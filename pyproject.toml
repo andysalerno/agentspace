@@ -8,6 +8,15 @@ dependencies = []
 [dependency-groups]
 dev = ["ruff", "pytest", "pytest-asyncio", "pyright"]
 
+[tool.uv.workspace]
+members = ["kernels/*"]
+
+[tool.uv.sources]
+kernel = { workspace = true }
+kernel-echo = { workspace = true }
+kernel-copilot = { workspace = true }
+kernel-host = { workspace = true }
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 

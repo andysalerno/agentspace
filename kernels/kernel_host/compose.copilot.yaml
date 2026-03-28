@@ -1,0 +1,24 @@
+services:
+  kernel:
+    build:
+      context: ../..
+      dockerfile: kernels/kernel_host/Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - copilot-config:/root/.copilot
+
+  setup:
+    build:
+      context: ../..
+      dockerfile: kernels/kernel_host/Dockerfile
+    env_file:
+      - .env
+    volumes:
+      - copilot-config:/root/.copilot
+    entrypoint: copilot
+    stdin_open: true
+    tty: true
+
+volumes:
+  copilot-config:

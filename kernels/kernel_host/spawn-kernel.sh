@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MESSAGE="${1:?Usage: spawn-kernel.sh <message>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+COMPOSE_FILE="$SCRIPT_DIR/compose.copilot.yaml"
 
-# Use .env if it exists, otherwise fall back to .env.example
-ENV_FILE="$SCRIPT_DIR/.env"
-if [[ ! -f "$ENV_FILE" ]]; then
-    ENV_FILE="$SCRIPT_DIR/.env.example"
+# Ensure .env exists (compose requires it via env_file)
+if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+    cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
 fi
 
-echo "Building kernel image..." >&2
-docker build -t agentspace-kernel -f "$SCRIPT_DIR/Dockerfile" "$REPO_ROOT"
-
-echo "Running kernel..." >&2
-docker run --rm --env-file "$ENV_FILE" agentspace-kernel "$MESSAGE"
+if [[ "${1:-}" == "setup" ]]; then
+    echo "Starting interactive copilot session (run /login to authenticate)..." >&2
+    docker compose -f "$COMPOSE_FILE" run --rm setup
+else
+    MESSAGE="${1:?Usage: spawn-kernel.sh <message|setup>}"
+    echo "Running kernel..." >&2
+    docker compose -f "$COMPOSE_FILE" run --rm kernel "$MESSAGE"
+fi

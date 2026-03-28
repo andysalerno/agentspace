@@ -1,30 +1,28 @@
 FROM python:3.13-slim
 
-# Install gh CLI (needed for copilot-cli harness)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+# Install Copilot CLI (needed for copilot kernel)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-      -o /usr/share/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-      > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends gh && \
-    apt-get clean && \
+    curl -fsSL https://gh.io/copilot-install | bash && \
+    apt-get purge -y curl && \
+    apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_LINK_MODE=copy
 
 WORKDIR /app
 
-# Copy all kernel packages
+# Copy all kernel packages and root project config
+COPY pyproject.toml pyproject.toml
 COPY kernels/kernel kernels/kernel
 COPY kernels/kernel_echo kernels/kernel_echo
 COPY kernels/kernel_copilot kernels/kernel_copilot
 COPY kernels/kernel_host kernels/kernel_host
 
-# Install all packages
-RUN pip install --no-cache-dir \
-    ./kernels/kernel \
-    ./kernels/kernel_echo \
-    ./kernels/kernel_copilot \
-    ./kernels/kernel_host
+# Install kernel_host and all its dependencies
+RUN uv sync --no-dev --package kernel-host
 
-ENTRYPOINT ["python", "-m", "kernel_host.runner"]
+ENTRYPOINT ["uv", "run", "--no-dev", "--package", "kernel-host", "-m", "kernel_host.runner"]
