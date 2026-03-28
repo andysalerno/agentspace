@@ -3,7 +3,7 @@ name = "kernel-host"
 version = "0.1.0"
 description = "Kernel host — runner that selects and executes a kernel implementation"
 requires-python = ">=3.13"
-dependencies = ["kernel", "kernel-echo", "kernel-copilot"]
+dependencies = ["fastapi", "kernel", "kernel-copilot", "kernel-echo", "uvicorn"]
 
 [build-system]
 requires = ["hatchling"]

@@ -2,13 +2,6 @@ FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
-    curl -fsSL https://gh.io/copilot-install | bash && \
-    apt-get purge -y curl && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
-
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 

@@ -6,13 +6,12 @@ services:
     env_file:
       - .env
     environment:
+      - AGENT_HOST_COPILOT_VOLUME=agentspace-kernel_copilot-config
+      - AGENT_HOST_DOCKER_NETWORK=agentspace-agent-host_default
+      - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
+      - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
       - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     ports:
       - "8001:8001"
     volumes:
-      - copilot-config:/root/.copilot
-
-volumes:
-  copilot-config:
-    name: agentspace-kernel_copilot-config
-    external: true
+      - /var/run/docker.sock:/var/run/docker.sock

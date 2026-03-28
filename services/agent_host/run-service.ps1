@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $composeFile = Join-Path $scriptDir "compose.yaml"
+$repoRoot = Split-Path -Parent (Split-Path -Parent $scriptDir)
+$kernelComposeFile = Join-Path $repoRoot "kernels\\kernel_host\\compose.copilot.yaml"
 $envFile = Join-Path $scriptDir ".env"
 $exampleEnvFile = Join-Path $scriptDir ".env.example"
 $projectName = "agentspace-agent-host"
@@ -14,6 +16,7 @@ if (-not (Test-Path $envFile)) {
 
 switch ($command) {
     "start" {
+        docker compose -p "agentspace-kernel" -f $kernelComposeFile build kernel
         docker compose -p $projectName -f $composeFile down --remove-orphans
         docker compose -p $projectName -f $composeFile build
         docker compose -p $projectName -f $composeFile up -d

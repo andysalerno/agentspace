@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import importlib
 
 import pytest
-from agent_host.app import app
 from agent_host.service import AgentHost
 from fastapi.testclient import TestClient
 from kernel.events import (
@@ -15,57 +14,62 @@ from kernel.events import (
     text_delta,
 )
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
 
-    from kernel.protocol import KernelConfig
-
-
-class StubKernel:
+class StubRuntime:
     def __init__(self) -> None:
-        self.resume_token_value: str | None = None
+        self._summaries: dict[str, dict[str, object]] = {}
+        self._histories: dict[str, list[list[KernelEvent]]] = {}
 
-    @property
-    def name(self) -> str:
-        return "stub"
+    async def create_session(
+        self,
+        *,
+        session_id: str,
+        harness: str,
+        env: dict[str, str],
+        cwd: str | None,
+        additional_paths: tuple[str, ...],
+    ) -> tuple[str, str]:
+        del harness, env, cwd, additional_paths
+        container_name = f"container-{session_id[:8]}"
+        base_url = f"http://{container_name}:8000"
+        self._summaries[base_url] = {
+            "status": "idle",
+            "resume_token": "resume-runtime-1",
+        }
+        self._histories[base_url] = []
+        return container_name, base_url
 
-    @property
-    def status(self) -> KernelStatus:
-        return KernelStatus.DONE
+    async def send_message(self, *, base_url: str, message: str) -> list[KernelEvent]:
+        events = [
+            session_start("kernel-session", "stub"),
+            status_event(KernelStatus.BUSY),
+            text_delta(message),
+            status_event(KernelStatus.DONE),
+            session_end(),
+        ]
+        self._histories[base_url].append(events)
+        self._summaries[base_url] = {
+            "status": "done",
+            "resume_token": "resume-runtime-2",
+        }
+        return events
 
-    @property
-    def resume_token(self) -> str | None:
-        return self.resume_token_value
+    async def summary(self, *, base_url: str) -> dict[str, object]:
+        return dict(self._summaries[base_url])
 
-    async def start(self, config: KernelConfig) -> None:
-        del config
+    async def history(self, *, base_url: str) -> list[list[KernelEvent]]:
+        return list(self._histories[base_url])
 
-    async def send(self, message: str) -> None:
-        del message
-        if self.resume_token_value is None:
-            self.resume_token_value = "resume-ref-app"  # noqa: S105
-
-    async def recv(self) -> AsyncIterator[KernelEvent]:
-        yield session_start("kernel-session", "stub")
-        yield status_event(KernelStatus.BUSY)
-        yield text_delta("ok")
-        yield status_event(KernelStatus.DONE)
-        yield session_end()
-
-    async def stop(self) -> None:
-        return
+    async def destroy_session(self, *, container_name: str) -> None:
+        del container_name
 
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    host = AgentHost()
-
-    def fake_get_kernel(_harness_name: str) -> StubKernel:
-        return StubKernel()
-
-    monkeypatch.setattr("agent_host.app.host", host)
-    monkeypatch.setattr("agent_host.service.get_kernel", fake_get_kernel)
-    return TestClient(app)
+    agent_host_app = importlib.import_module("agent_host.app")
+    host = AgentHost(runtime=StubRuntime())
+    monkeypatch.setattr(agent_host_app, "host", host)
+    return TestClient(agent_host_app.app)
 
 
 def test_healthz(client: TestClient) -> None:
@@ -92,6 +96,6 @@ def test_session_lifecycle(client: TestClient) -> None:
     assert history.status_code == 200
     assert session.status_code == 200
     assert destroyed.status_code == 204
-    assert message.json()["events"][2]["content"] == "ok"
-    assert history.json()["history"][0][2]["content"] == "ok"
-    assert session.json()["resume_token"] == "resume-ref-app"  # noqa: S105
+    assert message.json()["events"][2]["content"] == "hello"
+    assert history.json()["history"][0][2]["content"] == "hello"
+    assert session.json()["resume_token"].startswith("resume-runtime-")

@@ -3,7 +3,7 @@ name = "agent-host"
 version = "0.1.0"
 description = "Agent host prototype for managing kernel-backed sessions"
 requires-python = ">=3.13"
-dependencies = ["fastapi", "uvicorn", "kernel-host"]
+dependencies = ["docker", "fastapi", "httpx", "kernel-host", "uvicorn"]
 
 [build-system]
 requires = ["hatchling"]
