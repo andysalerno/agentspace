@@ -1,0 +1,20 @@
+[project]
+name = "kernel-echo"
+version = "0.1.0"
+description = "Echo kernel implementation — echoes input for testing"
+requires-python = ">=3.13"
+dependencies = ["kernel"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kernel_echo"]
+
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+
+[tool.ruff]
+target-version = "py313"

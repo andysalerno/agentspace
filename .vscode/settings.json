@@ -1,0 +1,8 @@
+{
+    "[python]": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "charliermarsh.ruff"
+    },
+    "ruff.configuration": "pyproject.toml",
+    "ruff.nativeServer": "on",
+}
