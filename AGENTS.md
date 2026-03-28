@@ -71,3 +71,16 @@ Preferences:
 - Python for prototyping, or where Rust is too unwieldy
 
 If so desired, a system may be prototyped in Python to feel out the architecture and interfaces, and then rewritten in Rust.
+
+## Proposed architecture
+
+Here is a rough overview of what I am envisioning:
+
+"web UX" --> is a "client"
+"cli ui" --> is a "client"
+"client" --> talks to "client-service"
+"client-service" --> talks to "agent-host" (view kernel sessions, chat, define + manage: agents, skills, channels, etc)
+"agent-host" --> manages kernel sessions (spawns them, kills them, full lifecycle - as containers, btw)
+"agent-host" --> manages skills (owns the dir where they live, volume mounts each enabled skill to a kernel when it spawns)
+kernel session --> manages + shims inner agent harness, exposes common streaming inputs / outputs
+kernel session --> mounts "skills" (well, agent-host does the mounting, it only consumes them)
