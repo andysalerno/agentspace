@@ -1,6 +1,7 @@
 ---
 description: "Commit staged/unstaged changes with an accurate, detailed commit message"
 agent: "agent"
+argument-hint: "Explanation of the changes to be committed"
 tools: [execute, read, search]
 ---
 
@@ -53,3 +54,9 @@ Now they queue for the next batch cycle.
 - If changes are unstaged, stage all of them with `git add -A` before committing.
 - Run `git commit` with the crafted message.
 - Show the final commit hash and summary.
+
+## 4. Info from the User
+
+The user has provided the following explanation of the changes to be committed:
+
+$ARGUMENTS
