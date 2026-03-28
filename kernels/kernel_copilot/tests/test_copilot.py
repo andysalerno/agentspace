@@ -56,7 +56,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_message_delta_produces_text_delta(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj = json.loads(SAMPLE_LINES[5])  # first message_delta
         await kernel._map_event(obj)
@@ -68,7 +69,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_multiple_deltas_stream_correctly(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         for line in SAMPLE_LINES[5:8]:  # three message_delta lines
             await kernel._map_event(json.loads(line))
@@ -81,7 +83,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_turn_end_produces_idle_status(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj = json.loads(SAMPLE_LINES[9])  # assistant.turn_end
         await kernel._map_event(obj)
@@ -93,7 +96,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_turn_start_produces_no_events(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj = json.loads(SAMPLE_LINES[4])  # assistant.turn_start
         await kernel._map_event(obj)
@@ -103,7 +107,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_session_events_produce_no_events(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         for line in SAMPLE_LINES[0:3]:  # session.* events
             await kernel._map_event(json.loads(line))
@@ -113,7 +118,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_user_message_produces_no_events(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj = json.loads(SAMPLE_LINES[3])  # user.message
         await kernel._map_event(obj)
@@ -123,7 +129,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_assistant_message_no_tools_produces_no_events(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj = json.loads(SAMPLE_LINES[8])  # assistant.message (empty toolRequests)
         await kernel._map_event(obj)
@@ -133,7 +140,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_assistant_message_with_tool_requests(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj: dict[str, object] = {
             "type": "assistant.message",
@@ -163,7 +171,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_result_captures_session_id(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj = json.loads(SAMPLE_LINES[10])  # result
         await kernel._map_event(obj)
@@ -174,7 +183,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_full_stream_produces_expected_sequence(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         """Feed all sample lines and verify the overall event sequence."""
         for obj in _parse_lines():
@@ -194,14 +204,14 @@ class TestCopilotMapping:
 
         # Verify streamed text
         text = "".join(
-            e.content for e in events
-            if e.type == EventType.TEXT_DELTA and e.content
+            e.content for e in events if e.type == EventType.TEXT_DELTA and e.content
         )
         assert text == "Yes, I can see your message!"
 
     @pytest.mark.asyncio
     async def test_empty_delta_content_skipped(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj: dict[str, object] = {
             "type": "assistant.message_delta",
@@ -217,7 +227,8 @@ class TestCopilotMapping:
 
     @pytest.mark.asyncio
     async def test_unrecognised_event_produces_no_events(
-        self, kernel: CopilotKernel,
+        self,
+        kernel: CopilotKernel,
     ) -> None:
         obj: dict[str, object] = {
             "type": "something.new",
