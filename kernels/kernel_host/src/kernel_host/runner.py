@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 
 from kernel.protocol import KernelConfig
@@ -28,8 +29,15 @@ async def run(message: str) -> None:
     harness_name = os.environ.get("KERNEL_HARNESS", "echo")
     kernel = get_kernel(harness_name)
 
-    # Build config from environment
-    config = KernelConfig(env=dict(os.environ))
+    additional_paths = tuple(
+        _split_paths(os.environ.get("KERNEL_ADDITIONAL_PATHS", "")),
+    )
+    config = KernelConfig(
+        env=dict(os.environ),
+        cwd=os.environ.get("KERNEL_WORKDIR") or None,
+        session_id=os.environ.get("KERNEL_SESSION_ID") or None,
+        additional_paths=additional_paths,
+    )
 
     await kernel.start(config)
 
@@ -42,6 +50,17 @@ async def run(message: str) -> None:
         print(event.to_jsonl(), flush=True)  # noqa: T201
 
     await kernel.stop()
+
+
+def _split_paths(raw: str) -> list[str]:
+    parts = [segment for segment in re.split(r"[\n;]+", raw) if segment]
+    if len(parts) != 1 or ":" not in raw:
+        return parts
+
+    colon_parts = [segment for segment in raw.split(":") if segment]
+    if all(segment.startswith("/") for segment in colon_parts):
+        return colon_parts
+    return parts
 
 
 def main() -> None:

@@ -11,11 +11,18 @@ if TYPE_CHECKING:
     from kernel.events import KernelEvent, KernelStatus
 
 
+def _empty_env() -> dict[str, str]:
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class KernelConfig:
     """Configuration passed to a kernel on start."""
 
-    env: dict[str, str] = field(default_factory=dict)
+    env: dict[str, str] = field(default_factory=_empty_env)
+    cwd: str | None = None
+    session_id: str | None = None
+    additional_paths: tuple[str, ...] = ()
 
 
 @runtime_checkable

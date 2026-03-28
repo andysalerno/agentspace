@@ -3,9 +3,10 @@
 Uses the real Copilot CLI JSON output format to verify that
 ``_map_event`` produces the correct standardized kernel events.
 """
+# pyright: reportPrivateUsage=false
 
-import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from kernel.events import EventType, KernelEvent, KernelStatus
@@ -150,7 +151,7 @@ class TestCopilotMapping:
                 "content": "",
                 "toolRequests": [
                     {"name": "shell", "input": {"cmd": "ls"}},
-                    {"name": "read_file", "input": {"path": "/tmp/x"}},
+                    {"name": "read_file", "input": {"path": "/workspace/x"}},
                 ],
                 "outputTokens": 10,
             },
@@ -167,7 +168,27 @@ class TestCopilotMapping:
         assert events[0].input == {"cmd": "ls"}
         assert events[1].type == EventType.TOOL_CALL
         assert events[1].tool == "read_file"
-        assert events[1].input == {"path": "/tmp/x"}
+        assert events[1].input == {"path": "/workspace/x"}
+
+    @pytest.mark.asyncio
+    async def test_tool_result_event_mapping(
+        self,
+        kernel: CopilotKernel,
+    ) -> None:
+        obj: dict[str, object] = {
+            "type": "tool.result",
+            "data": {
+                "name": "shell",
+                "output": {"stdout": "hello", "exit_code": 0},
+            },
+        }
+        await kernel._map_event(obj)
+
+        events = await _drain(kernel)
+        assert len(events) == 1
+        assert events[0].type == EventType.TOOL_RESULT
+        assert events[0].tool == "shell"
+        assert events[0].output == '{"stdout":"hello","exit_code":0}'
 
     @pytest.mark.asyncio
     async def test_result_captures_session_id(
@@ -261,3 +282,69 @@ class TestCopilotKernelLifecycle:
         assert events[0].type == EventType.SESSION_START
         assert events[0].kernel == "copilot-cli"
         assert events[0].session_id is not None
+
+    @pytest.mark.asyncio
+    async def test_send_os_error_is_reported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        kernel = CopilotKernel()
+        await kernel.start(KernelConfig())
+
+        create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
+        monkeypatch.setattr("kernel_copilot.asyncio.create_subprocess_exec", create_subprocess)
+
+        await kernel.send("hello")
+
+        events = [event async for event in kernel.recv()]
+        assert [event.type for event in events] == [
+            EventType.SESSION_START,
+            EventType.STATUS,
+            EventType.ERROR,
+            EventType.STATUS,
+            EventType.STATUS,
+            EventType.SESSION_END,
+        ]
+        assert events[2].message == "failed to start copilot CLI: Access is denied"
+
+    @pytest.mark.asyncio
+    async def test_start_uses_config_session_id(self) -> None:
+        kernel = CopilotKernel()
+        await kernel.start(KernelConfig(session_id="resume-123"))
+
+        events = await _drain(kernel)
+        assert len(events) == 1
+        assert events[0].session_id == "resume-123"
+
+    def test_build_command_includes_runtime_config(self) -> None:
+        kernel = CopilotKernel()
+        kernel._config = KernelConfig(
+            env={
+                "COPILOT_MODEL": "gpt-5.2",
+                "COPILOT_REASONING_EFFORT": "high",
+                "COPILOT_CONFIG_DIR": "/root/.copilot",
+                "COPILOT_ADDITIONAL_PATHS": "/workspace:/workspace-extra",
+                "COPILOT_EXTRA_ARGS": "--enable-all-github-mcp-tools\n--stream\non",
+            },
+            cwd="/workspace",
+            session_id="session-123",
+            additional_paths=("/repo",),
+        )
+
+        cmd = kernel._build_command("hello")
+
+        assert cmd[:4] == ["copilot", "-p", "hello", "--output-format"]
+        assert "--model" in cmd
+        assert "gpt-5.2" in cmd
+        assert "--effort" in cmd
+        assert "high" in cmd
+        assert "--config-dir" in cmd
+        assert "/root/.copilot" in cmd
+        assert "--resume=session-123" in cmd
+        assert cmd.count("--add-dir") == 3
+        assert "/repo" in cmd
+        assert "/workspace" in cmd
+        assert "/workspace-extra" in cmd
+        assert "--enable-all-github-mcp-tools" in cmd
+        assert "--stream" in cmd
+        assert "on" in cmd

@@ -1,9 +1,4 @@
-"""Copilot CLI kernel — wraps `copilot` as an agent harness.
-
-This shells out to `copilot -p <prompt>` in non-interactive mode
-with `--output-format json` to get native JSONL output, then maps
-that to standard kernel events.
-"""
+"""Copilot CLI kernel — wraps `copilot` as an agent harness."""
 
 from __future__ import annotations
 
@@ -11,8 +6,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from kernel.events import (
     KernelEvent,
@@ -23,6 +19,7 @@ from kernel.events import (
     status_event,
     text_delta,
     tool_call,
+    tool_result,
 )
 from kernel.protocol import KernelConfig
 
@@ -33,19 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 class CopilotKernel:
-    """Kernel that wraps GitHub Copilot CLI (`copilot`).
-
-    Unlike echo kernel, this defers subprocess spawning until send()
-    because `copilot` takes the prompt as a CLI argument.
-
-    Uses `copilot -p <prompt> --output-format json` for structured
-    JSONL output with `--allow-all-tools` to run non-interactively.
-    """
+    """Kernel that wraps GitHub Copilot CLI (`copilot`)."""
 
     def __init__(self) -> None:
         self._status = KernelStatus.IDLE
-        self._session_id: str = ""
-        self._config: KernelConfig = KernelConfig()
+        self._session_id = ""
+        self._config = KernelConfig()
         self._process: asyncio.subprocess.Process | None = None
         self._output_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[KernelEvent | None] = asyncio.Queue()
@@ -59,38 +49,26 @@ class CopilotKernel:
         return self._status
 
     async def start(self, config: KernelConfig) -> None:
-        self._session_id = uuid.uuid4().hex[:12]
         self._config = config
+        self._session_id = config.session_id or uuid.uuid4().hex[:12]
         self._status = KernelStatus.IDLE
         await self._queue.put(session_start(self._session_id, self.name))
 
     async def send(self, message: str) -> None:
+        if self._output_task is not None and not self._output_task.done():
+            await self._queue.put(
+                error("copilot kernel is already processing a request"),
+            )
+            return
+
         self._status = KernelStatus.BUSY
         await self._queue.put(status_event(KernelStatus.BUSY))
 
-        cmd = [
-            "copilot",
-            "-p",
-            message,
-            "--output-format",
-            "json",
-            "--allow-all",
-            "--no-ask-user",
-            "--no-auto-update",
-            "--no-color",
-            "-s",
-        ]
+        cmd = self._build_command(message)
+        env = self._build_env()
+        cwd = self._config.cwd
 
-        model = self._config.env.get("COPILOT_MODEL", "")
-        if model:
-            cmd.extend(["--model", model])
-
-        env = {**os.environ}
-        gh_token = self._config.env.get("GH_TOKEN", "")
-        if gh_token:
-            env["GH_TOKEN"] = gh_token
-
-        logger.debug("spawning subprocess: %s", cmd)
+        logger.debug("spawning copilot subprocess: cmd=%s cwd=%s", cmd, cwd)
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -98,13 +76,15 @@ class CopilotKernel:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=cwd,
             )
         except FileNotFoundError:
-            await self._queue.put(error("copilot CLI not found — is it installed?"))
-            self._status = KernelStatus.ERROR
-            await self._queue.put(status_event(KernelStatus.DONE))
-            await self._queue.put(session_end())
-            await self._queue.put(None)
+            await self._queue.put(error("copilot CLI not found; is it installed?"))
+            await self._finish(KernelStatus.ERROR)
+            return
+        except OSError as exc:
+            await self._queue.put(error(f"failed to start copilot CLI: {exc}"))
+            await self._finish(KernelStatus.ERROR)
             return
 
         self._output_task = asyncio.create_task(self._read_output())
@@ -123,22 +103,108 @@ class CopilotKernel:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except TimeoutError:
                 self._process.kill()
+                await self._process.wait()
+        if self._output_task is not None:
+            await self._output_task
         self._status = KernelStatus.DONE
+
+    def _build_command(self, message: str) -> list[str]:
+        cmd = [
+            "copilot",
+            "-p",
+            message,
+            "--output-format",
+            "json",
+            "--allow-all",
+            "--no-ask-user",
+            "--no-auto-update",
+            "--no-color",
+            "-s",
+        ]
+
+        model = self._config.env.get("COPILOT_MODEL")
+        if model:
+            cmd.extend(["--model", model])
+
+        reasoning_effort = self._config.env.get("COPILOT_REASONING_EFFORT")
+        if reasoning_effort:
+            cmd.extend(["--effort", reasoning_effort])
+
+        config_dir = self._config.env.get("COPILOT_CONFIG_DIR")
+        if config_dir:
+            cmd.extend(["--config-dir", config_dir])
+
+        resume_session = self._config.session_id or self._config.env.get(
+            "COPILOT_SESSION_ID",
+        )
+        if resume_session:
+            cmd.append(f"--resume={resume_session}")
+
+        extra_paths = list(self._config.additional_paths)
+        extra_paths.extend(self._split_paths_env())
+        for path in extra_paths:
+            cmd.extend(["--add-dir", path])
+
+        cmd.extend(self._iter_extra_arg_tokens())
+
+        return cmd
+
+    def _build_env(self) -> dict[str, str]:
+        env = {**os.environ}
+        for key in (
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "COPILOT_ALLOW_ALL",
+            "COPILOT_CONFIG_DIR",
+        ):
+            value = self._config.env.get(key)
+            if value:
+                env[key] = value
+        return env
+
+    def _split_paths_env(self) -> list[str]:
+        raw = self._config.env.get("COPILOT_ADDITIONAL_PATHS", "")
+        if not raw:
+            return []
+        return self._split_paths(raw)
+
+    def _iter_extra_arg_tokens(self) -> list[str]:
+        raw = self._config.env.get("COPILOT_EXTRA_ARGS", "")
+        return [arg for arg in raw.splitlines() if arg]
+
+    def _split_paths(self, raw: str) -> list[str]:
+        parts = [segment for segment in re.split(r"[\n;]+", raw) if segment]
+        if len(parts) != 1 or ":" not in raw:
+            return parts
+
+        colon_parts = [segment for segment in raw.split(":") if segment]
+        if all(segment.startswith("/") for segment in colon_parts):
+            return colon_parts
+        return parts
 
     async def _read_output(self) -> None:
         if self._process is None:
             return
 
-        await self._read_stdout()
-        await self._read_stderr()
+        stdout_task = asyncio.create_task(self._read_stdout())
+        stderr_task = asyncio.create_task(self._read_stderr())
+        await asyncio.gather(stdout_task, stderr_task)
 
         returncode = await self._process.wait()
         if returncode != 0:
-            self._status = KernelStatus.ERROR
             await self._queue.put(error(f"copilot exited with code {returncode}"))
+            await self._finish(KernelStatus.ERROR)
+            return
 
-        self._status = KernelStatus.DONE
-        await self._queue.put(status_event(KernelStatus.DONE))
+        await self._finish(KernelStatus.DONE)
+
+    async def _finish(self, status: KernelStatus) -> None:
+        self._status = status
+        if status != KernelStatus.ERROR:
+            await self._queue.put(status_event(KernelStatus.DONE))
+        else:
+            await self._queue.put(status_event(KernelStatus.ERROR))
+            await self._queue.put(status_event(KernelStatus.DONE))
         await self._queue.put(session_end())
         await self._queue.put(None)
 
@@ -159,85 +225,111 @@ class CopilotKernel:
     async def _read_stderr(self) -> None:
         if self._process is None or self._process.stderr is None:
             return
-        remaining = await self._process.stderr.read()
-        if remaining:
-            for raw in remaining.decode().splitlines():
-                stripped = raw.strip()
-                if stripped:
-                    await self._queue.put(error(stripped))
+        async for raw_line in self._process.stderr:
+            line = raw_line.decode().rstrip("\n").rstrip("\r").strip()
+            if line:
+                await self._queue.put(error(line))
 
-    async def _map_event(self, obj: dict[str, object]) -> None:
-        """Map a Copilot CLI JSONL object to kernel events.
-
-        The Copilot CLI with ``--output-format json`` emits events shaped like::
-
-            {"type": "<namespace>.<event>", "data": {...}, "id": "...",
-             "timestamp": "...", "parentId": "...", "ephemeral": true|false}
-
-        The top-level ``result`` event is an exception — it has ``sessionId``,
-        ``exitCode``, and ``usage`` at the top level (no ``data`` wrapper).
-        """
+    async def _map_event(self, obj: dict[str, object]) -> None:  # noqa: C901, PLR0911, PLR0912
         event_type = obj.get("type", "")
-        data = obj.get("data")
-        if not isinstance(data, dict):
-            data = {}
+        raw_data = obj.get("data")
+        data = cast("dict[str, object]", raw_data) if isinstance(raw_data, dict) else {}
 
-        # --- streaming text chunks ---
         if event_type == "assistant.message_delta":
             content = data.get("deltaContent", "")
             if isinstance(content, str) and content:
                 await self._queue.put(text_delta(content))
+            return
 
-        # --- turn lifecycle ---
-        elif event_type == "assistant.turn_start":
-            logger.debug("turn started: turnId=%s", data.get("turnId"))
+        if event_type == "assistant.turn_start":
+            logger.debug("turn started: turnId=%s", data.get("turnId", ""))
+            return
 
-        elif event_type == "assistant.turn_end":
+        if event_type == "assistant.turn_end":
             self._status = KernelStatus.IDLE
             await self._queue.put(status_event(KernelStatus.IDLE))
+            return
 
-        # --- full message (content already streamed via deltas) ---
-        elif event_type == "assistant.message":
+        if event_type == "assistant.message":
             logger.debug(
                 "message complete: messageId=%s tokens=%s",
-                data.get("messageId"),
-                data.get("outputTokens"),
+                data.get("messageId", ""),
+                data.get("outputTokens", ""),
             )
-            # Emit tool_call events for any tool requests attached to
-            # the completed message.
-            tool_requests = data.get("toolRequests", [])
-            if isinstance(tool_requests, list):
-                for req in tool_requests:
-                    if not isinstance(req, dict):
-                        continue
-                    t_name = req.get("name", req.get("tool", "unknown"))
-                    t_input = req.get("input", {})
-                    if isinstance(t_name, str) and isinstance(t_input, dict):
-                        await self._queue.put(tool_call(t_name, t_input))
+            await self._emit_tool_calls(data.get("toolRequests"))
+            return
 
-        # --- session-level result (different shape — no `data` wrapper) ---
-        elif event_type == "result":
+        if event_type in {"tool.call", "tool_call", "assistant.tool_call"}:
+            tool_name, tool_input = self._extract_tool_payload(data)
+            if tool_name is not None and tool_input is not None:
+                await self._queue.put(tool_call(tool_name, tool_input))
+            return
+
+        if event_type in {"tool.result", "tool_result", "assistant.tool_result"}:
+            tool_name, tool_output = self._extract_tool_result(data)
+            if tool_name is not None and tool_output is not None:
+                await self._queue.put(tool_result(tool_name, tool_output))
+            return
+
+        if event_type == "result":
             session_id = obj.get("sessionId")
             if isinstance(session_id, str):
                 self._session_id = session_id
-            exit_code = obj.get("exitCode")
+            exit_code = obj.get("exitCode", "")
             logger.debug(
                 "result: exitCode=%s sessionId=%s",
                 exit_code,
                 session_id,
             )
+            return
 
-        # --- user message echo ---
-        elif event_type == "user.message":
+        if event_type == "user.message":
             logger.debug("user message echoed")
+            return
 
-        # --- session infrastructure (ephemeral) ---
-        elif event_type in (
+        if event_type in {
             "session.mcp_server_status_changed",
             "session.mcp_servers_loaded",
             "session.tools_updated",
-        ):
+        }:
             logger.debug("session infra event: %s", event_type)
+            return
 
-        else:
-            logger.debug("unhandled copilot event: %s", event_type)
+        logger.debug("unhandled copilot event: %s", event_type)
+
+    async def _emit_tool_calls(self, tool_requests: object) -> None:
+        if not isinstance(tool_requests, list):
+            return
+        requests = cast("list[object]", tool_requests)
+        for request in requests:
+            if not isinstance(request, dict):
+                continue
+            tool_name, tool_input = self._extract_tool_payload(
+                cast("dict[str, object]", request),
+            )
+            if tool_name is not None and tool_input is not None:
+                await self._queue.put(tool_call(tool_name, tool_input))
+
+    def _extract_tool_payload(
+        self,
+        payload: dict[str, object],
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        tool_name = payload.get("name", payload.get("tool"))
+        tool_input = payload.get("input", payload.get("arguments", {}))
+        if not isinstance(tool_name, str) or not isinstance(tool_input, dict):
+            return None, None
+        return tool_name, cast("dict[str, Any]", tool_input)
+
+    def _extract_tool_result(
+        self,
+        payload: dict[str, object],
+    ) -> tuple[str | None, str | None]:
+        tool_name = payload.get("name", payload.get("tool"))
+        tool_output = payload.get("output", payload.get("result"))
+        if not isinstance(tool_name, str):
+            return None, None
+        if isinstance(tool_output, str):
+            return tool_name, tool_output
+        if tool_output is None:
+            return tool_name, ""
+        return tool_name, json.dumps(tool_output, separators=(",", ":"))

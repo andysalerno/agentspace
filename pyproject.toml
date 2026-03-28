@@ -37,4 +37,16 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["INP001", "S101"]
+"kernels/kernel_copilot/tests/test_copilot.py" = ["E501", "SLF001"]
 
+[tool.pyright]
+pythonVersion = "3.13"
+typeCheckingMode = "strict"
+venvPath = "."
+venv = ".venv"
+extraPaths = [
+    "kernels/kernel/src",
+    "kernels/kernel_echo/src",
+    "kernels/kernel_copilot/src",
+    "kernels/kernel_host/src",
+]

@@ -7,6 +7,7 @@ services:
       - .env
     environment:
       - LOG_LEVEL=DEBUG
+      - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     volumes:
       - copilot-config:/root/.copilot
 
@@ -18,11 +19,13 @@ services:
       - .env
     environment:
       - LOG_LEVEL=DEBUG
+      - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     volumes:
       - copilot-config:/root/.copilot
     entrypoint: copilot
     stdin_open: true
     tty: true
+    working_dir: ${KERNEL_WORKDIR}
 
 volumes:
   copilot-config:

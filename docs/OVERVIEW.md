@@ -1,0 +1,65 @@
+## Current Shape
+
+The repository is in an early kernel-first phase.
+
+Today the implemented stack is:
+
+1. `kernel`
+   Defines the shared protocol and the JSONL event contract.
+2. `kernel_echo`
+   Small in-process reference implementation for fast testing.
+3. `kernel_copilot`
+   Wraps `copilot -p ... --output-format json` and maps Copilot events into the shared event stream.
+4. `kernel_host`
+   Selects a kernel implementation, runs it, and prints JSONL events to stdout.
+
+This is the thin vertical slice needed before building the higher-level services from `PLAN.md`.
+
+## Event Contract
+
+Every kernel emits standard events on stdout as JSON Lines:
+
+- `session_start`
+- `status`
+- `text_delta`
+- `tool_call`
+- `tool_result`
+- `error`
+- `session_end`
+
+The host and any future `agent-host` or `client-service` layers can consume this stream without caring which harness produced it.
+
+## Copilot-Only Milestone
+
+The active non-test path is `copilot-cli`.
+
+Important runtime decisions in the current prototype:
+
+- one host invocation runs one prompt through one kernel
+- Copilot runs in non-interactive prompt mode with JSON output
+- Copilot config/session data is persisted in a named Docker volume
+- `KERNEL_WORKDIR` is intentionally left for the deployer to decide
+- launch scripts tear down previous compose resources before new runs
+
+## What Exists vs Planned
+
+Implemented:
+
+- kernel abstraction
+- echo kernel
+- copilot kernel
+- kernel host runner
+- Docker launch path for the kernel host
+- automated tests for event serialization, echo flow, copilot mapping, and runner config
+
+Not implemented yet:
+
+- `proto/`
+- `agent-host/`
+- `client-service/`
+- `client-web/`
+- `client-cli/`
+- `channels/`
+- `store/`
+
+Those remain aligned to `PLAN.md`, but the repo has not reached that breadth yet.
