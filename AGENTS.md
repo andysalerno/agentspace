@@ -8,6 +8,12 @@ AgentSpace is system for defining, interacting with, and observing AI agents.
 
 Where possible, everything is client/server. Even the cli user interfaces are client server, allowing the server to be either remote, or in-process (spun up alongside the client).
 
+### Containers for everything
+
+They system can be stood up via docker (or podman) compose files. This makes deployment simple AND helps isolate agents in containers where we can control their access, map volumes on demand, etc.
+
+However, it must still be possible to stand up the system *outside* containers.
+
 ### Interfaces between subsystems
 
 **Everything is swappable.** Every part of the system is abstracted in such a way that it can be replaced by a different implementation that fulfills the same contract.
@@ -43,3 +49,23 @@ Then they open up a chat session with the agent, in one of:
 - The web chat client
 - The cli client
 - An integration channel (matrix, irc, discord)
+
+## Concepts
+
+**kernel** - already described. wrapper / shim for existing headless agent harnesses
+**client** - 
+
+## Connectivity
+
+The I/O between services should be abstracted, and easily swappable between e.x.:
+- grpc
+- http / REST
+- code library (in-process, compiled together, where possible)
+
+## Technologies
+
+Each separate service can be implemented in whatever language / stack makes sense. As long as it conforms to the agreed upon interface between services, all is good.
+
+Preferences:
+- Rust is the ideal choice for robust services
+- Python for prototyping, or where Rust is too unwieldy
