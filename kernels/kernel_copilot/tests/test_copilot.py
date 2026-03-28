@@ -308,6 +308,27 @@ class TestCopilotKernelLifecycle:
         assert events[2].message == "failed to start copilot CLI: Access is denied"
 
     @pytest.mark.asyncio
+    async def test_send_creates_configured_cwd(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        kernel = CopilotKernel()
+        await kernel.start(KernelConfig(cwd="/srv/agentspace-kernel"))
+
+        created_paths: list[tuple[str, bool]] = []
+
+        def fake_ensure_directory(path: str) -> None:
+            created_paths.append((path, True))
+
+        create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
+        monkeypatch.setattr("kernel_copilot._ensure_directory", fake_ensure_directory)
+        monkeypatch.setattr("kernel_copilot.asyncio.create_subprocess_exec", create_subprocess)
+
+        await kernel.send("hello")
+
+        assert created_paths == [("/srv/agentspace-kernel", True)]
+
+    @pytest.mark.asyncio
     async def test_start_uses_config_session_id(self) -> None:
         kernel = CopilotKernel()
         await kernel.start(KernelConfig(session_id="resume-123"))

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kernel.events import (
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
+
+
+def _ensure_directory(path: str) -> None:
+    Path(path).mkdir(parents=True, exist_ok=True)
 
 
 class CopilotKernel:
@@ -67,6 +72,8 @@ class CopilotKernel:
         cmd = self._build_command(message)
         env = self._build_env()
         cwd = self._config.cwd
+        if cwd is not None:
+            await asyncio.to_thread(_ensure_directory, cwd)
 
         logger.debug("spawning copilot subprocess: cmd=%s cwd=%s", cmd, cwd)
 
