@@ -5,6 +5,8 @@ services:
       dockerfile: kernels/kernel_host/Dockerfile
     env_file:
       - .env
+    environment:
+      - LOG_LEVEL=DEBUG
     volumes:
       - copilot-config:/root/.copilot
 
@@ -14,6 +16,8 @@ services:
       dockerfile: kernels/kernel_host/Dockerfile
     env_file:
       - .env
+    environment:
+      - LOG_LEVEL=DEBUG
     volumes:
       - copilot-config:/root/.copilot
     entrypoint: copilot

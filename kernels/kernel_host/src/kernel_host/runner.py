@@ -9,12 +9,19 @@ sends the message, and streams JSONL events to stdout.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 
 from kernel.protocol import KernelConfig
 
 from kernel_host.registry import get_kernel
+
+
+def _configure_logging() -> None:
+    level_name = os.environ.get("LOG_LEVEL", "WARNING").upper()
+    level = getattr(logging, level_name, logging.WARNING)
+    logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
 
 
 async def run(message: str) -> None:
@@ -38,6 +45,7 @@ async def run(message: str) -> None:
 
 
 def main() -> None:
+    _configure_logging()
     if len(sys.argv) < 2:
         print("Usage: python -m kernel_host.runner <message>", file=sys.stderr)  # noqa: T201
         sys.exit(1)

@@ -15,6 +15,7 @@ See @docs/OVERVIEW.md for a more technical overview with goals and principles.
 - Use `ruff` for formatting and linting, with all defaults enabled
 - Create tests as you go
 - Use modern features and idiomatic practices
+- Add logging via logging module
 
 ### Rust
 

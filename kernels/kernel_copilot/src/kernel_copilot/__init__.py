@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from typing import TYPE_CHECKING
@@ -22,12 +23,13 @@ from kernel.events import (
     status_event,
     text_delta,
     tool_call,
-    tool_result,
 )
 from kernel.protocol import KernelConfig
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+logger = logging.getLogger(__name__)
 
 
 class CopilotKernel:
@@ -72,16 +74,23 @@ class CopilotKernel:
             message,
             "--output-format",
             "json",
-            "--allow-all-tools",
+            "--allow-all",
+            "--no-ask-user",
             "--no-auto-update",
             "--no-color",
             "-s",
         ]
 
+        model = self._config.env.get("COPILOT_MODEL", "")
+        if model:
+            cmd.extend(["--model", model])
+
         env = {**os.environ}
         gh_token = self._config.env.get("GH_TOKEN", "")
         if gh_token:
             env["GH_TOKEN"] = gh_token
+
+        logger.debug("spawning subprocess: %s", cmd)
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -158,27 +167,77 @@ class CopilotKernel:
                     await self._queue.put(error(stripped))
 
     async def _map_event(self, obj: dict[str, object]) -> None:
-        """Map a Copilot CLI JSONL object to a kernel event."""
-        event_type = obj.get("type", "")
+        """Map a Copilot CLI JSONL object to kernel events.
 
-        if event_type == "content_delta":
-            content = obj.get("content", "")
+        The Copilot CLI with ``--output-format json`` emits events shaped like::
+
+            {"type": "<namespace>.<event>", "data": {...}, "id": "...",
+             "timestamp": "...", "parentId": "...", "ephemeral": true|false}
+
+        The top-level ``result`` event is an exception — it has ``sessionId``,
+        ``exitCode``, and ``usage`` at the top level (no ``data`` wrapper).
+        """
+        event_type = obj.get("type", "")
+        data = obj.get("data")
+        if not isinstance(data, dict):
+            data = {}
+
+        # --- streaming text chunks ---
+        if event_type == "assistant.message_delta":
+            content = data.get("deltaContent", "")
             if isinstance(content, str) and content:
                 await self._queue.put(text_delta(content))
 
-        elif event_type == "tool_use":
-            tool_name = obj.get("name", "unknown")
-            tool_input = obj.get("input", {})
-            if isinstance(tool_name, str) and isinstance(tool_input, dict):
-                await self._queue.put(tool_call(tool_name, tool_input))
+        # --- turn lifecycle ---
+        elif event_type == "assistant.turn_start":
+            logger.debug("turn started: turnId=%s", data.get("turnId"))
 
-        elif event_type == "tool_result":
-            tool_name = obj.get("name", "unknown")
-            output = obj.get("output", "")
-            if isinstance(tool_name, str) and isinstance(output, str):
-                await self._queue.put(tool_result(tool_name, output))
+        elif event_type == "assistant.turn_end":
+            self._status = KernelStatus.IDLE
+            await self._queue.put(status_event(KernelStatus.IDLE))
 
-        elif event_type == "error":
-            message = obj.get("message", str(obj))
-            if isinstance(message, str):
-                await self._queue.put(error(message))
+        # --- full message (content already streamed via deltas) ---
+        elif event_type == "assistant.message":
+            logger.debug(
+                "message complete: messageId=%s tokens=%s",
+                data.get("messageId"),
+                data.get("outputTokens"),
+            )
+            # Emit tool_call events for any tool requests attached to
+            # the completed message.
+            tool_requests = data.get("toolRequests", [])
+            if isinstance(tool_requests, list):
+                for req in tool_requests:
+                    if not isinstance(req, dict):
+                        continue
+                    t_name = req.get("name", req.get("tool", "unknown"))
+                    t_input = req.get("input", {})
+                    if isinstance(t_name, str) and isinstance(t_input, dict):
+                        await self._queue.put(tool_call(t_name, t_input))
+
+        # --- session-level result (different shape — no `data` wrapper) ---
+        elif event_type == "result":
+            session_id = obj.get("sessionId")
+            if isinstance(session_id, str):
+                self._session_id = session_id
+            exit_code = obj.get("exitCode")
+            logger.debug(
+                "result: exitCode=%s sessionId=%s",
+                exit_code,
+                session_id,
+            )
+
+        # --- user message echo ---
+        elif event_type == "user.message":
+            logger.debug("user message echoed")
+
+        # --- session infrastructure (ephemeral) ---
+        elif event_type in (
+            "session.mcp_server_status_changed",
+            "session.mcp_servers_loaded",
+            "session.tools_updated",
+        ):
+            logger.debug("session infra event: %s", event_type)
+
+        else:
+            logger.debug("unhandled copilot event: %s", event_type)
