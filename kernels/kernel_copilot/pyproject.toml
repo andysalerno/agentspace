@@ -1,7 +1,7 @@
 [project]
 name = "kernel-copilot"
 version = "0.1.0"
-description = "Copilot CLI kernel implementation — wraps gh copilot"
+description = "Copilot CLI kernel implementation — wraps copilot CLI"
 requires-python = ">=3.13"
 dependencies = ["kernel"]
 
