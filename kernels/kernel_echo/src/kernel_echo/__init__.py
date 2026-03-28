@@ -40,6 +40,10 @@ class EchoKernel:
     def status(self) -> KernelStatus:
         return self._status
 
+    @property
+    def resume_token(self) -> str | None:
+        return self._session_id or None
+
     async def start(self, _config: KernelConfig) -> None:
         self._session_id = uuid.uuid4().hex[:12]
         self._status = KernelStatus.IDLE

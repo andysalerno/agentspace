@@ -12,6 +12,8 @@ Today the implemented stack is:
    Wraps `copilot -p ... --output-format json` and maps Copilot events into the shared event stream.
 4. `kernel_host`
    Selects a kernel implementation, runs it, and prints JSONL events to stdout.
+5. `agent_host`
+   Manages long-lived in-memory sessions and exposes them via a small FastAPI service.
 
 This is the thin vertical slice needed before building the higher-level services from `PLAN.md`.
 
@@ -50,6 +52,7 @@ Implemented:
 - copilot kernel
 - kernel host runner
 - Docker launch path for the kernel host
+- in-memory agent host service
 - automated tests for event serialization, echo flow, copilot mapping, and runner config
 
 Not implemented yet:

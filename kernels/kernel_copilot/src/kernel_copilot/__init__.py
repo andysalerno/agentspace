@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -52,6 +53,10 @@ class CopilotKernel:
     @property
     def status(self) -> KernelStatus:
         return self._status
+
+    @property
+    def resume_token(self) -> str | None:
+        return self._config.session_id or self._session_id or None
 
     async def start(self, config: KernelConfig) -> None:
         self._config = config
@@ -282,6 +287,7 @@ class CopilotKernel:
             session_id = obj.get("sessionId")
             if isinstance(session_id, str):
                 self._session_id = session_id
+                self._config = replace(self._config, session_id=session_id)
             exit_code = obj.get("exitCode", "")
             logger.debug(
                 "result: exitCode=%s sessionId=%s",

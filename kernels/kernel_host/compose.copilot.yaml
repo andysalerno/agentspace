@@ -29,3 +29,4 @@ services:
 
 volumes:
   copilot-config:
+    name: agentspace-kernel_copilot-config

@@ -6,16 +6,17 @@ requires-python = ">=3.13"
 dependencies = []
 
 [dependency-groups]
-dev = ["ruff", "pytest", "pytest-asyncio", "pyright"]
+dev = ["ruff", "pytest", "pytest-asyncio", "pyright", "httpx", "fastapi", "uvicorn"]
 
 [tool.uv.workspace]
-members = ["kernels/*"]
+members = ["kernels/*", "services/*"]
 
 [tool.uv.sources]
 kernel = { workspace = true }
 kernel-echo = { workspace = true }
 kernel-copilot = { workspace = true }
 kernel-host = { workspace = true }
+agent-host = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -49,4 +50,5 @@ extraPaths = [
     "kernels/kernel_echo/src",
     "kernels/kernel_copilot/src",
     "kernels/kernel_host/src",
+    "services/agent_host/src",
 ]

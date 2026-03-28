@@ -39,6 +39,9 @@ class Kernel(Protocol):
     @property
     def status(self) -> KernelStatus: ...
 
+    @property
+    def resume_token(self) -> str | None: ...
+
     async def start(self, config: KernelConfig) -> None:
         """Spawn the inner harness process."""
         ...

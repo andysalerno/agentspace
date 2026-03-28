@@ -8,6 +8,7 @@ The repo is currently centered on the kernel milestone:
 - `kernel_echo`: reference in-process kernel
 - `kernel_copilot`: `copilot-cli` kernel adapter
 - `kernel_host`: runner, Docker image, and launch scripts
+- `agent_host`: in-memory session manager with a FastAPI service wrapper
 
 For now, keep `copilot-cli` as the only real kernel path.
 
@@ -42,3 +43,32 @@ The launcher now:
 Before using the Docker flow, set `KERNEL_WORKDIR` in [kernels/kernel_host/.env.example](/C:/repos/agentspace/kernels/kernel_host/.env.example) or your local `.env`. It is intentionally not defaulted by compose.
 
 To resume a previous Copilot session, set `COPILOT_SESSION_ID` in [kernels/kernel_host/.env.example](/C:/repos/agentspace/kernels/kernel_host/.env.example).
+
+## Agent Host
+
+The first `agent_host` slice now exists as a containerized FastAPI service that manages kernel-backed sessions in memory.
+
+Start it with:
+
+```powershell
+.\services\agent_host\run-service.ps1 start
+```
+
+Stop it with:
+
+```powershell
+.\services\agent_host\run-service.ps1 stop
+```
+
+Default endpoint: `http://127.0.0.1:8001`
+
+Currently implemented endpoints:
+
+- `GET /healthz`
+- `POST /sessions`
+- `GET /sessions`
+- `GET /sessions/{session_id}`
+- `POST /sessions/{session_id}/messages`
+- `GET /sessions/{session_id}/history`
+- `POST /sessions/{session_id}/reset`
+- `DELETE /sessions/{session_id}`

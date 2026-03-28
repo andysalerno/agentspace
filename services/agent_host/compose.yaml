@@ -1,0 +1,18 @@
+services:
+  agent-host:
+    build:
+      context: ../..
+      dockerfile: services/agent_host/Dockerfile
+    env_file:
+      - .env
+    environment:
+      - KERNEL_WORKDIR=${KERNEL_WORKDIR}
+    ports:
+      - "8001:8001"
+    volumes:
+      - copilot-config:/root/.copilot
+
+volumes:
+  copilot-config:
+    name: agentspace-kernel_copilot-config
+    external: true
