@@ -52,8 +52,8 @@ Then they open up a chat session with the agent, in one of:
 
 ## Concepts
 
-**kernel** - already described. wrapper / shim for existing headless agent harnesses
-**client** - 
+**kernel** - already described. wrapper / shim for existing headless agent harnesses. Most implementations would "shell out" and capture streaming stdout outputs.
+**agenthost** - owns the kernel(s), manages them and their lifecycle.
 
 ## Connectivity
 
@@ -69,3 +69,5 @@ Each separate service can be implemented in whatever language / stack makes sens
 Preferences:
 - Rust is the ideal choice for robust services
 - Python for prototyping, or where Rust is too unwieldy
+
+If so desired, a system may be prototyped in Python to feel out the architecture and interfaces, and then rewritten in Rust.
