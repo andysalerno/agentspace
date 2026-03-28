@@ -11,28 +11,62 @@ This plan covers the first milestone: a working kernel abstraction with a Copilo
 ## Project Layout
 
 ```
-kernel/
-  pyproject.toml
-  Dockerfile
-  spawn-kernel.sh
-  .env.example
-  src/
-    kernel/
-      __init__.py
-      protocol.py        # Kernel Protocol (type contract)
-      base.py             # BaseKernel with shared machinery
-      events.py           # Standard event dataclasses
-      runner.py           # Container entry point (python -m kernel.runner)
-      harnesses/
+kernels/
+  kernel/                    # The abstraction — what you implement
+    pyproject.toml
+    src/
+      kernel/
         __init__.py
-        echo.py           # Echo kernel (for testing without a real harness)
-        copilot_cli.py    # Copilot CLI kernel
-  tests/
-    __init__.py
-    test_events.py
-    test_echo_kernel.py
-    test_copilot_cli.py
+        protocol.py          # Kernel Protocol (type contract)
+        base.py              # BaseKernel with shared subprocess machinery
+        events.py            # Standard event dataclasses
+    tests/
+      __init__.py
+      test_events.py
+
+  kernel_echo/               # Echo kernel implementation (for testing)
+    pyproject.toml
+    src/
+      kernel_echo/
+        __init__.py
+        echo.py
+    tests/
+      __init__.py
+      test_echo.py
+
+  kernel_copilot/            # Copilot CLI kernel implementation
+    pyproject.toml
+    src/
+      kernel_copilot/
+        __init__.py
+        copilot.py
+    tests/
+      __init__.py
+      test_copilot.py
+
+  kernel_host/               # Runner, Docker, spawn script
+    pyproject.toml
+    Dockerfile
+    spawn-kernel.sh
+    .env.example
+    src/
+      kernel_host/
+        __init__.py
+        runner.py            # Container entry point (python -m kernel_host.runner)
+        registry.py          # Maps harness names to kernel classes
+    tests/
+      __init__.py
+      test_runner.py
 ```
+
+### Package roles
+
+| Package | Role |
+|---------|------|
+| `kernel` | The concept. Defines `Kernel` protocol, `BaseKernel`, and event types. Has zero harness-specific code. |
+| `kernel_echo` | Implements `kernel` for testing. No subprocess, just echoes input. |
+| `kernel_copilot` | Implements `kernel` by shelling out to `gh copilot`. |
+| `kernel_host` | The `main()`. Knows about all implementations, selects one via config, runs it, and streams JSONL to stdout. Owns the Dockerfile and spawn script. |
 
 ---
 
@@ -68,7 +102,7 @@ All events include a `ts` (ISO 8601 timestamp).
 
 ---
 
-## Kernel Protocol
+## Kernel Protocol (`kernels/kernel/`)
 
 A Python `Protocol` defines the structural type contract. Implementations don't need to inherit from it — they just need to match the shape.
 
@@ -95,7 +129,7 @@ class Kernel(Protocol):
 
 ---
 
-## BaseKernel
+## BaseKernel (`kernels/kernel/`)
 
 A base class that provides shared machinery so harness implementations only need to define the harness-specific bits:
 
@@ -113,16 +147,16 @@ Each harness subclass implements:
 
 ---
 
-## Harness Implementations
+## Kernel Implementations
 
-### Echo Kernel (`harnesses/echo.py`)
+### Echo Kernel (`kernels/kernel_echo/`)
 
 A trivial kernel that doesn't shell out to anything. It just echoes the input message back as `text_delta` events. Used for:
 - Testing the kernel infrastructure end-to-end without a real harness
 - Testing the Docker/spawn pipeline
 - Developing agent-host without needing API keys
 
-### Copilot CLI Kernel (`harnesses/copilot_cli.py`)
+### Copilot CLI Kernel (`kernels/kernel_copilot/`)
 
 Wraps GitHub Copilot CLI (`gh copilot`). The implementation will:
 - Shell out to a `gh copilot` invocation (likely piping the prompt via stdin or CLI args)
@@ -136,20 +170,35 @@ Research needed during implementation:
 
 ---
 
-## Runner (Container Entry Point)
+## Kernel Host (`kernels/kernel_host/`)
 
-`kernel/runner.py` is the module executed inside the container: `python -m kernel.runner`
+The host is the `main()` — it knows about all kernel implementations, selects one via config, runs it, and streams JSONL to stdout.
+
+### Registry (`registry.py`)
+
+Maps harness names to kernel classes:
+
+```python
+KERNEL_REGISTRY: dict[str, type[Kernel]] = {
+    "echo": EchoKernel,
+    "copilot-cli": CopilotKernel,
+}
+```
+
+### Runner (`runner.py`) — Container Entry Point
+
+Executed inside the container as `python -m kernel_host.runner`.
 
 Flow:
 1. Read config from environment variables (loaded from `.env`)
 2. Read the harness type from `KERNEL_HARNESS` env var (default: `echo`)
 3. Read the user message from CLI args
-4. Instantiate the appropriate kernel
+4. Look up the kernel class in the registry, instantiate it
 5. Call `start()`, then `send(message)`, then iterate `recv()` and print each event as a JSON line to stdout
 6. Call `stop()` and exit
 
 ```
-ENTRYPOINT ["python", "-m", "kernel.runner"]
+ENTRYPOINT ["python", "-m", "kernel_host.runner"]
 ```
 
 ---
@@ -159,7 +208,7 @@ ENTRYPOINT ["python", "-m", "kernel.runner"]
 All harness-specific config comes from environment variables, typically loaded from a `.env` file mounted into the container.
 
 ```env
-# kernel/.env.example
+# kernels/kernel_host/.env.example
 
 # Which harness to use
 KERNEL_HARNESS=echo
@@ -176,7 +225,7 @@ KERNEL_HARNESS=echo
 
 ---
 
-## Dockerfile
+## Dockerfile (`kernels/kernel_host/Dockerfile`)
 
 ```dockerfile
 FROM python:3.13-slim
@@ -185,21 +234,29 @@ FROM python:3.13-slim
 # ...distro-specific install steps...
 
 WORKDIR /app
-COPY . .
-RUN pip install --no-cache-dir .
 
-ENTRYPOINT ["python", "-m", "kernel.runner"]
+# Copy all kernel packages (abstraction + implementations + host)
+COPY kernels/ kernels/
+
+# Install kernel packages
+RUN pip install --no-cache-dir \
+    ./kernels/kernel \
+    ./kernels/kernel_echo \
+    ./kernels/kernel_copilot \
+    ./kernels/kernel_host
+
+ENTRYPOINT ["python", "-m", "kernel_host.runner"]
 ```
 
 - Based on `python:3.13-slim`
 - Installs `gh` CLI + copilot extension for the copilot-cli harness
-- Copies kernel source and installs the Python package
-- Entry point is the runner module
+- Copies all kernel packages and pip-installs them
+- Entry point is the kernel_host runner module
 - Message is passed as CMD (so `docker run <image> "can you hear me?"`)
 
 ---
 
-## spawn-kernel.sh
+## spawn-kernel.sh (`kernels/kernel_host/spawn-kernel.sh`)
 
 A minimal wrapper for development/testing. Replaces agent-host for now.
 
@@ -209,13 +266,14 @@ set -euo pipefail
 
 MESSAGE="${1:?Usage: spawn-kernel.sh <message>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-docker build -t agentspace-kernel "$SCRIPT_DIR"
+docker build -t agentspace-kernel -f "$SCRIPT_DIR/Dockerfile" "$REPO_ROOT"
 docker run --rm --env-file "$SCRIPT_DIR/.env" agentspace-kernel "$MESSAGE"
 ```
 
 Behavior:
-1. Builds the kernel image (no-op if cached)
+1. Builds the kernel image from the repo root (so `COPY kernels/` works), using the Dockerfile in `kernel_host/`
 2. Runs a container with `--rm` (auto-remove on exit), passing `.env` and the message
 3. JSONL events stream to the terminal
 4. Container exits and is removed
@@ -224,13 +282,13 @@ Behavior:
 
 ## Implementation Order
 
-1. **Project scaffolding** — `pyproject.toml`, package structure, `__init__.py` files
-2. **`events.py`** — dataclasses for all event types + `to_jsonl()` serialization
-3. **`protocol.py`** — `Kernel` protocol, `KernelStatus` enum, `KernelConfig` dataclass
-4. **`base.py`** — `BaseKernel` with subprocess management and event plumbing
-5. **`harnesses/echo.py`** — echo kernel (no external deps)
-6. **`runner.py`** — container entry point
-7. **`Dockerfile`** + **`.env.example`** + **`spawn-kernel.sh`**
+1. **`kernels/kernel/` scaffolding** — `pyproject.toml`, package structure
+2. **`kernel/events.py`** — dataclasses for all event types + `to_jsonl()` serialization
+3. **`kernel/protocol.py`** — `Kernel` protocol, `KernelStatus` enum, `KernelConfig` dataclass
+4. **`kernel/base.py`** — `BaseKernel` with subprocess management and event plumbing
+5. **`kernels/kernel_echo/`** — echo kernel package (no external deps)
+6. **`kernels/kernel_host/`** — registry, runner, `.env.example`
+7. **`kernel_host/Dockerfile`** + **`kernel_host/spawn-kernel.sh`**
 8. **Tests** — unit tests for events, echo kernel, runner
 9. **Verify end-to-end** — `spawn-kernel.sh "hello"` produces correct JSONL
-10. **`harnesses/copilot_cli.py`** — Copilot CLI harness (requires `gh copilot` research + integration)
+10. **`kernels/kernel_copilot/`** — Copilot CLI kernel (requires `gh copilot` research + integration)
