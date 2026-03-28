@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from kernel.events import (
     KernelEvent,
@@ -14,7 +14,11 @@ from kernel.events import (
     status_event,
     text_delta,
 )
-from kernel.protocol import KernelConfig
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from kernel.protocol import KernelConfig
 
 
 class EchoKernel:
@@ -36,7 +40,7 @@ class EchoKernel:
     def status(self) -> KernelStatus:
         return self._status
 
-    async def start(self, config: KernelConfig) -> None:
+    async def start(self, _config: KernelConfig) -> None:
         self._session_id = uuid.uuid4().hex[:12]
         self._status = KernelStatus.IDLE
         await self._queue.put(session_start(self._session_id, self.name))

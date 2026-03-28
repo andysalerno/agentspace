@@ -9,9 +9,10 @@ Subclasses implement three methods:
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from kernel.events import (
     KernelEvent,
@@ -21,7 +22,11 @@ from kernel.events import (
     session_start,
     status_event,
 )
-from kernel.protocol import KernelConfig
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from kernel.protocol import KernelConfig
 
 
 class BaseKernel(ABC):
@@ -29,6 +34,7 @@ class BaseKernel(ABC):
         self._status = KernelStatus.IDLE
         self._session_id: str = ""
         self._process: asyncio.subprocess.Process | None = None
+        self._tasks: list[asyncio.Task[None]] = []
         self._queue: asyncio.Queue[KernelEvent | None] = asyncio.Queue()
 
     @property
@@ -60,9 +66,6 @@ class BaseKernel(ABC):
 
         cmd = self.harness_cmd(config)
         env = self.harness_env(config)
-
-        import os
-
         full_env = {**os.environ, **env}
 
         self._process = await asyncio.create_subprocess_exec(
@@ -74,9 +77,15 @@ class BaseKernel(ABC):
 
         await self._queue.put(session_start(self._session_id, self.name))
 
-        asyncio.create_task(self._read_stream(self._process.stdout, is_stderr=False))
-        asyncio.create_task(self._read_stream(self._process.stderr, is_stderr=True))
-        asyncio.create_task(self._wait_for_exit())
+        self._tasks = [
+            asyncio.create_task(
+                self._read_stream(self._process.stdout, is_stderr=False),
+            ),
+            asyncio.create_task(
+                self._read_stream(self._process.stderr, is_stderr=True),
+            ),
+            asyncio.create_task(self._wait_for_exit()),
+        ]
 
     async def send(self, message: str) -> None:
         if self._process is None or self._process.stdin is None:

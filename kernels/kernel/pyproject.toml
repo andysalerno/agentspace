@@ -17,5 +17,3 @@ typeCheckingMode = "strict"
 venvPath = "."
 venv = ".venv"
 
-[tool.ruff]
-target-version = "py313"

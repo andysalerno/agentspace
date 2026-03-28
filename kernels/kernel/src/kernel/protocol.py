@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from kernel.events import KernelEvent, KernelStatus
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from kernel.events import KernelEvent, KernelStatus
 
 
 @dataclass(frozen=True, slots=True)

@@ -4,7 +4,6 @@ import json
 import pytest
 from kernel.events import EventType, KernelStatus
 from kernel.protocol import KernelConfig
-
 from kernel_echo import EchoKernel
 
 
@@ -28,12 +27,10 @@ class TestEchoKernel:
         await kernel.start(config)
         await kernel.send("hello world")
 
-        events = []
-        async for event in kernel.recv():
-            events.append(event)
+        events = [event async for event in kernel.recv()]
 
-        # Should have: session_start, status(busy), text_delta(hello), text_delta( world),
-        # status(done), session_end
+        # Expect events: session_start, status-busy, text deltas,
+        # status-done, session_end
         types = [e.type for e in events]
         assert types[0] == EventType.SESSION_START
         assert types[1] == EventType.STATUS
@@ -60,9 +57,7 @@ class TestEchoKernel:
         await kernel.start(config)
         await kernel.send("test")
 
-        events = []
-        async for event in kernel.recv():
-            events.append(event)
+        events = [event async for event in kernel.recv()]
 
         status_events = [e for e in events if e.type == EventType.STATUS]
         statuses = [e.status for e in status_events]

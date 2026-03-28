@@ -1,5 +1,6 @@
-def main():
-    print("Hello from agentspace!")
+def main() -> None:
+    """Entry point."""
+    print("Hello from agentspace!")  # noqa: T201
 
 
 if __name__ == "__main__":

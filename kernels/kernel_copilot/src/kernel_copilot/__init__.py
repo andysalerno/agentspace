@@ -10,9 +10,10 @@ implementation based on known `gh copilot` behavior.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import uuid
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from kernel.events import (
     KernelEvent,
@@ -24,6 +25,9 @@ from kernel.events import (
     text_delta,
 )
 from kernel.protocol import KernelConfig
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 # Regex to strip ANSI escape codes from terminal output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -41,6 +45,7 @@ class CopilotKernel:
         self._session_id: str = ""
         self._config: KernelConfig = KernelConfig()
         self._process: asyncio.subprocess.Process | None = None
+        self._output_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[KernelEvent | None] = asyncio.Queue()
 
     @property
@@ -58,8 +63,6 @@ class CopilotKernel:
         await self._queue.put(session_start(self._session_id, self.name))
 
     async def send(self, message: str) -> None:
-        import os
-
         self._status = KernelStatus.BUSY
         await self._queue.put(status_event(KernelStatus.BUSY))
 
@@ -94,7 +97,7 @@ class CopilotKernel:
             await self._queue.put(None)
             return
 
-        asyncio.create_task(self._read_output())
+        self._output_task = asyncio.create_task(self._read_output())
 
     async def recv(self) -> AsyncIterator[KernelEvent]:
         while True:
@@ -128,10 +131,10 @@ class CopilotKernel:
         if self._process.stderr is not None:
             remaining = await self._process.stderr.read()
             if remaining:
-                for line in remaining.decode().splitlines():
-                    line = line.strip()
-                    if line:
-                        await self._queue.put(error(line))
+                for raw in remaining.decode().splitlines():
+                    stripped = raw.strip()
+                    if stripped:
+                        await self._queue.put(error(stripped))
 
         returncode = await self._process.wait()
         if returncode != 0:
