@@ -144,7 +144,7 @@ async def get_session(session_id: str) -> dict[str, object]:
 
 
 @app.get("/sessions/{session_id}/messages")
-async def list_messages(session_id: str) -> dict[str, list[dict[str, str]]]:
+async def list_messages(session_id: str) -> dict[str, list[dict[str, object]]]:
     try:
         return {"messages": await service.list_messages(session_id)}
     except SessionNotFoundError as exc:

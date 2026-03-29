@@ -34,6 +34,7 @@ export type ChatMessage = {
   role: string;
   content: string;
   created_at: string;
+  tool_calls?: Array<{ tool: string }>;
 };
 
 export type SessionDetail = SessionSummary & {

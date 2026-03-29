@@ -157,7 +157,7 @@ class ClientService:
         session.updated_at = utc_now()
         return session.detail()
 
-    async def list_messages(self, session_id: str) -> list[dict[str, str]]:
+    async def list_messages(self, session_id: str) -> list[dict[str, object]]:
         session = self._get_session(session_id)
         return [message.summary() for message in session.messages]
 
@@ -271,6 +271,7 @@ class ClientService:
             session_id=session.session_id,
             role=MessageRole.ASSISTANT,
             content=_flatten_text(events),
+            tool_calls=_extract_tool_calls(events),
         )
         session.messages.append(assistant_message)
         upstream = await self._agent_host.get_session(session.agent_host_session_id)
@@ -317,6 +318,15 @@ def _flatten_text(events: list[KernelEvent]) -> str:
     return "".join(
         event.content or "" for event in events if event.type == EventType.TEXT_DELTA
     ).strip()
+
+
+def _extract_tool_calls(events: list[KernelEvent]) -> list[dict[str, str]]:
+    """Extract tool call names from kernel events."""
+    return [
+        {"tool": event.tool}
+        for event in events
+        if event.type == EventType.TOOL_CALL and event.tool
+    ]
 
 
 def _validate_agent_id(agent_id: str) -> None:

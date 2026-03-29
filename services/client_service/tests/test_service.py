@@ -19,6 +19,8 @@ from kernel.events import (
     session_start,
     status_event,
     text_delta,
+    tool_call,
+    tool_result,
 )
 
 if TYPE_CHECKING:
@@ -154,6 +156,55 @@ async def test_agent_and_session_lifecycle() -> None:
     assert len(messages) == 2
     assert str(reset["agent_host_session_id"]).endswith("-reset")
     assert await service.list_messages(session_id) == []
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_extracted_into_assistant_message() -> None:
+    """Tool call events should be extracted and stored with the assistant message."""
+
+    class ToolCallStub(StubAgentHostClient):
+        async def send_message(
+            self,
+            session_id: str,
+            message: str,
+        ) -> list[KernelEvent]:
+            self.sent.append((session_id, message))
+            self._sessions[session_id]["status"] = "done"
+            return [
+                session_start(session_id, "copilot-cli"),
+                status_event(KernelStatus.BUSY),
+                tool_call("read_file", {"path": "src/foo.py"}),
+                tool_result("read_file", "print('hello')"),
+                tool_call("write_file", {"path": "src/bar.py", "content": "x = 1"}),
+                tool_result("write_file", "ok"),
+                text_delta("Done editing."),
+                status_event(KernelStatus.DONE),
+                session_end(),
+            ]
+
+    upstream = ToolCallStub()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    await service.create_agent(agent_id="tool-agent", name="Tool Agent")
+    session = await service.create_session(agent_id="tool-agent", cwd=None)
+    session_id = str(session["session_id"])
+
+    reply = await service.send_message(session_id, "edit some files")
+    assistant_message = cast("dict[str, object]", reply["assistant_message"])
+
+    assert assistant_message["content"] == "Done editing."
+    assert assistant_message["tool_calls"] == [
+        {"tool": "read_file"},
+        {"tool": "write_file"},
+    ]
+
+    # Verify tool calls persist in session history
+    messages = await service.list_messages(session_id)
+    assert len(messages) == 2
+    assert messages[1]["tool_calls"] == [
+        {"tool": "read_file"},
+        {"tool": "write_file"},
+    ]
 
 
 @pytest.mark.asyncio
