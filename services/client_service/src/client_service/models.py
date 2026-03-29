@@ -19,6 +19,10 @@ class MessageRole(StrEnum):
     SYSTEM = "system"
 
 
+class ChannelType(StrEnum):
+    CLI = "cli"
+
+
 @dataclass(slots=True)
 class AgentRecord:
     agent_id: str
@@ -88,3 +92,27 @@ class SessionRecord:
         data = self.summary()
         data["messages"] = [message.summary() for message in self.messages]
         return data
+
+
+@dataclass(slots=True)
+class ChannelRecord:
+    channel_id: str
+    channel_type: ChannelType
+    agent_id: str
+    session_id: str
+    name: str
+    cwd: str | None
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+    def summary(self) -> dict[str, str | None]:
+        return {
+            "channel_id": self.channel_id,
+            "channel_type": self.channel_type.value,
+            "agent_id": self.agent_id,
+            "session_id": self.session_id,
+            "name": self.name,
+            "cwd": self.cwd,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }

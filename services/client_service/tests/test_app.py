@@ -23,6 +23,7 @@ class StubClientService:
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, str]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.channels: dict[str, dict[str, Any]] = {}
 
     async def create_agent(
         self,
@@ -141,6 +142,61 @@ class StubClientService:
     async def delete_session(self, session_id: str) -> None:
         del self.sessions[session_id]
 
+    async def register_channel(
+        self,
+        *,
+        agent_id: str,
+        name: str,
+        channel_type: str,
+        cwd: str | None,
+    ) -> dict[str, str | None]:
+        self.sessions["session-1"] = {
+            "session_id": "session-1",
+            "agent_id": agent_id,
+            "agent_host_session_id": "host-1",
+            "status": "idle",
+            "cwd": cwd,
+            "created_at": "now",
+            "updated_at": "now",
+            "message_count": 0,
+        }
+        channel = {
+            "channel_id": "channel-1",
+            "channel_type": channel_type,
+            "agent_id": agent_id,
+            "session_id": "session-1",
+            "name": name,
+            "cwd": cwd,
+            "created_at": "now",
+            "updated_at": "now",
+        }
+        self.channels[str(channel["channel_id"])] = channel
+        return channel
+
+    async def list_channels(self) -> list[dict[str, str | None]]:
+        return list(self.channels.values())
+
+    async def get_channel(self, channel_id: str) -> dict[str, str | None]:
+        return self.channels[channel_id]
+
+    async def list_channel_messages(self, channel_id: str) -> list[dict[str, str]]:
+        del channel_id
+        return await self.list_messages("session-1")
+
+    async def send_channel_message(
+        self,
+        channel_id: str,
+        message: str,
+    ) -> dict[str, object]:
+        del channel_id
+        return await self.send_message("session-1", message)
+
+    async def reset_channel(self, channel_id: str) -> dict[str, str | None]:
+        return self.channels[channel_id]
+
+    async def delete_channel(self, channel_id: str) -> None:
+        del self.channels[channel_id]
+
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -168,3 +224,29 @@ def test_agent_and_session_routes(client: TestClient) -> None:
     assert listed_messages.status_code == 200
     assert sent.json()["assistant_message"]["content"] == "hello"
     assert listed_messages.json()["messages"][0]["content"] == "hello"
+
+
+def test_channel_routes(client: TestClient) -> None:
+    created_agent = client.post("/agents", json={"name": "Agent One"})
+    registered = client.post(
+        "/channels",
+        json={
+            "agent_id": str(created_agent.json()["agent_id"]),
+            "name": "terminal-1",
+            "channel_type": "cli",
+            "cwd": "C:/work",
+        },
+    )
+    listed = client.get("/channels")
+    sent = client.post(
+        f"/channels/{registered.json()['channel_id']}/messages",
+        json={"message": "hello"},
+    )
+    messages = client.get(f"/channels/{registered.json()['channel_id']}/messages")
+
+    assert registered.status_code == 200
+    assert listed.status_code == 200
+    assert sent.status_code == 200
+    assert messages.status_code == 200
+    assert listed.json()[0]["name"] == "terminal-1"
+    assert sent.json()["assistant_message"]["content"] == "hello"

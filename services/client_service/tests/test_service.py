@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 from client_service.service import (
     AgentNotFoundError,
+    ChannelNotFoundError,
     ClientService,
     SessionNotFoundError,
 )
@@ -123,6 +124,32 @@ async def test_delete_agent_cascades_sessions() -> None:
 
 
 @pytest.mark.asyncio
+async def test_channel_registration_and_reset_reuse_session() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    agent = await service.create_agent(name="Channel Agent")
+    channel = await service.register_channel(
+        agent_id=agent["agent_id"],
+        name="terminal-1",
+        cwd="C:/work",
+    )
+    channel_id = str(channel["channel_id"])
+    session_id = str(channel["session_id"])
+    reply = await service.send_channel_message(channel_id, "hello")
+    messages = await service.list_channel_messages(channel_id)
+    reset = await service.reset_channel(channel_id)
+    assistant_message = cast("dict[str, object]", reply["assistant_message"])
+
+    assert channel["name"] == "terminal-1"
+    assert channel["session_id"] == session_id
+    assert assistant_message["content"] == "hello world"
+    assert len(messages) == 2
+    assert reset["session_id"] == session_id
+    assert await service.list_channel_messages(channel_id) == []
+
+
+@pytest.mark.asyncio
 async def test_missing_records_raise() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)
@@ -132,3 +159,6 @@ async def test_missing_records_raise() -> None:
 
     with pytest.raises(SessionNotFoundError):
         await service.send_message("missing", "hello")
+
+    with pytest.raises(ChannelNotFoundError):
+        await service.send_channel_message("missing", "hello")
