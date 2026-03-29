@@ -276,9 +276,7 @@ class ClientService:
 
 def _flatten_text(events: list[KernelEvent]) -> str:
     return "".join(
-        event.content or ""
-        for event in events
-        if event.type == EventType.TEXT_DELTA
+        event.content or "" for event in events if event.type == EventType.TEXT_DELTA
     ).strip()
 
 
