@@ -5,13 +5,15 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from kernel_host.registry import HarnessName
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from client_service.models import ChannelType
 from client_service.service import (
+    AgentAlreadyExistsError,
     AgentNotFoundError,
     ChannelNotFoundError,
     ClientService,
+    InvalidAgentIdError,
     SessionNotFoundError,
 )
 
@@ -22,6 +24,7 @@ service = ClientService()
 
 
 class CreateAgentRequest(BaseModel):
+    agent_id: str = Field(pattern=r"^[a-z]+(?:-[a-z]+)*$")
     name: str
     harness: HarnessName = HarnessName.COPILOT_CLI
     system_prompt: str = ""
@@ -56,11 +59,17 @@ async def healthz() -> dict[str, str]:
 
 @app.post("/agents")
 async def create_agent(payload: CreateAgentRequest) -> dict[str, str]:
-    return await service.create_agent(
-        name=payload.name,
-        harness=payload.harness,
-        system_prompt=payload.system_prompt,
-    )
+    try:
+        return await service.create_agent(
+            agent_id=payload.agent_id,
+            name=payload.name,
+            harness=payload.harness,
+            system_prompt=payload.system_prompt,
+        )
+    except AgentAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidAgentIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/agents")

@@ -35,10 +35,15 @@ async def index(request: Request) -> HTMLResponse:
 
 @app.post("/agents")
 async def create_agent(
+    agent_id: Annotated[str, Form()],
     name: Annotated[str, Form()],
     system_prompt: Annotated[str, Form()] = "",
 ) -> RedirectResponse:
-    await client_service.create_agent(name=name, system_prompt=system_prompt)
+    await client_service.create_agent(
+        agent_id=agent_id,
+        name=name,
+        system_prompt=system_prompt,
+    )
     return RedirectResponse(url="/", status_code=303)
 
 

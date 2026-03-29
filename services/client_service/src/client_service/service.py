@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import uuid
 from dataclasses import asdict
 
@@ -20,9 +21,18 @@ from client_service.models import (
 )
 
 logger = logging.getLogger(__name__)
+AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
 
 
 class AgentNotFoundError(KeyError):
+    pass
+
+
+class AgentAlreadyExistsError(ValueError):
+    pass
+
+
+class InvalidAgentIdError(ValueError):
     pass
 
 
@@ -45,17 +55,21 @@ class ClientService:
     async def create_agent(
         self,
         *,
+        agent_id: str,
         name: str,
         harness: HarnessName = HarnessName.COPILOT_CLI,
         system_prompt: str = "",
     ) -> dict[str, str]:
+        _validate_agent_id(agent_id)
         agent = AgentRecord(
-            agent_id=uuid.uuid4().hex,
+            agent_id=agent_id,
             name=name,
             harness=harness,
             system_prompt=system_prompt,
         )
         async with self._lock:
+            if agent.agent_id in self._agents:
+                raise AgentAlreadyExistsError(agent.agent_id)
             self._agents[agent.agent_id] = agent
         logger.info("created agent %s using harness %s", agent.agent_id, harness.value)
         return agent.summary()
@@ -290,3 +304,11 @@ def _flatten_text(events: list[KernelEvent]) -> str:
         for event in events
         if event.type == EventType.TEXT_DELTA
     ).strip()
+
+
+def _validate_agent_id(agent_id: str) -> None:
+    if not AGENT_ID_PATTERN.fullmatch(agent_id):
+        msg = (
+            "agent_id must use lowercase letters and single dashes only"
+        )
+        raise InvalidAgentIdError(msg)

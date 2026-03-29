@@ -28,12 +28,13 @@ class StubClientService:
     async def create_agent(
         self,
         *,
+        agent_id: str,
         name: str,
         harness: HarnessName,
         system_prompt: str = "",
     ) -> dict[str, str]:
         agent = {
-            "agent_id": "agent-1",
+            "agent_id": agent_id,
             "name": name,
             "harness": harness.value,
             "system_prompt": system_prompt,
@@ -206,7 +207,10 @@ def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 def test_agent_and_session_routes(client: TestClient) -> None:
-    created_agent = client.post("/agents", json={"name": "Agent One"})
+    created_agent = client.post(
+        "/agents",
+        json={"agent_id": "agent-one", "name": "Agent One"},
+    )
     created_session = client.post(
         "/sessions",
         json={"agent_id": str(created_agent.json()["agent_id"]), "cwd": "C:/work"},
@@ -227,7 +231,10 @@ def test_agent_and_session_routes(client: TestClient) -> None:
 
 
 def test_channel_routes(client: TestClient) -> None:
-    created_agent = client.post("/agents", json={"name": "Agent One"})
+    created_agent = client.post(
+        "/agents",
+        json={"agent_id": "agent-one", "name": "Agent One"},
+    )
     registered = client.post(
         "/channels",
         json={
@@ -250,3 +257,12 @@ def test_channel_routes(client: TestClient) -> None:
     assert messages.status_code == 200
     assert listed.json()[0]["name"] == "terminal-1"
     assert sent.json()["assistant_message"]["content"] == "hello"
+
+
+def test_invalid_agent_id_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/agents",
+        json={"agent_id": "Bad Agent", "name": "Agent One"},
+    )
+
+    assert response.status_code == 422

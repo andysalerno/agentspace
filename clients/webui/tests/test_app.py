@@ -17,7 +17,14 @@ class StubClientServiceClient:
             },
         ]
 
-    async def create_agent(self, *, name: str, system_prompt: str) -> dict[str, Any]:
+    async def create_agent(
+        self,
+        *,
+        agent_id: str,
+        name: str,
+        system_prompt: str,
+    ) -> dict[str, Any]:
+        del agent_id
         del system_prompt
         return {"agent_id": "agent-1", "name": name, "harness": "copilot-cli"}
 
@@ -72,7 +79,11 @@ def test_index_page_renders(client: TestClient) -> None:
 def test_session_page_and_forms(client: TestClient) -> None:
     created = client.post(
         "/agents",
-        data={"name": "Agent Two", "system_prompt": "Be precise."},
+        data={
+            "agent_id": "agent-two",
+            "name": "Agent Two",
+            "system_prompt": "Be precise.",
+        },
         follow_redirects=False,
     )
     started = client.post(

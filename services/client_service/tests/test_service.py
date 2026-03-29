@@ -4,9 +4,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from client_service.service import (
+    AgentAlreadyExistsError,
     AgentNotFoundError,
     ChannelNotFoundError,
     ClientService,
+    InvalidAgentIdError,
     SessionNotFoundError,
 )
 from kernel.events import (
@@ -87,7 +89,7 @@ async def test_agent_and_session_lifecycle() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)
 
-    agent = await service.create_agent(name="Test Agent")
+    agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
     session = await service.create_session(agent_id=agent["agent_id"], cwd="C:/work")
     session_id = str(session["session_id"])
     reply = await service.send_message(session_id, "hello")
@@ -108,7 +110,7 @@ async def test_delete_agent_cascades_sessions() -> None:
     upstream = StubAgentHostClient()
     service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
 
-    agent = await service.create_agent(name="Test Agent")
+    agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
     agent_id = agent["agent_id"]
     session = await service.create_session(agent_id=agent["agent_id"], cwd=None)
     session_id = str(session["session_id"])
@@ -128,7 +130,7 @@ async def test_channel_registration_and_reset_reuse_session() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)
 
-    agent = await service.create_agent(name="Channel Agent")
+    agent = await service.create_agent(agent_id="channel-agent", name="Channel Agent")
     channel = await service.register_channel(
         agent_id=agent["agent_id"],
         name="terminal-1",
@@ -162,3 +164,17 @@ async def test_missing_records_raise() -> None:
 
     with pytest.raises(ChannelNotFoundError):
         await service.send_channel_message("missing", "hello")
+
+
+@pytest.mark.asyncio
+async def test_agent_id_validation_and_uniqueness() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    with pytest.raises(InvalidAgentIdError):
+        await service.create_agent(agent_id="Bad Agent", name="Bad Agent")
+
+    await service.create_agent(agent_id="valid-agent", name="Valid Agent")
+
+    with pytest.raises(AgentAlreadyExistsError):
+        await service.create_agent(agent_id="valid-agent", name="Duplicate")

@@ -23,6 +23,7 @@ class ClientServiceClient(Protocol):
     async def create_agent(
         self,
         *,
+        agent_id: str,
         name: str,
         system_prompt: str,
     ) -> JsonDict: ...
@@ -55,13 +56,23 @@ class HttpClientServiceClient:
         response = await self._request_json("GET", "/agents")
         return cast("JsonList", response)
 
-    async def create_agent(self, *, name: str, system_prompt: str) -> JsonDict:
+    async def create_agent(
+        self,
+        *,
+        agent_id: str,
+        name: str,
+        system_prompt: str,
+    ) -> JsonDict:
         return cast(
             "JsonDict",
             await self._request_json(
                 "POST",
                 "/agents",
-                json={"name": name, "system_prompt": system_prompt},
+                json={
+                    "agent_id": agent_id,
+                    "name": name,
+                    "system_prompt": system_prompt,
+                },
             ),
         )
 

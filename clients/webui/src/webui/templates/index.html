@@ -86,7 +86,11 @@
           <h2>Create Agent</h2>
           <form method="post" action="/agents">
             <label>
-              Name
+              Agent ID
+              <input type="text" name="agent_id" pattern="[a-z]+(?:-[a-z]+)*" placeholder="support-bot" required>
+            </label>
+            <label>
+              Display Name
               <input type="text" name="name" required>
             </label>
             <label>
@@ -125,7 +129,7 @@
             {% for agent in agents %}
             <li>
               <strong>{{ agent.name }}</strong>
-              <div class="meta">{{ agent.harness }}</div>
+              <div class="meta">{{ agent.agent_id }} | {{ agent.harness }}</div>
             </li>
             {% endfor %}
           </ul>
