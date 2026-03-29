@@ -32,6 +32,7 @@ class StubAgentHostClient:
         self.sent: list[tuple[str, str]] = []
         self.destroyed: list[str] = []
         self._sessions: dict[str, dict[str, str]] = {}
+        self._skills: dict[str, dict[str, object]] = {}
 
     async def create_session(
         self,
@@ -84,6 +85,41 @@ class StubAgentHostClient:
     async def destroy_session(self, session_id: str) -> None:
         self.destroyed.append(session_id)
         self._sessions.pop(session_id, None)
+
+    async def create_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> dict[str, object]:
+        skill: dict[str, object] = {"skill_id": skill_id, "files": files}
+        self._skills[skill_id] = skill
+        return skill
+
+    async def get_skill(self, skill_id: str) -> dict[str, object]:
+        if skill_id not in self._skills:
+            msg = f"skill not found: {skill_id}"
+            raise KeyError(msg)
+        return dict(self._skills[skill_id])
+
+    async def list_skills(self) -> list[dict[str, object]]:
+        return [{"skill_id": sid} for sid in self._skills]
+
+    async def update_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> dict[str, object]:
+        if skill_id not in self._skills:
+            msg = f"skill not found: {skill_id}"
+            raise KeyError(msg)
+        self._skills[skill_id] = {"skill_id": skill_id, "files": files}
+        return dict(self._skills[skill_id])
+
+    async def delete_skill(self, skill_id: str) -> None:
+        if skill_id not in self._skills:
+            msg = f"skill not found: {skill_id}"
+            raise KeyError(msg)
+        del self._skills[skill_id]
 
 
 @pytest.mark.asyncio
@@ -214,3 +250,25 @@ async def test_kill_kernel_not_found_raises() -> None:
 
     with pytest.raises(KernelNotFoundError):
         await service.kill_kernel("nonexistent")
+
+
+@pytest.mark.asyncio
+async def test_skills_crud_proxies_to_agent_host() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    created = await service.create_skill("my-skill", {"SKILL.md": "# My Skill"})
+    assert created["skill_id"] == "my-skill"
+
+    listed = await service.list_skills()
+    assert len(listed) == 1
+    assert listed[0]["skill_id"] == "my-skill"
+
+    fetched = await service.get_skill("my-skill")
+    assert fetched["files"] == {"SKILL.md": "# My Skill"}
+
+    updated = await service.update_skill("my-skill", {"SKILL.md": "# Updated"})
+    assert updated["files"] == {"SKILL.md": "# Updated"}
+
+    await service.delete_skill("my-skill")
+    assert await service.list_skills() == []

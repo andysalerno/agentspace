@@ -211,6 +211,31 @@ class ClientService:
             len(affected),
         )
 
+    # --- Skills (proxied to agent_host) ---
+
+    async def create_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> dict[str, object]:
+        return await self._agent_host.create_skill(skill_id, files)
+
+    async def get_skill(self, skill_id: str) -> dict[str, object]:
+        return await self._agent_host.get_skill(skill_id)
+
+    async def list_skills(self) -> list[dict[str, object]]:
+        return await self._agent_host.list_skills()
+
+    async def update_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> dict[str, object]:
+        return await self._agent_host.update_skill(skill_id, files)
+
+    async def delete_skill(self, skill_id: str) -> None:
+        await self._agent_host.delete_skill(skill_id)
+
     async def _send_to_session(
         self,
         session: SessionRecord,

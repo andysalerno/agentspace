@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from kernel_host.registry import HarnessName
@@ -184,3 +185,71 @@ async def kill_kernel(kernel_session_id: str) -> None:
         await service.kill_kernel(kernel_session_id)
     except KernelNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# --- Skills ---
+
+
+class CreateSkillRequest(BaseModel):
+    skill_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    files: dict[str, str]
+
+
+class UpdateSkillRequest(BaseModel):
+    files: dict[str, str]
+
+
+@app.post("/skills")
+async def create_skill(payload: CreateSkillRequest) -> dict[str, Any]:
+    try:
+        return await service.create_skill(payload.skill_id, payload.files)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        status = _status_for_skill_error(exc)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@app.get("/skills")
+async def list_skills() -> list[dict[str, Any]]:
+    return await service.list_skills()
+
+
+@app.get("/skills/{skill_id}")
+async def get_skill(skill_id: str) -> dict[str, Any]:
+    try:
+        return await service.get_skill(skill_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        status = _status_for_skill_error(exc)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@app.put("/skills/{skill_id}")
+async def update_skill(skill_id: str, payload: UpdateSkillRequest) -> dict[str, Any]:
+    try:
+        return await service.update_skill(skill_id, payload.files)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        status = _status_for_skill_error(exc)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+@app.delete("/skills/{skill_id}", status_code=204)
+async def delete_skill(skill_id: str) -> None:
+    try:
+        await service.delete_skill(skill_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        status = _status_for_skill_error(exc)
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+
+def _status_for_skill_error(exc: Exception) -> int:
+    """Map upstream httpx errors to appropriate status codes."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code
+    return 500

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from agent_host.service import AgentHost, KernelRuntimeSession
+from agent_host.skills import SkillsService
 from fastapi.testclient import TestClient
 from kernel.events import (
     KernelEvent,
@@ -82,10 +83,12 @@ class StubRuntime:
 
 
 @pytest.fixture
-def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def client(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> TestClient:
     agent_host_app = importlib.import_module("agent_host.app")
     host = AgentHost(runtime=StubRuntime())
     monkeypatch.setattr(agent_host_app, "host", host)
+    skills_svc = SkillsService(skills_dir=str(tmp_path))
+    monkeypatch.setattr(agent_host_app, "skills", skills_svc)
     return TestClient(agent_host_app.app)
 
 
@@ -116,3 +119,51 @@ def test_session_lifecycle(client: TestClient) -> None:
     assert message.json()["events"][2]["content"] == "hello"
     assert history.json()["history"][0][2]["content"] == "hello"
     assert session.json()["resume_token"].startswith("resume-runtime-")
+
+
+def test_skill_lifecycle(client: TestClient) -> None:
+    created = client.post(
+        "/skills",
+        json={"skill_id": "my-skill", "files": {"SKILL.md": "# My Skill"}},
+    )
+    listed = client.get("/skills")
+    fetched = client.get("/skills/my-skill")
+    updated = client.put(
+        "/skills/my-skill",
+        json={"files": {"SKILL.md": "# Updated"}},
+    )
+    deleted = client.delete("/skills/my-skill")
+    after_delete = client.get("/skills/my-skill")
+
+    assert created.status_code == 200
+    assert created.json()["skill_id"] == "my-skill"
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+    assert fetched.status_code == 200
+    assert fetched.json()["files"]["SKILL.md"] == "# My Skill"
+    assert updated.status_code == 200
+    assert updated.json()["files"]["SKILL.md"] == "# Updated"
+    assert deleted.status_code == 204
+    assert after_delete.status_code == 404
+
+
+def test_create_duplicate_skill_returns_409(client: TestClient) -> None:
+    client.post(
+        "/skills",
+        json={"skill_id": "dup-skill", "files": {"SKILL.md": "# First"}},
+    )
+    response = client.post(
+        "/skills",
+        json={"skill_id": "dup-skill", "files": {"SKILL.md": "# Second"}},
+    )
+
+    assert response.status_code == 409
+
+
+def test_invalid_skill_id_returns_422(client: TestClient) -> None:
+    response = client.post(
+        "/skills",
+        json={"skill_id": "Bad Skill", "files": {"SKILL.md": "# Bad"}},
+    )
+
+    assert response.status_code == 422

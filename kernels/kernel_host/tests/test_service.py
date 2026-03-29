@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -12,7 +13,7 @@ from kernel.events import (
     text_delta,
 )
 from kernel_host.registry import HarnessName
-from kernel_host.service import KernelSessionService
+from kernel_host.service import KernelSessionService, _discover_skill_dirs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -94,3 +95,20 @@ async def test_service_reuses_resume_token(
     assert len(second_events) == 5
     assert summary["resume_token"] == "resume-kernel-host"  # noqa: S105
     assert summary["turns"] == 2
+
+
+def test_discover_skill_dirs(tmp_path: object) -> None:
+    base = Path(str(tmp_path))
+    (base / "alpha-skill").mkdir()
+    (base / "beta-skill").mkdir()
+    (base / "some-file.txt").write_text("not a dir")
+
+    result = _discover_skill_dirs(str(base))
+
+    assert result == (str(base / "alpha-skill"), str(base / "beta-skill"))
+
+
+def test_discover_skill_dirs_missing_dir() -> None:
+    result = _discover_skill_dirs("/nonexistent/dir")
+
+    assert result == ()

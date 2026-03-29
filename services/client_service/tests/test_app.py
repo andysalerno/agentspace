@@ -4,6 +4,7 @@ import importlib
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
 from client_service.service import (
     KernelNotFoundError,
@@ -27,6 +28,7 @@ class StubClientService:
         self.agents: dict[str, dict[str, str]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
         self.killed_kernels: list[str] = []
+        self.skills: dict[str, dict[str, object]] = {}
 
     async def create_agent(
         self,
@@ -171,6 +173,47 @@ class StubClientService:
             raise KernelNotFoundError(kernel_session_id)
         self.killed_kernels.append(kernel_session_id)
 
+    async def create_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> dict[str, object]:
+        skill: dict[str, object] = {"skill_id": skill_id, "files": files}
+        self.skills[skill_id] = skill
+        return skill
+
+    async def get_skill(self, skill_id: str) -> dict[str, object]:
+        if skill_id not in self.skills:
+            _raise_skill_not_found("GET", skill_id)
+        return dict(self.skills[skill_id])
+
+    async def list_skills(self) -> list[dict[str, object]]:
+        return [{"skill_id": sid} for sid in self.skills]
+
+    async def update_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> dict[str, object]:
+        if skill_id not in self.skills:
+            _raise_skill_not_found("PUT", skill_id)
+        self.skills[skill_id] = {"skill_id": skill_id, "files": files}
+        return dict(self.skills[skill_id])
+
+    async def delete_skill(self, skill_id: str) -> None:
+        if skill_id not in self.skills:
+            _raise_skill_not_found("DELETE", skill_id)
+        del self.skills[skill_id]
+
+
+def _raise_skill_not_found(method: str, skill_id: str) -> None:
+    msg = f"skill not found: {skill_id}"
+    raise httpx.HTTPStatusError(
+        msg,
+        request=httpx.Request(method, f"/skills/{skill_id}"),
+        response=httpx.Response(404),
+    )
+
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -235,3 +278,38 @@ def test_kill_kernel_not_found_returns_404(client: TestClient) -> None:
     response = client.delete("/kernels/nonexistent")
 
     assert response.status_code == 404
+
+
+def test_skill_lifecycle(client: TestClient) -> None:
+    created = client.post(
+        "/skills",
+        json={"skill_id": "my-skill", "files": {"SKILL.md": "# My Skill"}},
+    )
+    listed = client.get("/skills")
+    fetched = client.get("/skills/my-skill")
+    updated = client.put(
+        "/skills/my-skill",
+        json={"files": {"SKILL.md": "# Updated"}},
+    )
+    deleted = client.delete("/skills/my-skill")
+    after_delete = client.get("/skills/my-skill")
+
+    assert created.status_code == 200
+    assert created.json()["skill_id"] == "my-skill"
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+    assert fetched.status_code == 200
+    assert fetched.json()["files"]["SKILL.md"] == "# My Skill"
+    assert updated.status_code == 200
+    assert updated.json()["files"]["SKILL.md"] == "# Updated"
+    assert deleted.status_code == 204
+    assert after_delete.status_code == 404
+
+
+def test_invalid_skill_id_returns_422(client: TestClient) -> None:
+    response = client.post(
+        "/skills",
+        json={"skill_id": "Bad Skill", "files": {"SKILL.md": "# Bad"}},
+    )
+
+    assert response.status_code == 422

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from kernel.events import EventType, KernelEvent, KernelStatus
@@ -84,9 +85,21 @@ def service_from_env() -> KernelSessionService:
         for path in os.environ.get("KERNEL_ADDITIONAL_PATHS", "").split(os.pathsep)
         if path
     )
+
+    skills_dir = os.environ.get("KERNEL_SKILLS_DIR", "")
+    skill_paths = _discover_skill_dirs(skills_dir) if skills_dir else ()
+
     return KernelSessionService(
         harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO)),
         env=dict(os.environ),
         cwd=os.environ.get("KERNEL_WORKDIR") or None,
-        additional_paths=additional_paths,
+        additional_paths=additional_paths + skill_paths,
     )
+
+
+def _discover_skill_dirs(skills_dir: str) -> tuple[str, ...]:
+    """Enumerate subdirectories under skills_dir to use as additional paths."""
+    base = Path(skills_dir)
+    if not base.is_dir():
+        return ()
+    return tuple(str(entry) for entry in sorted(base.iterdir()) if entry.is_dir())

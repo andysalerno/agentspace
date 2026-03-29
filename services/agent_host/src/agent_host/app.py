@@ -8,12 +8,20 @@ from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
 from agent_host.service import AgentHost, SessionNotFoundError
+from agent_host.skills import (
+    InvalidSkillFilePathError,
+    InvalidSkillIdError,
+    SkillAlreadyExistsError,
+    SkillNotFoundError,
+    SkillsService,
+)
 
 if TYPE_CHECKING:
     from kernel.events import KernelEvent
 
 app = FastAPI(title="Agent Host", version="0.1.0")
 host = AgentHost()
+skills = SkillsService()
 
 
 class CreateSessionRequest(BaseModel):
@@ -94,3 +102,60 @@ async def destroy_session(session_id: str) -> None:
         await host.destroy_session(session_id)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# --- Skills ---
+
+
+class CreateSkillRequest(BaseModel):
+    skill_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    files: dict[str, str]
+
+
+class UpdateSkillRequest(BaseModel):
+    files: dict[str, str]
+
+
+@app.post("/skills")
+async def create_skill(payload: CreateSkillRequest) -> dict[str, Any]:
+    try:
+        return skills.create_skill(payload.skill_id, payload.files)
+    except SkillAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (InvalidSkillIdError, InvalidSkillFilePathError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/skills")
+async def list_skills() -> list[dict[str, Any]]:
+    return skills.list_skills()
+
+
+@app.get("/skills/{skill_id}")
+async def get_skill(skill_id: str) -> dict[str, Any]:
+    try:
+        return skills.get_skill(skill_id)
+    except SkillNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidSkillIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.put("/skills/{skill_id}")
+async def update_skill(skill_id: str, payload: UpdateSkillRequest) -> dict[str, Any]:
+    try:
+        return skills.update_skill(skill_id, payload.files)
+    except SkillNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (InvalidSkillIdError, InvalidSkillFilePathError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.delete("/skills/{skill_id}", status_code=204)
+async def delete_skill(skill_id: str) -> None:
+    try:
+        skills.delete_skill(skill_id)
+    except SkillNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidSkillIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc

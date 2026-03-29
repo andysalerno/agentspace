@@ -44,6 +44,24 @@ class AgentHostClient(Protocol):
 
     async def destroy_session(self, session_id: str) -> None: ...
 
+    async def create_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> JsonDict: ...
+
+    async def get_skill(self, skill_id: str) -> JsonDict: ...
+
+    async def list_skills(self) -> JsonList: ...
+
+    async def update_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> JsonDict: ...
+
+    async def delete_skill(self, skill_id: str) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class HttpAgentHostClient:
@@ -88,8 +106,7 @@ class HttpAgentHostClient:
             cast("JsonDict", response)["history"],
         )
         return [
-            [_kernel_event_from_json(event) for event in turn]
-            for turn in raw_history
+            [_kernel_event_from_json(event) for event in turn] for turn in raw_history
         ]
 
     async def reset_session(self, session_id: str) -> JsonDict:
@@ -104,6 +121,42 @@ class HttpAgentHostClient:
             timeout=self.timeout,
         ) as client:
             response = await client.delete(f"/sessions/{session_id}")
+        response.raise_for_status()
+
+    async def create_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> JsonDict:
+        payload: dict[str, object] = {"skill_id": skill_id, "files": files}
+        return cast(
+            "JsonDict",
+            await self._request_json("POST", "/skills", json=payload),
+        )
+
+    async def get_skill(self, skill_id: str) -> JsonDict:
+        return cast("JsonDict", await self._request_json("GET", f"/skills/{skill_id}"))
+
+    async def list_skills(self) -> JsonList:
+        return cast("JsonList", await self._request_json("GET", "/skills"))
+
+    async def update_skill(
+        self,
+        skill_id: str,
+        files: dict[str, str],
+    ) -> JsonDict:
+        payload: dict[str, object] = {"files": files}
+        return cast(
+            "JsonDict",
+            await self._request_json("PUT", f"/skills/{skill_id}", json=payload),
+        )
+
+    async def delete_skill(self, skill_id: str) -> None:
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=self.timeout,
+        ) as client:
+            response = await client.delete(f"/skills/{skill_id}")
         response.raise_for_status()
 
     async def _request_json(

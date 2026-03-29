@@ -17,6 +17,8 @@ services:
         condition: service_completed_successfully
     environment:
       - AGENT_HOST_COPILOT_VOLUME=agentspace-kernel_copilot-config
+      - AGENT_HOST_SKILLS_VOLUME=agentspace-skills
+      - AGENT_HOST_SKILLS_DIR=/skills
       - AGENT_HOST_DOCKER_NETWORK=agentspace-stack
       - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
       - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
@@ -25,6 +27,7 @@ services:
       - "8001:8001"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - skills:/skills
     networks:
       - agentspace
 
@@ -63,3 +66,7 @@ services:
 networks:
   agentspace:
     name: agentspace-stack
+
+volumes:
+  skills:
+    name: agentspace-skills

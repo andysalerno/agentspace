@@ -103,6 +103,14 @@ class DockerKernelRuntime:
             "AGENT_HOST_COPILOT_VOLUME",
             "agentspace-kernel_copilot-config",
         )
+        self._skills_volume = os.environ.get(
+            "AGENT_HOST_SKILLS_VOLUME",
+            "agentspace-skills",
+        )
+        self._skills_dir = os.environ.get(
+            "AGENT_HOST_SKILLS_DIR",
+            "/skills",
+        )
 
     async def create_session(
         self,
@@ -180,6 +188,8 @@ class DockerKernelRuntime:
         if additional_paths:
             environment["KERNEL_ADDITIONAL_PATHS"] = os.pathsep.join(additional_paths)
 
+        environment["KERNEL_SKILLS_DIR"] = "/skills"
+
         self._client.containers.run(
             self._kernel_image,
             auto_remove=True,
@@ -200,6 +210,10 @@ class DockerKernelRuntime:
                 self._copilot_volume: {
                     "bind": "/root/.copilot",
                     "mode": "rw",
+                },
+                self._skills_volume: {
+                    "bind": "/skills",
+                    "mode": "ro",
                 },
             },
         )
