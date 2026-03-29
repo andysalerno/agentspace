@@ -1,0 +1,65 @@
+services:
+  kernel-host-image:
+    image: agentspace-kernel-kernel:latest
+    build:
+      context: .
+      dockerfile: kernels/kernel_host/Dockerfile
+    command: ["python", "-c", "print('kernel image ready')"]
+    restart: "no"
+
+  agent-host:
+    image: agentspace-agent-host-agent-host:latest
+    build:
+      context: .
+      dockerfile: services/agent_host/Dockerfile
+    depends_on:
+      kernel-host-image:
+        condition: service_completed_successfully
+    environment:
+      - AGENT_HOST_COPILOT_VOLUME=agentspace-kernel_copilot-config
+      - AGENT_HOST_DOCKER_NETWORK=agentspace-stack
+      - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
+      - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
+      - KERNEL_WORKDIR=${KERNEL_WORKDIR}
+    ports:
+      - "8001:8001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - agentspace
+
+  client-service:
+    image: agentspace-client-service-client-service:latest
+    build:
+      context: .
+      dockerfile: services/client_service/Dockerfile
+    depends_on:
+      agent-host:
+        condition: service_started
+    environment:
+      - CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://agent-host:8001
+      - CLIENT_SERVICE_AGENT_HOST_TIMEOUT=60
+    ports:
+      - "8002:8002"
+    networks:
+      - agentspace
+
+  webui:
+    image: agentspace-webui-webui:latest
+    build:
+      context: .
+      dockerfile: clients/webui/Dockerfile
+    depends_on:
+      client-service:
+        condition: service_started
+    environment:
+      - WEBUI_CLIENT_SERVICE_BASE_URL=http://client-service:8002
+      - WEBUI_CLIENT_SERVICE_TIMEOUT=60
+    ports:
+      - "8003:8003"
+    networks:
+      - agentspace
+
+networks:
+  agentspace:
+    name: agentspace-stack
