@@ -121,11 +121,11 @@ class ChatScreen(Screen[None]):
                     id="transcript",
                 )
                 with Vertical(id="composer"), Horizontal():
-                        yield Input(
-                            placeholder="Type a message…",
-                            id="msg-input",
-                        )
-                        yield Button("Send", id="send-btn", variant="primary")
+                    yield Input(
+                        placeholder="Type a message…",
+                        id="msg-input",
+                    )
+                    yield Button("Send", id="send-btn", variant="primary")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -188,8 +188,7 @@ class ChatScreen(Screen[None]):
         self._messages = detail.get("messages", [])
         header = self.query_one("#chat-header", Static)
         header.update(
-            f"Agent: {detail['agent_id']}  |  "
-            f"Session: {detail['session_id'][:8]}…",
+            f"Agent: {detail['agent_id']}  |  Session: {detail['session_id'][:8]}…",
         )
         self._render_transcript()
 
@@ -202,9 +201,7 @@ class ChatScreen(Screen[None]):
             tool_calls = msg.get("tool_calls", [])
             parts.append(f"**{role.upper()}**\n\n")
             if tool_calls:
-                tools_str = ", ".join(
-                    f"`{tc['tool']}`" for tc in tool_calls
-                )
+                tools_str = ", ".join(f"`{tc['tool']}`" for tc in tool_calls)
                 parts.append(f"Tools: {tools_str}\n\n")
             parts.append(f"{content}\n\n---\n\n")
         md.update("".join(parts) if parts else "*No messages yet.*")
@@ -693,16 +690,16 @@ class AgentSpaceApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         with Vertical(id="home-menu"), Vertical(id="menu-container"):
-                yield Label("◇ AgentSpace")
-                yield Button(
-                    "[1] Chat",
-                    id="btn-chat",
-                    variant="primary",
-                )
-                yield Button("[2] Agents", id="btn-agents")
-                yield Button("[3] Sessions", id="btn-sessions")
-                yield Button("[4] Kernels", id="btn-kernels")
-                yield Button("[5] Skills", id="btn-skills")
+            yield Label("◇ AgentSpace")
+            yield Button(
+                "[1] Chat",
+                id="btn-chat",
+                variant="primary",
+            )
+            yield Button("[2] Agents", id="btn-agents")
+            yield Button("[3] Sessions", id="btn-sessions")
+            yield Button("[4] Kernels", id="btn-kernels")
+            yield Button("[5] Skills", id="btn-skills")
         yield Footer()
 
     @on(Button.Pressed, "#btn-chat")

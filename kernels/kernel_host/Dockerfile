@@ -19,6 +19,7 @@ WORKDIR /app
 COPY pyproject.toml pyproject.toml
 COPY kernels/kernel kernels/kernel
 COPY kernels/kernel_echo kernels/kernel_echo
+COPY kernels/kernel_codex kernels/kernel_codex
 COPY kernels/kernel_copilot kernels/kernel_copilot
 COPY kernels/kernel_host kernels/kernel_host
 

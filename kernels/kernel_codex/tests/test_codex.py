@@ -87,7 +87,10 @@ class TestCodexMapping:
         events = await _drain(kernel)
         assert len(events) == 1
         assert events[0].type == EventType.TEXT_DELTA
-        assert events[0].content == "Checking the current working directory and listing its contents."
+        assert (
+            events[0].content
+            == "Checking the current working directory and listing its contents."
+        )
 
     @pytest.mark.asyncio
     async def test_command_execution_started_produces_tool_call(
