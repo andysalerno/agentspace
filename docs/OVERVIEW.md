@@ -14,6 +14,10 @@ Today the implemented stack is:
    Can run either as a one-shot runner or as a one-session HTTP service inside a kernel container.
 5. `agent_host`
    Manages sessions by spawning and supervising `kernel_host` containers and exposing them via a small FastAPI service.
+6. `client_service`
+   Client-facing gateway that stores agent definitions and transcript history in memory while proxying session work to `agent_host`.
+7. `webui`
+   Minimal hosted web client that talks only to `client_service`.
 
 This is the thin vertical slice needed before building the higher-level services from `PLAN.md`.
 
@@ -54,14 +58,13 @@ Implemented:
 - kernel host per-session HTTP service mode
 - Docker launch path for the kernel host
 - in-memory agent host service
+- in-memory client service
+- minimal hosted web UI
 - automated tests for event serialization, echo flow, copilot mapping, and runner config
 
 Not implemented yet:
 
 - `proto/`
-- `agent-host/`
-- `client-service/`
-- `client-web/`
 - `client-cli/`
 - `channels/`
 - `store/`

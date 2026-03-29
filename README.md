@@ -9,6 +9,8 @@ The repo is currently centered on the kernel milestone:
 - `kernel_copilot`: `copilot-cli` kernel adapter
 - `kernel_host`: runner plus one-session HTTP service mode for kernel containers
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
+- `client_service`: client-facing API over `agent_host`
+- `webui`: minimal hosted web UI over `client_service`
 
 For now, keep `copilot-cli` as the only real kernel path.
 
@@ -78,3 +80,63 @@ Currently implemented endpoints:
 - `GET /sessions/{session_id}/history`
 - `POST /sessions/{session_id}/reset`
 - `DELETE /sessions/{session_id}`
+
+## Client Service
+
+`client_service` is now the intended public backend API. Clients should talk to it, not to `agent_host` directly.
+
+Start it with:
+
+```powershell
+.\services\client_service\run-service.ps1 start
+```
+
+Stop it with:
+
+```powershell
+.\services\client_service\run-service.ps1 stop
+```
+
+Default endpoint: `http://127.0.0.1:8002`
+
+Current endpoints:
+
+- `GET /healthz`
+- `POST /agents`
+- `GET /agents`
+- `GET /agents/{agent_id}`
+- `PATCH /agents/{agent_id}`
+- `DELETE /agents/{agent_id}`
+- `POST /sessions`
+- `GET /sessions`
+- `GET /sessions/{session_id}`
+- `GET /sessions/{session_id}/messages`
+- `POST /sessions/{session_id}/messages`
+- `POST /sessions/{session_id}/reset`
+- `DELETE /sessions/{session_id}`
+
+## Web UI
+
+`webui` is a deliberately simple hosted client over `client_service`.
+
+Start it with:
+
+```powershell
+.\clients\webui\run-service.ps1 start
+```
+
+Stop it with:
+
+```powershell
+.\clients\webui\run-service.ps1 stop
+```
+
+Default endpoint: `http://127.0.0.1:8003`
+
+It currently supports:
+
+- creating an agent
+- starting a session
+- sending chat messages
+- resetting a session
+- viewing transcript history
