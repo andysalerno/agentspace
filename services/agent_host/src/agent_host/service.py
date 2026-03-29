@@ -31,7 +31,6 @@ class KernelRuntime(Protocol):
         session_id: str,
         harness: HarnessName,
         env: dict[str, str],
-        cwd: str | None,
         additional_paths: tuple[str, ...],
     ) -> KernelRuntimeSession: ...
 
@@ -69,7 +68,6 @@ class SessionRecord:
     harness: HarnessName
     runtime_session: KernelRuntimeSession
     env: dict[str, str]
-    cwd: str | None
     additional_paths: tuple[str, ...]
     history: list[list[KernelEvent]] = field(default_factory=_empty_history)
     status: KernelStatus = KernelStatus.IDLE
@@ -82,7 +80,6 @@ class SessionRecord:
             "status": self.status,
             "turns": len(self.history),
             "resume_token": self.resume_token,
-            "cwd": self.cwd,
             "additional_paths": list(self.additional_paths),
         }
 
@@ -124,7 +121,6 @@ class DockerKernelRuntime:
         session_id: str,
         harness: HarnessName,
         env: dict[str, str],
-        cwd: str | None,
         additional_paths: tuple[str, ...],
     ) -> KernelRuntimeSession:
         container_name = f"agentspace-kernel-{session_id[:12]}"
@@ -134,7 +130,6 @@ class DockerKernelRuntime:
             container_name,
             harness,
             env,
-            cwd,
             additional_paths,
         )
         await self._wait_until_ready(base_url)
@@ -195,13 +190,10 @@ class DockerKernelRuntime:
         container_name: str,
         harness: HarnessName,
         env: dict[str, str],
-        cwd: str | None,
         additional_paths: tuple[str, ...],
     ) -> None:
         environment = dict(env)
         environment["KERNEL_HARNESS"] = harness.value
-        if cwd is not None:
-            environment["KERNEL_WORKDIR"] = cwd
         if additional_paths:
             environment["KERNEL_ADDITIONAL_PATHS"] = os.pathsep.join(additional_paths)
 
@@ -275,7 +267,6 @@ class AgentHost:
         *,
         harness: HarnessName = HarnessName.COPILOT_CLI,
         env: dict[str, str] | None = None,
-        cwd: str | None = None,
         additional_paths: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         session_id = uuid.uuid4().hex
@@ -285,7 +276,6 @@ class AgentHost:
             session_id=session_id,
             harness=harness,
             env=merged_env,
-            cwd=cwd,
             additional_paths=additional_paths,
         )
         record = SessionRecord(
@@ -293,7 +283,6 @@ class AgentHost:
             harness=harness,
             runtime_session=runtime_session,
             env=merged_env,
-            cwd=cwd,
             additional_paths=additional_paths,
         )
         session_summary = await self._runtime.summary(session=runtime_session)
@@ -327,13 +316,11 @@ class AgentHost:
         record = self._get_session(session_id)
         harness = record.harness
         env = dict(record.env)
-        cwd = record.cwd
         additional_paths = record.additional_paths
         await self.destroy_session(session_id)
         return await self.create_session(
             harness=harness,
             env=env,
-            cwd=cwd,
             additional_paths=additional_paths,
         )
 

@@ -20,7 +20,6 @@ export type SessionSummary = {
   agent_id: string;
   agent_host_session_id: string;
   status: string;
-  cwd: string | null;
   channel_name: string | null;
   client_type: string | null;
   created_at: string;
@@ -47,7 +46,6 @@ export type KernelSummary = {
   status: string;
   turns: number;
   resume_token: string | null;
-  cwd: string | null;
   additional_paths: string[];
   client_session_ids: string[];
   channel_names: string[];

@@ -12,7 +12,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="AgentSpace CLI client")
     parser.add_argument("--agent-id")
     parser.add_argument("--name", default="cli")
-    parser.add_argument("--cwd")
     parser.add_argument("--session-id")
     parser.add_argument(
         "--client-service-base-url",
@@ -34,7 +33,6 @@ async def run() -> None:
         else await client.create_session(
             agent_id=args.agent_id,
             channel_name=args.name,
-            cwd=args.cwd,
         )
     )
     _write_line(f"session: {registration.session_id}")

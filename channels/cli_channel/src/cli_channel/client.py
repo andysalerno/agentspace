@@ -32,7 +32,6 @@ class ClientServiceSessionClient:
         *,
         agent_id: str,
         channel_name: str,
-        cwd: str | None,
     ) -> SessionRegistration:
         response = await self._request_json(
             "POST",
@@ -41,7 +40,6 @@ class ClientServiceSessionClient:
                 "agent_id": agent_id,
                 "channel_name": channel_name,
                 "client_type": "cli",
-                "cwd": cwd,
             },
         )
         return self._parse_session_registration(response)

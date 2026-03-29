@@ -25,7 +25,6 @@ class AgentHostClient(Protocol):
         self,
         *,
         harness: HarnessName,
-        cwd: str | None,
     ) -> JsonDict: ...
 
     async def get_session(self, session_id: str) -> JsonDict: ...
@@ -77,9 +76,8 @@ class HttpAgentHostClient:
         self,
         *,
         harness: HarnessName,
-        cwd: str | None,
     ) -> JsonDict:
-        payload = {"harness": harness.value, "cwd": cwd}
+        payload = {"harness": harness.value}
         return cast(
             "JsonDict",
             await self._request_json("POST", "/sessions", json=payload),

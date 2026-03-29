@@ -16,12 +16,10 @@ class KernelSessionService:
         *,
         harness: HarnessName,
         env: dict[str, str],
-        cwd: str | None,
         additional_paths: tuple[str, ...],
     ) -> None:
         self._harness = harness
         self._base_env = dict(env)
-        self._cwd = cwd
         self._additional_paths = additional_paths
         self._session_id: str | None = None
         self._history: list[list[KernelEvent]] = []
@@ -32,7 +30,6 @@ class KernelSessionService:
         kernel = get_kernel(self._harness)
         config = KernelConfig(
             env=dict(self._base_env),
-            cwd=self._cwd,
             session_id=self._session_id,
             additional_paths=self._additional_paths,
         )
@@ -55,7 +52,6 @@ class KernelSessionService:
             "status": self._status,
             "turns": len(self._history),
             "resume_token": self._session_id,
-            "cwd": self._cwd,
             "additional_paths": list(self._additional_paths),
         }
 
@@ -99,7 +95,6 @@ def service_from_env() -> KernelSessionService:
     return KernelSessionService(
         harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO)),
         env=dict(os.environ),
-        cwd=os.environ.get("KERNEL_WORKDIR") or None,
         additional_paths=additional_paths + skill_paths,
     )
 

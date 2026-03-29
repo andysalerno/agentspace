@@ -30,6 +30,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_WORKSPACE_DIR = "/workspace"
+
 
 def _ensure_directory(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -63,6 +65,11 @@ class CopilotKernel:
     def raw_logs(self) -> list[str]:
         return list(self._raw_lines)
 
+    @property
+    def _workspace_dir(self) -> str:
+        """Internal workspace directory — always a clean, kernel-managed path."""
+        return self._config.env.get("COPILOT_WORKSPACE_DIR", DEFAULT_WORKSPACE_DIR)
+
     async def start(self, config: KernelConfig) -> None:
         self._config = config
         self._session_id = config.session_id or uuid.uuid4().hex[:12]
@@ -82,9 +89,8 @@ class CopilotKernel:
 
         cmd = self._build_command(message)
         env = self._build_env()
-        cwd = self._config.cwd
-        if cwd is not None:
-            await asyncio.to_thread(_ensure_directory, cwd)
+        cwd = self._workspace_dir
+        await asyncio.to_thread(_ensure_directory, cwd)
 
         logger.debug("spawning copilot subprocess: cmd=%s cwd=%s", cmd, cwd)
 

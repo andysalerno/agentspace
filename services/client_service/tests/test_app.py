@@ -84,7 +84,6 @@ class StubClientService:
         self,
         *,
         agent_id: str,
-        cwd: str | None,
         channel_name: str | None = None,
         client_type: str | None = None,
     ) -> dict[str, object]:
@@ -93,7 +92,6 @@ class StubClientService:
             "agent_id": agent_id,
             "agent_host_session_id": "host-1",
             "status": "idle",
-            "cwd": cwd,
             "channel_name": channel_name,
             "client_type": client_type,
             "created_at": "now",
@@ -165,7 +163,6 @@ class StubClientService:
                 "status": "idle",
                 "turns": 1,
                 "resume_token": "resume-1",
-                "cwd": "C:/work",
                 "additional_paths": [],
                 "client_session_ids": ["session-1"],
                 "channel_names": ["webui"],
@@ -241,7 +238,6 @@ def test_agent_and_session_routes(client: TestClient) -> None:
         "/sessions",
         json={
             "agent_id": str(created_agent.json()["agent_id"]),
-            "cwd": "C:/work",
             "channel_name": "webui",
             "client_type": "webui",
         },

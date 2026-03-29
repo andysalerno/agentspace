@@ -64,7 +64,6 @@ async def test_run_builds_config_from_environment(
         return kernel
 
     monkeypatch.setenv("KERNEL_HARNESS", "copilot-cli")
-    monkeypatch.setenv("KERNEL_WORKDIR", "/workspace")
     monkeypatch.setenv("KERNEL_SESSION_ID", "resume-123")
     monkeypatch.setenv("KERNEL_ADDITIONAL_PATHS", "/workspace:/workspace-extra")
     monkeypatch.setattr(runner, "get_kernel", get_kernel_stub)
@@ -74,7 +73,6 @@ async def test_run_builds_config_from_environment(
     assert kernel.received_message == "hello from test"
     assert kernel.stopped is True
     assert kernel.started_config is not None
-    assert kernel.started_config.cwd == "/workspace"
     assert kernel.started_config.session_id == "resume-123"
     assert kernel.started_config.additional_paths == (
         "/workspace",

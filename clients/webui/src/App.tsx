@@ -96,13 +96,12 @@ export default function App() {
     }
   }
 
-  async function handleCreateSession(agentId: string, cwd: string, channelName: string) {
+  async function handleCreateSession(agentId: string, channelName: string) {
     setBusy(true);
     setError(null);
     try {
       const session = await api.createSession({
         agent_id: agentId,
-        cwd: cwd || null,
         channel_name: channelName || null,
         client_type: "webui",
       });

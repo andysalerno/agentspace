@@ -34,7 +34,6 @@ async def run(message: str) -> None:
     )
     config = KernelConfig(
         env=dict(os.environ),
-        cwd=os.environ.get("KERNEL_WORKDIR") or None,
         session_id=os.environ.get("KERNEL_SESSION_ID") or None,
         additional_paths=additional_paths,
     )

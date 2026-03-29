@@ -25,4 +25,7 @@ COPY kernels/kernel_host kernels/kernel_host
 # Install kernel_host and all its dependencies
 RUN uv sync --no-dev --package kernel-host
 
+# Create clean kernel workspace directory
+RUN mkdir -p /workspace
+
 ENTRYPOINT ["uv", "run", "--no-dev", "--package", "kernel-host", "-m", "kernel_host.runner"]

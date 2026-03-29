@@ -308,12 +308,12 @@ class TestCopilotKernelLifecycle:
         assert events[2].message == "failed to start copilot CLI: Access is denied"
 
     @pytest.mark.asyncio
-    async def test_send_creates_configured_cwd(
+    async def test_send_creates_workspace_dir(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         kernel = CopilotKernel()
-        await kernel.start(KernelConfig(cwd="/srv/agentspace-kernel"))
+        await kernel.start(KernelConfig())
 
         created_paths: list[tuple[str, bool]] = []
 
@@ -326,7 +326,28 @@ class TestCopilotKernelLifecycle:
 
         await kernel.send("hello")
 
-        assert created_paths == [("/srv/agentspace-kernel", True)]
+        assert created_paths == [("/workspace", True)]
+
+    @pytest.mark.asyncio
+    async def test_send_uses_custom_workspace_dir_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        kernel = CopilotKernel()
+        await kernel.start(KernelConfig(env={"COPILOT_WORKSPACE_DIR": "/custom/ws"}))
+
+        created_paths: list[tuple[str, bool]] = []
+
+        def fake_ensure_directory(path: str) -> None:
+            created_paths.append((path, True))
+
+        create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
+        monkeypatch.setattr("kernel_copilot._ensure_directory", fake_ensure_directory)
+        monkeypatch.setattr("kernel_copilot.asyncio.create_subprocess_exec", create_subprocess)
+
+        await kernel.send("hello")
+
+        assert created_paths == [("/custom/ws", True)]
 
     @pytest.mark.asyncio
     async def test_start_uses_config_session_id(self) -> None:
@@ -347,7 +368,6 @@ class TestCopilotKernelLifecycle:
                 "COPILOT_ADDITIONAL_PATHS": "/workspace:/workspace-extra",
                 "COPILOT_EXTRA_ARGS": "--enable-all-github-mcp-tools\n--stream\non",
             },
-            cwd="/workspace",
             session_id="session-123",
             additional_paths=("/repo",),
         )

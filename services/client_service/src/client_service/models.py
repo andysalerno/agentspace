@@ -86,7 +86,6 @@ class SessionRecord:
     agent_id: str
     agent_host_session_id: str
     status: str
-    cwd: str | None
     channel_name: str | None
     client_type: ClientType | None
     created_at: str = field(default_factory=utc_now)
@@ -100,7 +99,6 @@ class SessionRecord:
             "agent_id": self.agent_id,
             "agent_host_session_id": self.agent_host_session_id,
             "status": self.status,
-            "cwd": self.cwd,
             "channel_name": self.channel_name,
             "client_type": client_type,
             "created_at": self.created_at,

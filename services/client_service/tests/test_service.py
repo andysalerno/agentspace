@@ -40,10 +40,9 @@ class StubAgentHostClient:
         self,
         *,
         harness: HarnessName,
-        cwd: str | None,
     ) -> dict[str, object]:
         session_id = f"host-{len(self.created) + 1}"
-        self.created.append({"harness": harness, "cwd": cwd, "session_id": session_id})
+        self.created.append({"harness": harness, "session_id": session_id})
         self._sessions[session_id] = {"session_id": session_id, "status": "idle"}
         session: dict[str, object] = {"session_id": session_id, "status": "idle"}
         return session
@@ -138,7 +137,6 @@ async def test_agent_and_session_lifecycle() -> None:
     agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
     session = await service.create_session(
         agent_id=agent["agent_id"],
-        cwd="C:/work",
         channel_name="webui",
         client_type=ClientType.WEBUI,
     )
@@ -186,7 +184,7 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
     service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
 
     await service.create_agent(agent_id="tool-agent", name="Tool Agent")
-    session = await service.create_session(agent_id="tool-agent", cwd=None)
+    session = await service.create_session(agent_id="tool-agent")
     session_id = str(session["session_id"])
 
     reply = await service.send_message(session_id, "edit some files")
@@ -214,7 +212,7 @@ async def test_delete_agent_cascades_sessions() -> None:
 
     agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
     agent_id = agent["agent_id"]
-    session = await service.create_session(agent_id=agent["agent_id"], cwd=None)
+    session = await service.create_session(agent_id=agent["agent_id"])
     session_id = str(session["session_id"])
     upstream_session_id = str(session["agent_host_session_id"])
 
@@ -235,7 +233,6 @@ async def test_list_kernels_includes_client_session_and_channel_names() -> None:
     agent = await service.create_agent(agent_id="kernel-agent", name="Kernel Agent")
     session = await service.create_session(
         agent_id=agent["agent_id"],
-        cwd=None,
         channel_name="terminal-1",
         client_type=ClientType.CLI,
     )
@@ -258,7 +255,7 @@ async def test_missing_records_raise() -> None:
     service = ClientService(agent_host_client=runtime)
 
     with pytest.raises(AgentNotFoundError):
-        await service.create_session(agent_id="missing", cwd=None)
+        await service.create_session(agent_id="missing")
 
     with pytest.raises(SessionNotFoundError):
         await service.send_message("missing", "hello")
@@ -286,7 +283,6 @@ async def test_kill_kernel_destroys_and_marks_sessions_dead() -> None:
     await service.create_agent(agent_id="test-agent", name="Test Agent")
     session = await service.create_session(
         agent_id="test-agent",
-        cwd=None,
         channel_name="webui",
         client_type=ClientType.WEBUI,
     )

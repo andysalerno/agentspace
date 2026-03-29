@@ -7,7 +7,7 @@ type ChatViewProps = {
     selectedSessionId: string | null;
     selectedSession: SessionDetail | null;
     onSelectSession: (sessionId: string) => void;
-    onCreateSession: (agentId: string, cwd: string, channelName: string) => Promise<void>;
+    onCreateSession: (agentId: string, channelName: string) => Promise<void>;
     onSendMessage: (message: string) => Promise<void>;
     onResetSession: () => Promise<void>;
     busy: boolean;
@@ -26,7 +26,6 @@ export default function ChatView({
 }: ChatViewProps) {
     const [messageDraft, setMessageDraft] = useState("");
     const [newSessionAgentId, setNewSessionAgentId] = useState("");
-    const [newSessionCwd, setNewSessionCwd] = useState("");
     const [newSessionChannelName, setNewSessionChannelName] = useState("");
     const [showNewSession, setShowNewSession] = useState(false);
 
@@ -39,8 +38,7 @@ export default function ChatView({
     async function handleCreateSession(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         if (!newSessionAgentId) return;
-        await onCreateSession(newSessionAgentId, newSessionCwd, newSessionChannelName);
-        setNewSessionCwd("");
+        await onCreateSession(newSessionAgentId, newSessionChannelName);
         setNewSessionChannelName("");
         setShowNewSession(false);
     }
@@ -78,11 +76,6 @@ export default function ChatView({
                                 </option>
                             ))}
                         </select>
-                        <input
-                            placeholder="Working directory"
-                            value={newSessionCwd}
-                            onChange={(e) => setNewSessionCwd(e.target.value)}
-                        />
                         <input
                             placeholder="Channel name"
                             value={newSessionChannelName}

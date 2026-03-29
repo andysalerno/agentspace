@@ -49,7 +49,6 @@ class UpdateAgentRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     agent_id: str
-    cwd: str | None = None
     channel_name: str | None = None
     client_type: ClientType | None = None
 
@@ -122,7 +121,6 @@ async def create_session(payload: CreateSessionRequest) -> dict[str, object]:
     try:
         return await service.create_session(
             agent_id=payload.agent_id,
-            cwd=payload.cwd,
             channel_name=payload.channel_name,
             client_type=payload.client_type,
         )

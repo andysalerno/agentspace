@@ -74,7 +74,6 @@ async def test_service_reuses_resume_token(
     service = KernelSessionService(
         harness=HarnessName.COPILOT_CLI,
         env={"COPILOT_MODEL": "gpt-5.2"},
-        cwd="/srv/kernel",
         additional_paths=("/srv/kernel",),
     )
 

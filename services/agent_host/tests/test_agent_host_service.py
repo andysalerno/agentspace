@@ -29,7 +29,6 @@ class StubRuntime:
         session_id: str,
         harness: HarnessName,
         env: dict[str, str],
-        cwd: str | None,
         additional_paths: tuple[str, ...],
     ) -> KernelRuntimeSession:
         container_name = f"container-{session_id[:8]}"
@@ -38,7 +37,6 @@ class StubRuntime:
                 "session_id": session_id,
                 "harness": harness,
                 "env": env,
-                "cwd": cwd,
                 "additional_paths": additional_paths,
             },
         )
@@ -105,7 +103,6 @@ async def test_create_send_history_and_destroy() -> None:
     session = await host.create_session(
         harness=HarnessName.COPILOT_CLI,
         env={"COPILOT_MODEL": "gpt-5.2"},
-        cwd="/srv/agent",
         additional_paths=("/srv/agent",),
     )
     session_id = session["session_id"]
@@ -115,7 +112,6 @@ async def test_create_send_history_and_destroy() -> None:
     fetched = await host.get_session(session_id)
 
     assert runtime.created[0]["harness"] is HarnessName.COPILOT_CLI
-    assert runtime.created[0]["cwd"] == "/srv/agent"
     assert runtime.created[0]["additional_paths"] == ("/srv/agent",)
     assert runtime.created[0]["env"]["COPILOT_MODEL"] == "gpt-5.2"
     assert len(runtime.sent) == 1

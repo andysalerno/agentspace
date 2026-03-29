@@ -121,18 +121,16 @@ class ClientService:
         self,
         *,
         agent_id: str,
-        cwd: str | None,
         channel_name: str | None = None,
         client_type: ClientType | None = None,
     ) -> dict[str, object]:
         agent = self._get_agent(agent_id)
-        upstream = await self._agent_host.create_session(harness=agent.harness, cwd=cwd)
+        upstream = await self._agent_host.create_session(harness=agent.harness)
         session = SessionRecord(
             session_id=uuid.uuid4().hex,
             agent_id=agent_id,
             agent_host_session_id=str(upstream["session_id"]),
             status=str(upstream["status"]),
-            cwd=cwd,
             channel_name=channel_name,
             client_type=client_type,
         )

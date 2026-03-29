@@ -20,7 +20,6 @@ class KernelConfig:
     """Configuration passed to a kernel on start."""
 
     env: dict[str, str] = field(default_factory=_empty_env)
-    cwd: str | None = None
     session_id: str | None = None
     additional_paths: tuple[str, ...] = ()
 

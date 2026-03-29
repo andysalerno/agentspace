@@ -78,8 +78,6 @@ export default function KernelsView({ kernels, onKillKernel, busy }: KernelsView
                                     <span className={`status-badge ${kernel.status}`}>{kernel.status}</span>
                                     <span className="detail-label">Turns</span>
                                     <span>{kernel.turns}</span>
-                                    <span className="detail-label">CWD</span>
-                                    <span className="mono">{kernel.cwd ?? "—"}</span>
                                 </div>
                                 {kernel.client_session_ids.length > 0 && (
                                     <div className="tag-row">

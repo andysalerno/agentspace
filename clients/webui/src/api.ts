@@ -57,7 +57,6 @@ export const api = {
   getSession: (sessionId: string) => requestJson<SessionDetail>(`/sessions/${sessionId}`),
   createSession: (payload: {
     agent_id: string;
-    cwd: string | null;
     channel_name: string | null;
     client_type: "webui";
   }) =>
