@@ -836,7 +836,6 @@ button:disabled {
 
 /* ─── Collapsible Sidebar ─── */
 .sidebar {
-  transition: width 0.2s ease, min-width 0.2s ease;
 }
 
 .sidebar.collapsed {
