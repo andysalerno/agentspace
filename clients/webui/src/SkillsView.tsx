@@ -1,6 +1,7 @@
 import { FormEvent, useState } from "react";
 import { api } from "./api";
 import type { Skill } from "./types";
+import CodeEditor from "./CodeEditor";
 
 type FileEntry = { path: string; content: string };
 
@@ -156,12 +157,11 @@ export default function SkillsView({
                                         </button>
                                     )}
                                 </div>
-                                <textarea
-                                    placeholder="File content..."
-                                    required
-                                    rows={8}
+                                <CodeEditor
                                     value={file.content}
-                                    onChange={(e) => updateNewFile(index, "content", e.target.value)}
+                                    onChange={(v) => updateNewFile(index, "content", v)}
+                                    language={file.path.endsWith(".md") ? "markdown" : "plaintext"}
+                                    height="200px"
                                 />
                             </div>
                         ))}
@@ -221,13 +221,11 @@ export default function SkillsView({
                                                     </button>
                                                 )}
                                             </div>
-                                            <textarea
-                                                placeholder="File content..."
-                                                rows={8}
+                                            <CodeEditor
                                                 value={file.content}
-                                                onChange={(e) =>
-                                                    updateEditFile(index, "content", e.target.value)
-                                                }
+                                                onChange={(v) => updateEditFile(index, "content", v)}
+                                                language={file.path.endsWith(".md") ? "markdown" : "plaintext"}
+                                                height="200px"
                                             />
                                         </div>
                                     ))}

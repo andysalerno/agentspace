@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import type { Agent, Skill } from "./types";
+import CodeEditor from "./CodeEditor";
 
 type AgentsViewProps = {
     agents: Agent[];
@@ -99,11 +100,11 @@ export default function AgentsView({
                     </label>
                     <label>
                         System Prompt
-                        <textarea
-                            placeholder="Optional system prompt"
-                            rows={4}
+                        <CodeEditor
                             value={form.system_prompt}
-                            onChange={(e) => setForm({ ...form, system_prompt: e.target.value })}
+                            onChange={(v) => setForm({ ...form, system_prompt: v })}
+                            language="markdown"
+                            height="120px"
                         />
                     </label>
                     {skills.length > 0 && (
