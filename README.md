@@ -11,7 +11,7 @@ The repo is currently centered on the kernel milestone:
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
 - `client_service`: client-facing API over `agent_host`
 - `webui`: TypeScript dashboard over `client_service`
-- `cli_channel`: proof-of-concept channel client over `client_service`
+- `cli_channel`: proof-of-concept CLI session client over `client_service`
 
 For now, keep `copilot-cli` as the only real kernel path.
 
@@ -115,21 +115,13 @@ Current endpoints:
 - `POST /sessions/{session_id}/messages`
 - `POST /sessions/{session_id}/reset`
 - `DELETE /sessions/{session_id}`
-- `POST /channels`
-- `GET /channels`
-- `GET /channels/{channel_id}`
-- `GET /channels/{channel_id}/messages`
-- `POST /channels/{channel_id}/messages`
-- `POST /channels/{channel_id}/reset`
-- `DELETE /channels/{channel_id}`
 - `GET /kernels`
 
-Channel notes:
+Session metadata notes:
 
-- a channel registers itself with `client_service`
-- `client_service` creates a backing long-lived client-facing session immediately
-- repeated channel messages are routed to that same session
-- channel reset keeps the same client-facing session id but swaps to a fresh underlying `agent_host` session
+- clients can set optional `channel_name` and `client_type` when creating a session
+- persistence is keyed only by `session_id`
+- external adapters are responsible for remembering that `session_id`
 
 ## Web UI
 
@@ -153,22 +145,28 @@ It currently supports:
 
 - viewing, creating, and deleting agents
 - starting sessions and chatting with them
-- viewing existing sessions, including channel-backed sessions
-- viewing registered channels and their mapped sessions
+- viewing existing sessions, including sessions created by other clients
+- viewing the session source metadata attached at creation time
 - viewing active kernel sessions exposed through `client_service`
 
 ## CliChannel
 
-`cli_channel` is the first proof-of-concept channel client. It is separate from the future native CLI client and exists only to validate the channel protocol.
+`cli_channel` is the first proof-of-concept CLI session client. It is separate from the future native CLI client and exists only to validate the client-service session contract.
 
-Run it against a created agent:
+Start a new session:
 
 ```powershell
 uv run --package cli-channel -m cli_channel --agent-id <agent_id> --name terminal-1
 ```
 
+Resume an existing session:
+
+```powershell
+uv run --package cli-channel -m cli_channel --session-id <session_id>
+```
+
 Supported commands:
 
-- normal input sends a channel message
-- `/reset` resets the backing session while preserving the channel id
+- normal input sends a session message
+- `/reset` resets the backing kernel session while preserving the client-facing `session_id`
 - `/exit` exits the client

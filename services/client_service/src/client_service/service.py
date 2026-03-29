@@ -12,8 +12,7 @@ from kernel_host.registry import HarnessName
 from client_service.agent_host_client import AgentHostClient, HttpAgentHostClient
 from client_service.models import (
     AgentRecord,
-    ChannelRecord,
-    ChannelType,
+    ClientType,
     MessageRecord,
     MessageRole,
     SessionRecord,
@@ -40,16 +39,11 @@ class SessionNotFoundError(KeyError):
     pass
 
 
-class ChannelNotFoundError(KeyError):
-    pass
-
-
 class ClientService:
     def __init__(self, agent_host_client: AgentHostClient | None = None) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
         self._agents: dict[str, AgentRecord] = {}
         self._sessions: dict[str, SessionRecord] = {}
-        self._channels: dict[str, ChannelRecord] = {}
         self._lock = asyncio.Lock()
 
     async def create_agent(
@@ -108,16 +102,8 @@ class ClientService:
                 for session_id, session in self._sessions.items()
                 if session.agent_id == agent_id
             ]
-            channel_ids = [
-                channel_id
-                for channel_id, channel in self._channels.items()
-                if channel.agent_id == agent_id
-            ]
         if agent is None:
             raise AgentNotFoundError(agent_id)
-        for channel_id in channel_ids:
-            if channel_id in self._channels:
-                await self.delete_channel(channel_id)
         for session_id in session_ids:
             if session_id in self._sessions:
                 await self.delete_session(session_id)
@@ -127,6 +113,8 @@ class ClientService:
         *,
         agent_id: str,
         cwd: str | None,
+        channel_name: str | None = None,
+        client_type: ClientType | None = None,
     ) -> dict[str, object]:
         agent = self._get_agent(agent_id)
         upstream = await self._agent_host.create_session(harness=agent.harness, cwd=cwd)
@@ -136,6 +124,8 @@ class ClientService:
             agent_host_session_id=str(upstream["session_id"]),
             status=str(upstream["status"]),
             cwd=cwd,
+            channel_name=channel_name,
+            client_type=client_type,
         )
         async with self._lock:
             self._sessions[session.session_id] = session
@@ -166,38 +156,6 @@ class ClientService:
         session = self._get_session(session_id)
         return await self._send_to_session(session, message)
 
-    async def register_channel(
-        self,
-        *,
-        agent_id: str,
-        name: str,
-        channel_type: ChannelType = ChannelType.CLI,
-        cwd: str | None = None,
-    ) -> dict[str, str | None]:
-        session_summary = await self.create_session(agent_id=agent_id, cwd=cwd)
-        channel = ChannelRecord(
-            channel_id=uuid.uuid4().hex,
-            channel_type=channel_type,
-            agent_id=agent_id,
-            session_id=str(session_summary["session_id"]),
-            name=name,
-            cwd=cwd,
-        )
-        async with self._lock:
-            self._channels[channel.channel_id] = channel
-        logger.info(
-            "registered channel %s (%s) -> session %s",
-            channel.channel_id,
-            channel.channel_type.value,
-            channel.session_id,
-        )
-        return channel.summary()
-
-    async def list_channels(self) -> list[dict[str, str | None]]:
-        async with self._lock:
-            channels = [channel.summary() for channel in self._channels.values()]
-        return sorted(channels, key=lambda item: str(item["created_at"]))
-
     async def list_kernels(self) -> list[dict[str, object]]:
         upstream_sessions = await self._agent_host.list_sessions()
         kernels: list[dict[str, object]] = []
@@ -209,52 +167,23 @@ class ClientService:
                 if session.agent_host_session_id == agent_host_session_id
             ]
             client_session_ids = [session.session_id for session in client_sessions]
-            channels = [
-                channel
-                for channel in self._channels.values()
-                if channel.session_id in set(client_session_ids)
-            ]
             agent_ids = sorted({session.agent_id for session in client_sessions})
+            channel_names = sorted(
+                {
+                    session.channel_name
+                    for session in client_sessions
+                    if session.channel_name is not None
+                },
+            )
             kernels.append(
                 {
                     **upstream,
                     "client_session_ids": client_session_ids,
-                    "channel_ids": [channel.channel_id for channel in channels],
+                    "channel_names": channel_names,
                     "agent_ids": agent_ids,
                 },
             )
         return kernels
-
-    async def get_channel(self, channel_id: str) -> dict[str, str | None]:
-        return self._get_channel(channel_id).summary()
-
-    async def list_channel_messages(self, channel_id: str) -> list[dict[str, str]]:
-        channel = self._get_channel(channel_id)
-        return await self.list_messages(channel.session_id)
-
-    async def send_channel_message(
-        self,
-        channel_id: str,
-        message: str,
-    ) -> dict[str, object]:
-        channel = self._get_channel(channel_id)
-        channel.updated_at = utc_now()
-        session = self._get_session(channel.session_id)
-        return await self._send_to_session(session, message)
-
-    async def reset_channel(self, channel_id: str) -> dict[str, str | None]:
-        channel = self._get_channel(channel_id)
-        await self.reset_session(channel.session_id)
-        channel.updated_at = utc_now()
-        return channel.summary()
-
-    async def delete_channel(self, channel_id: str) -> None:
-        async with self._lock:
-            channel = self._channels.pop(channel_id, None)
-        if channel is None:
-            raise ChannelNotFoundError(channel_id)
-        if channel.session_id in self._sessions:
-            await self.delete_session(channel.session_id)
 
     async def _send_to_session(
         self,
@@ -318,12 +247,6 @@ class ClientService:
         except KeyError as exc:
             raise SessionNotFoundError(session_id) from exc
 
-    def _get_channel(self, channel_id: str) -> ChannelRecord:
-        try:
-            return self._channels[channel_id]
-        except KeyError as exc:
-            raise ChannelNotFoundError(channel_id) from exc
-
 
 def _flatten_text(events: list[KernelEvent]) -> str:
     return "".join(
@@ -335,7 +258,5 @@ def _flatten_text(events: list[KernelEvent]) -> str:
 
 def _validate_agent_id(agent_id: str) -> None:
     if not AGENT_ID_PATTERN.fullmatch(agent_id):
-        msg = (
-            "agent_id must use lowercase letters and single dashes only"
-        )
+        msg = "agent_id must use lowercase letters and single dashes only"
         raise InvalidAgentIdError(msg)

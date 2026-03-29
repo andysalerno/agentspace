@@ -1,7 +1,7 @@
 [project]
 name = "cli-channel"
 version = "0.1.0"
-description = "CLI channel proof of concept for AgentSpace"
+description = "CLI session client for AgentSpace"
 requires-python = ">=3.13"
 dependencies = ["httpx"]
 

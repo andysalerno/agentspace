@@ -15,11 +15,11 @@ Today the implemented stack is:
 5. `agent_host`
    Manages sessions by spawning and supervising `kernel_host` containers and exposing them via a small FastAPI service.
 6. `client_service`
-   Client-facing gateway that stores agent definitions, transcript history, and channel-to-session mappings in memory while proxying session work to `agent_host`.
+   Client-facing gateway that stores agent definitions, transcript history, and session metadata in memory while proxying session work to `agent_host`.
 7. `webui`
    Minimal TypeScript dashboard that talks only to `client_service`.
 8. `cli_channel`
-   A proof-of-concept external channel process that registers with `client_service` and sends repeated messages through a long-lived mapped session.
+   A proof-of-concept external CLI process that creates or resumes sessions through `client_service`.
 
 This is the thin vertical slice needed before building the higher-level services from `PLAN.md`.
 
@@ -63,7 +63,7 @@ Implemented:
 - in-memory client service
 - minimal hosted web UI
 - kernel-session listing routed from `agent_host` through `client_service`
-- channel registration and channel-to-session mapping in `client_service`
+- optional session source metadata (`channel_name`, `client_type`) in `client_service`
 - minimal `cli_channel` proof client
 - automated tests for event serialization, echo flow, copilot mapping, and runner config
 

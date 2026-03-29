@@ -10,68 +10,71 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
-class ChannelRegistration:
-    channel_id: str
+class SessionRegistration:
     session_id: str
-    name: str
+    agent_id: str
+    channel_name: str | None
 
 
 @dataclass(frozen=True, slots=True)
-class ChannelReply:
+class SessionReply:
     session_id: str
     assistant_text: str
 
 
 @dataclass(frozen=True, slots=True)
-class ClientServiceChannelClient:
+class ClientServiceSessionClient:
     base_url: str
     timeout: float = 60.0
 
-    async def register_channel(
+    async def create_session(
         self,
         *,
         agent_id: str,
-        name: str,
+        channel_name: str,
         cwd: str | None,
-    ) -> ChannelRegistration:
+    ) -> SessionRegistration:
         response = await self._request_json(
             "POST",
-            "/channels",
+            "/sessions",
             json={
                 "agent_id": agent_id,
-                "name": name,
-                "channel_type": "cli",
+                "channel_name": channel_name,
+                "client_type": "cli",
                 "cwd": cwd,
             },
         )
-        data = cast("dict[str, object]", response)
-        return ChannelRegistration(
-            channel_id=str(data["channel_id"]),
-            session_id=str(data["session_id"]),
-            name=str(data["name"]),
-        )
+        return self._parse_session_registration(response)
 
-    async def send_message(self, channel_id: str, message: str) -> ChannelReply:
+    async def get_session(self, session_id: str) -> SessionRegistration:
+        response = await self._request_json("GET", f"/sessions/{session_id}")
+        return self._parse_session_registration(response)
+
+    async def send_message(self, session_id: str, message: str) -> SessionReply:
         response = await self._request_json(
             "POST",
-            f"/channels/{channel_id}/messages",
+            f"/sessions/{session_id}/messages",
             json={"message": message},
         )
         data = cast("dict[str, object]", response)
         assistant_message = cast("dict[str, object]", data["assistant_message"])
         session = cast("dict[str, object]", data["session"])
-        return ChannelReply(
+        return SessionReply(
             session_id=str(session["session_id"]),
             assistant_text=str(assistant_message["content"]),
         )
 
-    async def reset(self, channel_id: str) -> ChannelRegistration:
-        response = await self._request_json("POST", f"/channels/{channel_id}/reset")
+    async def reset(self, session_id: str) -> SessionRegistration:
+        response = await self._request_json("POST", f"/sessions/{session_id}/reset")
+        return self._parse_session_registration(response)
+
+    def _parse_session_registration(self, response: object) -> SessionRegistration:
         data = cast("dict[str, object]", response)
-        return ChannelRegistration(
-            channel_id=str(data["channel_id"]),
+        channel_name = data.get("channel_name")
+        return SessionRegistration(
             session_id=str(data["session_id"]),
-            name=str(data["name"]),
+            agent_id=str(data["agent_id"]),
+            channel_name=None if channel_name is None else str(channel_name),
         )
 
     async def _request_json(

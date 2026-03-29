@@ -1,12 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "./api";
-import type {
-  Agent,
-  Channel,
-  KernelSummary,
-  SessionDetail,
-  SessionSummary,
-} from "./types";
+import type { Agent, KernelSummary, SessionDetail, SessionSummary } from "./types";
 
 type AgentFormState = {
   agent_id: string;
@@ -23,27 +17,25 @@ const initialAgentForm: AgentFormState = {
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [channels, setChannels] = useState<Channel[]>([]);
   const [kernels, setKernels] = useState<KernelSummary[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [agentForm, setAgentForm] = useState<AgentFormState>(initialAgentForm);
   const [newSessionAgentId, setNewSessionAgentId] = useState("");
   const [newSessionCwd, setNewSessionCwd] = useState("");
+  const [newSessionChannelName, setNewSessionChannelName] = useState("");
   const [messageDraft, setMessageDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function refreshOverview() {
-    const [agentData, sessionData, channelData, kernelData] = await Promise.all([
+    const [agentData, sessionData, kernelData] = await Promise.all([
       api.listAgents(),
       api.listSessions(),
-      api.listChannels(),
       api.listKernels(),
     ]);
     setAgents(agentData);
     setSessions(sessionData);
-    setChannels(channelData);
     setKernels(kernelData);
     if (!selectedSessionId && sessionData.length > 0) {
       setSelectedSessionId(sessionData[0].session_id);
@@ -113,10 +105,13 @@ export default function App() {
       const session = await api.createSession({
         agent_id: newSessionAgentId,
         cwd: newSessionCwd || null,
+        channel_name: newSessionChannelName || null,
+        client_type: "webui",
       });
       await refreshOverview();
       setSelectedSessionId(session.session_id);
       setNewSessionCwd("");
+      setNewSessionChannelName("");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -163,9 +158,7 @@ export default function App() {
       <header className="topbar">
         <div>
           <h1>AgentSpace</h1>
-          <p className="subtitle">
-            Agents, sessions, channels, and kernel activity in one place.
-          </p>
+          <p className="subtitle">Agents, sessions, and kernel activity in one place.</p>
         </div>
         <button className="secondary-button" onClick={() => refreshOverview()} type="button">
           Refresh
@@ -275,15 +268,20 @@ export default function App() {
                   onChange={(event) => setNewSessionCwd(event.target.value)}
                 />
               </label>
+              <label>
+                Channel Name
+                <input
+                  placeholder="webui"
+                  value={newSessionChannelName}
+                  onChange={(event) => setNewSessionChannelName(event.target.value)}
+                />
+              </label>
               <button disabled={busy || !newSessionAgentId} type="submit">
                 Start Chat Session
               </button>
             </form>
             <div className="list">
               {sessions.map((session) => {
-                const mappedChannels = channels.filter(
-                  (channel) => channel.session_id === session.session_id,
-                );
                 return (
                   <button
                     className={`session-card ${
@@ -298,13 +296,9 @@ export default function App() {
                     <div className="muted">
                       status: {session.status} | messages: {session.message_count}
                     </div>
-                    {mappedChannels.length > 0 ? (
+                    {session.channel_name ? (
                       <div className="tag-row">
-                        {mappedChannels.map((channel) => (
-                          <span className="tag" key={channel.channel_id}>
-                            channel: {channel.name}
-                          </span>
-                        ))}
+                        <span className="tag">channel: {session.channel_name}</span>
                       </div>
                     ) : null}
                   </button>
@@ -361,23 +355,27 @@ export default function App() {
         <aside className="right-column">
           <section className="panel">
             <div className="panel-heading">
-              <h2>Channels</h2>
-              <span>{channels.length}</span>
+              <h2>Session Sources</h2>
+              <span>
+                {sessions.filter((session) => session.channel_name !== null).length}
+              </span>
             </div>
             <div className="list">
-              {channels.length ? (
-                channels.map((channel) => (
-                  <div className="list-card" key={channel.channel_id}>
+              {sessions.some((session) => session.channel_name !== null) ? (
+                sessions
+                  .filter((session) => session.channel_name !== null)
+                  .map((session) => (
+                  <div className="list-card" key={session.session_id}>
                     <div>
-                      <strong>{channel.name}</strong>
-                      <div className="muted">{channel.channel_type}</div>
-                      <div className="muted">agent: {channel.agent_id}</div>
-                      <div className="muted">session: {channel.session_id}</div>
+                      <strong>{session.channel_name}</strong>
+                      <div className="muted">{session.client_type ?? "unknown client"}</div>
+                      <div className="muted">agent: {session.agent_id}</div>
+                      <div className="muted">session: {session.session_id}</div>
                     </div>
                   </div>
                 ))
               ) : (
-                <div className="empty-state">No registered channels.</div>
+                <div className="empty-state">No session sources recorded.</div>
               )}
             </div>
           </section>
@@ -395,8 +393,12 @@ export default function App() {
                       <strong>{kernel.harness}</strong>
                       <div className="muted">kernel: {kernel.session_id}</div>
                       <div className="muted">status: {kernel.status}</div>
-                      <div className="muted">client sessions: {kernel.client_session_ids.join(", ") || "none"}</div>
-                      <div className="muted">channels: {kernel.channel_ids.join(", ") || "none"}</div>
+                      <div className="muted">
+                        client sessions: {kernel.client_session_ids.join(", ") || "none"}
+                      </div>
+                      <div className="muted">
+                        channel names: {kernel.channel_names.join(", ") || "none"}
+                      </div>
                     </div>
                   </div>
                 ))

@@ -8,11 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
-from client_service.models import ChannelType
+from client_service.models import ClientType  # noqa: TC001
 from client_service.service import (
     AgentAlreadyExistsError,
     AgentNotFoundError,
-    ChannelNotFoundError,
     ClientService,
     InvalidAgentIdError,
     SessionNotFoundError,
@@ -47,17 +46,12 @@ class UpdateAgentRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     agent_id: str
     cwd: str | None = None
+    channel_name: str | None = None
+    client_type: ClientType | None = None
 
 
 class SendMessageRequest(BaseModel):
     message: str
-
-
-class RegisterChannelRequest(BaseModel):
-    agent_id: str
-    name: str
-    channel_type: ChannelType = ChannelType.CLI
-    cwd: str | None = None
 
 
 @app.get("/healthz")
@@ -120,7 +114,12 @@ async def delete_agent(agent_id: str) -> None:
 @app.post("/sessions")
 async def create_session(payload: CreateSessionRequest) -> dict[str, object]:
     try:
-        return await service.create_session(agent_id=payload.agent_id, cwd=payload.cwd)
+        return await service.create_session(
+            agent_id=payload.agent_id,
+            cwd=payload.cwd,
+            channel_name=payload.channel_name,
+            client_type=payload.client_type,
+        )
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -173,71 +172,6 @@ async def delete_session(session_id: str) -> None:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/channels")
-async def register_channel(
-    payload: RegisterChannelRequest,
-) -> dict[str, str | None]:
-    try:
-        return await service.register_channel(
-            agent_id=payload.agent_id,
-            name=payload.name,
-            channel_type=payload.channel_type,
-            cwd=payload.cwd,
-        )
-    except AgentNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/channels")
-async def list_channels() -> list[dict[str, str | None]]:
-    return await service.list_channels()
-
-
 @app.get("/kernels")
 async def list_kernels() -> list[dict[str, object]]:
     return await service.list_kernels()
-
-
-@app.get("/channels/{channel_id}")
-async def get_channel(channel_id: str) -> dict[str, str | None]:
-    try:
-        return await service.get_channel(channel_id)
-    except ChannelNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.get("/channels/{channel_id}/messages")
-async def list_channel_messages(
-    channel_id: str,
-) -> dict[str, list[dict[str, str]]]:
-    try:
-        return {"messages": await service.list_channel_messages(channel_id)}
-    except ChannelNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/channels/{channel_id}/messages")
-async def send_channel_message(
-    channel_id: str,
-    payload: SendMessageRequest,
-) -> dict[str, Any]:
-    try:
-        return await service.send_channel_message(channel_id, payload.message)
-    except ChannelNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.post("/channels/{channel_id}/reset")
-async def reset_channel(channel_id: str) -> dict[str, str | None]:
-    try:
-        return await service.reset_channel(channel_id)
-    except ChannelNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-
-@app.delete("/channels/{channel_id}", status_code=204)
-async def delete_channel(channel_id: str) -> None:
-    try:
-        await service.delete_channel(channel_id)
-    except ChannelNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc

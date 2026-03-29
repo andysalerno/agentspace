@@ -13,6 +13,8 @@ export type SessionSummary = {
   agent_host_session_id: string;
   status: string;
   cwd: string | null;
+  channel_name: string | null;
+  client_type: string | null;
   created_at: string;
   updated_at: string;
   message_count: number;
@@ -30,17 +32,6 @@ export type SessionDetail = SessionSummary & {
   messages: ChatMessage[];
 };
 
-export type Channel = {
-  channel_id: string;
-  channel_type: string;
-  agent_id: string;
-  session_id: string;
-  name: string;
-  cwd: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
 export type KernelSummary = {
   session_id: string;
   harness: string;
@@ -50,7 +41,7 @@ export type KernelSummary = {
   cwd: string | null;
   additional_paths: string[];
   client_session_ids: string[];
-  channel_ids: string[];
+  channel_names: string[];
   agent_ids: string[];
 };
 

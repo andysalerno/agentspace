@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
+from client_service.models import ClientType
 from client_service.service import (
     AgentAlreadyExistsError,
     AgentNotFoundError,
-    ChannelNotFoundError,
     ClientService,
     InvalidAgentIdError,
     SessionNotFoundError,
@@ -90,7 +90,12 @@ async def test_agent_and_session_lifecycle() -> None:
     service = ClientService(agent_host_client=runtime)
 
     agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
-    session = await service.create_session(agent_id=agent["agent_id"], cwd="C:/work")
+    session = await service.create_session(
+        agent_id=agent["agent_id"],
+        cwd="C:/work",
+        channel_name="webui",
+        client_type=ClientType.WEBUI,
+    )
     session_id = str(session["session_id"])
     reply = await service.send_message(session_id, "hello")
     messages = await service.list_messages(session_id)
@@ -99,6 +104,8 @@ async def test_agent_and_session_lifecycle() -> None:
 
     assert agent["harness"] == "copilot-cli"
     assert session["agent_id"] == agent["agent_id"]
+    assert session["channel_name"] == "webui"
+    assert session["client_type"] == "webui"
     assert assistant_message["content"] == "hello world"
     assert len(messages) == 2
     assert str(reset["agent_host_session_id"]).endswith("-reset")
@@ -126,59 +133,28 @@ async def test_delete_agent_cascades_sessions() -> None:
 
 
 @pytest.mark.asyncio
-async def test_channel_registration_and_reset_reuse_session() -> None:
-    runtime = cast("AgentHostClient", StubAgentHostClient())
-    service = ClientService(agent_host_client=runtime)
-
-    agent = await service.create_agent(agent_id="channel-agent", name="Channel Agent")
-    channel = await service.register_channel(
-        agent_id=agent["agent_id"],
-        name="terminal-1",
-        cwd="C:/work",
-    )
-    channel_id = str(channel["channel_id"])
-    session_id = str(channel["session_id"])
-    reply = await service.send_channel_message(channel_id, "hello")
-    messages = await service.list_channel_messages(channel_id)
-    reset = await service.reset_channel(channel_id)
-    assistant_message = cast("dict[str, object]", reply["assistant_message"])
-
-    assert channel["name"] == "terminal-1"
-    assert channel["session_id"] == session_id
-    assert assistant_message["content"] == "hello world"
-    assert len(messages) == 2
-    assert reset["session_id"] == session_id
-    assert await service.list_channel_messages(channel_id) == []
-
-
-@pytest.mark.asyncio
-async def test_list_kernels_includes_client_session_and_channel_links() -> None:
+async def test_list_kernels_includes_client_session_and_channel_names() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)
 
     agent = await service.create_agent(agent_id="kernel-agent", name="Kernel Agent")
-    session = await service.create_session(agent_id=agent["agent_id"], cwd=None)
-    channel = await service.register_channel(
+    session = await service.create_session(
         agent_id=agent["agent_id"],
-        name="terminal-1",
         cwd=None,
+        channel_name="terminal-1",
+        client_type=ClientType.CLI,
     )
 
     kernels = await service.list_kernels()
 
-    assert len(kernels) == 2
-    session_kernel = next(
+    assert len(kernels) == 1
+    kernel = next(
         kernel
         for kernel in kernels
         if session["session_id"] in cast("list[str]", kernel["client_session_ids"])
     )
-    channel_kernel = next(
-        kernel
-        for kernel in kernels
-        if channel["channel_id"] in cast("list[str]", kernel["channel_ids"])
-    )
-    assert session_kernel["agent_ids"] == ["kernel-agent"]
-    assert channel_kernel["client_session_ids"] == [channel["session_id"]]
+    assert kernel["agent_ids"] == ["kernel-agent"]
+    assert kernel["channel_names"] == ["terminal-1"]
 
 
 @pytest.mark.asyncio
@@ -191,9 +167,6 @@ async def test_missing_records_raise() -> None:
 
     with pytest.raises(SessionNotFoundError):
         await service.send_message("missing", "hello")
-
-    with pytest.raises(ChannelNotFoundError):
-        await service.send_channel_message("missing", "hello")
 
 
 @pytest.mark.asyncio

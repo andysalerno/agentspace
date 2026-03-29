@@ -1,6 +1,5 @@
 import type {
   Agent,
-  Channel,
   KernelSummary,
   SendMessageResponse,
   SessionDetail,
@@ -41,7 +40,12 @@ export const api = {
     requestJson<void>(`/agents/${agentId}`, { method: "DELETE" }),
   listSessions: () => requestJson<SessionSummary[]>("/sessions"),
   getSession: (sessionId: string) => requestJson<SessionDetail>(`/sessions/${sessionId}`),
-  createSession: (payload: { agent_id: string; cwd: string | null }) =>
+  createSession: (payload: {
+    agent_id: string;
+    cwd: string | null;
+    channel_name: string | null;
+    client_type: "webui";
+  }) =>
     requestJson<SessionSummary>("/sessions", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -53,6 +57,5 @@ export const api = {
     }),
   resetSession: (sessionId: string) =>
     requestJson<SessionSummary>(`/sessions/${sessionId}/reset`, { method: "POST" }),
-  listChannels: () => requestJson<Channel[]>("/channels"),
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),
 };
