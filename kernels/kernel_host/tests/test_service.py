@@ -13,7 +13,7 @@ from kernel.events import (
     text_delta,
 )
 from kernel_host.registry import HarnessName
-from kernel_host.service import KernelSessionService, _discover_skill_dirs
+from kernel_host.service import KernelSessionService, discover_skill_dirs
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -102,12 +102,12 @@ def test_discover_skill_dirs(tmp_path: object) -> None:
     (base / "beta-skill").mkdir()
     (base / "some-file.txt").write_text("not a dir")
 
-    result = _discover_skill_dirs(str(base))
+    result = discover_skill_dirs(str(base))
 
     assert result == (str(base / "alpha-skill"), str(base / "beta-skill"))
 
 
 def test_discover_skill_dirs_missing_dir() -> None:
-    result = _discover_skill_dirs("/nonexistent/dir")
+    result = discover_skill_dirs("/nonexistent/dir")
 
     assert result == ()

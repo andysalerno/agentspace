@@ -293,7 +293,7 @@ class TestCopilotKernelLifecycle:
 
         create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
         monkeypatch.setattr(
-            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess
+            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess,
         )
 
         await kernel.send("hello")
@@ -325,7 +325,7 @@ class TestCopilotKernelLifecycle:
         create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
         monkeypatch.setattr("kernel_copilot._ensure_directory", fake_ensure_directory)
         monkeypatch.setattr(
-            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess
+            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess,
         )
 
         await kernel.send("hello")
@@ -348,7 +348,7 @@ class TestCopilotKernelLifecycle:
         create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
         monkeypatch.setattr("kernel_copilot._ensure_directory", fake_ensure_directory)
         monkeypatch.setattr(
-            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess
+            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess,
         )
 
         await kernel.send("hello")

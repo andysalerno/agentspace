@@ -136,7 +136,7 @@ async def test_agent_and_session_lifecycle() -> None:
 
     agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
     session = await service.create_session(
-        agent_id=agent["agent_id"],
+        agent_id=str(agent["agent_id"]),
         channel_name="webui",
         client_type=ClientType.WEBUI,
     )
@@ -183,8 +183,8 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
     upstream = ToolCallStub()
     service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
 
-    await service.create_agent(agent_id="tool-agent", name="Tool Agent")
-    session = await service.create_session(agent_id="tool-agent")
+    agent = await service.create_agent(agent_id="tool-agent", name="Tool Agent")
+    session = await service.create_session(agent_id=str(agent["agent_id"]))
     session_id = str(session["session_id"])
 
     reply = await service.send_message(session_id, "edit some files")
@@ -211,8 +211,8 @@ async def test_delete_agent_cascades_sessions() -> None:
     service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
 
     agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
-    agent_id = agent["agent_id"]
-    session = await service.create_session(agent_id=agent["agent_id"])
+    agent_id = str(agent["agent_id"])
+    session = await service.create_session(agent_id=agent_id)
     session_id = str(session["session_id"])
     upstream_session_id = str(session["agent_host_session_id"])
 
@@ -232,7 +232,7 @@ async def test_list_kernels_includes_client_session_and_channel_names() -> None:
 
     agent = await service.create_agent(agent_id="kernel-agent", name="Kernel Agent")
     session = await service.create_session(
-        agent_id=agent["agent_id"],
+        agent_id=str(agent["agent_id"]),
         channel_name="terminal-1",
         client_type=ClientType.CLI,
     )

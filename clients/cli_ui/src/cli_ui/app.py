@@ -1,12 +1,16 @@
 """AgentSpace TUI application built with Textual."""
+# pyright: reportUnknownVariableType=false
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    pass
 
 from textual import on, work
 from textual.app import App, ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import (
@@ -136,7 +140,7 @@ class ChatScreen(Screen[None]):
     async def _load_data(self) -> None:
         self._agents = await self._api.list_agents()
         self._sessions = await self._api.list_sessions()
-        agent_select = self.query_one("#agent-select", Select)
+        agent_select: Select[str] = self.query_one("#agent-select", Select)
         agent_select.set_options(
             [(a["name"], a["agent_id"]) for a in self._agents],
         )
@@ -162,8 +166,8 @@ class ChatScreen(Screen[None]):
 
     @work
     async def _do_create_session(self) -> None:
-        agent_select = self.query_one("#agent-select", Select)
-        if agent_select.value is Select.BLANK:
+        agent_select: Select[str] = self.query_one("#agent-select", Select)
+        if agent_select.value is Select.BLANK:  # type: ignore[reportUnnecessaryComparison]
             return
         agent_id = str(agent_select.value)
         session = await self._api.create_session(agent_id=agent_id)
@@ -292,14 +296,14 @@ class AgentsScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one("#agents-table", DataTable)
+        table: DataTable[str] = self.query_one("#agents-table", DataTable)
         table.add_columns("ID", "Name", "Harness", "Skills", "Created")
         self._load_agents()
 
     @work
     async def _load_agents(self) -> None:
         agents = await self._api.list_agents()
-        table = self.query_one("#agents-table", DataTable)
+        table: DataTable[str] = self.query_one("#agents-table", DataTable)
         table.clear()
         for a in agents:
             skills = ", ".join(a.get("skills", []))
@@ -366,7 +370,7 @@ class SessionsScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one("#sessions-table", DataTable)
+        table: DataTable[str] = self.query_one("#sessions-table", DataTable)
         table.add_columns(
             "Agent",
             "Session ID",
@@ -380,7 +384,7 @@ class SessionsScreen(Screen[None]):
     @work
     async def _load_sessions(self) -> None:
         sessions = await self._api.list_sessions()
-        table = self.query_one("#sessions-table", DataTable)
+        table: DataTable[str] = self.query_one("#sessions-table", DataTable)
         table.clear()
         for s in sessions:
             table.add_row(
@@ -439,7 +443,7 @@ class KernelsScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one("#kernels-table", DataTable)
+        table: DataTable[str] = self.query_one("#kernels-table", DataTable)
         table.add_columns(
             "Harness",
             "Session ID",
@@ -452,7 +456,7 @@ class KernelsScreen(Screen[None]):
     @work
     async def _load_kernels(self) -> None:
         kernels = await self._api.list_kernels()
-        table = self.query_one("#kernels-table", DataTable)
+        table: DataTable[str] = self.query_one("#kernels-table", DataTable)
         table.clear()
         for k in kernels:
             table.add_row(
@@ -464,7 +468,7 @@ class KernelsScreen(Screen[None]):
             )
 
     @on(DataTable.RowSelected, "#kernels-table")
-    def _on_row_selected(self, event: DataTable.RowSelected) -> None:
+    def _on_row_selected(self, event: DataTable.RowSelected) -> None:  # type: ignore[type-arg]
         if event.row_key and event.row_key.value:
             self._selected_kernel_id = str(event.row_key.value)
 
@@ -570,7 +574,7 @@ class SkillsScreen(Screen[None]):
         yield Footer()
 
     def on_mount(self) -> None:
-        table = self.query_one("#skills-table", DataTable)
+        table: DataTable[str] = self.query_one("#skills-table", DataTable)
         table.add_columns("Skill ID")
         table.cursor_type = "row"
         self._load_skills()
@@ -578,7 +582,7 @@ class SkillsScreen(Screen[None]):
     @work
     async def _load_skills(self) -> None:
         skills = await self._api.list_skills()
-        table = self.query_one("#skills-table", DataTable)
+        table: DataTable[str] = self.query_one("#skills-table", DataTable)
         table.clear()
         for s in skills:
             table.add_row(s["skill_id"], key=s["skill_id"])
@@ -589,7 +593,7 @@ class SkillsScreen(Screen[None]):
 
     @on(Button.Pressed, "#view-skill-btn")
     def _on_view(self) -> None:
-        table = self.query_one("#skills-table", DataTable)
+        table: DataTable[str] = self.query_one("#skills-table", DataTable)
         row_key = table.cursor_row
         if row_key >= 0:
             cell = table.get_row_at(row_key)
@@ -608,7 +612,7 @@ class SkillsScreen(Screen[None]):
 
     @on(Button.Pressed, "#delete-skill-btn")
     def _on_delete(self) -> None:
-        table = self.query_one("#skills-table", DataTable)
+        table: DataTable[str] = self.query_one("#skills-table", DataTable)
         row_key = table.cursor_row
         if row_key >= 0:
             cell = table.get_row_at(row_key)
@@ -674,7 +678,7 @@ class AgentSpaceApp(App[None]):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("q", "quit", "Quit"),
         Binding("1", "open_chat", "Chat"),
         Binding("2", "open_agents", "Agents"),

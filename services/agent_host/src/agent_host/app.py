@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from kernel_host.registry import HarnessName
@@ -17,11 +22,23 @@ from agent_host.skills import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from kernel.events import KernelEvent
 
-app = FastAPI(title="Agent Host", version="0.1.0")
+logger = logging.getLogger(__name__)
+
 host = AgentHost()
 skills = SkillsService()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    await host.destroy_all_sessions()
+
+
+app = FastAPI(title="Agent Host", version="0.1.0", lifespan=lifespan)
 
 
 class CreateSessionRequest(BaseModel):

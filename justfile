@@ -26,6 +26,7 @@ stack-up:
 
 stack-down:
   docker compose -f compose.yaml down --remove-orphans
+  -docker rm -f $(docker ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
 
 stack-logs:
   docker compose -f compose.yaml logs -f

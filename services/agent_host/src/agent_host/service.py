@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import uuid
 from dataclasses import dataclass, field
@@ -8,7 +9,7 @@ from typing import Any, Protocol
 
 import docker
 import httpx
-from docker.errors import NotFound
+from docker.errors import DockerException, NotFound
 from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel_host.registry import HarnessName
 
@@ -213,6 +214,7 @@ class DockerKernelRuntime:
                 "kernel_host.api_main",
             ],
             environment=environment,
+            labels={"agentspace.role": "kernel"},
             name=container_name,
             network=self._kernel_network,
             volumes={
@@ -311,6 +313,22 @@ class AgentHost:
         if record is None:
             raise SessionNotFoundError(session_id)
         await self._runtime.destroy_session(session=record.runtime_session)
+
+    async def destroy_all_sessions(self) -> None:
+        """Destroy all active sessions. Called during shutdown."""
+        logger = logging.getLogger(logger_name)
+        async with self._lock:
+            records = list(self._sessions.values())
+            self._sessions.clear()
+        for record in records:
+            try:
+                await self._runtime.destroy_session(session=record.runtime_session)
+            except (OSError, DockerException, httpx.HTTPError):
+                logger.warning(
+                    "failed to destroy kernel for session %s",
+                    record.session_id,
+                    exc_info=True,
+                )
 
     async def reset_session(self, session_id: str) -> dict[str, Any]:
         record = self._get_session(session_id)

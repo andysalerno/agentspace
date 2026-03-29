@@ -90,7 +90,7 @@ def service_from_env() -> KernelSessionService:
     )
 
     skills_dir = os.environ.get("KERNEL_SKILLS_DIR", "")
-    skill_paths = _discover_skill_dirs(skills_dir) if skills_dir else ()
+    skill_paths = discover_skill_dirs(skills_dir) if skills_dir else ()
 
     return KernelSessionService(
         harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO)),
@@ -99,7 +99,7 @@ def service_from_env() -> KernelSessionService:
     )
 
 
-def _discover_skill_dirs(skills_dir: str) -> tuple[str, ...]:
+def discover_skill_dirs(skills_dir: str) -> tuple[str, ...]:
     """Enumerate subdirectories under skills_dir to use as additional paths."""
     base = Path(skills_dir)
     if not base.is_dir():
