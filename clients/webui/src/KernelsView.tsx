@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { api } from "./api";
 import type { KernelSummary } from "./types";
 
 type KernelsViewProps = {
@@ -7,12 +9,62 @@ type KernelsViewProps = {
 };
 
 export default function KernelsView({ kernels, onKillKernel, busy }: KernelsViewProps) {
+    const [logsFor, setLogsFor] = useState<string | null>(null);
+    const [logLines, setLogLines] = useState<string[]>([]);
+    const [loadingLogs, setLoadingLogs] = useState(false);
+
+    async function fetchLogs(sessionId: string) {
+        setLoadingLogs(true);
+        try {
+            const data = await api.kernelLogs(sessionId);
+            setLogLines(data.lines);
+            setLogsFor(sessionId);
+        } finally {
+            setLoadingLogs(false);
+        }
+    }
+
+    function closeLogs() {
+        setLogsFor(null);
+        setLogLines([]);
+    }
+
     return (
         <div className="view-content">
             <div className="view-header">
                 <h2>Kernels</h2>
                 <span className="muted">{kernels.length} active</span>
             </div>
+
+            {logsFor && (
+                <div className="kernel-logs-panel card">
+                    <div className="kernel-logs-header">
+                        <h3>Logs — {logsFor.slice(0, 12)}…</h3>
+                        <div className="card-footer-actions">
+                            <button
+                                className="secondary-button small"
+                                disabled={loadingLogs}
+                                onClick={() => fetchLogs(logsFor)}
+                                type="button"
+                            >
+                                {loadingLogs ? "Loading…" : "Refresh"}
+                            </button>
+                            <button
+                                className="secondary-button small"
+                                onClick={closeLogs}
+                                type="button"
+                            >
+                                Close
+                            </button>
+                        </div>
+                    </div>
+                    <pre className="kernel-logs-content">
+                        {logLines.length > 0
+                            ? logLines.join("\n")
+                            : "(no logs yet)"}
+                    </pre>
+                </div>
+            )}
 
             {kernels.length > 0 ? (
                 <div className="card-grid">
@@ -41,14 +93,24 @@ export default function KernelsView({ kernels, onKillKernel, busy }: KernelsView
                             </div>
                             <div className="card-footer">
                                 <span className="muted">{kernel.turns} turn{kernel.turns !== 1 ? "s" : ""}</span>
-                                <button
-                                    className="danger-button"
-                                    disabled={busy}
-                                    onClick={() => onKillKernel(kernel.session_id)}
-                                    type="button"
-                                >
-                                    Kill
-                                </button>
+                                <div className="card-footer-actions">
+                                    <button
+                                        className="secondary-button small"
+                                        disabled={loadingLogs}
+                                        onClick={() => fetchLogs(kernel.session_id)}
+                                        type="button"
+                                    >
+                                        View Logs
+                                    </button>
+                                    <button
+                                        className="danger-button small"
+                                        disabled={busy}
+                                        onClick={() => onKillKernel(kernel.session_id)}
+                                        type="button"
+                                    >
+                                        Kill
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     ))}

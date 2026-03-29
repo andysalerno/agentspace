@@ -216,6 +216,15 @@ class ClientService:
             len(affected),
         )
 
+    async def kernel_logs(self, kernel_session_id: str) -> list[str]:
+        upstream_sessions = await self._agent_host.list_sessions()
+        found = any(
+            str(s["session_id"]) == kernel_session_id for s in upstream_sessions
+        )
+        if not found:
+            raise KernelNotFoundError(kernel_session_id)
+        return await self._agent_host.logs(kernel_session_id)
+
     # --- Skills (proxied to agent_host) ---
 
     async def create_skill(

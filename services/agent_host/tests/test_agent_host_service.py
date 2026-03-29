@@ -84,6 +84,14 @@ class StubRuntime:
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         self.destroyed.append(self._session_key(session))
 
+    async def logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[str]:
+        del session
+        return ['{"type":"stub","data":{}}']
+
     def _session_key(self, session: KernelRuntimeSession) -> str:
         assert isinstance(session.value, str)
         return session.value

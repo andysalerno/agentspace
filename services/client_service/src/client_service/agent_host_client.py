@@ -40,6 +40,8 @@ class AgentHostClient(Protocol):
 
     async def history(self, session_id: str) -> list[list[KernelEvent]]: ...
 
+    async def logs(self, session_id: str) -> list[str]: ...
+
     async def reset_session(self, session_id: str) -> JsonDict: ...
 
     async def destroy_session(self, session_id: str) -> None: ...
@@ -108,6 +110,13 @@ class HttpAgentHostClient:
         return [
             [_kernel_event_from_json(event) for event in turn] for turn in raw_history
         ]
+
+    async def logs(self, session_id: str) -> list[str]:
+        response = await self._request_json(
+            "GET",
+            f"/sessions/{session_id}/logs",
+        )
+        return cast("list[str]", cast("JsonDict", response)["lines"])
 
     async def reset_session(self, session_id: str) -> JsonDict:
         return cast(

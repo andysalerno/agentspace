@@ -75,6 +75,8 @@ export const api = {
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),
   killKernel: (sessionId: string) =>
     requestJson<void>(`/kernels/${sessionId}`, { method: "DELETE" }),
+  kernelLogs: (sessionId: string) =>
+    requestJson<{ lines: string[] }>(`/kernels/${sessionId}/logs`),
 
   // Skills
   listSkills: () => requestJson<Skill[]>("/skills"),

@@ -191,6 +191,15 @@ async def kill_kernel(kernel_session_id: str) -> None:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/kernels/{kernel_session_id}/logs")
+async def kernel_logs(kernel_session_id: str) -> dict[str, Any]:
+    try:
+        lines = await service.kernel_logs(kernel_session_id)
+    except KernelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"lines": lines}
+
+
 # --- Skills ---
 
 

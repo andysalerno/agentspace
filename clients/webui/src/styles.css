@@ -523,6 +523,39 @@ button:disabled {
   font-size: 0.85rem;
 }
 
+/* ─── Kernel Logs ─── */
+.kernel-logs-panel {
+  margin-bottom: 24px;
+}
+
+.kernel-logs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.kernel-logs-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.kernel-logs-content {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  padding: 16px 20px;
+  margin: 0;
+  max-height: 500px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;

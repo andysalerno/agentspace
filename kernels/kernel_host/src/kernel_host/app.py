@@ -45,6 +45,11 @@ async def history() -> dict[str, Any]:
     return {"history": [_serialize_events(events) for events in turns]}
 
 
+@app.get("/logs")
+async def logs() -> dict[str, Any]:
+    return {"lines": await service.logs()}
+
+
 @app.post("/reset")
 async def reset() -> dict[str, Any]:
     return await service.reset()

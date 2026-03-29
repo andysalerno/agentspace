@@ -178,6 +178,11 @@ class StubClientService:
             raise KernelNotFoundError(kernel_session_id)
         self.killed_kernels.append(kernel_session_id)
 
+    async def kernel_logs(self, kernel_session_id: str) -> list[str]:
+        if kernel_session_id != "host-1":
+            raise KernelNotFoundError(kernel_session_id)
+        return ['{"type":"stub","data":{}}']
+
     async def create_skill(
         self,
         skill_id: str,
@@ -262,6 +267,19 @@ def test_kernel_routes(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()[0]["channel_names"] == ["webui"]
+
+
+def test_kernel_logs(client: TestClient) -> None:
+    response = client.get("/kernels/host-1/logs")
+
+    assert response.status_code == 200
+    assert isinstance(response.json()["lines"], list)
+
+
+def test_kernel_logs_not_found(client: TestClient) -> None:
+    response = client.get("/kernels/nonexistent/logs")
+
+    assert response.status_code == 404
 
 
 def test_invalid_agent_id_rejected(client: TestClient) -> None:

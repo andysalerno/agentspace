@@ -86,6 +86,12 @@ class StubAgentHostClient:
         self.destroyed.append(session_id)
         self._sessions.pop(session_id, None)
 
+    async def logs(self, session_id: str) -> list[str]:
+        if session_id not in self._sessions:
+            msg = f"session not found: {session_id}"
+            raise KeyError(msg)
+        return ['{"type":"stub","data":{}}']
+
     async def create_skill(
         self,
         skill_id: str,

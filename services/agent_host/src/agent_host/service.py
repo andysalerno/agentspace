@@ -50,6 +50,12 @@ class KernelRuntime(Protocol):
         session: KernelRuntimeSession,
     ) -> list[list[KernelEvent]]: ...
 
+    async def logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[str]: ...
+
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None: ...
 
 
@@ -168,6 +174,17 @@ class DockerKernelRuntime:
         response.raise_for_status()
         raw_history = response.json()["history"]
         return [[KernelEvent(**event) for event in turn] for turn in raw_history]
+
+    async def logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[str]:
+        handle = self._docker_session(session)
+        async with httpx.AsyncClient(timeout=self._startup_timeout) as client:
+            response = await client.get(f"{handle.base_url}/logs")
+        response.raise_for_status()
+        return list(response.json()["lines"])
 
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         handle = self._docker_session(session)
@@ -337,6 +354,10 @@ class AgentHost:
         history = await self._runtime.history(session=record.runtime_session)
         record.history = history
         return list(history)
+
+    async def logs(self, session_id: str) -> list[str]:
+        record = self._get_session(session_id)
+        return await self._runtime.logs(session=record.runtime_session)
 
     def _get_session(self, session_id: str) -> SessionRecord:
         try:

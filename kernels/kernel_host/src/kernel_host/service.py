@@ -25,6 +25,7 @@ class KernelSessionService:
         self._additional_paths = additional_paths
         self._session_id: str | None = None
         self._history: list[list[KernelEvent]] = []
+        self._raw_logs: list[str] = []
         self._status = KernelStatus.IDLE
 
     async def send_message(self, message: str) -> list[KernelEvent]:
@@ -43,6 +44,8 @@ class KernelSessionService:
         if kernel.resume_token is not None:
             self._session_id = kernel.resume_token
         self._history.append(events)
+        raw_logs: list[str] = getattr(kernel, "raw_logs", [])
+        self._raw_logs.extend(raw_logs)
         self._status = self._derive_status(events, kernel.status)
         return events
 
@@ -59,9 +62,13 @@ class KernelSessionService:
     async def history(self) -> list[list[KernelEvent]]:
         return list(self._history)
 
+    async def logs(self) -> list[str]:
+        return list(self._raw_logs)
+
     async def reset(self) -> dict[str, Any]:
         self._session_id = None
         self._history.clear()
+        self._raw_logs.clear()
         self._status = KernelStatus.IDLE
         return await self.summary()
 

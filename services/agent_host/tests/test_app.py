@@ -77,6 +77,14 @@ class StubRuntime:
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         del session
 
+    async def logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[str]:
+        del session
+        return ['{"type":"stub","data":{}}']
+
     def _session_key(self, session: KernelRuntimeSession) -> str:
         assert isinstance(session.value, str)
         return session.value
@@ -119,6 +127,22 @@ def test_session_lifecycle(client: TestClient) -> None:
     assert message.json()["events"][2]["content"] == "hello"
     assert history.json()["history"][0][2]["content"] == "hello"
     assert session.json()["resume_token"].startswith("resume-runtime-")
+
+
+def test_session_logs(client: TestClient) -> None:
+    created = client.post("/sessions", json={"harness": "copilot-cli"})
+    session_id = created.json()["session_id"]
+
+    logs = client.get(f"/sessions/{session_id}/logs")
+
+    assert logs.status_code == 200
+    assert isinstance(logs.json()["lines"], list)
+
+
+def test_session_logs_not_found(client: TestClient) -> None:
+    response = client.get("/sessions/nonexistent/logs")
+
+    assert response.status_code == 404
 
 
 def test_skill_lifecycle(client: TestClient) -> None:

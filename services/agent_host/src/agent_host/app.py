@@ -88,6 +88,15 @@ async def history(session_id: str) -> dict[str, Any]:
     return {"history": [_serialize_events(events) for events in turns]}
 
 
+@app.get("/sessions/{session_id}/logs")
+async def session_logs(session_id: str) -> dict[str, Any]:
+    try:
+        lines = await host.logs(session_id)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"lines": lines}
+
+
 @app.post("/sessions/{session_id}/reset")
 async def reset_session(session_id: str) -> dict[str, Any]:
     try:

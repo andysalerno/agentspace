@@ -45,6 +45,7 @@ class CopilotKernel:
         self._process: asyncio.subprocess.Process | None = None
         self._output_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[KernelEvent | None] = asyncio.Queue()
+        self._raw_lines: list[str] = []
 
     @property
     def name(self) -> str:
@@ -58,10 +59,15 @@ class CopilotKernel:
     def resume_token(self) -> str | None:
         return self._config.session_id or self._session_id or None
 
+    @property
+    def raw_logs(self) -> list[str]:
+        return list(self._raw_lines)
+
     async def start(self, config: KernelConfig) -> None:
         self._config = config
         self._session_id = config.session_id or uuid.uuid4().hex[:12]
         self._status = KernelStatus.IDLE
+        self._raw_lines = []
         await self._queue.put(session_start(self._session_id, self.name))
 
     async def send(self, message: str) -> None:
@@ -227,6 +233,7 @@ class CopilotKernel:
             line = raw_line.decode().rstrip("\n").rstrip("\r").strip()
             if not line:
                 continue
+            self._raw_lines.append(line)
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
@@ -240,6 +247,7 @@ class CopilotKernel:
         async for raw_line in self._process.stderr:
             line = raw_line.decode().rstrip("\n").rstrip("\r").strip()
             if line:
+                self._raw_lines.append(f"[stderr] {line}")
                 await self._queue.put(error(line))
 
     async def _map_event(self, obj: dict[str, object]) -> None:  # noqa: C901, PLR0911, PLR0912
