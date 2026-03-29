@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import importlib
+from typing import TYPE_CHECKING
 
 import pytest
-from agent_host.service import AgentHost
+from agent_host.service import AgentHost, KernelRuntimeSession
 from fastapi.testclient import TestClient
 from kernel.events import (
     KernelEvent,
@@ -13,6 +14,9 @@ from kernel.events import (
     status_event,
     text_delta,
 )
+
+if TYPE_CHECKING:
+    from kernel_host.registry import HarnessName
 
 
 class StubRuntime:
@@ -24,22 +28,27 @@ class StubRuntime:
         self,
         *,
         session_id: str,
-        harness: str,
+        harness: HarnessName,
         env: dict[str, str],
         cwd: str | None,
         additional_paths: tuple[str, ...],
-    ) -> tuple[str, str]:
+    ) -> KernelRuntimeSession:
         del harness, env, cwd, additional_paths
         container_name = f"container-{session_id[:8]}"
-        base_url = f"http://{container_name}:8000"
-        self._summaries[base_url] = {
+        self._summaries[container_name] = {
             "status": "idle",
             "resume_token": "resume-runtime-1",
         }
-        self._histories[base_url] = []
-        return container_name, base_url
+        self._histories[container_name] = []
+        return KernelRuntimeSession(value=container_name)
 
-    async def send_message(self, *, base_url: str, message: str) -> list[KernelEvent]:
+    async def send_message(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        message: str,
+    ) -> list[KernelEvent]:
+        container_name = self._session_key(session)
         events = [
             session_start("kernel-session", "stub"),
             status_event(KernelStatus.BUSY),
@@ -47,21 +56,29 @@ class StubRuntime:
             status_event(KernelStatus.DONE),
             session_end(),
         ]
-        self._histories[base_url].append(events)
-        self._summaries[base_url] = {
+        self._histories[container_name].append(events)
+        self._summaries[container_name] = {
             "status": "done",
             "resume_token": "resume-runtime-2",
         }
         return events
 
-    async def summary(self, *, base_url: str) -> dict[str, object]:
-        return dict(self._summaries[base_url])
+    async def summary(self, *, session: KernelRuntimeSession) -> dict[str, object]:
+        return dict(self._summaries[self._session_key(session)])
 
-    async def history(self, *, base_url: str) -> list[list[KernelEvent]]:
-        return list(self._histories[base_url])
+    async def history(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[list[KernelEvent]]:
+        return list(self._histories[self._session_key(session)])
 
-    async def destroy_session(self, *, container_name: str) -> None:
-        del container_name
+    async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
+        del session
+
+    def _session_key(self, session: KernelRuntimeSession) -> str:
+        assert isinstance(session.value, str)
+        return session.value
 
 
 @pytest.fixture

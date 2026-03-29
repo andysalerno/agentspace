@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from kernel.protocol import KernelConfig
+    from kernel_host.registry import HarnessName
 
 
 class StubKernel:
@@ -59,7 +60,7 @@ async def test_run_builds_config_from_environment(
 ) -> None:
     kernel = StubKernel()
 
-    def get_kernel_stub(_harness_name: str) -> StubKernel:
+    def get_kernel_stub(_harness_name: HarnessName) -> StubKernel:
         return kernel
 
     monkeypatch.setenv("KERNEL_HARNESS", "copilot-cli")

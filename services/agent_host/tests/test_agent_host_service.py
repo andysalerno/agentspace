@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from agent_host.service import AgentHost, SessionNotFoundError
+from agent_host.service import AgentHost, KernelRuntimeSession, SessionNotFoundError
 from kernel.events import (
     KernelEvent,
     KernelStatus,
@@ -12,6 +12,7 @@ from kernel.events import (
     status_event,
     text_delta,
 )
+from kernel_host.registry import HarnessName
 
 
 class StubRuntime:
@@ -26,13 +27,12 @@ class StubRuntime:
         self,
         *,
         session_id: str,
-        harness: str,
+        harness: HarnessName,
         env: dict[str, str],
         cwd: str | None,
         additional_paths: tuple[str, ...],
-    ) -> tuple[str, str]:
+    ) -> KernelRuntimeSession:
         container_name = f"container-{session_id[:8]}"
-        base_url = f"http://{container_name}:8000"
         self.created.append(
             {
                 "session_id": session_id,
@@ -42,15 +42,21 @@ class StubRuntime:
                 "additional_paths": additional_paths,
             },
         )
-        self._summaries[base_url] = {
+        self._summaries[container_name] = {
             "status": "idle",
             "resume_token": "resume-runtime-1",
         }
-        self._histories[base_url] = []
-        return container_name, base_url
+        self._histories[container_name] = []
+        return KernelRuntimeSession(value=container_name)
 
-    async def send_message(self, *, base_url: str, message: str) -> list[KernelEvent]:
-        self.sent.append((base_url, message))
+    async def send_message(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        message: str,
+    ) -> list[KernelEvent]:
+        container_name = self._session_key(session)
+        self.sent.append((container_name, message))
         events = [
             session_start("kernel-session", "stub"),
             status_event(KernelStatus.BUSY),
@@ -58,21 +64,29 @@ class StubRuntime:
             status_event(KernelStatus.DONE),
             session_end(),
         ]
-        self._histories[base_url].append(events)
-        self._summaries[base_url] = {
+        self._histories[container_name].append(events)
+        self._summaries[container_name] = {
             "status": "done",
             "resume_token": "resume-runtime-2",
         }
         return events
 
-    async def summary(self, *, base_url: str) -> dict[str, object]:
-        return dict(self._summaries[base_url])
+    async def summary(self, *, session: KernelRuntimeSession) -> dict[str, object]:
+        return dict(self._summaries[self._session_key(session)])
 
-    async def history(self, *, base_url: str) -> list[list[KernelEvent]]:
-        return list(self._histories[base_url])
+    async def history(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[list[KernelEvent]]:
+        return list(self._histories[self._session_key(session)])
 
-    async def destroy_session(self, *, container_name: str) -> None:
-        self.destroyed.append(container_name)
+    async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
+        self.destroyed.append(self._session_key(session))
+
+    def _session_key(self, session: KernelRuntimeSession) -> str:
+        assert isinstance(session.value, str)
+        return session.value
 
 
 @pytest.mark.asyncio
@@ -81,7 +95,7 @@ async def test_create_send_history_and_destroy() -> None:
     host = AgentHost(runtime=runtime)
 
     session = await host.create_session(
-        harness="copilot-cli",
+        harness=HarnessName.COPILOT_CLI,
         env={"COPILOT_MODEL": "gpt-5.2"},
         cwd="/srv/agent",
         additional_paths=("/srv/agent",),
@@ -92,7 +106,7 @@ async def test_create_send_history_and_destroy() -> None:
     history = await host.history(session_id)
     fetched = await host.get_session(session_id)
 
-    assert runtime.created[0]["harness"] == "copilot-cli"
+    assert runtime.created[0]["harness"] is HarnessName.COPILOT_CLI
     assert runtime.created[0]["cwd"] == "/srv/agent"
     assert runtime.created[0]["additional_paths"] == ("/srv/agent",)
     assert runtime.created[0]["env"]["COPILOT_MODEL"] == "gpt-5.2"
@@ -110,7 +124,7 @@ async def test_create_send_history_and_destroy() -> None:
     assert fetched["turns"] == 1
 
     await host.destroy_session(session_id)
-    assert runtime.destroyed == [session["container_name"]]
+    assert len(runtime.destroyed) == 1
 
 
 @pytest.mark.asyncio
@@ -118,10 +132,10 @@ async def test_reset_session_recreates_container() -> None:
     runtime = StubRuntime()
     host = AgentHost(runtime=runtime)
 
-    session = await host.create_session(harness="copilot-cli")
+    session = await host.create_session(harness=HarnessName.COPILOT_CLI)
     new_session = await host.reset_session(session["session_id"])
 
-    assert runtime.destroyed == [session["container_name"]]
+    assert len(runtime.destroyed) == 1
     assert new_session["session_id"] != session["session_id"]
 
 

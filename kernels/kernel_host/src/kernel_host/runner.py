@@ -16,7 +16,7 @@ import sys
 
 from kernel.protocol import KernelConfig
 
-from kernel_host.registry import get_kernel
+from kernel_host.registry import HarnessName, get_kernel
 
 
 def _configure_logging() -> None:
@@ -26,7 +26,7 @@ def _configure_logging() -> None:
 
 
 async def run(message: str) -> None:
-    harness_name = os.environ.get("KERNEL_HARNESS", "echo")
+    harness_name = HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO))
     kernel = get_kernel(harness_name)
 
     additional_paths = tuple(

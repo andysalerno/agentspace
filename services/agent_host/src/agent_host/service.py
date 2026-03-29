@@ -10,11 +10,18 @@ import docker
 import httpx
 from docker.errors import NotFound
 from kernel.events import EventType, KernelEvent, KernelStatus
+from kernel_host.registry import HarnessName
 
 logger_name = __name__
 
+
 class SessionNotFoundError(KeyError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class KernelRuntimeSession:
+    value: object
 
 
 class KernelRuntime(Protocol):
@@ -22,24 +29,28 @@ class KernelRuntime(Protocol):
         self,
         *,
         session_id: str,
-        harness: str,
+        harness: HarnessName,
         env: dict[str, str],
         cwd: str | None,
         additional_paths: tuple[str, ...],
-    ) -> tuple[str, str]: ...
+    ) -> KernelRuntimeSession: ...
 
     async def send_message(
         self,
         *,
-        base_url: str,
+        session: KernelRuntimeSession,
         message: str,
     ) -> list[KernelEvent]: ...
 
-    async def summary(self, *, base_url: str) -> dict[str, Any]: ...
+    async def summary(self, *, session: KernelRuntimeSession) -> dict[str, Any]: ...
 
-    async def history(self, *, base_url: str) -> list[list[KernelEvent]]: ...
+    async def history(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[list[KernelEvent]]: ...
 
-    async def destroy_session(self, *, container_name: str) -> None: ...
+    async def destroy_session(self, *, session: KernelRuntimeSession) -> None: ...
 
 
 def _empty_history() -> list[list[KernelEvent]]:
@@ -49,9 +60,8 @@ def _empty_history() -> list[list[KernelEvent]]:
 @dataclass(slots=True)
 class SessionRecord:
     session_id: str
-    harness: str
-    container_name: str
-    base_url: str
+    harness: HarnessName
+    runtime_session: KernelRuntimeSession
     env: dict[str, str]
     cwd: str | None
     additional_paths: tuple[str, ...]
@@ -62,8 +72,7 @@ class SessionRecord:
     def summary(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
-            "harness": self.harness,
-            "container_name": self.container_name,
+            "harness": self.harness.value,
             "status": self.status,
             "turns": len(self.history),
             "resume_token": self.resume_token,
@@ -99,11 +108,11 @@ class DockerKernelRuntime:
         self,
         *,
         session_id: str,
-        harness: str,
+        harness: HarnessName,
         env: dict[str, str],
         cwd: str | None,
         additional_paths: tuple[str, ...],
-    ) -> tuple[str, str]:
+    ) -> KernelRuntimeSession:
         container_name = f"agentspace-kernel-{session_id[:12]}"
         base_url = self._base_url_template.format(container_name=container_name)
         await asyncio.to_thread(
@@ -115,42 +124,57 @@ class DockerKernelRuntime:
             additional_paths,
         )
         await self._wait_until_ready(base_url)
-        return container_name, base_url
+        return KernelRuntimeSession(
+            value=DockerKernelSession(container_name=container_name, base_url=base_url),
+        )
 
-    async def send_message(self, *, base_url: str, message: str) -> list[KernelEvent]:
+    async def send_message(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        message: str,
+    ) -> list[KernelEvent]:
+        handle = self._docker_session(session)
         payload = {"message": message}
         async with httpx.AsyncClient(timeout=self._startup_timeout) as client:
-            response = await client.post(f"{base_url}/messages", json=payload)
+            response = await client.post(f"{handle.base_url}/messages", json=payload)
         response.raise_for_status()
         raw_events = response.json()["events"]
         return [KernelEvent(**event) for event in raw_events]
 
-    async def summary(self, *, base_url: str) -> dict[str, Any]:
+    async def summary(self, *, session: KernelRuntimeSession) -> dict[str, Any]:
+        handle = self._docker_session(session)
         async with httpx.AsyncClient(timeout=self._startup_timeout) as client:
-            response = await client.get(f"{base_url}/session")
+            response = await client.get(f"{handle.base_url}/session")
         response.raise_for_status()
         return dict(response.json())
 
-    async def history(self, *, base_url: str) -> list[list[KernelEvent]]:
+    async def history(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> list[list[KernelEvent]]:
+        handle = self._docker_session(session)
         async with httpx.AsyncClient(timeout=self._startup_timeout) as client:
-            response = await client.get(f"{base_url}/history")
+            response = await client.get(f"{handle.base_url}/history")
         response.raise_for_status()
         raw_history = response.json()["history"]
         return [[KernelEvent(**event) for event in turn] for turn in raw_history]
 
-    async def destroy_session(self, *, container_name: str) -> None:
-        await asyncio.to_thread(self._remove_container, container_name)
+    async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
+        handle = self._docker_session(session)
+        await asyncio.to_thread(self._remove_container, handle.container_name)
 
     def _run_container(
         self,
         container_name: str,
-        harness: str,
+        harness: HarnessName,
         env: dict[str, str],
         cwd: str | None,
         additional_paths: tuple[str, ...],
     ) -> None:
         environment = dict(env)
-        environment["KERNEL_HARNESS"] = harness
+        environment["KERNEL_HARNESS"] = harness.value
         if cwd is not None:
             environment["KERNEL_WORKDIR"] = cwd
         if additional_paths:
@@ -179,6 +203,12 @@ class DockerKernelRuntime:
                 },
             },
         )
+
+    def _docker_session(self, session: KernelRuntimeSession) -> DockerKernelSession:
+        if not isinstance(session.value, DockerKernelSession):
+            msg = f"unsupported runtime session handle: {type(session.value)!r}"
+            raise TypeError(msg)
+        return session.value
 
     def _remove_container(self, container_name: str) -> None:
         try:
@@ -212,7 +242,7 @@ class AgentHost:
     async def create_session(
         self,
         *,
-        harness: str = "copilot-cli",
+        harness: HarnessName = HarnessName.COPILOT_CLI,
         env: dict[str, str] | None = None,
         cwd: str | None = None,
         additional_paths: tuple[str, ...] = (),
@@ -220,7 +250,7 @@ class AgentHost:
         session_id = uuid.uuid4().hex
         merged_env = dict(os.environ)
         merged_env.update(env or {})
-        container_name, base_url = await self._runtime.create_session(
+        runtime_session = await self._runtime.create_session(
             session_id=session_id,
             harness=harness,
             env=merged_env,
@@ -230,13 +260,12 @@ class AgentHost:
         record = SessionRecord(
             session_id=session_id,
             harness=harness,
-            container_name=container_name,
-            base_url=base_url,
+            runtime_session=runtime_session,
             env=merged_env,
             cwd=cwd,
             additional_paths=additional_paths,
         )
-        session_summary = await self._runtime.summary(base_url=base_url)
+        session_summary = await self._runtime.summary(session=runtime_session)
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
         record.status = _as_status(session_summary.get("status"), KernelStatus.IDLE)
         async with self._lock:
@@ -246,12 +275,12 @@ class AgentHost:
     async def send_message(self, session_id: str, message: str) -> list[KernelEvent]:
         record = self._get_session(session_id)
         events = await self._runtime.send_message(
-            base_url=record.base_url,
+            session=record.runtime_session,
             message=message,
         )
         record.history.append(events)
         record.status = _derive_status(events, record.status)
-        session_summary = await self._runtime.summary(base_url=record.base_url)
+        session_summary = await self._runtime.summary(session=record.runtime_session)
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
         record.status = _as_status(session_summary.get("status"), record.status)
         return events
@@ -261,7 +290,7 @@ class AgentHost:
             record = self._sessions.pop(session_id, None)
         if record is None:
             raise SessionNotFoundError(session_id)
-        await self._runtime.destroy_session(container_name=record.container_name)
+        await self._runtime.destroy_session(session=record.runtime_session)
 
     async def reset_session(self, session_id: str) -> dict[str, Any]:
         record = self._get_session(session_id)
@@ -279,7 +308,7 @@ class AgentHost:
 
     async def get_session(self, session_id: str) -> dict[str, Any]:
         record = self._get_session(session_id)
-        session_summary = await self._runtime.summary(base_url=record.base_url)
+        session_summary = await self._runtime.summary(session=record.runtime_session)
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
         record.status = _as_status(session_summary.get("status"), record.status)
         return record.summary()
@@ -291,7 +320,7 @@ class AgentHost:
 
     async def history(self, session_id: str) -> list[list[KernelEvent]]:
         record = self._get_session(session_id)
-        history = await self._runtime.history(base_url=record.base_url)
+        history = await self._runtime.history(session=record.runtime_session)
         record.history = history
         return list(history)
 
@@ -322,3 +351,9 @@ def _as_resume_token(value: object) -> str | None:
     if isinstance(value, str) and value:
         return value
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class DockerKernelSession:
+    container_name: str
+    base_url: str

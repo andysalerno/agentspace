@@ -11,6 +11,7 @@ from kernel.events import (
     status_event,
     text_delta,
 )
+from kernel_host.registry import HarnessName
 from kernel_host.service import KernelSessionService
 
 if TYPE_CHECKING:
@@ -62,7 +63,7 @@ async def test_service_reuses_resume_token(
 ) -> None:
     kernels: list[StubKernel] = []
 
-    def fake_get_kernel(_harness_name: str) -> StubKernel:
+    def fake_get_kernel(_harness_name: HarnessName) -> StubKernel:
         kernel = StubKernel()
         kernels.append(kernel)
         return kernel
@@ -70,7 +71,7 @@ async def test_service_reuses_resume_token(
     monkeypatch.setattr("kernel_host.service.get_kernel", fake_get_kernel)
 
     service = KernelSessionService(
-        harness="copilot-cli",
+        harness=HarnessName.COPILOT_CLI,
         env={"COPILOT_MODEL": "gpt-5.2"},
         cwd="/srv/kernel",
         additional_paths=("/srv/kernel",),

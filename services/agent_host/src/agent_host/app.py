@@ -4,6 +4,7 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException
+from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
 from agent_host.service import AgentHost, SessionNotFoundError
@@ -16,7 +17,7 @@ host = AgentHost()
 
 
 class CreateSessionRequest(BaseModel):
-    harness: str = "copilot-cli"
+    harness: HarnessName = HarnessName.COPILOT_CLI
     env: dict[str, str] = Field(default_factory=dict)
     cwd: str | None = None
     additional_paths: list[str] = Field(default_factory=list)

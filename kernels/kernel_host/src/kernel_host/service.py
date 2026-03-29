@@ -6,14 +6,14 @@ from typing import Any
 from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel.protocol import KernelConfig
 
-from kernel_host.registry import get_kernel
+from kernel_host.registry import HarnessName, get_kernel
 
 
 class KernelSessionService:
     def __init__(
         self,
         *,
-        harness: str,
+        harness: HarnessName,
         env: dict[str, str],
         cwd: str | None,
         additional_paths: tuple[str, ...],
@@ -85,7 +85,7 @@ def service_from_env() -> KernelSessionService:
         if path
     )
     return KernelSessionService(
-        harness=os.environ.get("KERNEL_HARNESS", "echo"),
+        harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO)),
         env=dict(os.environ),
         cwd=os.environ.get("KERNEL_WORKDIR") or None,
         additional_paths=additional_paths,
