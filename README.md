@@ -11,6 +11,7 @@ The repo is currently centered on the kernel milestone:
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
 - `client_service`: client-facing API over `agent_host`
 - `webui`: minimal hosted web UI over `client_service`
+- `cli_channel`: proof-of-concept channel client over `client_service`
 
 For now, keep `copilot-cli` as the only real kernel path.
 
@@ -114,6 +115,20 @@ Current endpoints:
 - `POST /sessions/{session_id}/messages`
 - `POST /sessions/{session_id}/reset`
 - `DELETE /sessions/{session_id}`
+- `POST /channels`
+- `GET /channels`
+- `GET /channels/{channel_id}`
+- `GET /channels/{channel_id}/messages`
+- `POST /channels/{channel_id}/messages`
+- `POST /channels/{channel_id}/reset`
+- `DELETE /channels/{channel_id}`
+
+Channel notes:
+
+- a channel registers itself with `client_service`
+- `client_service` creates a backing long-lived client-facing session immediately
+- repeated channel messages are routed to that same session
+- channel reset keeps the same client-facing session id but swaps to a fresh underlying `agent_host` session
 
 ## Web UI
 
@@ -140,3 +155,19 @@ It currently supports:
 - sending chat messages
 - resetting a session
 - viewing transcript history
+
+## CliChannel
+
+`cli_channel` is the first proof-of-concept channel client. It is separate from the future native CLI client and exists only to validate the channel protocol.
+
+Run it against a created agent:
+
+```powershell
+uv run --package cli-channel -m cli_channel --agent-id <agent_id> --name terminal-1
+```
+
+Supported commands:
+
+- normal input sends a channel message
+- `/reset` resets the backing session while preserving the channel id
+- `/exit` exits the client
