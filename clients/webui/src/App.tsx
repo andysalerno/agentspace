@@ -1,30 +1,19 @@
-import { FormEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { Agent, KernelSummary, SessionDetail, SessionSummary } from "./types";
-
-type AgentFormState = {
-  agent_id: string;
-  name: string;
-  system_prompt: string;
-};
-
-const initialAgentForm: AgentFormState = {
-  agent_id: "",
-  name: "",
-  system_prompt: "",
-};
+import type { Agent, KernelSummary, SessionDetail, SessionSummary, ViewId } from "./types";
+import Sidebar from "./Sidebar";
+import ChatView from "./ChatView";
+import AgentsView from "./AgentsView";
+import SessionsView from "./SessionsView";
+import KernelsView from "./KernelsView";
 
 export default function App() {
+  const [viewId, setViewId] = useState<ViewId>("chat");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [kernels, setKernels] = useState<KernelSummary[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
-  const [agentForm, setAgentForm] = useState<AgentFormState>(initialAgentForm);
-  const [newSessionAgentId, setNewSessionAgentId] = useState("");
-  const [newSessionCwd, setNewSessionCwd] = useState("");
-  const [newSessionChannelName, setNewSessionChannelName] = useState("");
-  const [messageDraft, setMessageDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -37,12 +26,6 @@ export default function App() {
     setAgents(agentData);
     setSessions(sessionData);
     setKernels(kernelData);
-    if (!selectedSessionId && sessionData.length > 0) {
-      setSelectedSessionId(sessionData[0].session_id);
-    }
-    if (!newSessionAgentId && agentData.length > 0) {
-      setNewSessionAgentId(agentData[0].agent_id);
-    }
   }
 
   async function refreshSelectedSession(sessionId: string) {
@@ -62,15 +45,16 @@ export default function App() {
     refreshSelectedSession(selectedSessionId).catch((err: Error) => setError(err.message));
   }, [selectedSessionId]);
 
-  async function handleCreateAgent(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleCreateAgent(form: {
+    agent_id: string;
+    name: string;
+    system_prompt: string;
+  }) {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createAgent(agentForm);
-      setAgentForm(initialAgentForm);
+      await api.createAgent(form);
       await refreshOverview();
-      setNewSessionAgentId(created.agent_id);
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -94,24 +78,18 @@ export default function App() {
     }
   }
 
-  async function handleCreateSession(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!newSessionAgentId) {
-      return;
-    }
+  async function handleCreateSession(agentId: string, cwd: string, channelName: string) {
     setBusy(true);
     setError(null);
     try {
       const session = await api.createSession({
-        agent_id: newSessionAgentId,
-        cwd: newSessionCwd || null,
-        channel_name: newSessionChannelName || null,
+        agent_id: agentId,
+        cwd: cwd || null,
+        channel_name: channelName || null,
         client_type: "webui",
       });
       await refreshOverview();
       setSelectedSessionId(session.session_id);
-      setNewSessionCwd("");
-      setNewSessionChannelName("");
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -119,16 +97,12 @@ export default function App() {
     }
   }
 
-  async function handleSendMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedSessionId || !messageDraft.trim()) {
-      return;
-    }
+  async function handleSendMessage(message: string) {
+    if (!selectedSessionId) return;
     setBusy(true);
     setError(null);
     try {
-      await api.sendMessage(selectedSessionId, messageDraft.trim());
-      setMessageDraft("");
+      await api.sendMessage(selectedSessionId, message);
       await Promise.all([refreshOverview(), refreshSelectedSession(selectedSessionId)]);
     } catch (err) {
       setError((err as Error).message);
@@ -138,9 +112,7 @@ export default function App() {
   }
 
   async function handleResetSession() {
-    if (!selectedSessionId) {
-      return;
-    }
+    if (!selectedSessionId) return;
     setBusy(true);
     setError(null);
     try {
@@ -153,262 +125,71 @@ export default function App() {
     }
   }
 
+  function handleNavigateToChat(sessionId: string) {
+    setSelectedSessionId(sessionId);
+    setViewId("chat");
+  }
+
+  function renderView() {
+    switch (viewId) {
+      case "chat":
+        return (
+          <ChatView
+            agents={agents}
+            sessions={sessions}
+            selectedSessionId={selectedSessionId}
+            selectedSession={selectedSession}
+            onSelectSession={setSelectedSessionId}
+            onCreateSession={handleCreateSession}
+            onSendMessage={handleSendMessage}
+            onResetSession={handleResetSession}
+            busy={busy}
+          />
+        );
+      case "agents":
+        return (
+          <AgentsView
+            agents={agents}
+            onCreateAgent={handleCreateAgent}
+            onDeleteAgent={handleDeleteAgent}
+            busy={busy}
+          />
+        );
+      case "sessions":
+        return (
+          <SessionsView
+            sessions={sessions}
+            agents={agents}
+            onNavigateToChat={handleNavigateToChat}
+          />
+        );
+      case "kernels":
+        return <KernelsView kernels={kernels} />;
+    }
+  }
+
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <h1>AgentSpace</h1>
-          <p className="subtitle">Agents, sessions, and kernel activity in one place.</p>
-        </div>
-        <button className="secondary-button" onClick={() => refreshOverview()} type="button">
-          Refresh
-        </button>
-      </header>
-      {error ? <div className="error-banner">{error}</div> : null}
-      <main className="dashboard">
-        <aside className="left-column">
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Agents</h2>
-              <span>{agents.length}</span>
-            </div>
-            <form className="stack" onSubmit={handleCreateAgent}>
-              <label>
-                Agent ID
-                <input
-                  pattern="[a-z]+(?:-[a-z]+)*"
-                  placeholder="support-bot"
-                  required
-                  value={agentForm.agent_id}
-                  onChange={(event) =>
-                    setAgentForm((current) => ({
-                      ...current,
-                      agent_id: event.target.value,
-                    }))
-                  }
-                />
-              </label>
-              <label>
-                Display Name
-                <input
-                  placeholder="Support Bot"
-                  required
-                  value={agentForm.name}
-                  onChange={(event) =>
-                    setAgentForm((current) => ({
-                      ...current,
-                      name: event.target.value,
-                    }))
-                  }
-                />
-              </label>
-              <label>
-                System Prompt
-                <textarea
-                  placeholder="Optional prompt"
-                  rows={4}
-                  value={agentForm.system_prompt}
-                  onChange={(event) =>
-                    setAgentForm((current) => ({
-                      ...current,
-                      system_prompt: event.target.value,
-                    }))
-                  }
-                />
-              </label>
-              <button disabled={busy} type="submit">
-                Add Agent
-              </button>
-            </form>
-            <div className="list">
-              {agents.map((agent) => (
-                <div className="list-card" key={agent.agent_id}>
-                  <div>
-                    <strong>{agent.name}</strong>
-                    <div className="muted">{agent.agent_id}</div>
-                    <div className="muted">{agent.harness}</div>
-                  </div>
-                  <button
-                    className="danger-button"
-                    disabled={busy}
-                    onClick={() => handleDeleteAgent(agent.agent_id)}
-                    type="button"
-                  >
-                    Delete
-                  </button>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Sessions</h2>
-              <span>{sessions.length}</span>
-            </div>
-            <form className="stack compact" onSubmit={handleCreateSession}>
-              <label>
-                Agent
-                <select
-                  value={newSessionAgentId}
-                  onChange={(event) => setNewSessionAgentId(event.target.value)}
-                >
-                  {agents.map((agent) => (
-                    <option key={agent.agent_id} value={agent.agent_id}>
-                      {agent.agent_id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Working Directory
-                <input
-                  placeholder="/tmp/agent-session"
-                  value={newSessionCwd}
-                  onChange={(event) => setNewSessionCwd(event.target.value)}
-                />
-              </label>
-              <label>
-                Channel Name
-                <input
-                  placeholder="webui"
-                  value={newSessionChannelName}
-                  onChange={(event) => setNewSessionChannelName(event.target.value)}
-                />
-              </label>
-              <button disabled={busy || !newSessionAgentId} type="submit">
-                Start Chat Session
-              </button>
-            </form>
-            <div className="list">
-              {sessions.map((session) => {
-                return (
-                  <button
-                    className={`session-card ${
-                      selectedSessionId === session.session_id ? "active" : ""
-                    }`}
-                    key={session.session_id}
-                    onClick={() => setSelectedSessionId(session.session_id)}
-                    type="button"
-                  >
-                    <strong>{session.agent_id}</strong>
-                    <div className="muted">{session.session_id}</div>
-                    <div className="muted">
-                      status: {session.status} | messages: {session.message_count}
-                    </div>
-                    {session.channel_name ? (
-                      <div className="tag-row">
-                        <span className="tag">channel: {session.channel_name}</span>
-                      </div>
-                    ) : null}
-                  </button>
-                );
-              })}
-            </div>
-          </section>
-        </aside>
-
-        <section className="chat-panel panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Chat</h2>
-              <div className="muted">
-                {selectedSession
-                  ? `${selectedSession.agent_id} | ${selectedSession.session_id}`
-                  : "Select a session"}
-              </div>
-            </div>
+      <Sidebar
+        activeView={viewId}
+        onNavigate={setViewId}
+        onRefresh={() => refreshOverview().catch((err: Error) => setError(err.message))}
+      />
+      <div className="main-area">
+        {error && (
+          <div className="error-banner">
+            <span>{error}</span>
             <button
-              className="secondary-button"
-              disabled={busy || !selectedSessionId}
-              onClick={handleResetSession}
+              className="dismiss-button"
+              onClick={() => setError(null)}
               type="button"
             >
-              Reset Session
+              ×
             </button>
           </div>
-          <div className="transcript">
-            {selectedSession?.messages.length ? (
-              selectedSession.messages.map((message) => (
-                <article className={`message ${message.role}`} key={message.message_id}>
-                  <header>{message.role}</header>
-                  <div>{message.content}</div>
-                </article>
-              ))
-            ) : (
-              <div className="empty-state">No messages yet.</div>
-            )}
-          </div>
-          <form className="composer" onSubmit={handleSendMessage}>
-            <textarea
-              placeholder="Send a message to the selected session"
-              rows={5}
-              value={messageDraft}
-              onChange={(event) => setMessageDraft(event.target.value)}
-            />
-            <button disabled={busy || !selectedSessionId} type="submit">
-              Send Message
-            </button>
-          </form>
-        </section>
-
-        <aside className="right-column">
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Session Sources</h2>
-              <span>
-                {sessions.filter((session) => session.channel_name !== null).length}
-              </span>
-            </div>
-            <div className="list">
-              {sessions.some((session) => session.channel_name !== null) ? (
-                sessions
-                  .filter((session) => session.channel_name !== null)
-                  .map((session) => (
-                  <div className="list-card" key={session.session_id}>
-                    <div>
-                      <strong>{session.channel_name}</strong>
-                      <div className="muted">{session.client_type ?? "unknown client"}</div>
-                      <div className="muted">agent: {session.agent_id}</div>
-                      <div className="muted">session: {session.session_id}</div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="empty-state">No session sources recorded.</div>
-              )}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-heading">
-              <h2>Kernel Sessions</h2>
-              <span>{kernels.length}</span>
-            </div>
-            <div className="list">
-              {kernels.length ? (
-                kernels.map((kernel) => (
-                  <div className="list-card" key={kernel.session_id}>
-                    <div>
-                      <strong>{kernel.harness}</strong>
-                      <div className="muted">kernel: {kernel.session_id}</div>
-                      <div className="muted">status: {kernel.status}</div>
-                      <div className="muted">
-                        client sessions: {kernel.client_session_ids.join(", ") || "none"}
-                      </div>
-                      <div className="muted">
-                        channel names: {kernel.channel_names.join(", ") || "none"}
-                      </div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="empty-state">No active kernels.</div>
-              )}
-            </div>
-          </section>
-        </aside>
-      </main>
+        )}
+        {renderView()}
+      </div>
     </div>
   );
 }

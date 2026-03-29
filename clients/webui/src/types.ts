@@ -1,3 +1,5 @@
+export type ViewId = "chat" | "agents" | "sessions" | "kernels";
+
 export type Agent = {
   agent_id: string;
   name: string;

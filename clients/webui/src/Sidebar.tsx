@@ -1,0 +1,80 @@
+import type { ReactNode } from "react";
+import type { ViewId } from "./types";
+
+type SidebarProps = {
+  activeView: ViewId;
+  onNavigate: (view: ViewId) => void;
+  onRefresh: () => void;
+};
+
+const navItems: { id: ViewId; label: string; icon: ReactNode }[] = [
+  {
+    id: "chat",
+    label: "Chat",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+        <path d="M2 5a2 2 0 012-2h12a2 2 0 012 2v7a2 2 0 01-2 2H8l-4 3.5V14H4a2 2 0 01-2-2V5z" />
+      </svg>
+    ),
+  },
+  {
+    id: "agents",
+    label: "Agents",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+        <path d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" />
+      </svg>
+    ),
+  },
+  {
+    id: "sessions",
+    label: "Sessions",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+        <path d="M3 4h14v2H3V4zm0 5h14v2H3V9zm0 5h10v2H3v-2z" />
+      </svg>
+    ),
+  },
+  {
+    id: "kernels",
+    label: "Kernels",
+    icon: (
+      <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+        <path d="M13 7H7v6h6V7zM6 2v2H4a2 2 0 00-2 2v1h2v2H2v2h2v2H2v1a2 2 0 002 2h2v2h2v-2h2v2h2v-2h2v2h2v-2h2a2 2 0 002-2v-1h-2v-2h2V9h-2V7h2V6a2 2 0 00-2-2h-2V2h-2v2h-2V2H8v2H6V2z" />
+      </svg>
+    ),
+  },
+];
+
+export default function Sidebar({ activeView, onNavigate, onRefresh }: SidebarProps) {
+  return (
+    <nav className="sidebar">
+      <div className="sidebar-header">
+        <span className="sidebar-logo">◇</span>
+        <span className="sidebar-title">AgentSpace</span>
+      </div>
+      <ul className="sidebar-nav">
+        {navItems.map((item) => (
+          <li key={item.id}>
+            <button
+              className={`sidebar-nav-item ${activeView === item.id ? "active" : ""}`}
+              onClick={() => onNavigate(item.id)}
+              type="button"
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="sidebar-footer">
+        <button className="sidebar-nav-item" onClick={onRefresh} type="button">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm.008 9.057a1 1 0 011.276.61A5.002 5.002 0 0014.001 13H11a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0v-2.101a7.002 7.002 0 01-11.601-2.566 1 1 0 01.61-1.276z" />
+          </svg>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </nav>
+  );
+}
