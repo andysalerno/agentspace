@@ -182,6 +182,19 @@ export default function App() {
     }
   }
 
+  async function handleUpdateSkill(skillId: string, files: Record<string, string>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateSkill(skillId, files);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleNavigateToChat(sessionId: string) {
     setSelectedSessionId(sessionId);
     setViewId("chat");
@@ -229,6 +242,7 @@ export default function App() {
           <SkillsView
             skills={skills}
             onCreateSkill={handleCreateSkill}
+            onUpdateSkill={handleUpdateSkill}
             onDeleteSkill={handleDeleteSkill}
             busy={busy}
           />

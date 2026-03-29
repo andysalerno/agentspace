@@ -673,6 +673,45 @@ button:disabled {
   overflow-y: auto;
 }
 
+/* ─── Skill Multi-File Form ─── */
+.skill-files-section {
+  margin-top: 8px;
+}
+
+.skill-files-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.skill-files-label {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.skill-file-entry {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: #fafafa;
+}
+
+.skill-file-entry-header {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.skill-file-path-input {
+  flex: 1;
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 0.85rem;
+}
+
 .detail-label {
   color: var(--text-secondary);
   font-weight: 500;
