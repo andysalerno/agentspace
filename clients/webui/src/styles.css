@@ -835,8 +835,7 @@ button:disabled {
 }
 
 /* ─── Collapsible Sidebar ─── */
-.sidebar {
-}
+.sidebar {}
 
 .sidebar.collapsed {
   width: 56px;
