@@ -177,6 +177,22 @@ class StubClientService:
     async def list_channels(self) -> list[dict[str, str | None]]:
         return list(self.channels.values())
 
+    async def list_kernels(self) -> list[dict[str, object]]:
+        return [
+            {
+                "session_id": "host-1",
+                "harness": "copilot-cli",
+                "status": "idle",
+                "turns": 1,
+                "resume_token": "resume-1",
+                "cwd": "C:/work",
+                "additional_paths": [],
+                "client_session_ids": ["session-1"],
+                "channel_ids": ["channel-1"],
+                "agent_ids": ["agent-one"],
+            },
+        ]
+
     async def get_channel(self, channel_id: str) -> dict[str, str | None]:
         return self.channels[channel_id]
 
@@ -257,6 +273,13 @@ def test_channel_routes(client: TestClient) -> None:
     assert messages.status_code == 200
     assert listed.json()[0]["name"] == "terminal-1"
     assert sent.json()["assistant_message"]["content"] == "hello"
+
+
+def test_kernel_routes(client: TestClient) -> None:
+    response = client.get("/kernels")
+
+    assert response.status_code == 200
+    assert response.json()[0]["channel_ids"] == ["channel-1"]
 
 
 def test_invalid_agent_id_rejected(client: TestClient) -> None:

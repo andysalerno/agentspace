@@ -9,7 +9,7 @@ dependencies = []
 dev = ["ruff", "pytest", "pytest-asyncio", "pyright", "httpx", "fastapi", "jinja2", "uvicorn"]
 
 [tool.uv.workspace]
-members = ["kernels/*", "services/*", "clients/*", "channels/*"]
+members = ["kernels/*", "services/*", "channels/*"]
 
 [tool.uv.sources]
 kernel = { workspace = true }
@@ -18,7 +18,6 @@ kernel-copilot = { workspace = true }
 kernel-host = { workspace = true }
 agent-host = { workspace = true }
 client-service = { workspace = true }
-webui = { workspace = true }
 cli-channel = { workspace = true }
 
 [tool.pytest.ini_options]
@@ -55,6 +54,5 @@ extraPaths = [
     "kernels/kernel_host/src",
     "services/agent_host/src",
     "services/client_service/src",
-    "clients/webui/src",
     "channels/cli_channel/src",
 ]

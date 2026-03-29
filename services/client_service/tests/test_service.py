@@ -152,6 +152,36 @@ async def test_channel_registration_and_reset_reuse_session() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_kernels_includes_client_session_and_channel_links() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    agent = await service.create_agent(agent_id="kernel-agent", name="Kernel Agent")
+    session = await service.create_session(agent_id=agent["agent_id"], cwd=None)
+    channel = await service.register_channel(
+        agent_id=agent["agent_id"],
+        name="terminal-1",
+        cwd=None,
+    )
+
+    kernels = await service.list_kernels()
+
+    assert len(kernels) == 2
+    session_kernel = next(
+        kernel
+        for kernel in kernels
+        if session["session_id"] in cast("list[str]", kernel["client_session_ids"])
+    )
+    channel_kernel = next(
+        kernel
+        for kernel in kernels
+        if channel["channel_id"] in cast("list[str]", kernel["channel_ids"])
+    )
+    assert session_kernel["agent_ids"] == ["kernel-agent"]
+    assert channel_kernel["client_session_ids"] == [channel["session_id"]]
+
+
+@pytest.mark.asyncio
 async def test_missing_records_raise() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)

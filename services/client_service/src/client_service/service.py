@@ -198,6 +198,33 @@ class ClientService:
             channels = [channel.summary() for channel in self._channels.values()]
         return sorted(channels, key=lambda item: str(item["created_at"]))
 
+    async def list_kernels(self) -> list[dict[str, object]]:
+        upstream_sessions = await self._agent_host.list_sessions()
+        kernels: list[dict[str, object]] = []
+        for upstream in upstream_sessions:
+            agent_host_session_id = str(upstream["session_id"])
+            client_sessions = [
+                session
+                for session in self._sessions.values()
+                if session.agent_host_session_id == agent_host_session_id
+            ]
+            client_session_ids = [session.session_id for session in client_sessions]
+            channels = [
+                channel
+                for channel in self._channels.values()
+                if channel.session_id in set(client_session_ids)
+            ]
+            agent_ids = sorted({session.agent_id for session in client_sessions})
+            kernels.append(
+                {
+                    **upstream,
+                    "client_session_ids": client_session_ids,
+                    "channel_ids": [channel.channel_id for channel in channels],
+                    "agent_ids": agent_ids,
+                },
+            )
+        return kernels
+
     async def get_channel(self, channel_id: str) -> dict[str, str | None]:
         return self._get_channel(channel_id).summary()
 

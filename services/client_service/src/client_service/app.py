@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,13 @@ from client_service.service import (
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Client Service", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 service = ClientService()
 
 
@@ -183,6 +191,11 @@ async def register_channel(
 @app.get("/channels")
 async def list_channels() -> list[dict[str, str | None]]:
     return await service.list_channels()
+
+
+@app.get("/kernels")
+async def list_kernels() -> list[dict[str, object]]:
+    return await service.list_kernels()
 
 
 @app.get("/channels/{channel_id}")
