@@ -18,6 +18,23 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    return localStorage.getItem("sidebar-collapsed") === "true";
+  });
+  const [darkMode, setDarkMode] = useState(() => {
+    const stored = localStorage.getItem("theme");
+    if (stored) return stored === "dark";
+    return window.matchMedia("(prefers-color-scheme: dark)").matches;
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", darkMode ? "dark" : "light");
+    localStorage.setItem("theme", darkMode ? "dark" : "light");
+  }, [darkMode]);
+
+  useEffect(() => {
+    localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
 
   async function refreshOverview() {
     const [agentData, sessionData, kernelData, skillData] = await Promise.all([
@@ -255,6 +272,10 @@ export default function App() {
         activeView={viewId}
         onNavigate={setViewId}
         onRefresh={() => refreshOverview().catch((err: Error) => setError(err.message))}
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+        darkMode={darkMode}
+        onToggleDarkMode={() => setDarkMode((prev) => !prev)}
       />
       <div className="main-area">
         {error && (
