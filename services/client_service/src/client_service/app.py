@@ -37,12 +37,14 @@ class CreateAgentRequest(BaseModel):
     name: str
     harness: HarnessName = HarnessName.COPILOT_CLI
     system_prompt: str = ""
+    skills: list[str] = Field(default_factory=list)
 
 
 class UpdateAgentRequest(BaseModel):
     name: str | None = None
     harness: HarnessName | None = None
     system_prompt: str | None = None
+    skills: list[str] | None = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -62,13 +64,14 @@ async def healthz() -> dict[str, str]:
 
 
 @app.post("/agents")
-async def create_agent(payload: CreateAgentRequest) -> dict[str, str]:
+async def create_agent(payload: CreateAgentRequest) -> dict[str, object]:
     try:
         return await service.create_agent(
             agent_id=payload.agent_id,
             name=payload.name,
             harness=payload.harness,
             system_prompt=payload.system_prompt,
+            skills=payload.skills,
         )
     except AgentAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -77,12 +80,12 @@ async def create_agent(payload: CreateAgentRequest) -> dict[str, str]:
 
 
 @app.get("/agents")
-async def list_agents() -> list[dict[str, str]]:
+async def list_agents() -> list[dict[str, object]]:
     return await service.list_agents()
 
 
 @app.get("/agents/{agent_id}")
-async def get_agent(agent_id: str) -> dict[str, str]:
+async def get_agent(agent_id: str) -> dict[str, object]:
     try:
         return await service.get_agent(agent_id)
     except AgentNotFoundError as exc:
@@ -93,13 +96,14 @@ async def get_agent(agent_id: str) -> dict[str, str]:
 async def update_agent(
     agent_id: str,
     payload: UpdateAgentRequest,
-) -> dict[str, str]:
+) -> dict[str, object]:
     try:
         return await service.update_agent(
             agent_id,
             name=payload.name,
             harness=payload.harness,
             system_prompt=payload.system_prompt,
+            skills=payload.skills,
         )
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

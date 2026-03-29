@@ -1,12 +1,18 @@
-export type ViewId = "chat" | "agents" | "sessions" | "kernels";
+export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills";
 
 export type Agent = {
   agent_id: string;
   name: string;
   harness: string;
   system_prompt: string;
+  skills: string[];
   created_at: string;
   updated_at: string;
+};
+
+export type Skill = {
+  skill_id: string;
+  files?: Record<string, string>;
 };
 
 export type SessionSummary = {

@@ -57,13 +57,15 @@ class ClientService:
         name: str,
         harness: HarnessName = HarnessName.COPILOT_CLI,
         system_prompt: str = "",
-    ) -> dict[str, str]:
+        skills: list[str] | None = None,
+    ) -> dict[str, object]:
         _validate_agent_id(agent_id)
         agent = AgentRecord(
             agent_id=agent_id,
             name=name,
             harness=harness,
             system_prompt=system_prompt,
+            skills=skills or [],
         )
         async with self._lock:
             if agent.agent_id in self._agents:
@@ -72,12 +74,12 @@ class ClientService:
         logger.info("created agent %s using harness %s", agent.agent_id, harness.value)
         return agent.summary()
 
-    async def list_agents(self) -> list[dict[str, str]]:
+    async def list_agents(self) -> list[dict[str, object]]:
         async with self._lock:
             agents = [agent.summary() for agent in self._agents.values()]
         return sorted(agents, key=lambda item: str(item["created_at"]))
 
-    async def get_agent(self, agent_id: str) -> dict[str, str]:
+    async def get_agent(self, agent_id: str) -> dict[str, object]:
         return self._get_agent(agent_id).summary()
 
     async def update_agent(
@@ -87,7 +89,8 @@ class ClientService:
         name: str | None,
         harness: HarnessName | None,
         system_prompt: str | None,
-    ) -> dict[str, str]:
+        skills: list[str] | None,
+    ) -> dict[str, object]:
         agent = self._get_agent(agent_id)
         if name is not None:
             agent.name = name
@@ -95,6 +98,8 @@ class ClientService:
             agent.harness = harness
         if system_prompt is not None:
             agent.system_prompt = system_prompt
+        if skills is not None:
+            agent.skills = list(skills)
         agent.updated_at = utc_now()
         return agent.summary()
 

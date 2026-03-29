@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 class StubClientService:
     def __init__(self) -> None:
-        self.agents: dict[str, dict[str, str]] = {}
+        self.agents: dict[str, dict[str, object]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
         self.killed_kernels: list[str] = []
         self.skills: dict[str, dict[str, object]] = {}
@@ -37,22 +37,24 @@ class StubClientService:
         name: str,
         harness: HarnessName,
         system_prompt: str = "",
-    ) -> dict[str, str]:
-        agent = {
+        skills: list[str] | None = None,
+    ) -> dict[str, object]:
+        agent: dict[str, object] = {
             "agent_id": agent_id,
             "name": name,
             "harness": harness.value,
             "system_prompt": system_prompt,
+            "skills": skills or [],
             "created_at": "now",
             "updated_at": "now",
         }
-        self.agents[agent["agent_id"]] = agent
+        self.agents[str(agent["agent_id"])] = agent
         return agent
 
-    async def list_agents(self) -> list[dict[str, str]]:
+    async def list_agents(self) -> list[dict[str, object]]:
         return list(self.agents.values())
 
-    async def get_agent(self, agent_id: str) -> dict[str, str]:
+    async def get_agent(self, agent_id: str) -> dict[str, object]:
         return self.agents[agent_id]
 
     async def update_agent(
@@ -62,7 +64,8 @@ class StubClientService:
         name: str | None,
         harness: HarnessName | None,
         system_prompt: str | None,
-    ) -> dict[str, str]:
+        skills: list[str] | None,
+    ) -> dict[str, object]:
         agent = self.agents[agent_id]
         if name is not None:
             agent["name"] = name
@@ -70,6 +73,8 @@ class StubClientService:
             agent["harness"] = harness.value
         if system_prompt is not None:
             agent["system_prompt"] = system_prompt
+        if skills is not None:
+            agent["skills"] = list(skills)
         return agent
 
     async def delete_agent(self, agent_id: str) -> None:

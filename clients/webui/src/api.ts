@@ -4,6 +4,7 @@ import type {
   SendMessageResponse,
   SessionDetail,
   SessionSummary,
+  Skill,
 } from "./types";
 
 const apiBase = "/api";
@@ -31,9 +32,23 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listAgents: () => requestJson<Agent[]>("/agents"),
-  createAgent: (payload: { agent_id: string; name: string; system_prompt: string }) =>
+  createAgent: (payload: {
+    agent_id: string;
+    name: string;
+    system_prompt: string;
+    skills?: string[];
+  }) =>
     requestJson<Agent>("/agents", {
       method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateAgent: (agentId: string, payload: {
+    name?: string;
+    system_prompt?: string;
+    skills?: string[];
+  }) =>
+    requestJson<Agent>(`/agents/${agentId}`, {
+      method: "PATCH",
       body: JSON.stringify(payload),
     }),
   deleteAgent: (agentId: string) =>
@@ -60,4 +75,20 @@ export const api = {
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),
   killKernel: (sessionId: string) =>
     requestJson<void>(`/kernels/${sessionId}`, { method: "DELETE" }),
+
+  // Skills
+  listSkills: () => requestJson<Skill[]>("/skills"),
+  getSkill: (skillId: string) => requestJson<Skill>(`/skills/${skillId}`),
+  createSkill: (payload: { skill_id: string; files: Record<string, string> }) =>
+    requestJson<Skill>("/skills", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateSkill: (skillId: string, files: Record<string, string>) =>
+    requestJson<Skill>(`/skills/${skillId}`, {
+      method: "PUT",
+      body: JSON.stringify({ files }),
+    }),
+  deleteSkill: (skillId: string) =>
+    requestJson<void>(`/skills/${skillId}`, { method: "DELETE" }),
 };

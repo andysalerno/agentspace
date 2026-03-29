@@ -1,31 +1,35 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { Agent, KernelSummary, SessionDetail, SessionSummary, ViewId } from "./types";
+import type { Agent, KernelSummary, SessionDetail, SessionSummary, Skill, ViewId } from "./types";
 import Sidebar from "./Sidebar";
 import ChatView from "./ChatView";
 import AgentsView from "./AgentsView";
 import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
+import SkillsView from "./SkillsView";
 
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [kernels, setKernels] = useState<KernelSummary[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function refreshOverview() {
-    const [agentData, sessionData, kernelData] = await Promise.all([
+    const [agentData, sessionData, kernelData, skillData] = await Promise.all([
       api.listAgents(),
       api.listSessions(),
       api.listKernels(),
+      api.listSkills(),
     ]);
     setAgents(agentData);
     setSessions(sessionData);
     setKernels(kernelData);
+    setSkills(skillData);
   }
 
   async function refreshSelectedSession(sessionId: string) {
@@ -49,11 +53,25 @@ export default function App() {
     agent_id: string;
     name: string;
     system_prompt: string;
+    skills: string[];
   }) {
     setBusy(true);
     setError(null);
     try {
       await api.createAgent(form);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateAgent(agentId: string, patch: { skills: string[] }) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateAgent(agentId, patch);
       await refreshOverview();
     } catch (err) {
       setError((err as Error).message);
@@ -138,6 +156,32 @@ export default function App() {
     }
   }
 
+  async function handleCreateSkill(skillId: string, files: Record<string, string>) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.createSkill({ skill_id: skillId, files });
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteSkill(skillId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteSkill(skillId);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleNavigateToChat(sessionId: string) {
     setSelectedSessionId(sessionId);
     setViewId("chat");
@@ -163,7 +207,9 @@ export default function App() {
         return (
           <AgentsView
             agents={agents}
+            skills={skills}
             onCreateAgent={handleCreateAgent}
+            onUpdateAgent={handleUpdateAgent}
             onDeleteAgent={handleDeleteAgent}
             busy={busy}
           />
@@ -178,6 +224,15 @@ export default function App() {
         );
       case "kernels":
         return <KernelsView kernels={kernels} onKillKernel={handleKillKernel} busy={busy} />;
+      case "skills":
+        return (
+          <SkillsView
+            skills={skills}
+            onCreateSkill={handleCreateSkill}
+            onDeleteSkill={handleDeleteSkill}
+            busy={busy}
+          />
+        );
     }
   }
 

@@ -24,21 +24,27 @@ class ClientType(StrEnum):
     WEBUI = "webui"
 
 
+def _empty_skills() -> list[str]:
+    return []
+
+
 @dataclass(slots=True)
 class AgentRecord:
     agent_id: str
     name: str
     harness: HarnessName
     system_prompt: str
+    skills: list[str] = field(default_factory=_empty_skills)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
-    def summary(self) -> dict[str, str]:
+    def summary(self) -> dict[str, object]:
         return {
             "agent_id": self.agent_id,
             "name": self.name,
             "harness": self.harness.value,
             "system_prompt": self.system_prompt,
+            "skills": list(self.skills),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
