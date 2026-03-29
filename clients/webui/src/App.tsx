@@ -125,6 +125,19 @@ export default function App() {
     }
   }
 
+  async function handleKillKernel(kernelSessionId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.killKernel(kernelSessionId);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleNavigateToChat(sessionId: string) {
     setSelectedSessionId(sessionId);
     setViewId("chat");
@@ -164,7 +177,7 @@ export default function App() {
           />
         );
       case "kernels":
-        return <KernelsView kernels={kernels} />;
+        return <KernelsView kernels={kernels} onKillKernel={handleKillKernel} busy={busy} />;
     }
   }
 

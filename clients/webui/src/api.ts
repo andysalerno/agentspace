@@ -58,4 +58,6 @@ export const api = {
   resetSession: (sessionId: string) =>
     requestJson<SessionSummary>(`/sessions/${sessionId}/reset`, { method: "POST" }),
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),
+  killKernel: (sessionId: string) =>
+    requestJson<void>(`/kernels/${sessionId}`, { method: "DELETE" }),
 };

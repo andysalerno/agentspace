@@ -39,6 +39,10 @@ class SessionNotFoundError(KeyError):
     pass
 
 
+class KernelNotFoundError(KeyError):
+    pass
+
+
 class ClientService:
     def __init__(self, agent_host_client: AgentHostClient | None = None) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
@@ -184,6 +188,28 @@ class ClientService:
                 },
             )
         return kernels
+
+    async def kill_kernel(self, kernel_session_id: str) -> None:
+        upstream_sessions = await self._agent_host.list_sessions()
+        found = any(
+            str(s["session_id"]) == kernel_session_id for s in upstream_sessions
+        )
+        if not found:
+            raise KernelNotFoundError(kernel_session_id)
+        await self._agent_host.destroy_session(kernel_session_id)
+        async with self._lock:
+            affected = [
+                sid
+                for sid, session in self._sessions.items()
+                if session.agent_host_session_id == kernel_session_id
+            ]
+            for sid in affected:
+                self._sessions[sid].status = "dead"
+        logger.info(
+            "killed kernel %s, marked %d client sessions as dead",
+            kernel_session_id,
+            len(affected),
+        )
 
     async def _send_to_session(
         self,

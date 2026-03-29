@@ -14,6 +14,7 @@ from client_service.service import (
     AgentNotFoundError,
     ClientService,
     InvalidAgentIdError,
+    KernelNotFoundError,
     SessionNotFoundError,
 )
 
@@ -175,3 +176,11 @@ async def delete_session(session_id: str) -> None:
 @app.get("/kernels")
 async def list_kernels() -> list[dict[str, object]]:
     return await service.list_kernels()
+
+
+@app.delete("/kernels/{kernel_session_id}", status_code=204)
+async def kill_kernel(kernel_session_id: str) -> None:
+    try:
+        await service.kill_kernel(kernel_session_id)
+    except KernelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -2,9 +2,11 @@ import type { KernelSummary } from "./types";
 
 type KernelsViewProps = {
     kernels: KernelSummary[];
+    onKillKernel: (sessionId: string) => void;
+    busy: boolean;
 };
 
-export default function KernelsView({ kernels }: KernelsViewProps) {
+export default function KernelsView({ kernels, onKillKernel, busy }: KernelsViewProps) {
     return (
         <div className="view-content">
             <div className="view-header">
@@ -36,6 +38,17 @@ export default function KernelsView({ kernels }: KernelsViewProps) {
                                         ))}
                                     </div>
                                 )}
+                            </div>
+                            <div className="card-footer">
+                                <span className="muted">{kernel.turns} turn{kernel.turns !== 1 ? "s" : ""}</span>
+                                <button
+                                    className="danger-button"
+                                    disabled={busy}
+                                    onClick={() => onKillKernel(kernel.session_id)}
+                                    type="button"
+                                >
+                                    Kill
+                                </button>
                             </div>
                         </div>
                     ))}

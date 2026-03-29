@@ -9,6 +9,7 @@ from client_service.service import (
     AgentNotFoundError,
     ClientService,
     InvalidAgentIdError,
+    KernelNotFoundError,
     SessionNotFoundError,
 )
 from kernel.events import (
@@ -82,6 +83,7 @@ class StubAgentHostClient:
 
     async def destroy_session(self, session_id: str) -> None:
         self.destroyed.append(session_id)
+        self._sessions.pop(session_id, None)
 
 
 @pytest.mark.asyncio
@@ -181,3 +183,34 @@ async def test_agent_id_validation_and_uniqueness() -> None:
 
     with pytest.raises(AgentAlreadyExistsError):
         await service.create_agent(agent_id="valid-agent", name="Duplicate")
+
+
+@pytest.mark.asyncio
+async def test_kill_kernel_destroys_and_marks_sessions_dead() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    await service.create_agent(agent_id="test-agent", name="Test Agent")
+    session = await service.create_session(
+        agent_id="test-agent",
+        cwd=None,
+        channel_name="webui",
+        client_type=ClientType.WEBUI,
+    )
+    kernel_session_id = str(session["agent_host_session_id"])
+
+    await service.kill_kernel(kernel_session_id)
+
+    assert kernel_session_id in upstream.destroyed
+    sessions = await service.list_sessions()
+    assert len(sessions) == 1
+    assert sessions[0]["status"] == "dead"
+
+
+@pytest.mark.asyncio
+async def test_kill_kernel_not_found_raises() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    with pytest.raises(KernelNotFoundError):
+        await service.kill_kernel("nonexistent")

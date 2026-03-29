@@ -5,6 +5,9 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from client_service.service import (
+    KernelNotFoundError,
+)
 from fastapi.testclient import TestClient
 from kernel.events import (
     KernelEvent,
@@ -23,6 +26,7 @@ class StubClientService:
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, str]] = {}
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.killed_kernels: list[str] = []
 
     async def create_agent(
         self,
@@ -162,6 +166,11 @@ class StubClientService:
             },
         ]
 
+    async def kill_kernel(self, kernel_session_id: str) -> None:
+        if kernel_session_id != "host-1":
+            raise KernelNotFoundError(kernel_session_id)
+        self.killed_kernels.append(kernel_session_id)
+
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -214,3 +223,15 @@ def test_invalid_agent_id_rejected(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_kill_kernel_returns_204(client: TestClient) -> None:
+    response = client.delete("/kernels/host-1")
+
+    assert response.status_code == 204
+
+
+def test_kill_kernel_not_found_returns_404(client: TestClient) -> None:
+    response = client.delete("/kernels/nonexistent")
+
+    assert response.status_code == 404
