@@ -17,7 +17,7 @@ Today the implemented stack is:
 6. `client_service`
    Client-facing gateway that stores agent definitions, transcript history, and channel-to-session mappings in memory while proxying session work to `agent_host`.
 7. `webui`
-   Minimal hosted web client that talks only to `client_service`.
+   Minimal TypeScript dashboard that talks only to `client_service`.
 8. `cli_channel`
    A proof-of-concept external channel process that registers with `client_service` and sends repeated messages through a long-lived mapped session.
 
@@ -62,6 +62,7 @@ Implemented:
 - in-memory agent host service
 - in-memory client service
 - minimal hosted web UI
+- kernel-session listing routed from `agent_host` through `client_service`
 - channel registration and channel-to-session mapping in `client_service`
 - minimal `cli_channel` proof client
 - automated tests for event serialization, echo flow, copilot mapping, and runner config

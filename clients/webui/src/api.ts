@@ -7,7 +7,19 @@ import type {
   SessionSummary,
 } from "./types";
 
-const apiBase = import.meta.env.VITE_CLIENT_SERVICE_BASE_URL ?? "http://localhost:8002";
+declare global {
+  interface Window {
+    __AGENTSPACE_CONFIG__?: {
+      clientServiceBaseUrl?: string;
+    };
+  }
+}
+
+const runtimeApiBase = window.__AGENTSPACE_CONFIG__?.clientServiceBaseUrl?.trim();
+const apiBase =
+  runtimeApiBase && runtimeApiBase.length > 0
+    ? runtimeApiBase
+    : (import.meta.env.VITE_CLIENT_SERVICE_BASE_URL ?? "http://localhost:8002");
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {

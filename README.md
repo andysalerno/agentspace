@@ -10,7 +10,7 @@ The repo is currently centered on the kernel milestone:
 - `kernel_host`: runner plus one-session HTTP service mode for kernel containers
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
 - `client_service`: client-facing API over `agent_host`
-- `webui`: minimal hosted web UI over `client_service`
+- `webui`: TypeScript dashboard over `client_service`
 - `cli_channel`: proof-of-concept channel client over `client_service`
 
 For now, keep `copilot-cli` as the only real kernel path.
@@ -122,6 +122,7 @@ Current endpoints:
 - `POST /channels/{channel_id}/messages`
 - `POST /channels/{channel_id}/reset`
 - `DELETE /channels/{channel_id}`
+- `GET /kernels`
 
 Channel notes:
 
@@ -132,7 +133,7 @@ Channel notes:
 
 ## Web UI
 
-`webui` is a deliberately simple hosted client over `client_service`.
+`webui` is a deliberately simple TypeScript dashboard over `client_service`.
 
 Start it with:
 
@@ -150,11 +151,11 @@ Default endpoint: `http://127.0.0.1:8003`
 
 It currently supports:
 
-- creating an agent
-- starting a session
-- sending chat messages
-- resetting a session
-- viewing transcript history
+- viewing, creating, and deleting agents
+- starting sessions and chatting with them
+- viewing existing sessions, including channel-backed sessions
+- viewing registered channels and their mapped sessions
+- viewing active kernel sessions exposed through `client_service`
 
 ## CliChannel
 

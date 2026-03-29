@@ -17,5 +17,9 @@ FROM nginx:1.27-alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY clients/webui/nginx.conf /etc/nginx/conf.d/default.conf
+COPY clients/webui/config.js.template /usr/share/nginx/html/config.js.template
+COPY clients/webui/docker-entrypoint.sh /docker-entrypoint.d/40-webui-config.sh
+
+RUN chmod +x /docker-entrypoint.d/40-webui-config.sh
 
 EXPOSE 8003
