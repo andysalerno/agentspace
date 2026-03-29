@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kernel.protocol import Kernel
 
+from kernel_codex import CodexKernel
 from kernel_copilot import CopilotKernel
 from kernel_echo import EchoKernel
 
@@ -15,11 +16,13 @@ from kernel_echo import EchoKernel
 class HarnessName(StrEnum):
     ECHO = "echo"
     COPILOT_CLI = "copilot-cli"
+    CODEX = "codex"
 
 
 KERNEL_REGISTRY: dict[HarnessName, type] = {
     HarnessName.ECHO: EchoKernel,
     HarnessName.COPILOT_CLI: CopilotKernel,
+    HarnessName.CODEX: CodexKernel,
 }
 
 

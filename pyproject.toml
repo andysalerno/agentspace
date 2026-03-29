@@ -14,6 +14,7 @@ members = ["kernels/*", "services/*", "channels/*"]
 [tool.uv.sources]
 kernel = { workspace = true }
 kernel-echo = { workspace = true }
+kernel-codex = { workspace = true }
 kernel-copilot = { workspace = true }
 kernel-host = { workspace = true }
 agent-host = { workspace = true }
@@ -41,6 +42,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["INP001", "S101"]
 "kernels/kernel_copilot/tests/test_copilot.py" = ["E501", "SLF001"]
+"kernels/kernel_codex/tests/test_codex.py" = ["E501", "SLF001"]
 
 [tool.pyright]
 pythonVersion = "3.13"
@@ -50,6 +52,7 @@ venv = ".venv"
 extraPaths = [
     "kernels/kernel/src",
     "kernels/kernel_echo/src",
+    "kernels/kernel_codex/src",
     "kernels/kernel_copilot/src",
     "kernels/kernel_host/src",
     "services/agent_host/src",

@@ -9,6 +9,7 @@ members = [
     "cli-channel",
     "client-service",
     "kernel",
+    "kernel-codex",
     "kernel-copilot",
     "kernel-echo",
     "kernel-host",
@@ -316,6 +317,17 @@ version = "0.1.0"
 source = { editable = "kernels/kernel" }
 
 [[package]]
+name = "kernel-codex"
+version = "0.1.0"
+source = { editable = "kernels/kernel_codex" }
+dependencies = [
+    { name = "kernel" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
+
+[[package]]
 name = "kernel-copilot"
 version = "0.1.0"
 source = { editable = "kernels/kernel_copilot" }
@@ -344,6 +356,7 @@ source = { editable = "kernels/kernel_host" }
 dependencies = [
     { name = "fastapi" },
     { name = "kernel" },
+    { name = "kernel-codex" },
     { name = "kernel-copilot" },
     { name = "kernel-echo" },
     { name = "uvicorn" },
@@ -353,6 +366,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi" },
     { name = "kernel", editable = "kernels/kernel" },
+    { name = "kernel-codex", editable = "kernels/kernel_codex" },
     { name = "kernel-copilot", editable = "kernels/kernel_copilot" },
     { name = "kernel-echo", editable = "kernels/kernel_echo" },
     { name = "uvicorn" },
