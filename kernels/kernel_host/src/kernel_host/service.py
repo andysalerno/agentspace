@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +10,8 @@ from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel.protocol import KernelConfig
 
 from kernel_host.registry import HarnessName, get_kernel
+
+logger = logging.getLogger(__name__)
 
 
 class KernelSessionService:
@@ -23,7 +27,8 @@ class KernelSessionService:
         self._additional_paths = additional_paths
         self._session_id: str | None = None
         self._history: list[list[KernelEvent]] = []
-        self._raw_logs: list[str] = []
+        self._log_path = Path(tempfile.mkdtemp()) / "kernel.log"
+        self._log_path.touch()
         self._status = KernelStatus.IDLE
 
     async def send_message(self, message: str) -> list[KernelEvent]:
@@ -42,7 +47,9 @@ class KernelSessionService:
             self._session_id = kernel.resume_token
         self._history.append(events)
         raw_logs: list[str] = getattr(kernel, "raw_logs", [])
-        self._raw_logs.extend(raw_logs)
+        if raw_logs:
+            with self._log_path.open("a", encoding="utf-8") as f:
+                f.writelines(line + "\n" for line in raw_logs)
         self._status = self._derive_status(events, kernel.status)
         return events
 
@@ -59,12 +66,15 @@ class KernelSessionService:
         return list(self._history)
 
     async def logs(self) -> list[str]:
-        return list(self._raw_logs)
+        try:
+            return self._log_path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return []
 
     async def reset(self) -> dict[str, Any]:
         self._session_id = None
         self._history.clear()
-        self._raw_logs.clear()
+        self._log_path.write_text("", encoding="utf-8")
         self._status = KernelStatus.IDLE
         return await self.summary()
 
