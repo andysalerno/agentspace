@@ -1,0 +1,11 @@
+services:
+  webui:
+    build:
+      context: ../..
+      dockerfile: clients/webui/Dockerfile
+    env_file:
+      - .env
+    ports:
+      - "8003:8003"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

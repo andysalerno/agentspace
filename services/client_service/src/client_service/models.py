@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from enum import StrEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kernel_host.registry import HarnessName
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+class MessageRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+    SYSTEM = "system"
+
+
+@dataclass(slots=True)
+class AgentRecord:
+    agent_id: str
+    name: str
+    harness: HarnessName
+    system_prompt: str
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+    def summary(self) -> dict[str, str]:
+        return {
+            "agent_id": self.agent_id,
+            "name": self.name,
+            "harness": self.harness.value,
+            "system_prompt": self.system_prompt,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(slots=True)
+class MessageRecord:
+    message_id: str
+    session_id: str
+    role: MessageRole
+    content: str
+    created_at: str = field(default_factory=utc_now)
+
+    def summary(self) -> dict[str, str]:
+        return {
+            "message_id": self.message_id,
+            "session_id": self.session_id,
+            "role": self.role.value,
+            "content": self.content,
+            "created_at": self.created_at,
+        }
+
+
+def _empty_messages() -> list[MessageRecord]:
+    return []
+
+
+@dataclass(slots=True)
+class SessionRecord:
+    session_id: str
+    agent_id: str
+    agent_host_session_id: str
+    status: str
+    cwd: str | None
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+    messages: list[MessageRecord] = field(default_factory=_empty_messages)
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "session_id": self.session_id,
+            "agent_id": self.agent_id,
+            "agent_host_session_id": self.agent_host_session_id,
+            "status": self.status,
+            "cwd": self.cwd,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "message_count": len(self.messages),
+        }
+
+    def detail(self) -> dict[str, object]:
+        data = self.summary()
+        data["messages"] = [message.summary() for message in self.messages]
+        return data
