@@ -40,6 +40,7 @@ class KernelRuntime(Protocol):
         harness: HarnessName,
         env: dict[str, str],
         additional_paths: tuple[str, ...],
+        skills: tuple[str, ...] = (),
     ) -> KernelRuntimeSession: ...
 
     async def send_message(
@@ -77,6 +78,7 @@ class SessionRecord:
     runtime_session: KernelRuntimeSession
     env: dict[str, str]
     additional_paths: tuple[str, ...]
+    skills: tuple[str, ...] = ()
     history: list[list[KernelEvent]] = field(default_factory=_empty_history)
     status: KernelStatus = KernelStatus.IDLE
     resume_token: str | None = None
@@ -130,6 +132,7 @@ class DockerKernelRuntime:
         harness: HarnessName,
         env: dict[str, str],
         additional_paths: tuple[str, ...],
+        skills: tuple[str, ...] = (),
     ) -> KernelRuntimeSession:
         container_name = f"agentspace-kernel-{session_id[:12]}"
         base_url = self._base_url_template.format(container_name=container_name)
@@ -139,6 +142,7 @@ class DockerKernelRuntime:
             harness,
             env,
             additional_paths,
+            skills,
         )
         await self._wait_until_ready(base_url)
         return KernelRuntimeSession(
@@ -199,6 +203,7 @@ class DockerKernelRuntime:
         harness: HarnessName,
         env: dict[str, str],
         additional_paths: tuple[str, ...],
+        skills: tuple[str, ...] = (),
     ) -> None:
         environment = dict(env)
         environment["KERNEL_HARNESS"] = harness.value
@@ -206,7 +211,10 @@ class DockerKernelRuntime:
             environment["KERNEL_ADDITIONAL_PATHS"] = os.pathsep.join(additional_paths)
 
         skills_mount = SKILLS_MOUNT_PATHS.get(harness, "/skills")
+        skills_staging = "/mnt/all-skills"
         environment["KERNEL_SKILLS_DIR"] = skills_mount
+        environment["KERNEL_SKILLS_STAGING_DIR"] = skills_staging
+        environment["KERNEL_ENABLED_SKILLS"] = ",".join(skills)
 
         self._client.containers.run(
             self._kernel_image,
@@ -231,7 +239,7 @@ class DockerKernelRuntime:
                     "mode": "rw",
                 },
                 self._skills_volume: {
-                    "bind": skills_mount,
+                    "bind": skills_staging,
                     "mode": "ro",
                 },
             },
@@ -278,6 +286,7 @@ class AgentHost:
         harness: HarnessName = HarnessName.COPILOT_CLI,
         env: dict[str, str] | None = None,
         additional_paths: tuple[str, ...] = (),
+        skills: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         session_id = uuid.uuid4().hex
         merged_env = dict(os.environ)
@@ -287,6 +296,7 @@ class AgentHost:
             harness=harness,
             env=merged_env,
             additional_paths=additional_paths,
+            skills=skills,
         )
         record = SessionRecord(
             session_id=session_id,
@@ -294,6 +304,7 @@ class AgentHost:
             runtime_session=runtime_session,
             env=merged_env,
             additional_paths=additional_paths,
+            skills=skills,
         )
         session_summary = await self._runtime.summary(session=runtime_session)
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
@@ -343,11 +354,13 @@ class AgentHost:
         harness = record.harness
         env = dict(record.env)
         additional_paths = record.additional_paths
+        skills = record.skills
         await self.destroy_session(session_id)
         return await self.create_session(
             harness=harness,
             env=env,
             additional_paths=additional_paths,
+            skills=skills,
         )
 
     async def get_session(self, session_id: str) -> dict[str, Any]:

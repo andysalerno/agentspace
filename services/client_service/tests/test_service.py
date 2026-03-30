@@ -40,6 +40,7 @@ class StubAgentHostClient:
         self,
         *,
         harness: HarnessName,
+        skills: list[str] | None = None,
     ) -> dict[str, object]:
         session_id = f"host-{len(self.created) + 1}"
         self.created.append({"harness": harness, "session_id": session_id})

@@ -25,6 +25,7 @@ class AgentHostClient(Protocol):
         self,
         *,
         harness: HarnessName,
+        skills: list[str] | None = None,
     ) -> JsonDict: ...
 
     async def get_session(self, session_id: str) -> JsonDict: ...
@@ -76,8 +77,11 @@ class HttpAgentHostClient:
         self,
         *,
         harness: HarnessName,
+        skills: list[str] | None = None,
     ) -> JsonDict:
-        payload = {"harness": harness.value}
+        payload: dict[str, object] = {"harness": harness.value}
+        if skills is not None:
+            payload["skills"] = skills
         return cast(
             "JsonDict",
             await self._request_json("POST", "/sessions", json=payload),

@@ -47,6 +47,7 @@ class CreateSessionRequest(BaseModel):
     harness: HarnessName = HarnessName.COPILOT_CLI
     env: dict[str, str] = Field(default_factory=dict)
     additional_paths: list[str] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):
@@ -68,6 +69,7 @@ async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
         harness=payload.harness,
         env=payload.env,
         additional_paths=tuple(payload.additional_paths),
+        skills=tuple(payload.skills),
     )
 
 

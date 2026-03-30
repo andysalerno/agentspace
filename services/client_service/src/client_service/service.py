@@ -125,7 +125,10 @@ class ClientService:
         client_type: ClientType | None = None,
     ) -> dict[str, object]:
         agent = self._get_agent(agent_id)
-        upstream = await self._agent_host.create_session(harness=agent.harness)
+        upstream = await self._agent_host.create_session(
+            harness=agent.harness,
+            skills=agent.skills,
+        )
         session = SessionRecord(
             session_id=uuid.uuid4().hex,
             agent_id=agent_id,

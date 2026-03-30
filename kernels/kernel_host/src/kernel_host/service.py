@@ -100,7 +100,18 @@ def service_from_env() -> KernelSessionService:
     )
 
     skills_dir = os.environ.get("KERNEL_SKILLS_DIR", "")
-    skill_paths = discover_skill_dirs(skills_dir) if skills_dir else ()
+    staging_dir = os.environ.get("KERNEL_SKILLS_STAGING_DIR", "")
+    enabled_skills_raw = os.environ.get("KERNEL_ENABLED_SKILLS")
+    enabled_skills = (
+        {s for s in enabled_skills_raw.split(",") if s}
+        if enabled_skills_raw is not None
+        else None
+    )
+
+    if staging_dir and skills_dir:
+        link_enabled_skills(staging_dir, skills_dir, enabled_skills)
+
+    skill_paths = discover_skill_dirs(skills_dir, enabled_skills) if skills_dir else ()
 
     return KernelSessionService(
         harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO)),
@@ -109,9 +120,46 @@ def service_from_env() -> KernelSessionService:
     )
 
 
-def discover_skill_dirs(skills_dir: str) -> tuple[str, ...]:
-    """Enumerate subdirectories under skills_dir to use as additional paths."""
+def link_enabled_skills(
+    staging_dir: str,
+    skills_dir: str,
+    enabled_skills: set[str] | None,
+) -> None:
+    """Symlink enabled skills from *staging_dir* into *skills_dir*.
+
+    Only skill directories whose name appears in *enabled_skills* are linked.
+    If *enabled_skills* is ``None``, all skills are linked.
+    """
+    staging = Path(staging_dir)
+    target = Path(skills_dir)
+    if not staging.is_dir():
+        return
+    target.mkdir(parents=True, exist_ok=True)
+    for entry in sorted(staging.iterdir()):
+        if not entry.is_dir():
+            continue
+        if enabled_skills is not None and entry.name not in enabled_skills:
+            continue
+        link = target / entry.name
+        if not link.exists():
+            link.symlink_to(entry)
+            logger.info("linked skill %s -> %s", link, entry)
+
+
+def discover_skill_dirs(
+    skills_dir: str,
+    enabled_skills: set[str] | None = None,
+) -> tuple[str, ...]:
+    """Enumerate subdirectories under skills_dir to use as additional paths.
+
+    If *enabled_skills* is not ``None``, only directories whose name appears
+    in the set are included.  An empty set means no skills.
+    """
     base = Path(skills_dir)
     if not base.is_dir():
         return ()
-    return tuple(str(entry) for entry in sorted(base.iterdir()) if entry.is_dir())
+    return tuple(
+        str(entry)
+        for entry in sorted(base.iterdir())
+        if entry.is_dir() and (enabled_skills is None or entry.name in enabled_skills)
+    )

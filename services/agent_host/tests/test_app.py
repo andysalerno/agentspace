@@ -32,8 +32,9 @@ class StubRuntime:
         harness: HarnessName,
         env: dict[str, str],
         additional_paths: tuple[str, ...],
+        skills: tuple[str, ...] = (),
     ) -> KernelRuntimeSession:
-        del harness, env, additional_paths
+        del harness, env, additional_paths, skills
         container_name = f"container-{session_id[:8]}"
         self._summaries[container_name] = {
             "status": "idle",

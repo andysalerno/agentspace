@@ -35,6 +35,7 @@ class StubRuntime:
         harness: HarnessName,
         env: dict[str, str],
         additional_paths: tuple[str, ...],
+        skills: tuple[str, ...] = (),
     ) -> KernelRuntimeSession:
         container_name = f"container-{session_id[:8]}"
         self.created.append(
