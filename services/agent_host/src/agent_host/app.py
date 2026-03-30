@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from agent_host.service import AgentHost, SessionNotFoundError
 from agent_host.skills import (
+    BuiltinSkillReadOnlyError,
     InvalidSkillFilePathError,
     InvalidSkillIdError,
     SkillAlreadyExistsError,
@@ -34,6 +35,7 @@ skills = SkillsService()
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    skills.sync_builtin_skills()
     yield
     await host.destroy_all_sessions()
 
@@ -169,6 +171,8 @@ async def get_skill(skill_id: str) -> dict[str, Any]:
 async def update_skill(skill_id: str, payload: UpdateSkillRequest) -> dict[str, Any]:
     try:
         return skills.update_skill(skill_id, payload.files)
+    except BuiltinSkillReadOnlyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SkillNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (InvalidSkillIdError, InvalidSkillFilePathError) as exc:
@@ -179,6 +183,8 @@ async def update_skill(skill_id: str, payload: UpdateSkillRequest) -> dict[str, 
 async def delete_skill(skill_id: str) -> None:
     try:
         skills.delete_skill(skill_id)
+    except BuiltinSkillReadOnlyError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except SkillNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidSkillIdError as exc:

@@ -13,6 +13,7 @@ export type Agent = {
 export type Skill = {
   skill_id: string;
   files?: Record<string, string>;
+  source?: "builtin" | "user";
 };
 
 export type SessionSummary = {

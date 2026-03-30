@@ -28,6 +28,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - skills:/skills
+      - ./mounts/skills:/builtin-skills:ro
     networks:
       - agentspace
 

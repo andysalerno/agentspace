@@ -3,6 +3,10 @@
 Skills are stored on a volume mounted into the agent-host container.
 Each skill is a directory containing files (primarily markdown).
 The volume path is configured via AGENT_HOST_SKILLS_DIR (default: /skills).
+
+Builtin skills can be loaded from a second directory (e.g. a bind-mounted
+repo folder at /builtin-skills). They are copied into the main skills
+directory at startup and marked read-only via the API.
 """
 
 from __future__ import annotations
@@ -37,6 +41,10 @@ class InvalidSkillFilePathError(ValueError):
     pass
 
 
+class BuiltinSkillReadOnlyError(ValueError):
+    pass
+
+
 def _validate_skill_id(skill_id: str) -> None:
     if not SKILL_ID_PATTERN.fullmatch(skill_id):
         msg = (
@@ -63,10 +71,58 @@ def _validate_file_path(relative_path: str) -> None:
 class SkillsService:
     """Filesystem-backed skill management."""
 
-    def __init__(self, skills_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        skills_dir: str | None = None,
+        builtin_skills_dir: str | None = None,
+    ) -> None:
         self._skills_dir = Path(
             skills_dir or os.environ.get("AGENT_HOST_SKILLS_DIR", "/skills"),
         )
+        self._builtin_skills_dir = Path(
+            builtin_skills_dir
+            or os.environ.get("AGENT_HOST_BUILTIN_SKILLS_DIR", "/builtin-skills"),
+        )
+        self._builtin_ids: set[str] = set()
+
+    def sync_builtin_skills(self) -> None:
+        """Copy skills from the builtin directory into the main skills dir.
+
+        Each subdirectory of the builtin dir whose name matches the skill ID
+        pattern is copied (overwritten) into the main skills directory. The
+        set of builtin skill IDs is recorded so the API can mark them
+        read-only.
+        """
+        if not self._builtin_skills_dir.is_dir():
+            logger.info(
+                "builtin skills dir %s not found, skipping sync",
+                self._builtin_skills_dir,
+            )
+            return
+
+        self._ensure_base_dir()
+        synced: list[str] = []
+
+        for entry in sorted(self._builtin_skills_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            if not SKILL_ID_PATTERN.fullmatch(entry.name):
+                logger.warning(
+                    "skipping builtin skill with invalid id: %s",
+                    entry.name,
+                )
+                continue
+            dest = self._skills_dir / entry.name
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(entry, dest)
+            self._builtin_ids.add(entry.name)
+            synced.append(entry.name)
+
+        logger.info("synced %d builtin skill(s): %s", len(synced), synced)
+
+    def is_builtin(self, skill_id: str) -> bool:
+        return skill_id in self._builtin_ids
 
     def _ensure_base_dir(self) -> None:
         self._skills_dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +147,8 @@ class SkillsService:
 
     def create_skill(self, skill_id: str, files: dict[str, str]) -> SkillDict:
         _validate_skill_id(skill_id)
+        if self.is_builtin(skill_id):
+            raise SkillAlreadyExistsError(skill_id)
         self._ensure_base_dir()
         skill_dir = self._skill_path(skill_id)
         if skill_dir.exists():
@@ -98,7 +156,11 @@ class SkillsService:
         skill_dir.mkdir(parents=True)
         self._write_skill_files(skill_dir, files)
         logger.info("created skill %s with %d files", skill_id, len(files))
-        return {"skill_id": skill_id, "files": self._read_skill_files(skill_dir)}
+        return {
+            "skill_id": skill_id,
+            "files": self._read_skill_files(skill_dir),
+            "source": "user",
+        }
 
     def get_skill(self, skill_id: str) -> SkillDict:
         _validate_skill_id(skill_id)
@@ -108,18 +170,25 @@ class SkillsService:
         return {
             "skill_id": skill_id,
             "files": self._read_skill_files(skill_dir),
+            "source": "builtin" if self.is_builtin(skill_id) else "user",
         }
 
     def list_skills(self) -> list[SkillDict]:
         self._ensure_base_dir()
         return [
-            {"skill_id": entry.name}
+            {
+                "skill_id": entry.name,
+                "source": "builtin" if self.is_builtin(entry.name) else "user",
+            }
             for entry in sorted(self._skills_dir.iterdir())
             if entry.is_dir() and SKILL_ID_PATTERN.fullmatch(entry.name)
         ]
 
     def update_skill(self, skill_id: str, files: dict[str, str]) -> SkillDict:
         _validate_skill_id(skill_id)
+        if self.is_builtin(skill_id):
+            msg = f"builtin skill '{skill_id}' is read-only"
+            raise BuiltinSkillReadOnlyError(msg)
         skill_dir = self._skill_path(skill_id)
         if not skill_dir.is_dir():
             raise SkillNotFoundError(skill_id)
@@ -128,10 +197,17 @@ class SkillsService:
         skill_dir.mkdir(parents=True)
         self._write_skill_files(skill_dir, files)
         logger.info("updated skill %s with %d files", skill_id, len(files))
-        return {"skill_id": skill_id, "files": self._read_skill_files(skill_dir)}
+        return {
+            "skill_id": skill_id,
+            "files": self._read_skill_files(skill_dir),
+            "source": "user",
+        }
 
     def delete_skill(self, skill_id: str) -> None:
         _validate_skill_id(skill_id)
+        if self.is_builtin(skill_id):
+            msg = f"builtin skill '{skill_id}' is read-only"
+            raise BuiltinSkillReadOnlyError(msg)
         skill_dir = self._skill_path(skill_id)
         if not skill_dir.is_dir():
             raise SkillNotFoundError(skill_id)

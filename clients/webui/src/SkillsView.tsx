@@ -176,7 +176,12 @@ export default function SkillsView({
                 {skills.map((skill) => (
                     <div className="card" key={skill.skill_id}>
                         <div className="card-body">
-                            <h3>{skill.skill_id}</h3>
+                            <h3>
+                                {skill.skill_id}
+                                {skill.source === "builtin" && (
+                                    <span className="badge builtin-badge" title="Predefined skill (read-only)">builtin</span>
+                                )}
+                            </h3>
                             {expandedSkillId === skill.skill_id && expandedSkill?.files && (
                                 <div className="skill-file-preview">
                                     {Object.entries(expandedSkill.files).map(([filename, content]) => (
@@ -259,7 +264,7 @@ export default function SkillsView({
                                 {expandedSkillId === skill.skill_id ? "Collapse" : "View Files"}
                             </button>
                             <div className="card-footer-actions">
-                                {editingSkillId !== skill.skill_id && (
+                                {editingSkillId !== skill.skill_id && skill.source !== "builtin" && (
                                     <button
                                         className="secondary-button small"
                                         disabled={busy}
@@ -275,14 +280,16 @@ export default function SkillsView({
                                         Edit
                                     </button>
                                 )}
-                                <button
-                                    className="danger-button small"
-                                    disabled={busy}
-                                    onClick={() => onDeleteSkill(skill.skill_id)}
-                                    type="button"
-                                >
-                                    Delete
-                                </button>
+                                {skill.source !== "builtin" && (
+                                    <button
+                                        className="danger-button small"
+                                        disabled={busy}
+                                        onClick={() => onDeleteSkill(skill.skill_id)}
+                                        type="button"
+                                    >
+                                        Delete
+                                    </button>
+                                )}
                             </div>
                         </div>
                     </div>
