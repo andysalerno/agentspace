@@ -15,6 +15,13 @@ from kernel_host.registry import HarnessName
 
 logger_name = __name__
 
+# Where each harness expects to find skill directories inside the container.
+SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
+    HarnessName.COPILOT_CLI: "/root/.copilot/skills",
+    HarnessName.CODEX: "/skills",
+    HarnessName.ECHO: "/skills",
+}
+
 
 class SessionNotFoundError(KeyError):
     pass
@@ -198,7 +205,8 @@ class DockerKernelRuntime:
         if additional_paths:
             environment["KERNEL_ADDITIONAL_PATHS"] = os.pathsep.join(additional_paths)
 
-        environment["KERNEL_SKILLS_DIR"] = "/skills"
+        skills_mount = SKILLS_MOUNT_PATHS.get(harness, "/skills")
+        environment["KERNEL_SKILLS_DIR"] = skills_mount
 
         self._client.containers.run(
             self._kernel_image,
@@ -223,7 +231,7 @@ class DockerKernelRuntime:
                     "mode": "rw",
                 },
                 self._skills_volume: {
-                    "bind": "/skills",
+                    "bind": skills_mount,
                     "mode": "ro",
                 },
             },

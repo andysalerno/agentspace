@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from agent_host.service import AgentHost, KernelRuntimeSession, SessionNotFoundError
+from agent_host.service import (
+    SKILLS_MOUNT_PATHS,
+    AgentHost,
+    KernelRuntimeSession,
+    SessionNotFoundError,
+)
 from kernel.events import (
     KernelEvent,
     KernelStatus,
@@ -149,3 +154,14 @@ async def test_missing_session_raises() -> None:
 
     with pytest.raises(SessionNotFoundError):
         await host.get_session("missing")
+
+
+def test_skills_mount_paths_covers_all_harnesses() -> None:
+    for harness in HarnessName:
+        assert harness in SKILLS_MOUNT_PATHS, (
+            f"missing SKILLS_MOUNT_PATHS entry for {harness!r}"
+        )
+
+
+def test_copilot_skills_mount_path() -> None:
+    assert SKILLS_MOUNT_PATHS[HarnessName.COPILOT_CLI] == "/root/.copilot/skills"
