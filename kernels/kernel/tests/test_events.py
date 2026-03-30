@@ -4,6 +4,7 @@ from kernel.events import (
     EventType,
     KernelStatus,
     error,
+    reasoning_delta,
     session_end,
     session_start,
     status_event,
@@ -27,6 +28,12 @@ class TestKernelEventSerialization:
         data = json.loads(evt.to_jsonl())
         assert data["type"] == "text_delta"
         assert data["content"] == "hello world"
+
+    def test_reasoning_delta(self) -> None:
+        evt = reasoning_delta("thinking about it")
+        data = json.loads(evt.to_jsonl())
+        assert data["type"] == "reasoning_delta"
+        assert data["content"] == "thinking about it"
 
     def test_status_event(self) -> None:
         evt = status_event(KernelStatus.BUSY)
@@ -73,6 +80,7 @@ class TestKernelEventSerialization:
     def test_event_type_enum_values(self) -> None:
         assert EventType.SESSION_START == "session_start"
         assert EventType.TEXT_DELTA == "text_delta"
+        assert EventType.REASONING_DELTA == "reasoning_delta"
         assert EventType.TOOL_CALL == "tool_call"
         assert EventType.TOOL_RESULT == "tool_result"
         assert EventType.ERROR == "error"

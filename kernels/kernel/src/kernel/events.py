@@ -17,6 +17,7 @@ class EventType(StrEnum):
     SESSION_START = "session_start"
     STATUS = "status"
     TEXT_DELTA = "text_delta"
+    REASONING_DELTA = "reasoning_delta"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     ERROR = "error"
@@ -66,6 +67,10 @@ def status_event(status: KernelStatus) -> KernelEvent:
 
 def text_delta(content: str) -> KernelEvent:
     return KernelEvent(type=EventType.TEXT_DELTA, content=content)
+
+
+def reasoning_delta(content: str) -> KernelEvent:
+    return KernelEvent(type=EventType.REASONING_DELTA, content=content)
 
 
 def tool_call(tool: str, tool_input: dict[str, Any]) -> KernelEvent:

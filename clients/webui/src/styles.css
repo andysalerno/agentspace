@@ -519,6 +519,37 @@ button:disabled {
   align-self: flex-start;
 }
 
+/* ─── Reasoning Block ─── */
+.reasoning-block {
+  margin-bottom: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--card-footer-bg);
+  font-size: 0.85rem;
+}
+
+.reasoning-block summary {
+  cursor: pointer;
+  padding: 6px 10px;
+  color: var(--text-secondary);
+  font-weight: 500;
+  user-select: none;
+}
+
+.reasoning-block summary:hover {
+  color: var(--text-primary);
+}
+
+.reasoning-content {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  max-height: 300px;
+  overflow-y: auto;
+  font-style: italic;
+}
+
 /* ─── Tool Call Tags ─── */
 .tool-calls {
   display: flex;

@@ -35,6 +35,7 @@ export type ChatMessage = {
   content: string;
   created_at: string;
   tool_calls?: Array<{ tool: string }>;
+  reasoning?: string;
 };
 
 export type SessionDetail = SessionSummary & {

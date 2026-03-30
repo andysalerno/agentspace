@@ -62,6 +62,7 @@ class MessageRecord:
     content: str
     created_at: str = field(default_factory=utc_now)
     tool_calls: list[dict[str, str]] = field(default_factory=_empty_tool_calls)
+    reasoning: str = ""
 
     def summary(self) -> dict[str, object]:
         data: dict[str, object] = {
@@ -73,6 +74,8 @@ class MessageRecord:
         }
         if self.tool_calls:
             data["tool_calls"] = list(self.tool_calls)
+        if self.reasoning:
+            data["reasoning"] = self.reasoning
         return data
 
 

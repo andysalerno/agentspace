@@ -16,6 +16,7 @@ from kernel.events import (
     KernelEvent,
     KernelStatus,
     error,
+    reasoning_delta,
     session_end,
     session_start,
     status_event,
@@ -265,6 +266,12 @@ class CopilotKernel:
             content = data.get("deltaContent", "")
             if isinstance(content, str) and content:
                 await self._queue.put(text_delta(content))
+            return
+
+        if event_type == "assistant.reasoning_delta":
+            content = data.get("deltaContent", "")
+            if isinstance(content, str) and content:
+                await self._queue.put(reasoning_delta(content))
             return
 
         if event_type == "assistant.turn_start":

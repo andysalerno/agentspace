@@ -125,6 +125,12 @@ export default function ChatView({
                                 selectedSession.messages.map((msg) => (
                                     <article className={`message ${msg.role}`} key={msg.message_id}>
                                         <header>{msg.role}</header>
+                                        {msg.reasoning && (
+                                            <details className="reasoning-block">
+                                                <summary>Reasoning</summary>
+                                                <div className="reasoning-content">{msg.reasoning}</div>
+                                            </details>
+                                        )}
                                         {msg.tool_calls && msg.tool_calls.length > 0 && (
                                             <div className="tool-calls">
                                                 {msg.tool_calls.map((tc, i) => (

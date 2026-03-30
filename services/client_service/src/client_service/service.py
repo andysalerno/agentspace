@@ -273,6 +273,7 @@ class ClientService:
             role=MessageRole.ASSISTANT,
             content=_flatten_text(events),
             tool_calls=_extract_tool_calls(events),
+            reasoning=_flatten_reasoning(events),
         )
         session.messages.append(assistant_message)
         upstream = await self._agent_host.get_session(session.agent_host_session_id)
@@ -318,6 +319,14 @@ class ClientService:
 def _flatten_text(events: list[KernelEvent]) -> str:
     return "".join(
         event.content or "" for event in events if event.type == EventType.TEXT_DELTA
+    ).strip()
+
+
+def _flatten_reasoning(events: list[KernelEvent]) -> str:
+    return "".join(
+        event.content or ""
+        for event in events
+        if event.type == EventType.REASONING_DELTA
     ).strip()
 
 
