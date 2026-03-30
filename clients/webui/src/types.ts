@@ -28,13 +28,19 @@ export type SessionSummary = {
   message_count: number;
 };
 
+export type ToolCall = {
+  tool: string;
+  input?: string;
+  output?: string;
+};
+
 export type ChatMessage = {
   message_id: string;
   session_id: string;
   role: string;
   content: string;
   created_at: string;
-  tool_calls?: Array<{ tool: string }>;
+  tool_calls?: ToolCall[];
   reasoning?: string;
 };
 

@@ -28,7 +28,22 @@ def _empty_skills() -> list[str]:
     return []
 
 
-def _empty_tool_calls() -> list[dict[str, str]]:
+@dataclass(frozen=True, slots=True)
+class ToolCallRecord:
+    tool: str
+    input: str | None = None
+    output: str | None = None
+
+    def summary(self) -> dict[str, object]:
+        data: dict[str, object] = {"tool": self.tool}
+        if self.input is not None:
+            data["input"] = self.input
+        if self.output is not None:
+            data["output"] = self.output
+        return data
+
+
+def _empty_tool_calls() -> list[ToolCallRecord]:
     return []
 
 
@@ -61,7 +76,7 @@ class MessageRecord:
     role: MessageRole
     content: str
     created_at: str = field(default_factory=utc_now)
-    tool_calls: list[dict[str, str]] = field(default_factory=_empty_tool_calls)
+    tool_calls: list[ToolCallRecord] = field(default_factory=_empty_tool_calls)
     reasoning: str = ""
 
     def summary(self) -> dict[str, object]:
@@ -73,7 +88,7 @@ class MessageRecord:
             "created_at": self.created_at,
         }
         if self.tool_calls:
-            data["tool_calls"] = list(self.tool_calls)
+            data["tool_calls"] = [tc.summary() for tc in self.tool_calls]
         if self.reasoning:
             data["reasoning"] = self.reasoning
         return data

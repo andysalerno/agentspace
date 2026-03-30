@@ -193,16 +193,32 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
 
     assert assistant_message["content"] == "Done editing."
     assert assistant_message["tool_calls"] == [
-        {"tool": "read_file"},
-        {"tool": "write_file"},
+        {
+            "tool": "read_file",
+            "input": '{\n  "path": "src/foo.py"\n}',
+            "output": "print('hello')",
+        },
+        {
+            "tool": "write_file",
+            "input": '{\n  "path": "src/bar.py",\n  "content": "x = 1"\n}',
+            "output": "ok",
+        },
     ]
 
     # Verify tool calls persist in session history
     messages = await service.list_messages(session_id)
     assert len(messages) == 2
     assert messages[1]["tool_calls"] == [
-        {"tool": "read_file"},
-        {"tool": "write_file"},
+        {
+            "tool": "read_file",
+            "input": '{\n  "path": "src/foo.py"\n}',
+            "output": "print('hello')",
+        },
+        {
+            "tool": "write_file",
+            "input": '{\n  "path": "src/bar.py",\n  "content": "x = 1"\n}',
+            "output": "ok",
+        },
     ]
 
 

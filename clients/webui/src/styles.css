@@ -569,6 +569,73 @@ button:disabled {
   color: var(--tool-tag-color);
   font-size: 0.78rem;
   font-family: "Cascadia Code", "Fira Code", monospace;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.tool-call-tag:hover {
+  background: var(--tool-tag-border);
+  border-color: var(--tool-tag-color);
+}
+
+/* ─── Tool Detail Overlay ─── */
+.tool-detail-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.tool-detail-pane {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  width: 700px;
+  max-width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+}
+
+.tool-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.tool-detail-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-family: "Cascadia Code", "Fira Code", monospace;
+}
+
+.tool-detail-editors {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.tool-detail-section {
+  display: flex;
+  flex-direction: column;
+}
+
+.tool-detail-section label {
+  padding: 8px 16px 4px;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  font-weight: 600;
 }
 
 .composer {

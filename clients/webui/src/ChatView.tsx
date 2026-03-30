@@ -1,5 +1,6 @@
 import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
-import type { Agent, SessionDetail, SessionSummary } from "./types";
+import type { Agent, SessionDetail, SessionSummary, ToolCall } from "./types";
+import ToolDetailPane from "./ToolDetailPane";
 
 type ChatViewProps = {
     agents: Agent[];
@@ -28,6 +29,7 @@ export default function ChatView({
     const [newSessionAgentId, setNewSessionAgentId] = useState("");
     const [newSessionChannelName, setNewSessionChannelName] = useState("");
     const [showNewSession, setShowNewSession] = useState(false);
+    const [selectedToolCall, setSelectedToolCall] = useState<ToolCall | null>(null);
 
     useEffect(() => {
         if (!newSessionAgentId && agents.length > 0) {
@@ -134,9 +136,14 @@ export default function ChatView({
                                         {msg.tool_calls && msg.tool_calls.length > 0 && (
                                             <div className="tool-calls">
                                                 {msg.tool_calls.map((tc, i) => (
-                                                    <span className="tool-call-tag" key={i}>
+                                                    <button
+                                                        className="tool-call-tag"
+                                                        key={i}
+                                                        type="button"
+                                                        onClick={() => setSelectedToolCall(tc)}
+                                                    >
                                                         ⚙ {tc.tool}
-                                                    </span>
+                                                    </button>
                                                 ))}
                                             </div>
                                         )}
@@ -175,6 +182,12 @@ export default function ChatView({
                     </div>
                 )}
             </section>
+            {selectedToolCall && (
+                <ToolDetailPane
+                    toolCall={selectedToolCall}
+                    onClose={() => setSelectedToolCall(null)}
+                />
+            )}
         </div>
     );
 }

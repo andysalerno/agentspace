@@ -49,6 +49,7 @@ class CopilotKernel:
         self._output_task: asyncio.Task[None] | None = None
         self._queue: asyncio.Queue[KernelEvent | None] = asyncio.Queue()
         self._raw_lines: list[str] = []
+        self._tool_call_names: dict[str, str] = {}
 
     @property
     def name(self) -> str:
@@ -257,7 +258,7 @@ class CopilotKernel:
                 self._raw_lines.append(f"[stderr] {line}")
                 await self._queue.put(error(line))
 
-    async def _map_event(self, obj: dict[str, object]) -> None:  # noqa: C901, PLR0911, PLR0912
+    async def _map_event(self, obj: dict[str, object]) -> None:  # noqa: C901, PLR0911, PLR0912, PLR0915
         event_type = obj.get("type", "")
         raw_data = obj.get("data")
         data = cast("dict[str, object]", raw_data) if isinstance(raw_data, dict) else {}
@@ -302,6 +303,33 @@ class CopilotKernel:
             tool_name, tool_output = self._extract_tool_result(data)
             if tool_name is not None and tool_output is not None:
                 await self._queue.put(tool_result(tool_name, tool_output))
+            return
+
+        if event_type == "tool.execution_start":
+            call_id = data.get("toolCallId")
+            tool_name = data.get("toolName")
+            if isinstance(call_id, str) and isinstance(tool_name, str):
+                self._tool_call_names[call_id] = tool_name
+            return
+
+        if event_type == "tool.execution_complete":
+            call_id = data.get("toolCallId")
+            if isinstance(call_id, str):
+                tool_name = self._tool_call_names.pop(call_id, None)
+            else:
+                tool_name = None
+            if tool_name is not None:
+                raw_result = data.get("result")
+                if isinstance(raw_result, dict):
+                    result_dict = cast("dict[str, object]", raw_result)
+                    output = str(
+                        result_dict.get("detailedContent")
+                        or result_dict.get("content")
+                        or "",
+                    )
+                else:
+                    output = str(raw_result) if raw_result else ""
+                await self._queue.put(tool_result(tool_name, output))
             return
 
         if event_type == "result":

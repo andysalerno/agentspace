@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import uuid
@@ -16,6 +17,7 @@ from client_service.models import (
     MessageRecord,
     MessageRole,
     SessionRecord,
+    ToolCallRecord,
     utc_now,
 )
 
@@ -330,13 +332,25 @@ def _flatten_reasoning(events: list[KernelEvent]) -> str:
     ).strip()
 
 
-def _extract_tool_calls(events: list[KernelEvent]) -> list[dict[str, str]]:
-    """Extract tool call names from kernel events."""
-    return [
-        {"tool": event.tool}
-        for event in events
-        if event.type == EventType.TOOL_CALL and event.tool
-    ]
+def _extract_tool_calls(events: list[KernelEvent]) -> list[ToolCallRecord]:
+    """Extract tool calls with their inputs and paired outputs."""
+    calls: list[ToolCallRecord] = []
+    result_map: dict[str, str] = {}
+    for event in events:
+        if event.type == EventType.TOOL_RESULT and event.tool and event.output:
+            result_map[event.tool] = event.output
+    for event in events:
+        if event.type == EventType.TOOL_CALL and event.tool:
+            tool_input = json.dumps(event.input, indent=2) if event.input else None
+            tool_output = result_map.pop(event.tool, None)
+            calls.append(
+                ToolCallRecord(
+                    tool=event.tool,
+                    input=tool_input,
+                    output=tool_output,
+                )
+            )
+    return calls
 
 
 def _validate_agent_id(agent_id: str) -> None:
