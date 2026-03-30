@@ -33,3 +33,7 @@ stack-logs:
 
 stack-status:
   docker compose -f compose.yaml ps
+
+# One-time setup: launch interactive copilot session for /login auth
+copilot-setup:
+  {{kernel_host_script}} setup
