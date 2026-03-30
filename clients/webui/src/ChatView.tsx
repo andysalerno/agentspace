@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
 import type { Agent, SessionDetail, SessionSummary } from "./types";
 
 type ChatViewProps = {
@@ -146,9 +146,17 @@ export default function ChatView({
                         <form className="composer" onSubmit={handleSendMessage}>
                             <textarea
                                 placeholder="Type a message…"
-                                rows={3}
+                                rows={1}
                                 value={messageDraft}
                                 onChange={(e) => setMessageDraft(e.target.value)}
+                                onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
+                                    if (e.key === "Enter" && !e.shiftKey) {
+                                        e.preventDefault();
+                                        if (messageDraft.trim() && !busy) {
+                                            void handleSendMessage(e as unknown as FormEvent<HTMLFormElement>);
+                                        }
+                                    }
+                                }}
                             />
                             <button disabled={busy || !messageDraft.trim()} type="submit">
                                 Send
