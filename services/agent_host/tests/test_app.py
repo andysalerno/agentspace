@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -17,6 +18,8 @@ from kernel.events import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from kernel_host.registry import HarnessName
 
 
@@ -49,6 +52,20 @@ class StubRuntime:
         session: KernelRuntimeSession,
         message: str,
     ) -> list[KernelEvent]:
+        return [
+            event
+            async for event in self.stream_message(
+                session=session,
+                message=message,
+            )
+        ]
+
+    def stream_message(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]:
         container_name = self._session_key(session)
         events = [
             session_start("kernel-session", "stub"),
@@ -57,12 +74,17 @@ class StubRuntime:
             status_event(KernelStatus.DONE),
             session_end(),
         ]
-        self._histories[container_name].append(events)
-        self._summaries[container_name] = {
-            "status": "done",
-            "resume_token": "resume-runtime-2",
-        }
-        return events
+
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            for event in events:
+                yield event
+            self._histories[container_name].append(events)
+            self._summaries[container_name] = {
+                "status": "done",
+                "resume_token": "resume-runtime-2",
+            }
+
+        return iterator()
 
     async def summary(self, *, session: KernelRuntimeSession) -> dict[str, object]:
         return dict(self._summaries[self._session_key(session)])
@@ -127,6 +149,28 @@ def test_session_lifecycle(client: TestClient) -> None:
     assert message.json()["events"][2]["content"] == "hello"
     assert history.json()["history"][0][2]["content"] == "hello"
     assert session.json()["resume_token"].startswith("resume-runtime-")
+
+
+def test_message_stream_route(client: TestClient) -> None:
+    created = client.post("/sessions", json={"harness": "copilot-cli"})
+    session_id = created.json()["session_id"]
+
+    with client.stream(
+        "POST",
+        f"/sessions/{session_id}/messages/stream",
+        json={"message": "hello"},
+    ) as response:
+        lines = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert [line["type"] for line in lines] == [
+        "session_start",
+        "status",
+        "text_delta",
+        "status",
+        "session_end",
+    ]
+    assert lines[2]["content"] == "hello"
 
 
 def test_session_logs(client: TestClient) -> None:

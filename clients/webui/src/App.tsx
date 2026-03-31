@@ -1,12 +1,78 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
-import type { Agent, KernelSummary, SessionDetail, SessionSummary, Skill, ViewId } from "./types";
+import type {
+  Agent,
+  ChatMessage,
+  KernelEvent,
+  KernelSummary,
+  SessionDetail,
+  SessionSummary,
+  Skill,
+  ToolCall,
+  ViewId,
+} from "./types";
 import Sidebar from "./Sidebar";
 import ChatView from "./ChatView";
 import AgentsView from "./AgentsView";
 import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
 import SkillsView from "./SkillsView";
+
+function createLocalMessage(
+  sessionId: string,
+  role: "user" | "assistant",
+  content: string,
+): ChatMessage {
+  return {
+    message_id: `${role}-${crypto.randomUUID()}`,
+    session_id: sessionId,
+    role,
+    content,
+    created_at: new Date().toISOString(),
+    tool_calls: [],
+  };
+}
+
+function applyEventToAssistant(
+  message: ChatMessage,
+  event: KernelEvent,
+): ChatMessage {
+  if (event.type === "text_delta" && event.content) {
+    return { ...message, content: `${message.content}${event.content}` };
+  }
+
+  if (event.type === "reasoning_delta" && event.content) {
+    return {
+      ...message,
+      reasoning: `${message.reasoning ?? ""}${event.content}`,
+    };
+  }
+
+  if (event.type === "tool_call" && event.tool) {
+    const nextToolCalls = [
+      ...(message.tool_calls ?? []),
+      {
+        tool: event.tool,
+        input: event.input ? JSON.stringify(event.input, null, 2) : undefined,
+      } satisfies ToolCall,
+    ];
+    return { ...message, tool_calls: nextToolCalls };
+  }
+
+  if (event.type === "tool_result" && event.tool && event.output) {
+    const toolCalls = [...(message.tool_calls ?? [])];
+    const toolIndex = toolCalls.findIndex(
+      (toolCall) => toolCall.tool === event.tool && toolCall.output === undefined,
+    );
+    if (toolIndex >= 0) {
+      const toolCall = toolCalls[toolIndex];
+      toolCalls[toolIndex] = { ...toolCall, output: event.output };
+      return { ...message, tool_calls: toolCalls };
+    }
+  }
+
+  return message;
+}
 
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
@@ -18,6 +84,9 @@ export default function App() {
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
+  const streamControllerRef = useRef<AbortController | null>(null);
+  const streamingSessionIdRef = useRef<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     return localStorage.getItem("sidebar-collapsed") === "true";
   });
@@ -59,12 +128,28 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (
+      streamingSessionIdRef.current !== null
+      && streamingSessionIdRef.current !== selectedSessionId
+    ) {
+      streamControllerRef.current?.abort();
+      streamControllerRef.current = null;
+      streamingSessionIdRef.current = null;
+      setStreamingMessage(null);
+      setBusy(false);
+    }
     if (!selectedSessionId) {
       setSelectedSession(null);
       return;
     }
     refreshSelectedSession(selectedSessionId).catch((err: Error) => setError(err.message));
   }, [selectedSessionId]);
+
+  useEffect(() => {
+    return () => {
+      streamControllerRef.current?.abort();
+    };
+  }, []);
 
   async function handleCreateAgent(form: {
     agent_id: string;
@@ -131,22 +216,76 @@ export default function App() {
     }
   }
 
-  async function handleSendMessage(message: string) {
+  function handleSendMessage(message: string) {
     if (!selectedSessionId) return;
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    streamingSessionIdRef.current = null;
     setBusy(true);
     setError(null);
-    try {
-      await api.sendMessage(selectedSessionId, message);
-      await Promise.all([refreshOverview(), refreshSelectedSession(selectedSessionId)]);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
-    }
+    const activeSessionId = selectedSessionId;
+    const userMessage = createLocalMessage(activeSessionId, "user", message);
+    const pendingAssistant = createLocalMessage(activeSessionId, "assistant", "");
+
+    setSelectedSession((current) => {
+      if (!current || current.session_id !== activeSessionId) {
+        return current;
+      }
+      return {
+        ...current,
+        messages: [...current.messages, userMessage],
+      };
+    });
+    setStreamingMessage(pendingAssistant);
+
+    const controller = api.streamMessage(activeSessionId, message, {
+      onEvent: (event) => {
+        setStreamingMessage((current) => {
+          if (!current || current.session_id !== activeSessionId) {
+            return current;
+          }
+          return applyEventToAssistant(current, event);
+        });
+      },
+      onFinal: (chunk) => {
+        setSelectedSession((current) => {
+          if (!current || current.session_id !== activeSessionId) {
+            return current;
+          }
+          return {
+            ...current,
+            ...chunk.session,
+            messages: [...current.messages, chunk.assistant_message],
+          };
+        });
+        setStreamingMessage(null);
+        setBusy(false);
+        streamControllerRef.current = null;
+        streamingSessionIdRef.current = null;
+        void Promise.all([refreshOverview(), refreshSelectedSession(activeSessionId)]).catch(
+          (err: Error) => setError(err.message),
+        );
+      },
+      onError: (err) => {
+        setStreamingMessage(null);
+        setBusy(false);
+        streamControllerRef.current = null;
+        streamingSessionIdRef.current = null;
+        void Promise.all([refreshOverview(), refreshSelectedSession(activeSessionId)])
+          .catch(() => undefined)
+          .finally(() => setError(err.message));
+      },
+    });
+    streamControllerRef.current = controller;
+    streamingSessionIdRef.current = activeSessionId;
   }
 
   async function handleResetSession() {
     if (!selectedSessionId) return;
+    streamControllerRef.current?.abort();
+    streamControllerRef.current = null;
+    streamingSessionIdRef.current = null;
+    setStreamingMessage(null);
     setBusy(true);
     setError(null);
     try {
@@ -230,6 +369,7 @@ export default function App() {
             onSendMessage={handleSendMessage}
             onResetSession={handleResetSession}
             busy={busy}
+            streamingMessage={streamingMessage}
           />
         );
       case "agents":

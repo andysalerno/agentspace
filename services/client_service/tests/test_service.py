@@ -24,6 +24,8 @@ from kernel.events import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from client_service.agent_host_client import AgentHostClient
     from kernel_host.registry import HarnessName
 
@@ -42,6 +44,7 @@ class StubAgentHostClient:
         harness: HarnessName,
         skills: list[str] | None = None,
     ) -> dict[str, object]:
+        del skills
         session_id = f"host-{len(self.created) + 1}"
         self.created.append({"harness": harness, "session_id": session_id})
         self._sessions[session_id] = {"session_id": session_id, "status": "idle"}
@@ -58,9 +61,15 @@ class StubAgentHostClient:
         return [await self.get_session(session_id) for session_id in self._sessions]
 
     async def send_message(self, session_id: str, message: str) -> list[KernelEvent]:
+        return [event async for event in self.stream_message(session_id, message)]
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]:
         self.sent.append((session_id, message))
-        self._sessions[session_id]["status"] = "done"
-        return [
+        events = [
             session_start(session_id, "copilot-cli"),
             status_event(KernelStatus.BUSY),
             text_delta("hello"),
@@ -68,6 +77,13 @@ class StubAgentHostClient:
             status_event(KernelStatus.DONE),
             session_end(),
         ]
+
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            for event in events:
+                yield event
+            self._sessions[session_id]["status"] = "done"
+
+        return iterator()
 
     async def history(self, session_id: str) -> list[list[KernelEvent]]:
         del session_id
@@ -152,6 +168,7 @@ async def test_agent_and_session_lifecycle() -> None:
     assert session["channel_name"] == "webui"
     assert session["client_type"] == "webui"
     assert assistant_message["content"] == "hello world"
+    assert "type" not in reply
     assert len(messages) == 2
     assert str(reset["agent_host_session_id"]).endswith("-reset")
     assert await service.list_messages(session_id) == []
@@ -167,9 +184,15 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
             session_id: str,
             message: str,
         ) -> list[KernelEvent]:
+            return [event async for event in self.stream_message(session_id, message)]
+
+        def stream_message(
+            self,
+            session_id: str,
+            message: str,
+        ) -> AsyncIterator[KernelEvent]:
             self.sent.append((session_id, message))
-            self._sessions[session_id]["status"] = "done"
-            return [
+            events = [
                 session_start(session_id, "copilot-cli"),
                 status_event(KernelStatus.BUSY),
                 tool_call("read_file", {"path": "src/foo.py"}),
@@ -180,6 +203,13 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
                 status_event(KernelStatus.DONE),
                 session_end(),
             ]
+
+            async def iterator() -> AsyncIterator[KernelEvent]:
+                for event in events:
+                    yield event
+                self._sessions[session_id]["status"] = "done"
+
+            return iterator()
 
     upstream = ToolCallStub()
     service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
@@ -220,6 +250,32 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
             "output": "ok",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_stream_message_yields_events_then_final_payload() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    agent = await service.create_agent(agent_id="stream-agent", name="Stream Agent")
+    session = await service.create_session(agent_id=str(agent["agent_id"]))
+    session_id = str(session["session_id"])
+
+    chunks = [chunk async for chunk in service.stream_message(session_id, "hello")]
+    messages = await service.list_messages(session_id)
+
+    assert [str(chunk["type"]) for chunk in chunks] == [
+        "event",
+        "event",
+        "event",
+        "event",
+        "event",
+        "event",
+        "final",
+    ]
+    assert cast("dict[str, object]", chunks[-1])["assistant_message"] == messages[1]
+    assert messages[0]["content"] == "hello"
+    assert messages[1]["content"] == "hello world"
 
 
 @pytest.mark.asyncio

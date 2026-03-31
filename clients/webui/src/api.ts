@@ -1,6 +1,9 @@
 import type {
   Agent,
+  KernelEvent,
   KernelSummary,
+  MessageStreamChunk,
+  MessageStreamFinalChunk,
   SendMessageResponse,
   SessionDetail,
   SessionSummary,
@@ -28,6 +31,10 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+function parseChunk(line: string): MessageStreamChunk {
+  return JSON.parse(line) as MessageStreamChunk;
 }
 
 export const api = {
@@ -69,6 +76,95 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ message }),
     }),
+  streamMessage: (
+    sessionId: string,
+    message: string,
+    handlers?: {
+      onEvent?: (event: KernelEvent) => void;
+      onFinal?: (chunk: MessageStreamFinalChunk) => void;
+      onError?: (error: Error) => void;
+    },
+  ): AbortController => {
+    const controller = new AbortController();
+
+    void (async () => {
+      try {
+        const response = await fetch(`${apiBase}/sessions/${sessionId}/messages/stream`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ message }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const text = await response.text();
+          throw new Error(text || `${response.status} ${response.statusText}`);
+        }
+
+        if (!response.body) {
+          throw new Error("streaming response body was not available");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let finalChunk: MessageStreamFinalChunk | null = null;
+
+        const processBuffer = (flush: boolean) => {
+          let newlineIndex = buffer.indexOf("\n");
+          while (newlineIndex >= 0) {
+            const line = buffer.slice(0, newlineIndex).trim();
+            buffer = buffer.slice(newlineIndex + 1);
+            if (line) {
+              const chunk = parseChunk(line);
+              if (chunk.type === "event") {
+                handlers?.onEvent?.(chunk.event);
+              } else {
+                finalChunk = chunk;
+                handlers?.onFinal?.(chunk);
+              }
+            }
+            newlineIndex = buffer.indexOf("\n");
+          }
+
+          if (flush) {
+            const line = buffer.trim();
+            if (line) {
+              const chunk = parseChunk(line);
+              if (chunk.type === "event") {
+                handlers?.onEvent?.(chunk.event);
+              } else {
+                finalChunk = chunk;
+                handlers?.onFinal?.(chunk);
+              }
+            }
+            buffer = "";
+          }
+        };
+
+        while (true) {
+          const { done, value } = await reader.read();
+          buffer += decoder.decode(value, { stream: !done });
+          processBuffer(done);
+          if (done) {
+            break;
+          }
+        }
+
+        if (finalChunk === null) {
+          throw new Error("message stream ended without a final payload");
+        }
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") {
+          handlers?.onError?.(error as Error);
+        }
+      }
+    })();
+
+    return controller;
+  },
   resetSession: (sessionId: string) =>
     requestJson<SessionSummary>(`/sessions/${sessionId}/reset`, { method: "POST" }),
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),

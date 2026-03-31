@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agent_host.service import (
@@ -18,6 +18,9 @@ from kernel.events import (
     text_delta,
 )
 from kernel_host.registry import HarnessName
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 class StubRuntime:
@@ -37,6 +40,7 @@ class StubRuntime:
         additional_paths: tuple[str, ...],
         skills: tuple[str, ...] = (),
     ) -> KernelRuntimeSession:
+        del skills
         container_name = f"container-{session_id[:8]}"
         self.created.append(
             {
@@ -59,6 +63,20 @@ class StubRuntime:
         session: KernelRuntimeSession,
         message: str,
     ) -> list[KernelEvent]:
+        return [
+            event
+            async for event in self.stream_message(
+                session=session,
+                message=message,
+            )
+        ]
+
+    def stream_message(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]:
         container_name = self._session_key(session)
         self.sent.append((container_name, message))
         events = [
@@ -68,12 +86,19 @@ class StubRuntime:
             status_event(KernelStatus.DONE),
             session_end(),
         ]
-        self._histories[container_name].append(events)
-        self._summaries[container_name] = {
-            "status": "done",
-            "resume_token": "resume-runtime-2",
-        }
-        return events
+
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            try:
+                for event in events:
+                    yield event
+            finally:
+                self._histories[container_name].append(events)
+                self._summaries[container_name] = {
+                    "status": "done",
+                    "resume_token": "resume-runtime-2",
+                }
+
+        return iterator()
 
     async def summary(self, *, session: KernelRuntimeSession) -> dict[str, object]:
         return dict(self._summaries[self._session_key(session)])
@@ -135,6 +160,46 @@ async def test_create_send_history_and_destroy() -> None:
 
     await host.destroy_session(session_id)
     assert len(runtime.destroyed) == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_message_updates_history_and_status() -> None:
+    runtime = StubRuntime()
+    host = AgentHost(runtime=runtime)
+
+    session = await host.create_session(harness=HarnessName.ECHO)
+    session_id = str(session["session_id"])
+
+    events = [event async for event in host.stream_message(session_id, "hello")]
+    fetched = await host.get_session(session_id)
+
+    assert [event.type for event in events] == [
+        "session_start",
+        "status",
+        "text_delta",
+        "status",
+        "session_end",
+    ]
+    assert fetched["turns"] == 1
+    assert fetched["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_stream_message_finalizes_when_consumer_closes_early() -> None:
+    runtime = StubRuntime()
+    host = AgentHost(runtime=runtime)
+
+    session = await host.create_session(harness=HarnessName.ECHO)
+    session_id = str(session["session_id"])
+
+    stream = host.stream_message(session_id, "hello")
+    first = await anext(stream)
+    await stream.aclose()
+    fetched = await host.get_session(session_id)
+
+    assert first.type == "session_start"
+    assert fetched["turns"] == 1
+    assert fetched["status"] == "done"
 
 
 @pytest.mark.asyncio

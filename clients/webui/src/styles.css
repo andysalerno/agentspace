@@ -519,6 +519,21 @@ button:disabled {
   align-self: flex-start;
 }
 
+.message.streaming {
+  border-style: dashed;
+}
+
+.cursor {
+  animation: blink 0.7s step-end infinite;
+  color: var(--text-secondary);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 /* ─── Reasoning Block ─── */
 .reasoning-block {
   margin-bottom: 8px;

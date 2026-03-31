@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
@@ -18,6 +20,9 @@ from client_service.service import (
     KernelNotFoundError,
     SessionNotFoundError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logging.basicConfig(level=logging.INFO)
 
@@ -158,6 +163,30 @@ async def send_message(
         return await service.send_message(session_id, payload.message)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/messages/stream")
+async def stream_message(
+    session_id: str,
+    payload: SendMessageRequest,
+) -> StreamingResponse:
+    try:
+        stream = service.stream_message(session_id, payload.message)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    async def response_lines() -> AsyncIterator[str]:
+        async for item in stream:
+            yield json.dumps(item, separators=(",", ":")) + "\n"
+
+    return StreamingResponse(
+        response_lines(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/sessions/{session_id}/reset")

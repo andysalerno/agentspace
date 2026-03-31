@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -9,7 +10,7 @@ import httpx
 from kernel.events import EventType, KernelEvent, KernelStatus
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
 
     from kernel_host.registry import HarnessName
 
@@ -37,6 +38,12 @@ class AgentHostClient(Protocol):
         session_id: str,
         message: str,
     ) -> list[KernelEvent]: ...
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]: ...
 
     async def history(self, session_id: str) -> list[list[KernelEvent]]: ...
 
@@ -95,13 +102,36 @@ class HttpAgentHostClient:
         return cast("JsonList", await self._request_json("GET", "/sessions"))
 
     async def send_message(self, session_id: str, message: str) -> list[KernelEvent]:
-        response = await self._request_json(
-            "POST",
-            f"/sessions/{session_id}/messages",
-            json={"message": message},
-        )
-        raw_events = cast("list[JsonDict]", cast("JsonDict", response)["events"])
-        return [_kernel_event_from_json(event) for event in raw_events]
+        return [event async for event in self.stream_message(session_id, message)]
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]:
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            timeout = httpx.Timeout(self.timeout, read=None)
+            async with (
+                httpx.AsyncClient(
+                    base_url=self.base_url,
+                    timeout=timeout,
+                ) as client,
+                client.stream(
+                    "POST",
+                    f"/sessions/{session_id}/messages/stream",
+                    json={"message": message},
+                ) as response,
+            ):
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    raw_event = json.loads(line)
+                    if not isinstance(raw_event, dict):
+                        continue
+                    yield _kernel_event_from_json(cast("JsonDict", raw_event))
+
+        return iterator()
 
     async def history(self, session_id: str) -> list[list[KernelEvent]]:
         response = await self._request_json("GET", f"/sessions/{session_id}/history")

@@ -39,16 +39,14 @@ async def run(message: str) -> None:
     )
 
     await kernel.start(config)
-
-    # Send message (for echo kernel, triggers in-process; for subprocess
-    # kernels, sends to stdin or was already passed as CLI arg)
-    await kernel.send(message)
-
-    # Stream events as JSONL to stdout
-    async for event in kernel.recv():
-        print(event.to_jsonl(), flush=True)  # noqa: T201
-
-    await kernel.stop()
+    send_task = asyncio.create_task(kernel.send(message))
+    try:
+        async for event in kernel.recv():
+            print(event.to_jsonl(), flush=True)  # noqa: T201
+        await send_task
+    finally:
+        await send_task
+        await kernel.stop()
 
 
 def _split_paths(raw: str) -> list[str]:

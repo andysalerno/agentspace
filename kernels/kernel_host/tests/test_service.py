@@ -96,6 +96,35 @@ async def test_service_reuses_resume_token(
     assert summary["turns"] == 2
 
 
+@pytest.mark.asyncio
+async def test_stream_message_persists_history_after_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_get_kernel(_harness_name: HarnessName) -> StubKernel:
+        return StubKernel()
+
+    monkeypatch.setattr("kernel_host.service.get_kernel", fake_get_kernel)
+
+    service = KernelSessionService(
+        harness=HarnessName.ECHO,
+        env={},
+        additional_paths=(),
+    )
+
+    events = [event async for event in service.stream_message("stream me")]
+    history = await service.history()
+
+    assert [event.type for event in events] == [
+        "session_start",
+        "status",
+        "text_delta",
+        "status",
+        "session_end",
+    ]
+    assert len(history) == 1
+    assert history[0][2].content == "hello"
+
+
 def test_discover_skill_dirs(tmp_path: object) -> None:
     base = Path(str(tmp_path))
     (base / "alpha-skill").mkdir()

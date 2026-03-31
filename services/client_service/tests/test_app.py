@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import json
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
-from client_service.service import (
-    KernelNotFoundError,
-)
+from client_service.service import KernelNotFoundError
 from fastapi.testclient import TestClient
 from kernel.events import (
     KernelEvent,
@@ -20,6 +19,8 @@ from kernel.events import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from kernel_host.registry import HarnessName
 
 
@@ -131,12 +132,6 @@ class StubClientService:
 
     async def send_message(self, session_id: str, message: str) -> dict[str, object]:
         del message
-        events: list[KernelEvent] = [
-            session_start("host-1", "copilot-cli"),
-            status_event(KernelStatus.BUSY),
-            text_delta("hello"),
-            session_end(),
-        ]
         return {
             "session": self.sessions[session_id],
             "assistant_message": {
@@ -146,8 +141,33 @@ class StubClientService:
                 "content": "hello",
                 "created_at": "now",
             },
-            "events": [asdict(event) for event in events],
+            "events": [asdict(event) for event in self._events()],
         }
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[dict[str, object]]:
+        del message
+
+        async def iterator() -> AsyncIterator[dict[str, object]]:
+            for event in self._events():
+                yield {"type": "event", "event": asdict(event)}
+            yield {
+                "type": "final",
+                "session": self.sessions[session_id],
+                "assistant_message": {
+                    "message_id": "msg-2",
+                    "session_id": session_id,
+                    "role": "assistant",
+                    "content": "hello",
+                    "created_at": "now",
+                },
+                "events": [asdict(event) for event in self._events()],
+            }
+
+        return iterator()
 
     async def reset_session(self, session_id: str) -> dict[str, object]:
         return self.sessions[session_id]
@@ -212,6 +232,14 @@ class StubClientService:
             _raise_skill_not_found("DELETE", skill_id)
         del self.skills[skill_id]
 
+    def _events(self) -> list[KernelEvent]:
+        return [
+            session_start("host-1", "copilot-cli"),
+            status_event(KernelStatus.BUSY),
+            text_delta("hello"),
+            session_end(),
+        ]
+
 
 def _raise_skill_not_found(method: str, skill_id: str) -> None:
     msg = f"skill not found: {skill_id}"
@@ -256,6 +284,35 @@ def test_agent_and_session_routes(client: TestClient) -> None:
     assert created_session.json()["channel_name"] == "webui"
     assert sent.json()["assistant_message"]["content"] == "hello"
     assert listed_messages.json()["messages"][0]["content"] == "hello"
+
+
+def test_message_stream_route(client: TestClient) -> None:
+    client.post("/agents", json={"agent_id": "agent-one", "name": "Agent One"})
+    created_session = client.post(
+        "/sessions",
+        json={
+            "agent_id": "agent-one",
+            "channel_name": "webui",
+            "client_type": "webui",
+        },
+    )
+
+    with client.stream(
+        "POST",
+        f"/sessions/{created_session.json()['session_id']}/messages/stream",
+        json={"message": "hello"},
+    ) as response:
+        chunks = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert [chunk["type"] for chunk in chunks] == [
+        "event",
+        "event",
+        "event",
+        "event",
+        "final",
+    ]
+    assert chunks[-1]["assistant_message"]["content"] == "hello"
 
 
 def test_kernel_routes(client: TestClient) -> None:

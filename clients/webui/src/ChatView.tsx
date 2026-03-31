@@ -1,5 +1,5 @@
 import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
-import type { Agent, SessionDetail, SessionSummary, ToolCall } from "./types";
+import type { Agent, ChatMessage, SessionDetail, SessionSummary, ToolCall } from "./types";
 import ToolDetailPane from "./ToolDetailPane";
 
 type ChatViewProps = {
@@ -9,9 +9,10 @@ type ChatViewProps = {
     selectedSession: SessionDetail | null;
     onSelectSession: (sessionId: string) => void;
     onCreateSession: (agentId: string, channelName: string) => Promise<void>;
-    onSendMessage: (message: string) => Promise<void>;
+    onSendMessage: (message: string) => void;
     onResetSession: () => Promise<void>;
     busy: boolean;
+    streamingMessage: ChatMessage | null;
 };
 
 export default function ChatView({
@@ -24,6 +25,7 @@ export default function ChatView({
     onSendMessage,
     onResetSession,
     busy,
+    streamingMessage,
 }: ChatViewProps) {
     const [messageDraft, setMessageDraft] = useState("");
     const [newSessionAgentId, setNewSessionAgentId] = useState("");
@@ -48,8 +50,9 @@ export default function ChatView({
     async function handleSendMessage(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         if (!messageDraft.trim()) return;
-        await onSendMessage(messageDraft.trim());
+        const msg = messageDraft.trim();
         setMessageDraft("");
+        onSendMessage(msg);
     }
 
     return (
@@ -123,33 +126,66 @@ export default function ChatView({
                             </button>
                         </div>
                         <div className="transcript">
-                            {selectedSession.messages.length > 0 ? (
-                                selectedSession.messages.map((msg) => (
-                                    <article className={`message ${msg.role}`} key={msg.message_id}>
-                                        <header>{msg.role}</header>
-                                        {msg.reasoning && (
-                                            <details className="reasoning-block">
-                                                <summary>Reasoning</summary>
-                                                <div className="reasoning-content">{msg.reasoning}</div>
-                                            </details>
-                                        )}
-                                        {msg.tool_calls && msg.tool_calls.length > 0 && (
-                                            <div className="tool-calls">
-                                                {msg.tool_calls.map((tc, i) => (
-                                                    <button
-                                                        className="tool-call-tag"
-                                                        key={i}
-                                                        type="button"
-                                                        onClick={() => setSelectedToolCall(tc)}
-                                                    >
-                                                        ⚙ {tc.tool}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        )}
-                                        <div>{msg.content}</div>
-                                    </article>
-                                ))
+                            {selectedSession.messages.length > 0 || streamingMessage ? (
+                                <>
+                                    {selectedSession.messages.map((msg) => (
+                                        <article className={`message ${msg.role}`} key={msg.message_id}>
+                                            <header>{msg.role}</header>
+                                            {msg.reasoning && (
+                                                <details className="reasoning-block">
+                                                    <summary>Reasoning</summary>
+                                                    <div className="reasoning-content">{msg.reasoning}</div>
+                                                </details>
+                                            )}
+                                            {msg.tool_calls && msg.tool_calls.length > 0 && (
+                                                <div className="tool-calls">
+                                                    {msg.tool_calls.map((tc, i) => (
+                                                        <button
+                                                            className="tool-call-tag"
+                                                            key={i}
+                                                            type="button"
+                                                            onClick={() => setSelectedToolCall(tc)}
+                                                        >
+                                                            ⚙ {tc.tool}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            <div>{msg.content}</div>
+                                        </article>
+                                    ))}
+                                    {streamingMessage && (
+                                        <article
+                                            className={`message ${streamingMessage.role} streaming`}
+                                            key={streamingMessage.message_id}
+                                        >
+                                            <header>{streamingMessage.role}</header>
+                                            {streamingMessage.reasoning && (
+                                                <details className="reasoning-block" open>
+                                                    <summary>Reasoning</summary>
+                                                    <div className="reasoning-content">
+                                                        {streamingMessage.reasoning}
+                                                    </div>
+                                                </details>
+                                            )}
+                                            {streamingMessage.tool_calls && streamingMessage.tool_calls.length > 0 && (
+                                                <div className="tool-calls">
+                                                    {streamingMessage.tool_calls.map((tc, i) => (
+                                                        <button
+                                                            className="tool-call-tag"
+                                                            key={i}
+                                                            type="button"
+                                                            onClick={() => setSelectedToolCall(tc)}
+                                                        >
+                                                            ⚙ {tc.tool}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            <div>{streamingMessage.content}<span className="cursor">▌</span></div>
+                                        </article>
+                                    )}
+                                </>
                             ) : (
                                 <div className="empty-state centered">
                                     Send a message to start the conversation.

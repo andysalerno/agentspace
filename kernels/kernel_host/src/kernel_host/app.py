@@ -4,11 +4,14 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from kernel_host.service import service_from_env
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from kernel.events import KernelEvent
 
 app = FastAPI(title="Kernel Host", version="0.1.0")
@@ -37,6 +40,22 @@ async def session_summary() -> dict[str, Any]:
 async def send_message(payload: SendMessageRequest) -> dict[str, Any]:
     events = await service.send_message(payload.message)
     return {"events": _serialize_events(events)}
+
+
+@app.post("/messages/stream")
+async def stream_message(payload: SendMessageRequest) -> StreamingResponse:
+    async def event_lines() -> AsyncIterator[str]:
+        async for event in service.stream_message(payload.message):
+            yield f"{event.to_jsonl()}\n"
+
+    return StreamingResponse(
+        event_lines(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/history")

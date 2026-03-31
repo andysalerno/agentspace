@@ -6,6 +6,7 @@ import logging
 import re
 import uuid
 from dataclasses import asdict
+from typing import TYPE_CHECKING
 
 from kernel.events import EventType, KernelEvent
 from kernel_host.registry import HarnessName
@@ -20,6 +21,9 @@ from client_service.models import (
     ToolCallRecord,
     utc_now,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
@@ -43,6 +47,17 @@ class SessionNotFoundError(KeyError):
 
 class KernelNotFoundError(KeyError):
     pass
+
+
+VISIBLE_ASSISTANT_EVENT_TYPES = frozenset(
+    {
+        EventType.TEXT_DELTA,
+        EventType.REASONING_DELTA,
+        EventType.TOOL_CALL,
+        EventType.TOOL_RESULT,
+        EventType.ERROR,
+    },
+)
 
 
 class ClientService:
@@ -165,8 +180,15 @@ class ClientService:
         return [message.summary() for message in session.messages]
 
     async def send_message(self, session_id: str, message: str) -> dict[str, object]:
+        return await self._accumulate_stream(self.stream_message(session_id, message))
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[dict[str, object]]:
         session = self._get_session(session_id)
-        return await self._send_to_session(session, message)
+        return self._stream_to_session(session, message)
 
     async def list_kernels(self) -> list[dict[str, object]]:
         upstream_sessions = await self._agent_host.list_sessions()
@@ -258,6 +280,13 @@ class ClientService:
         session: SessionRecord,
         message: str,
     ) -> dict[str, object]:
+        return await self._accumulate_stream(self._stream_to_session(session, message))
+
+    async def _stream_to_session(
+        self,
+        session: SessionRecord,
+        message: str,
+    ) -> AsyncIterator[dict[str, object]]:
         user_message = MessageRecord(
             message_id=uuid.uuid4().hex,
             session_id=session.session_id,
@@ -265,28 +294,70 @@ class ClientService:
             content=message,
         )
         session.messages.append(user_message)
-        events = await self._agent_host.send_message(
+        events: list[KernelEvent] = []
+        assistant_message: MessageRecord | None = None
+        completed = False
+        stream = self._agent_host.stream_message(
             session.agent_host_session_id,
             message,
         )
-        assistant_message = MessageRecord(
-            message_id=uuid.uuid4().hex,
-            session_id=session.session_id,
-            role=MessageRole.ASSISTANT,
-            content=_flatten_text(events),
-            tool_calls=_extract_tool_calls(events),
-            reasoning=_flatten_reasoning(events),
-        )
-        session.messages.append(assistant_message)
-        upstream = await self._agent_host.get_session(session.agent_host_session_id)
-        session.status = str(upstream["status"])
-        session.updated_at = assistant_message.created_at
-        logger.info("stored turn for client session %s", session.session_id)
-        return {
+        try:
+            async for event in stream:
+                events.append(event)
+                yield {"type": "event", "event": asdict(event)}
+            completed = True
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if callable(aclose):
+                await aclose()
+            assistant_message = await self._finalize_stream_turn(
+                session=session,
+                events=events,
+                completed=completed,
+            )
+
+        if assistant_message is None:
+            assistant_message = _build_assistant_message(session.session_id, events)
+
+        yield {
+            "type": "final",
             "session": session.summary(),
             "assistant_message": assistant_message.summary(),
             "events": [asdict(event) for event in events],
         }
+
+    async def _accumulate_stream(
+        self,
+        stream: AsyncIterator[dict[str, object]],
+    ) -> dict[str, object]:
+        final_payload: dict[str, object] | None = None
+        async for item in stream:
+            if item.get("type") == "final":
+                final_payload = item
+        if final_payload is None:
+            msg = "message stream ended without a final payload"
+            raise RuntimeError(msg)
+        return {key: value for key, value in final_payload.items() if key != "type"}
+
+    async def _finalize_stream_turn(
+        self,
+        *,
+        session: SessionRecord,
+        events: list[KernelEvent],
+        completed: bool,
+    ) -> MessageRecord | None:
+        assistant_message: MessageRecord | None = None
+        if events and (completed or _has_visible_assistant_events(events)):
+            assistant_message = _build_assistant_message(session.session_id, events)
+            session.messages.append(assistant_message)
+            session.updated_at = assistant_message.created_at
+        else:
+            session.updated_at = utc_now()
+
+        upstream = await self._agent_host.get_session(session.agent_host_session_id)
+        session.status = str(upstream["status"])
+        logger.info("stored turn for client session %s", session.session_id)
+        return assistant_message
 
     async def reset_session(self, session_id: str) -> dict[str, object]:
         session = self._get_session(session_id)
@@ -348,9 +419,27 @@ def _extract_tool_calls(events: list[KernelEvent]) -> list[ToolCallRecord]:
                     tool=event.tool,
                     input=tool_input,
                     output=tool_output,
-                )
+                ),
             )
     return calls
+
+
+def _build_assistant_message(
+    session_id: str,
+    events: list[KernelEvent],
+) -> MessageRecord:
+    return MessageRecord(
+        message_id=uuid.uuid4().hex,
+        session_id=session_id,
+        role=MessageRole.ASSISTANT,
+        content=_flatten_text(events),
+        tool_calls=_extract_tool_calls(events),
+        reasoning=_flatten_reasoning(events),
+    )
+
+
+def _has_visible_assistant_events(events: list[KernelEvent]) -> bool:
+    return any(event.type in VISIBLE_ASSISTANT_EVENT_TYPES for event in events)
 
 
 def _validate_agent_id(agent_id: str) -> None:

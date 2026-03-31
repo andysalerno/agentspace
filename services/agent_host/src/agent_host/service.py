@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import docker
 import httpx
 from docker.errors import DockerException, NotFound
 from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel_host.registry import HarnessName
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger_name = __name__
 
@@ -49,6 +53,13 @@ class KernelRuntime(Protocol):
         session: KernelRuntimeSession,
         message: str,
     ) -> list[KernelEvent]: ...
+
+    def stream_message(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]: ...
 
     async def summary(self, *, session: KernelRuntimeSession) -> dict[str, Any]: ...
 
@@ -155,13 +166,43 @@ class DockerKernelRuntime:
         session: KernelRuntimeSession,
         message: str,
     ) -> list[KernelEvent]:
+        return [
+            event
+            async for event in self.stream_message(
+                session=session,
+                message=message,
+            )
+        ]
+
+    def stream_message(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]:
         handle = self._docker_session(session)
         payload = {"message": message}
-        async with httpx.AsyncClient(timeout=self._startup_timeout) as client:
-            response = await client.post(f"{handle.base_url}/messages", json=payload)
-        response.raise_for_status()
-        raw_events = response.json()["events"]
-        return [KernelEvent(**event) for event in raw_events]
+
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            timeout = httpx.Timeout(self._startup_timeout, read=None)
+            async with (
+                httpx.AsyncClient(timeout=timeout) as client,
+                client.stream(
+                    "POST",
+                    f"{handle.base_url}/messages/stream",
+                    json=payload,
+                ) as response,
+            ):
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    raw_event = json.loads(line)
+                    if not isinstance(raw_event, dict):
+                        continue
+                    yield KernelEvent(**cast("dict[str, Any]", raw_event))
+
+        return iterator()
 
     async def summary(self, *, session: KernelRuntimeSession) -> dict[str, Any]:
         handle = self._docker_session(session)
@@ -314,17 +355,41 @@ class AgentHost:
         return record.summary()
 
     async def send_message(self, session_id: str, message: str) -> list[KernelEvent]:
+        return [event async for event in self.stream_message(session_id, message)]
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]:
         record = self._get_session(session_id)
-        events = await self._runtime.send_message(
+        events: list[KernelEvent] = []
+        stream = self._runtime.stream_message(
             session=record.runtime_session,
             message=message,
         )
-        record.history.append(events)
-        record.status = _derive_status(events, record.status)
-        session_summary = await self._runtime.summary(session=record.runtime_session)
-        record.resume_token = _as_resume_token(session_summary.get("resume_token"))
-        record.status = _as_status(session_summary.get("status"), record.status)
-        return events
+
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            try:
+                async for event in stream:
+                    events.append(event)
+                    yield event
+            finally:
+                aclose = getattr(stream, "aclose", None)
+                if callable(aclose):
+                    await aclose()
+                if events:
+                    record.history.append(list(events))
+                    record.status = _derive_status(events, record.status)
+                session_summary = await self._runtime.summary(
+                    session=record.runtime_session,
+                )
+                record.resume_token = _as_resume_token(
+                    session_summary.get("resume_token"),
+                )
+                record.status = _as_status(session_summary.get("status"), record.status)
+
+        return iterator()
 
     async def destroy_session(self, session_id: str) -> None:
         async with self._lock:

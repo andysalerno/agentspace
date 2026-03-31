@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel.protocol import KernelConfig
 
 from kernel_host.registry import HarnessName, get_kernel
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -32,26 +37,41 @@ class KernelSessionService:
         self._status = KernelStatus.IDLE
 
     async def send_message(self, message: str) -> list[KernelEvent]:
+        return [event async for event in self.stream_message(message)]
+
+    def stream_message(self, message: str) -> AsyncIterator[KernelEvent]:
         kernel = get_kernel(self._harness)
         config = KernelConfig(
             env=dict(self._base_env),
             session_id=self._session_id,
             additional_paths=self._additional_paths,
         )
-        await kernel.start(config)
-        await kernel.send(message)
-        events = [event async for event in kernel.recv()]
-        await kernel.stop()
+        events: list[KernelEvent] = []
 
-        if kernel.resume_token is not None:
-            self._session_id = kernel.resume_token
-        self._history.append(events)
-        raw_logs: list[str] = getattr(kernel, "raw_logs", [])
-        if raw_logs:
-            with self._log_path.open("a", encoding="utf-8") as f:
-                f.writelines(line + "\n" for line in raw_logs)
-        self._status = self._derive_status(events, kernel.status)
-        return events
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            send_task: asyncio.Task[None] | None = None
+            try:
+                await kernel.start(config)
+                send_task = asyncio.create_task(kernel.send(message))
+                async for event in kernel.recv():
+                    events.append(event)
+                    yield event
+                await send_task
+            finally:
+                if send_task is not None:
+                    with suppress(asyncio.CancelledError):
+                        await send_task
+                await kernel.stop()
+                if kernel.resume_token is not None:
+                    self._session_id = kernel.resume_token
+                self._history.append(list(events))
+                raw_logs: list[str] = getattr(kernel, "raw_logs", [])
+                if raw_logs:
+                    with self._log_path.open("a", encoding="utf-8") as f:
+                        f.writelines(line + "\n" for line in raw_logs)
+                self._status = self._derive_status(events, kernel.status)
+
+        return iterator()
 
     async def summary(self) -> dict[str, Any]:
         return {

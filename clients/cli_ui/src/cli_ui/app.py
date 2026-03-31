@@ -3,10 +3,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
-
-if TYPE_CHECKING:
-    pass
+import json
+from typing import Any, ClassVar
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -30,6 +28,58 @@ from textual.widgets import (
 )
 
 from cli_ui.api import ApiClient
+
+
+def _new_local_message(role: str, content: str) -> dict[str, Any]:
+    return {
+        "role": role,
+        "content": content,
+        "tool_calls": [],
+        "reasoning": "",
+    }
+
+
+def _apply_stream_event(
+    assistant_message: dict[str, Any],
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    event_type = str(event.get("type", ""))
+    content = event.get("content")
+    if event_type == "text_delta" and isinstance(content, str):
+        assistant_message["content"] = (
+            str(assistant_message.get("content", "")) + content
+        )
+        return assistant_message
+    if event_type == "reasoning_delta" and isinstance(content, str):
+        assistant_message["reasoning"] = (
+            str(assistant_message.get("reasoning", "")) + content
+        )
+        return assistant_message
+    if event_type == "tool_call" and isinstance(event.get("tool"), str):
+        tool_calls = list(assistant_message.get("tool_calls", []))
+        tool_input = event.get("input")
+        tool_calls.append(
+            {
+                "tool": str(event["tool"]),
+                "input": json.dumps(tool_input, indent=2)
+                if isinstance(tool_input, dict)
+                else None,
+            },
+        )
+        assistant_message["tool_calls"] = tool_calls
+        return assistant_message
+    if (
+        event_type == "tool_result"
+        and isinstance(event.get("tool"), str)
+        and isinstance(event.get("output"), str)
+    ):
+        tool_calls = list(assistant_message.get("tool_calls", []))
+        for tool_call in tool_calls:
+            if tool_call.get("tool") == event["tool"] and "output" not in tool_call:
+                tool_call["output"] = event["output"]
+                break
+        assistant_message["tool_calls"] = tool_calls
+    return assistant_message
 
 # ──────────────────────────────────────────────────────────────────
 # Chat Screen
@@ -231,21 +281,28 @@ class ChatScreen(Screen[None]):
         msg_input.value = ""
         send_btn = self.query_one("#send-btn", Button)
         send_btn.disabled = True
+        self._messages.append(_new_local_message("user", message))
+        pending_assistant = _new_local_message("assistant", "")
+        self._messages.append(pending_assistant)
+        self._render_transcript()
         try:
-            result = await self._api.send_message(
+            async for item in self._api.stream_message(
                 self._selected_session_id,
                 message,
-            )
-            self._messages.append(
-                {
-                    "role": "user",
-                    "content": message,
-                    "tool_calls": [],
-                },
-            )
-            assistant = result.get("assistant_message", {})
-            self._messages.append(assistant)
-            self._render_transcript()
+            ):
+                if item.get("type") == "event":
+                    event = item.get("event", {})
+                    if isinstance(event, dict):
+                        _apply_stream_event(pending_assistant, event)
+                        self._render_transcript()
+                    continue
+                if item.get("type") == "final":
+                    assistant = item.get("assistant_message", {})
+                    if isinstance(assistant, dict):
+                        self._messages[-1] = assistant
+                        self._render_transcript()
+            self._sessions = await self._api.list_sessions()
+            self._refresh_session_list()
         finally:
             send_btn.disabled = False
 

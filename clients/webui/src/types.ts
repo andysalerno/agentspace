@@ -65,3 +65,30 @@ export type SendMessageResponse = {
   events: Array<Record<string, unknown>>;
   session: SessionSummary;
 };
+
+export type KernelEvent = {
+  type: string;
+  ts: string;
+  session_id?: string | null;
+  kernel?: string | null;
+  status?: string | null;
+  content?: string | null;
+  tool?: string | null;
+  input?: Record<string, unknown> | null;
+  output?: string | null;
+  message?: string | null;
+};
+
+export type MessageStreamEventChunk = {
+  type: "event";
+  event: KernelEvent;
+};
+
+export type MessageStreamFinalChunk = {
+  type: "final";
+  assistant_message: ChatMessage;
+  events: Array<Record<string, unknown>>;
+  session: SessionSummary;
+};
+
+export type MessageStreamChunk = MessageStreamEventChunk | MessageStreamFinalChunk;

@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +98,34 @@ class ApiClient:
             f"/sessions/{session_id}/messages",
             json={"message": message},
         )
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[dict[str, Any]]:
+        async def iterator() -> AsyncIterator[dict[str, Any]]:
+            timeout = httpx.Timeout(self.timeout, read=None)
+            async with (
+                httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=timeout,
+                ) as client,
+                client.stream(
+                    "POST",
+                    f"/api/sessions/{session_id}/messages/stream",
+                    json={"message": message},
+                ) as resp,
+            ):
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line:
+                        continue
+                    payload = json.loads(line)
+                    if isinstance(payload, dict):
+                        yield payload
+
+        return iterator()
 
     async def reset_session(self, session_id: str) -> dict[str, Any]:
         return await self._request("POST", f"/sessions/{session_id}/reset")  # type: ignore[return-value]

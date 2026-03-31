@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
@@ -96,6 +97,30 @@ async def send_message(
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"events": _serialize_events(events)}
+
+
+@app.post("/sessions/{session_id}/messages/stream")
+async def stream_message(
+    session_id: str,
+    payload: SendMessageRequest,
+) -> StreamingResponse:
+    try:
+        stream = host.stream_message(session_id, payload.message)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    async def event_lines() -> AsyncIterator[str]:
+        async for event in stream:
+            yield f"{event.to_jsonl()}\n"
+
+    return StreamingResponse(
+        event_lines(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/sessions/{session_id}/history")
