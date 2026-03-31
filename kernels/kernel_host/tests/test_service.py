@@ -13,7 +13,11 @@ from kernel.events import (
     text_delta,
 )
 from kernel_host.registry import HarnessName
-from kernel_host.service import KernelSessionService, discover_skill_dirs
+from kernel_host.service import (
+    KernelSessionService,
+    discover_skill_dirs,
+    link_enabled_skills,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -140,3 +144,64 @@ def test_discover_skill_dirs_missing_dir() -> None:
     result = discover_skill_dirs("/nonexistent/dir")
 
     assert result == ()
+
+
+def test_link_enabled_skills_removes_stale_symlinks(tmp_path: object) -> None:
+    base = Path(str(tmp_path))
+    staging = base / "staging"
+    skills = base / "skills"
+    staging.mkdir()
+    skills.mkdir()
+
+    # Simulate a prior session that linked "example".
+    (staging / "example").mkdir()
+    (staging / "other").mkdir()
+    (skills / "example").symlink_to(staging / "example")
+
+    # New session enables no skills — stale link should be removed.
+    link_enabled_skills(str(staging), str(skills), enabled_skills=set())
+
+    assert not (skills / "example").exists()
+    assert not (skills / "other").exists()
+
+
+def test_link_enabled_skills_keeps_enabled_and_removes_disabled(
+    tmp_path: object,
+) -> None:
+    base = Path(str(tmp_path))
+    staging = base / "staging"
+    skills = base / "skills"
+    staging.mkdir()
+    skills.mkdir()
+
+    (staging / "keep-me").mkdir()
+    (staging / "drop-me").mkdir()
+    # Both were linked in a prior session.
+    (skills / "keep-me").symlink_to(staging / "keep-me")
+    (skills / "drop-me").symlink_to(staging / "drop-me")
+
+    link_enabled_skills(str(staging), str(skills), enabled_skills={"keep-me"})
+
+    assert (skills / "keep-me").is_symlink()
+    assert not (skills / "drop-me").exists()
+
+
+def test_link_enabled_skills_does_not_remove_non_staging_symlinks(
+    tmp_path: object,
+) -> None:
+    base = Path(str(tmp_path))
+    staging = base / "staging"
+    skills = base / "skills"
+    other = base / "other"
+    staging.mkdir()
+    skills.mkdir()
+    other.mkdir()
+
+    (staging / "staged-skill").mkdir()
+    (other / "external").mkdir()
+    # A symlink that points outside staging — should not be touched.
+    (skills / "external").symlink_to(other / "external")
+
+    link_enabled_skills(str(staging), str(skills), enabled_skills=set())
+
+    assert (skills / "external").is_symlink()

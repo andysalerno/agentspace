@@ -140,6 +140,27 @@ def service_from_env() -> KernelSessionService:
     )
 
 
+def _remove_stale_skill_links(
+    target: Path,
+    staging_resolved: Path,
+    enabled_skills: set[str] | None,
+) -> None:
+    """Remove symlinks in *target* pointing into *staging_resolved* but not enabled."""
+    for existing in target.iterdir():
+        if not existing.is_symlink():
+            continue
+        try:
+            link_target = existing.resolve()
+        except OSError:
+            continue
+        if not str(link_target).startswith(str(staging_resolved)):
+            continue
+        if enabled_skills is None or existing.name in enabled_skills:
+            continue
+        existing.unlink()
+        logger.info("removed stale skill link %s", existing)
+
+
 def link_enabled_skills(
     staging_dir: str,
     skills_dir: str,
@@ -149,12 +170,19 @@ def link_enabled_skills(
 
     Only skill directories whose name appears in *enabled_skills* are linked.
     If *enabled_skills* is ``None``, all skills are linked.
+
+    Stale symlinks that point into *staging_dir* but are not in the enabled
+    set are removed so that skills from previous sessions don't leak through
+    persistent volumes.
     """
     staging = Path(staging_dir)
     target = Path(skills_dir)
     if not staging.is_dir():
         return
     target.mkdir(parents=True, exist_ok=True)
+
+    _remove_stale_skill_links(target, staging.resolve(), enabled_skills)
+
     for entry in sorted(staging.iterdir()):
         if not entry.is_dir():
             continue
