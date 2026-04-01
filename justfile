@@ -17,6 +17,9 @@ bootstrap:
   uv sync --all-packages --dev
   npm --prefix clients/webui install
 
+test:
+  uv run pytest
+
 webui-outdated:
   npm --prefix clients/webui outdated
 

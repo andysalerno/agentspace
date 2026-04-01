@@ -92,7 +92,13 @@ class CopilotKernel:
         cmd = self._build_command(message)
         env = self._build_env()
         cwd = self._workspace_dir
-        await asyncio.to_thread(_ensure_directory, cwd)
+
+        try:
+            await asyncio.to_thread(_ensure_directory, cwd)
+        except OSError as exc:
+            await self._queue.put(error(f"failed to start copilot CLI: {exc}"))
+            await self._finish(KernelStatus.ERROR)
+            return
 
         logger.debug("spawning copilot subprocess: cmd=%s cwd=%s", cmd, cwd)
 
