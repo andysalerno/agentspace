@@ -2,10 +2,11 @@ FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-# Install Copilot CLI (needed for copilot kernel)
+# Install Copilot CLI and Claude Code (needed for harness kernels)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     curl -fsSL https://gh.io/copilot-install | bash && \
+    curl -fsSL https://claude.ai/install.sh | bash && \
     apt-get purge -y curl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
