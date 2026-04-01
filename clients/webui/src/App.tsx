@@ -77,6 +77,7 @@ function applyEventToAssistant(
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [harnesses, setHarnesses] = useState<string[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [kernels, setKernels] = useState<KernelSummary[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
@@ -106,12 +107,14 @@ export default function App() {
   }, [sidebarCollapsed]);
 
   async function refreshOverview() {
-    const [agentData, sessionData, kernelData, skillData] = await Promise.all([
+    const [harnessData, agentData, sessionData, kernelData, skillData] = await Promise.all([
+      api.listHarnesses(),
       api.listAgents(),
       api.listSessions(),
       api.listKernels(),
       api.listSkills(),
     ]);
+    setHarnesses(harnessData);
     setAgents(agentData);
     setSessions(sessionData);
     setKernels(kernelData);
@@ -154,6 +157,7 @@ export default function App() {
   async function handleCreateAgent(form: {
     agent_id: string;
     name: string;
+    harness: string;
     system_prompt: string;
     skills: string[];
   }) {
@@ -377,6 +381,7 @@ export default function App() {
           <AgentsView
             agents={agents}
             skills={skills}
+            harnesses={harnesses}
             onCreateAgent={handleCreateAgent}
             onUpdateAgent={handleUpdateAgent}
             onDeleteAgent={handleDeleteAgent}

@@ -175,6 +175,19 @@ async def test_agent_and_session_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_list_harnesses_returns_registered_harnesses() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    assert await service.list_harnesses() == [
+        "claude-code",
+        "echo",
+        "copilot-cli",
+        "codex",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_tool_calls_extracted_into_assistant_message() -> None:
     """Tool call events should be extracted and stored with the assistant message."""
 
@@ -273,7 +286,7 @@ async def test_stream_message_yields_events_then_final_payload() -> None:
         "event",
         "final",
     ]
-    assert cast("dict[str, object]", chunks[-1])["assistant_message"] == messages[1]
+    assert chunks[-1]["assistant_message"] == messages[1]
     assert messages[0]["content"] == "hello"
     assert messages[1]["content"] == "hello world"
 

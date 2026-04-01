@@ -1,13 +1,31 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import type { Agent, Skill } from "./types";
 import CodeEditor from "./CodeEditor";
+
+const DEFAULT_HARNESS = "copilot-cli";
+
+function getInitialHarness(harnesses: string[]): string {
+    if (harnesses.includes(DEFAULT_HARNESS)) {
+        return DEFAULT_HARNESS;
+    }
+    return harnesses[0] ?? DEFAULT_HARNESS;
+}
+
+function formatHarnessLabel(harness: string): string {
+    return harness
+        .split("-")
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+}
 
 type AgentsViewProps = {
     agents: Agent[];
     skills: Skill[];
+    harnesses: string[];
     onCreateAgent: (form: {
         agent_id: string;
         name: string;
+        harness: string;
         system_prompt: string;
         skills: string[];
     }) => Promise<void>;
@@ -19,6 +37,7 @@ type AgentsViewProps = {
 export default function AgentsView({
     agents,
     skills,
+    harnesses,
     onCreateAgent,
     onUpdateAgent,
     onDeleteAgent,
@@ -27,6 +46,7 @@ export default function AgentsView({
     const [form, setForm] = useState({
         agent_id: "",
         name: "",
+        harness: getInitialHarness(harnesses),
         system_prompt: "",
         skills: [] as string[],
     });
@@ -34,10 +54,25 @@ export default function AgentsView({
     const [editingSkillsFor, setEditingSkillsFor] = useState<string | null>(null);
     const [editSkills, setEditSkills] = useState<string[]>([]);
 
+    useEffect(() => {
+        if (harnesses.length === 0) {
+            return;
+        }
+        if (!harnesses.includes(form.harness)) {
+            setForm((prev) => ({ ...prev, harness: getInitialHarness(harnesses) }));
+        }
+    }, [form.harness, harnesses]);
+
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         await onCreateAgent(form);
-        setForm({ agent_id: "", name: "", system_prompt: "", skills: [] });
+        setForm({
+            agent_id: "",
+            name: "",
+            harness: getInitialHarness(harnesses),
+            system_prompt: "",
+            skills: [],
+        });
         setShowForm(false);
     }
 
@@ -97,6 +132,19 @@ export default function AgentsView({
                             value={form.name}
                             onChange={(e) => setForm({ ...form, name: e.target.value })}
                         />
+                    </label>
+                    <label>
+                        Kernel
+                        <select
+                            value={form.harness}
+                            onChange={(e) => setForm({ ...form, harness: e.target.value })}
+                        >
+                            {harnesses.map((harness) => (
+                                <option key={harness} value={harness}>
+                                    {formatHarnessLabel(harness)}
+                                </option>
+                            ))}
+                        </select>
                     </label>
                     <label>
                         System Prompt

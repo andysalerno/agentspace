@@ -1,9 +1,11 @@
 export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills";
 
+export type Harness = string;
+
 export type Agent = {
   agent_id: string;
   name: string;
-  harness: string;
+  harness: Harness;
   system_prompt: string;
   skills: string[];
   created_at: string;

@@ -52,6 +52,9 @@ class StubClientService:
         self.agents[str(agent["agent_id"])] = agent
         return agent
 
+    async def list_harnesses(self) -> list[str]:
+        return ["claude-code", "echo", "copilot-cli", "codex"]
+
     async def list_agents(self) -> list[dict[str, object]]:
         return list(self.agents.values())
 
@@ -284,6 +287,27 @@ def test_agent_and_session_routes(client: TestClient) -> None:
     assert created_session.json()["channel_name"] == "webui"
     assert sent.json()["assistant_message"]["content"] == "hello"
     assert listed_messages.json()["messages"][0]["content"] == "hello"
+
+
+def test_create_agent_accepts_explicit_harness(client: TestClient) -> None:
+    response = client.post(
+        "/agents",
+        json={
+            "agent_id": "agent-codex",
+            "name": "Agent Codex",
+            "harness": "codex",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["harness"] == "codex"
+
+
+def test_list_harnesses_route(client: TestClient) -> None:
+    response = client.get("/harnesses")
+
+    assert response.status_code == 200
+    assert response.json() == ["claude-code", "echo", "copilot-cli", "codex"]
 
 
 def test_message_stream_route(client: TestClient) -> None:

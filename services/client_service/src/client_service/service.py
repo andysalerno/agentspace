@@ -98,6 +98,9 @@ class ClientService:
             agents = [agent.summary() for agent in self._agents.values()]
         return sorted(agents, key=lambda item: str(item["created_at"]))
 
+    async def list_harnesses(self) -> list[str]:
+        return [harness.value for harness in HarnessName]
+
     async def get_agent(self, agent_id: str) -> dict[str, object]:
         return self._get_agent(agent_id).summary()
 

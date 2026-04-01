@@ -67,6 +67,11 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/harnesses")
+async def list_harnesses() -> list[str]:
+    return await service.list_harnesses()
+
+
 @app.post("/agents")
 async def create_agent(payload: CreateAgentRequest) -> dict[str, object]:
     try:

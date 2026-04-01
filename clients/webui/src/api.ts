@@ -38,10 +38,12 @@ function parseChunk(line: string): MessageStreamChunk {
 }
 
 export const api = {
+  listHarnesses: () => requestJson<string[]>("/harnesses"),
   listAgents: () => requestJson<Agent[]>("/agents"),
   createAgent: (payload: {
     agent_id: string;
     name: string;
+    harness: string;
     system_prompt: string;
     skills?: string[];
   }) =>
