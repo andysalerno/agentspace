@@ -8,6 +8,7 @@ export type Agent = {
   harness: Harness;
   system_prompt: string;
   skills: string[];
+  env_vars: string;
   created_at: string;
   updated_at: string;
 };

@@ -11,6 +11,7 @@ from client_service.service import (
     InvalidAgentIdError,
     KernelNotFoundError,
     SessionNotFoundError,
+    parse_env_vars,
 )
 from kernel.events import (
     KernelEvent,
@@ -43,10 +44,11 @@ class StubAgentHostClient:
         *,
         harness: HarnessName,
         skills: list[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> dict[str, object]:
         del skills
         session_id = f"host-{len(self.created) + 1}"
-        self.created.append({"harness": harness, "session_id": session_id})
+        self.created.append({"harness": harness, "session_id": session_id, "env": env})
         self._sessions[session_id] = {"session_id": session_id, "status": "idle"}
         session: dict[str, object] = {"session_id": session_id, "status": "idle"}
         return session
@@ -411,3 +413,96 @@ async def test_skills_crud_proxies_to_agent_host() -> None:
 
     await service.delete_skill("my-skill")
     assert await service.list_skills() == []
+
+
+@pytest.mark.asyncio
+async def test_env_vars_stored_on_agent() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    env_text = "API_KEY=sk-123\nMODEL=claude-sonnet"
+    agent = await service.create_agent(
+        agent_id="env-agent",
+        name="Env Agent",
+        env_vars=env_text,
+    )
+    assert agent["env_vars"] == env_text
+
+    fetched = await service.get_agent("env-agent")
+    assert fetched["env_vars"] == env_text
+
+
+@pytest.mark.asyncio
+async def test_env_vars_updated_on_agent() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    await service.create_agent(
+        agent_id="env-agent",
+        name="Env Agent",
+        env_vars="OLD_KEY=old",
+    )
+    updated = await service.update_agent(
+        "env-agent",
+        name=None,
+        harness=None,
+        system_prompt=None,
+        skills=None,
+        env_vars="NEW_KEY=new",
+    )
+    assert updated["env_vars"] == "NEW_KEY=new"
+
+
+@pytest.mark.asyncio
+async def test_env_vars_passed_to_agent_host_on_session_create() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    env_text = "API_KEY=sk-123\nMODEL=claude-sonnet"
+    await service.create_agent(
+        agent_id="env-agent",
+        name="Env Agent",
+        env_vars=env_text,
+    )
+    await service.create_session(agent_id="env-agent")
+
+    assert len(upstream.created) == 1
+    assert upstream.created[0]["env"] == {
+        "API_KEY": "sk-123",
+        "MODEL": "claude-sonnet",
+    }
+
+
+@pytest.mark.asyncio
+async def test_empty_env_vars_passes_empty_dict() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    await service.create_agent(agent_id="no-env", name="No Env")
+    await service.create_session(agent_id="no-env")
+
+    assert upstream.created[0]["env"] == {}
+
+
+def test_parse_env_vars_basic() -> None:
+    result = parse_env_vars("KEY=value\nFOO=bar")
+    assert result == {"KEY": "value", "FOO": "bar"}
+
+
+def test_parse_env_vars_comments_and_blanks() -> None:
+    result = parse_env_vars("# comment\nKEY=value\n\n# another comment\nFOO=bar\n")
+    assert result == {"KEY": "value", "FOO": "bar"}
+
+
+def test_parse_env_vars_quoted_values() -> None:
+    result = parse_env_vars('SINGLE=\'hello world\'\nDOUBLE="hello world"')
+    assert result == {"SINGLE": "hello world", "DOUBLE": "hello world"}
+
+
+def test_parse_env_vars_empty_string() -> None:
+    assert parse_env_vars("") == {}
+
+
+def test_parse_env_vars_value_with_equals() -> None:
+    result = parse_env_vars("URL=https://example.com?foo=bar&baz=qux")
+    assert result == {"URL": "https://example.com?foo=bar&baz=qux"}

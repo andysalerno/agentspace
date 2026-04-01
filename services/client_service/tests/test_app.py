@@ -39,6 +39,7 @@ class StubClientService:
         harness: HarnessName,
         system_prompt: str = "",
         skills: list[str] | None = None,
+        env_vars: str = "",
     ) -> dict[str, object]:
         agent: dict[str, object] = {
             "agent_id": agent_id,
@@ -46,6 +47,7 @@ class StubClientService:
             "harness": harness.value,
             "system_prompt": system_prompt,
             "skills": skills or [],
+            "env_vars": env_vars,
             "created_at": "now",
             "updated_at": "now",
         }
@@ -69,6 +71,7 @@ class StubClientService:
         harness: HarnessName | None,
         system_prompt: str | None,
         skills: list[str] | None,
+        env_vars: str | None,
     ) -> dict[str, object]:
         agent = self.agents[agent_id]
         if name is not None:
@@ -79,6 +82,8 @@ class StubClientService:
             agent["system_prompt"] = system_prompt
         if skills is not None:
             agent["skills"] = list(skills)
+        if env_vars is not None:
+            agent["env_vars"] = env_vars
         return agent
 
     async def delete_agent(self, agent_id: str) -> None:

@@ -28,6 +28,7 @@ type AgentsViewProps = {
         harness: string;
         system_prompt: string;
         skills: string[];
+        env_vars: string;
     }) => Promise<void>;
     onUpdateAgent: (agentId: string, patch: { skills: string[] }) => Promise<void>;
     onDeleteAgent: (agentId: string) => Promise<void>;
@@ -49,6 +50,7 @@ export default function AgentsView({
         harness: getInitialHarness(harnesses),
         system_prompt: "",
         skills: [] as string[],
+        env_vars: "",
     });
     const [showForm, setShowForm] = useState(false);
     const [editingSkillsFor, setEditingSkillsFor] = useState<string | null>(null);
@@ -72,6 +74,7 @@ export default function AgentsView({
             harness: getInitialHarness(harnesses),
             system_prompt: "",
             skills: [],
+            env_vars: "",
         });
         setShowForm(false);
     }
@@ -172,6 +175,16 @@ export default function AgentsView({
                             </div>
                         </fieldset>
                     )}
+                    <label>
+                        Environment Variables
+                        <CodeEditor
+                            value={form.env_vars}
+                            onChange={(v) => setForm({ ...form, env_vars: v })}
+                            language="ini"
+                            height="120px"
+                        />
+                        <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
+                    </label>
                     <button disabled={busy} type="submit">
                         Create Agent
                     </button>

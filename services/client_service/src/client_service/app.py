@@ -43,6 +43,7 @@ class CreateAgentRequest(BaseModel):
     harness: HarnessName = HarnessName.COPILOT_CLI
     system_prompt: str = ""
     skills: list[str] = Field(default_factory=list)
+    env_vars: str = ""
 
 
 class UpdateAgentRequest(BaseModel):
@@ -50,6 +51,7 @@ class UpdateAgentRequest(BaseModel):
     harness: HarnessName | None = None
     system_prompt: str | None = None
     skills: list[str] | None = None
+    env_vars: str | None = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -81,6 +83,7 @@ async def create_agent(payload: CreateAgentRequest) -> dict[str, object]:
             harness=payload.harness,
             system_prompt=payload.system_prompt,
             skills=payload.skills,
+            env_vars=payload.env_vars,
         )
     except AgentAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -113,6 +116,7 @@ async def update_agent(
             harness=payload.harness,
             system_prompt=payload.system_prompt,
             skills=payload.skills,
+            env_vars=payload.env_vars,
         )
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -54,6 +54,7 @@ class AgentRecord:
     harness: HarnessName
     system_prompt: str
     skills: list[str] = field(default_factory=_empty_skills)
+    env_vars: str = ""
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -64,6 +65,7 @@ class AgentRecord:
             "harness": self.harness.value,
             "system_prompt": self.system_prompt,
             "skills": list(self.skills),
+            "env_vars": self.env_vars,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

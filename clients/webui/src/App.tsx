@@ -160,6 +160,7 @@ export default function App() {
     harness: string;
     system_prompt: string;
     skills: string[];
+    env_vars: string;
   }) {
     setBusy(true);
     setError(null);

@@ -77,6 +77,7 @@ class ClientService:
         harness: HarnessName = HarnessName.COPILOT_CLI,
         system_prompt: str = "",
         skills: list[str] | None = None,
+        env_vars: str = "",
     ) -> dict[str, object]:
         _validate_agent_id(agent_id)
         agent = AgentRecord(
@@ -85,6 +86,7 @@ class ClientService:
             harness=harness,
             system_prompt=system_prompt,
             skills=skills or [],
+            env_vars=env_vars,
         )
         async with self._lock:
             if agent.agent_id in self._agents:
@@ -112,6 +114,7 @@ class ClientService:
         harness: HarnessName | None,
         system_prompt: str | None,
         skills: list[str] | None,
+        env_vars: str | None,
     ) -> dict[str, object]:
         agent = self._get_agent(agent_id)
         if name is not None:
@@ -122,6 +125,8 @@ class ClientService:
             agent.system_prompt = system_prompt
         if skills is not None:
             agent.skills = list(skills)
+        if env_vars is not None:
+            agent.env_vars = env_vars
         agent.updated_at = utc_now()
         return agent.summary()
 
@@ -147,9 +152,11 @@ class ClientService:
         client_type: ClientType | None = None,
     ) -> dict[str, object]:
         agent = self._get_agent(agent_id)
+        env = parse_env_vars(agent.env_vars)
         upstream = await self._agent_host.create_session(
             harness=agent.harness,
             skills=agent.skills,
+            env=env,
         )
         session = SessionRecord(
             session_id=uuid.uuid4().hex,
@@ -451,3 +458,26 @@ def _validate_agent_id(agent_id: str) -> None:
     if not AGENT_ID_PATTERN.fullmatch(agent_id):
         msg = "agent_id must use lowercase letters and single dashes only"
         raise InvalidAgentIdError(msg)
+
+
+def parse_env_vars(raw: str) -> dict[str, str]:
+    """Parse .env file content into a dict of environment variables.
+
+    Supports KEY=VALUE lines.  Blank lines and lines starting with ``#``
+    are ignored.  Values may optionally be wrapped in single or double
+    quotes, which are stripped.
+    """
+    env: dict[str, str] = {}
+    for line in raw.splitlines():
+        line = line.strip()  # noqa: PLW2901
+        if not line or line.startswith("#"):
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        env[key] = value
+    return env

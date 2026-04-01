@@ -46,6 +46,7 @@ export const api = {
     harness: string;
     system_prompt: string;
     skills?: string[];
+    env_vars?: string;
   }) =>
     requestJson<Agent>("/agents", {
       method: "POST",
@@ -55,6 +56,7 @@ export const api = {
     name?: string;
     system_prompt?: string;
     skills?: string[];
+    env_vars?: string;
   }) =>
     requestJson<Agent>(`/agents/${agentId}`, {
       method: "PATCH",
