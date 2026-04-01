@@ -9,7 +9,8 @@ RUN apt-get update && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     apt-get purge -y curl && \
     apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    ln -sf /root/.local/bin/claude /usr/local/bin/claude
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy

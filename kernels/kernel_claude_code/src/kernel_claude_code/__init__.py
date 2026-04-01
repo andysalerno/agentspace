@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import sys
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -108,14 +109,17 @@ class ClaudeCodeKernel:
                 cwd=cwd,
             )
         except FileNotFoundError:
+            logger.exception("claude CLI not found; is it installed and on the PATH?")
             await self._queue.put(error("claude CLI not found; is it installed?"))
             await self._finish(KernelStatus.ERROR)
             return
         except OSError as exc:
+            logger.exception("failed to start claude CLI")
             await self._queue.put(error(f"failed to start claude CLI: {exc}"))
             await self._finish(KernelStatus.ERROR)
             return
 
+        logger.info("claude subprocess started, pid=%d", self._process.pid)
         self._output_task = asyncio.create_task(self._read_output())
 
     async def recv(self) -> AsyncIterator[KernelEvent]:
@@ -173,6 +177,7 @@ class ClaudeCodeKernel:
     def _build_env(self) -> dict[str, str]:
         env = {**os.environ}
         env["WORKSPACE_DIR"] = self._workspace_dir
+        env["IS_SANDBOX"] = "1"
 
         for key in (
             "ANTHROPIC_API_KEY",
@@ -230,6 +235,7 @@ class ClaudeCodeKernel:
         await asyncio.gather(stdout_task, stderr_task)
 
         returncode = await self._process.wait()
+        logger.info("claude subprocess exited with code %d", returncode)
         if returncode != 0:
             await self._queue.put(error(f"claude exited with code {returncode}"))
             await self._finish(KernelStatus.ERROR)
@@ -251,10 +257,14 @@ class ClaudeCodeKernel:
         if self._process is None or self._process.stdout is None:
             return
 
+        sys.stderr.write("[claude stdout] reader started, waiting for output...\n")
+        sys.stderr.flush()
         async for raw_line in self._process.stdout:
             line = raw_line.decode().rstrip("\n").rstrip("\r").strip()
             if not line:
                 continue
+            sys.stderr.write(f"[claude stdout] {line}\n")
+            sys.stderr.flush()
             self._raw_lines.append(line)
             try:
                 obj = json.loads(line)
@@ -265,16 +275,24 @@ class ClaudeCodeKernel:
                 await self._map_event(cast("dict[str, object]", obj))
             else:
                 await self._queue.put(text_delta(json.dumps(obj) + "\n"))
+        sys.stderr.write("[claude stdout] reader finished (EOF)\n")
+        sys.stderr.flush()
 
     async def _read_stderr(self) -> None:
         if self._process is None or self._process.stderr is None:
             return
 
+        sys.stderr.write("[claude stderr] reader started, waiting for output...\n")
+        sys.stderr.flush()
         async for raw_line in self._process.stderr:
             line = raw_line.decode().rstrip("\n").rstrip("\r").strip()
             if line:
+                sys.stderr.write(f"[claude stderr] {line}\n")
+                sys.stderr.flush()
                 self._raw_lines.append(f"[stderr] {line}")
                 await self._queue.put(error(line))
+        sys.stderr.write("[claude stderr] reader finished (EOF)\n")
+        sys.stderr.flush()
 
     async def _map_event(self, obj: dict[str, object]) -> None:  # noqa: C901, PLR0911, PLR0912
         event_type = obj.get("type", "")
