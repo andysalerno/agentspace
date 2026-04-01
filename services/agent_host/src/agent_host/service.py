@@ -15,12 +15,15 @@ from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel_host.registry import HarnessName
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
+
+    type AcloseFn = Callable[[], Awaitable[object]]
 
 logger_name = __name__
 
 # Where each harness expects to find skill directories inside the container.
 SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
+    HarnessName.CLAUDE_CODE: "/skills",
     HarnessName.COPILOT_CLI: "/root/.copilot/skills",
     HarnessName.CODEX: "/skills",
     HarnessName.ECHO: "/skills",
@@ -377,7 +380,7 @@ class AgentHost:
             finally:
                 aclose = getattr(stream, "aclose", None)
                 if callable(aclose):
-                    await aclose()
+                    await cast("AcloseFn", aclose)()
                 if events:
                     record.history.append(list(events))
                     record.status = _derive_status(events, record.status)

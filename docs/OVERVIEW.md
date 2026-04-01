@@ -36,7 +36,7 @@ AgentSpace is a system for defining, interacting with, and observing AI agents. 
 │  ┌────▼────┐    ┌────▼────┐    ┌────▼────┐              │
 │  │ kernel  │    │ kernel  │    │ kernel  │  ...          │
 │  │ :8000   │    │ :8000   │    │ :8000   │              │
-│  │(echo)   │    │(copilot)│    │(codex)  │              │
+│  │(echo)   │    │(copilot)│    │(codex)  │  ...         │
 │  └─────────┘    └─────────┘    └─────────┘              │
 │  one container per session                              │
 └─────────────────────────────────────────────────────────┘
@@ -51,6 +51,7 @@ agentspace/
 ├── kernels/
 │   ├── kernel/              # Protocol, events, base class (the abstraction)
 │   ├── kernel_echo/         # In-process echo kernel (testing)
+│   ├── kernel_claude_code/  # Claude Code CLI adapter
 │   ├── kernel_copilot/      # GitHub Copilot CLI adapter
 │   ├── kernel_codex/        # OpenAI Codex CLI adapter
 │   └── kernel_host/         # Container entry point + HTTP service
@@ -117,6 +118,10 @@ Wraps the `copilot` CLI in non-interactive prompt mode with JSON output. Support
 
 Wraps `codex exec` with similar patterns. Supports session threads, model selection, and maps Codex events (`turn.completed`, `agent_message`, `command_execution`) into the standard stream.
 
+#### `kernel_claude_code` — Claude Code CLI
+
+Wraps `claude --print --bare --output-format stream-json` with resumable sessions, explicit `--add-dir` handling for mounted skills and extra paths, and a scaffolded event parser that normalizes Claude output into the shared kernel event stream.
+
 #### `kernel_host` — Container Entry Point
 
 Runs inside each kernel container. Has two modes:
@@ -124,7 +129,7 @@ Runs inside each kernel container. Has two modes:
 - **Runner mode** (`python -m kernel_host.runner "prompt"`) — one-shot CLI that prints JSONL to stdout.
 - **Service mode** (`python -m kernel_host.app`) — long-lived FastAPI server (port 8000) exposing `/messages`, `/session`, `/history`, `/logs`, and `/reset` endpoints. This is the mode used in production; `agent_host` talks to each container over HTTP.
 
-A registry maps harness names (`echo`, `copilot-cli`, `codex`) to kernel classes.
+A registry maps harness names (`echo`, `claude-code`, `copilot-cli`, `codex`) to kernel classes.
 
 ### Service Layer
 
@@ -177,7 +182,7 @@ Key API endpoints (port 8002):
 | `GET /kernels/{id}/logs` | Kernel logs (proxied) |
 | `CRUD /skills` | Skills management (proxied) |
 
-Data models: `AgentRecord`, `SessionRecord`, `MessageRecord`, with `HarnessName` enum (`echo`, `copilot-cli`, `codex`) and `ClientType` enum (`cli`, `webui`).
+Data models: `AgentRecord`, `SessionRecord`, `MessageRecord`, with `HarnessName` enum (`echo`, `claude-code`, `copilot-cli`, `codex`) and `ClientType` enum (`cli`, `webui`).
 
 ### Client Layer
 
@@ -211,7 +216,7 @@ sequenceDiagram
     participant CS as client_service
     participant AH as agent_host
     participant KH as kernel_host (container)
-    participant K as Kernel (copilot / codex)
+    participant K as Kernel (claude / copilot / codex)
 
     C->>CS: POST /sessions/{id}/messages
     CS->>AH: POST /sessions/{id}/messages
@@ -282,7 +287,7 @@ The codebase uses strict pyright type-checking, ruff with all lint rules enabled
 **Implemented:**
 
 - Kernel abstraction with protocol, base class, and JSONL event contract
-- Three kernel implementations: echo, copilot-cli, codex
+- Four kernel implementations: echo, claude-code, copilot-cli, codex
 - Kernel host with both runner and HTTP service modes
 - Docker-based kernel container lifecycle
 - Agent host service with skills management

@@ -10,6 +10,7 @@ members = [
     "cli-ui",
     "client-service",
     "kernel",
+    "kernel-claude-code",
     "kernel-codex",
     "kernel-copilot",
     "kernel-echo",
@@ -333,6 +334,17 @@ version = "0.1.0"
 source = { editable = "kernels/kernel" }
 
 [[package]]
+name = "kernel-claude-code"
+version = "0.1.0"
+source = { editable = "kernels/kernel_claude_code" }
+dependencies = [
+    { name = "kernel" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
+
+[[package]]
 name = "kernel-codex"
 version = "0.1.0"
 source = { editable = "kernels/kernel_codex" }
@@ -372,6 +384,7 @@ source = { editable = "kernels/kernel_host" }
 dependencies = [
     { name = "fastapi" },
     { name = "kernel" },
+    { name = "kernel-claude-code" },
     { name = "kernel-codex" },
     { name = "kernel-copilot" },
     { name = "kernel-echo" },
@@ -382,6 +395,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi" },
     { name = "kernel", editable = "kernels/kernel" },
+    { name = "kernel-claude-code", editable = "kernels/kernel_claude_code" },
     { name = "kernel-codex", editable = "kernels/kernel_codex" },
     { name = "kernel-copilot", editable = "kernels/kernel_copilot" },
     { name = "kernel-echo", editable = "kernels/kernel_echo" },

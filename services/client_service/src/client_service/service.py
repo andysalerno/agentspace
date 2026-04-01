@@ -6,7 +6,7 @@ import logging
 import re
 import uuid
 from dataclasses import asdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from kernel.events import EventType, KernelEvent
 from kernel_host.registry import HarnessName
@@ -23,7 +23,9 @@ from client_service.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
+
+    type AcloseFn = Callable[[], Awaitable[object]]
 
 logger = logging.getLogger(__name__)
 AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
@@ -309,7 +311,7 @@ class ClientService:
         finally:
             aclose = getattr(stream, "aclose", None)
             if callable(aclose):
-                await aclose()
+                await cast("AcloseFn", aclose)()
             assistant_message = await self._finalize_stream_turn(
                 session=session,
                 events=events,
