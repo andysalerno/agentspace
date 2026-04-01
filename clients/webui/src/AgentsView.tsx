@@ -149,15 +149,15 @@ export default function AgentsView({
                             ))}
                         </select>
                     </label>
-                    <label>
-                        System Prompt
+                    <div>
+                        <label>System Prompt</label>
                         <CodeEditor
                             value={form.system_prompt}
                             onChange={(v) => setForm({ ...form, system_prompt: v })}
                             language="markdown"
                             height="120px"
                         />
-                    </label>
+                    </div>
                     {skills.length > 0 && (
                         <fieldset className="skills-fieldset">
                             <legend>Skills</legend>
@@ -175,8 +175,8 @@ export default function AgentsView({
                             </div>
                         </fieldset>
                     )}
-                    <label>
-                        Environment Variables
+                    <div>
+                        <label>Environment Variables</label>
                         <CodeEditor
                             value={form.env_vars}
                             onChange={(v) => setForm({ ...form, env_vars: v })}
@@ -184,7 +184,7 @@ export default function AgentsView({
                             height="120px"
                         />
                         <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
-                    </label>
+                    </div>
                     <button disabled={busy} type="submit">
                         Create Agent
                     </button>
