@@ -494,9 +494,8 @@ button:disabled {
 .message {
   border-radius: var(--radius-md);
   padding: 12px 16px;
-  white-space: pre-wrap;
   max-width: 80%;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .message header {
@@ -517,6 +516,115 @@ button:disabled {
   background: var(--card-bg);
   border: 1px solid var(--border-color);
   align-self: flex-start;
+}
+
+.message-content {
+  color: inherit;
+}
+
+.message-content > :first-child {
+  margin-top: 0;
+}
+
+.message-content > :last-child {
+  margin-bottom: 0;
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content h5,
+.message-content h6 {
+  margin: 1rem 0 0.5rem;
+  line-height: 1.25;
+}
+
+.message-content p,
+.message-content ul,
+.message-content ol,
+.message-content blockquote,
+.message-content pre,
+.message-content table,
+.message-content hr {
+  margin: 0.75rem 0;
+}
+
+.message-content ul,
+.message-content ol {
+  padding-left: 1.4rem;
+}
+
+.message-content li + li {
+  margin-top: 0.25rem;
+}
+
+.message-content li > p {
+  margin: 0.25rem 0;
+}
+
+.message-content a {
+  color: var(--accent);
+}
+
+.message-content blockquote {
+  margin-left: 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--border-color);
+  color: var(--text-secondary);
+}
+
+.message-content pre {
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--card-footer-bg);
+}
+
+.message-content code {
+  font-family: "Cascadia Code", "Fira Code", monospace;
+  font-size: 0.9em;
+}
+
+.message-content :not(pre) > code {
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-sm);
+  background: var(--card-footer-bg);
+}
+
+.message-content pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.message-content table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.message-content th,
+.message-content td {
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  text-align: left;
+}
+
+.message-content img {
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+}
+
+.message-content hr {
+  border: none;
+  border-top: 1px solid var(--border-color);
+}
+
+.message-content input[type="checkbox"] {
+  margin-right: 0.45rem;
 }
 
 .message.streaming {

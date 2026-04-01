@@ -1,4 +1,7 @@
 import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
 import type { Agent, ChatMessage, SessionDetail, SessionSummary, ToolCall } from "./types";
 import ToolDetailPane from "./ToolDetailPane";
 
@@ -14,6 +17,39 @@ type ChatViewProps = {
     busy: boolean;
     streamingMessage: ChatMessage | null;
 };
+
+const markdownPlugins = [remarkGfm, remarkBreaks];
+
+function MessageMarkdown({
+    content,
+    streaming = false,
+}: {
+    content: string;
+    streaming?: boolean;
+}) {
+    return (
+        <div className="message-content">
+            <ReactMarkdown
+                remarkPlugins={markdownPlugins}
+                components={{
+                    a: ({ href, children, ...props }) => (
+                        <a
+                            {...props}
+                            href={href}
+                            rel={href ? "noreferrer noopener" : undefined}
+                            target={href ? "_blank" : undefined}
+                        >
+                            {children}
+                        </a>
+                    ),
+                }}
+            >
+                {content}
+            </ReactMarkdown>
+            {streaming ? <span className="cursor">▌</span> : null}
+        </div>
+    );
+}
 
 export default function ChatView({
     agents,
@@ -151,7 +187,7 @@ export default function ChatView({
                                                     ))}
                                                 </div>
                                             )}
-                                            <div>{msg.content}</div>
+                                            <MessageMarkdown content={msg.content} />
                                         </article>
                                     ))}
                                     {streamingMessage && (
@@ -182,7 +218,7 @@ export default function ChatView({
                                                     ))}
                                                 </div>
                                             )}
-                                            <div>{streamingMessage.content}<span className="cursor">▌</span></div>
+                                            <MessageMarkdown content={streamingMessage.content} streaming />
                                         </article>
                                     )}
                                 </>
