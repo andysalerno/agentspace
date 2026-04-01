@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     type AcloseFn = Callable[[], Awaitable[object]]
 
-logger_name = __name__
+logger = logging.getLogger(__name__)
 
 # Where each harness expects to find skill directories inside the container.
 SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
@@ -150,6 +150,15 @@ class DockerKernelRuntime:
     ) -> KernelRuntimeSession:
         container_name = f"agentspace-kernel-{session_id[:12]}"
         base_url = self._base_url_template.format(container_name=container_name)
+        logger.debug(
+            "creating kernel container: name=%s harness=%s"
+            " env_keys=%s additional_paths=%s skills=%s",
+            container_name,
+            harness.value,
+            sorted(env.keys()),
+            additional_paths,
+            skills,
+        )
         await asyncio.to_thread(
             self._run_container,
             container_name,
@@ -260,6 +269,12 @@ class DockerKernelRuntime:
         environment["KERNEL_SKILLS_STAGING_DIR"] = skills_staging
         environment["KERNEL_ENABLED_SKILLS"] = ",".join(skills)
 
+        logger.debug(
+            "container %s final env: %s",
+            container_name,
+            environment,
+        )
+
         self._client.containers.run(
             self._kernel_image,
             auto_remove=True,
@@ -333,8 +348,16 @@ class AgentHost:
         skills: tuple[str, ...] = (),
     ) -> dict[str, Any]:
         session_id = uuid.uuid4().hex
+        caller_env = env or {}
         merged_env = dict(os.environ)
-        merged_env.update(env or {})
+        merged_env.update(caller_env)
+        logger.debug(
+            "creating session %s: harness=%s caller_env_keys=%s skills=%s",
+            session_id,
+            harness.value,
+            sorted(caller_env.keys()),
+            skills,
+        )
         runtime_session = await self._runtime.create_session(
             session_id=session_id,
             harness=harness,
@@ -403,7 +426,6 @@ class AgentHost:
 
     async def destroy_all_sessions(self) -> None:
         """Destroy all active sessions. Called during shutdown."""
-        logger = logging.getLogger(logger_name)
         async with self._lock:
             records = list(self._sessions.values())
             self._sessions.clear()

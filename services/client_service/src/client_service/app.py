@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import logging
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -23,8 +22,6 @@ from client_service.service import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Client Service", version="0.1.0")
 app.add_middleware(

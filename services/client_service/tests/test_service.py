@@ -495,7 +495,7 @@ def test_parse_env_vars_comments_and_blanks() -> None:
 
 
 def test_parse_env_vars_quoted_values() -> None:
-    result = parse_env_vars('SINGLE=\'hello world\'\nDOUBLE="hello world"')
+    result = parse_env_vars("SINGLE='hello world'\nDOUBLE=\"hello world\"")
     assert result == {"SINGLE": "hello world", "DOUBLE": "hello world"}
 
 

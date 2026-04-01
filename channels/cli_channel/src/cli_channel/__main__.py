@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
 from cli_channel.client import ClientServiceSessionClient
@@ -21,7 +22,11 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run() -> None:
-    logging.basicConfig(level=logging.INFO)
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     args = parse_args()
     if args.session_id is None and args.agent_id is None:
         msg = "--agent-id is required when --session-id is not provided"
