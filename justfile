@@ -17,6 +17,9 @@ bootstrap:
   uv sync --all-packages --dev
   npm --prefix clients/webui install
 
+webui-outdated:
+  npm --prefix clients/webui outdated
+
 # Full stack compose workflow
 stack-build:
   docker compose -f compose.yaml build
