@@ -150,7 +150,7 @@ class DockerKernelRuntime:
     ) -> KernelRuntimeSession:
         container_name = f"agentspace-kernel-{session_id[:12]}"
         base_url = self._base_url_template.format(container_name=container_name)
-        logger.debug(
+        logger.info(
             "creating kernel container: name=%s harness=%s"
             " env_keys=%s additional_paths=%s skills=%s",
             container_name,
@@ -269,7 +269,7 @@ class DockerKernelRuntime:
         environment["KERNEL_SKILLS_STAGING_DIR"] = skills_staging
         environment["KERNEL_ENABLED_SKILLS"] = ",".join(skills)
 
-        logger.debug(
+        logger.info(
             "container %s final env: %s",
             container_name,
             environment,
@@ -351,7 +351,7 @@ class AgentHost:
         caller_env = env or {}
         merged_env = dict(os.environ)
         merged_env.update(caller_env)
-        logger.debug(
+        logger.info(
             "creating session %s: harness=%s caller_env_keys=%s skills=%s",
             session_id,
             harness.value,

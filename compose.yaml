@@ -16,7 +16,7 @@ services:
       kernel-host-image:
         condition: service_completed_successfully
     environment:
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
       - AGENT_HOST_COPILOT_VOLUME=agentspace-kernel_copilot-config
       - AGENT_HOST_SKILLS_VOLUME=agentspace-skills
       - AGENT_HOST_SKILLS_DIR=/skills
@@ -42,7 +42,7 @@ services:
       agent-host:
         condition: service_started
     environment:
-      - LOG_LEVEL=DEBUG
+      - LOG_LEVEL=INFO
       - CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://agent-host:8001
       - CLIENT_SERVICE_AGENT_HOST_TIMEOUT=60
     ports:

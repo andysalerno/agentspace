@@ -84,7 +84,7 @@ class CodexKernel:
         env = self._build_env()
         cwd = self._workspace_dir
 
-        logger.debug("spawning codex subprocess: cmd=%s cwd=%s", cmd, cwd)
+        logger.info("spawning codex subprocess: cmd=%s cwd=%s", cmd, cwd)
 
         try:
             self._process = await asyncio.create_subprocess_exec(

@@ -7,9 +7,9 @@ import uvicorn
 
 
 def main() -> None:
-    log_level = os.environ.get("LOG_LEVEL", "DEBUG").upper()
+    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
     logging.basicConfig(
-        level=getattr(logging, log_level, logging.DEBUG),
+        level=getattr(logging, log_level, logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 

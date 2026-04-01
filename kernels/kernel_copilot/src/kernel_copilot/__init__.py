@@ -100,7 +100,7 @@ class CopilotKernel:
             await self._finish(KernelStatus.ERROR)
             return
 
-        logger.debug("spawning copilot subprocess: cmd=%s cwd=%s", cmd, cwd)
+        logger.info("spawning copilot subprocess: cmd=%s cwd=%s", cmd, cwd)
 
         try:
             self._process = await asyncio.create_subprocess_exec(

@@ -9,8 +9,8 @@ from uvicorn.config import LOGGING_CONFIG
 
 
 def _log_level_from_env() -> int:
-    level_name = os.environ.get("LOG_LEVEL", "DEBUG").upper()
-    return getattr(logging, level_name, logging.DEBUG)
+    level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    return getattr(logging, level_name, logging.INFO)
 
 
 def _uvicorn_log_config(log_level: int) -> dict[str, object]:

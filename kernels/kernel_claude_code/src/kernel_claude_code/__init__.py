@@ -97,7 +97,7 @@ class ClaudeCodeKernel:
         cwd = self._workspace_dir
         await asyncio.to_thread(_ensure_directory, cwd)
 
-        logger.debug("spawning claude subprocess: cmd=%s cwd=%s", cmd, cwd)
+        logger.info("spawning claude subprocess: cmd=%s cwd=%s", cmd, cwd)
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -363,10 +363,10 @@ class ClaudeCodeKernel:
             "system",
         }
         if event_type in ignored_events:
-            logger.debug("ignoring claude event: %s", event_type)
+            logger.info("ignoring claude event: %s", event_type)
             return
 
-        logger.debug("unhandled claude event: type=%s data=%s", event_type, data)
+        logger.info("unhandled claude event: type=%s data=%s", event_type, data)
 
     async def _emit_content_items(self, content: object) -> bool:
         if not isinstance(content, list):
