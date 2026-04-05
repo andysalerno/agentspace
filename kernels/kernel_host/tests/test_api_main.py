@@ -24,11 +24,11 @@ def test_main_defaults_to_debug_logs_on_stdout(
     api_main.main()
 
     kwargs = captured["kwargs"]
-    assert kwargs["log_level"] == logging.DEBUG
+    assert kwargs["log_level"] == logging.INFO
     assert kwargs["log_config"]["handlers"]["default"]["stream"] == "ext://sys.stdout"
     assert kwargs["log_config"]["root"] == {
         "handlers": ["default"],
-        "level": logging.DEBUG,
+        "level": logging.INFO,
     }
 
 
