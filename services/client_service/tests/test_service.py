@@ -186,6 +186,7 @@ async def test_list_harnesses_returns_registered_harnesses() -> None:
         "echo",
         "copilot-cli",
         "codex",
+        "opencode",
     ]
 
 

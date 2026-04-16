@@ -18,27 +18,27 @@ bootstrap:
   npm --prefix clients/webui install
 
 test:
-  uv run pytest
+  uv run --all-packages pytest
 
 webui-outdated:
   npm --prefix clients/webui outdated
 
 # Full stack compose workflow
 stack-build:
-  docker compose -f compose.yaml build
+  podman compose -f compose.yaml build
 
 stack-up:
-  docker compose -f compose.yaml up -d --build
+  podman compose -f compose.yaml up -d --build
 
 stack-down:
-  docker compose -f compose.yaml down --remove-orphans
-  -docker rm -f $(docker ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
+  podman compose -f compose.yaml down --remove-orphans
+  -podman rm -f $(podman ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
 
 stack-logs:
-  docker compose -f compose.yaml logs -f
+  podman compose -f compose.yaml logs -f
 
 stack-status:
-  docker compose -f compose.yaml ps
+  podman compose -f compose.yaml ps
 
 # One-time setup: launch interactive copilot session for /login auth
 copilot-setup:
