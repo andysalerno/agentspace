@@ -13,6 +13,9 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /root/.local/bin/claude /usr/local/bin/claude
 
+# Ensure opencode is in PATH
+RUN ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode
+
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 
