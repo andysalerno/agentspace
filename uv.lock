@@ -15,6 +15,7 @@ members = [
     "kernel-copilot",
     "kernel-echo",
     "kernel-host",
+    "kernel-opencode",
 ]
 
 [[package]]
@@ -388,6 +389,7 @@ dependencies = [
     { name = "kernel-codex" },
     { name = "kernel-copilot" },
     { name = "kernel-echo" },
+    { name = "kernel-opencode" },
     { name = "uvicorn" },
 ]
 
@@ -399,8 +401,20 @@ requires-dist = [
     { name = "kernel-codex", editable = "kernels/kernel_codex" },
     { name = "kernel-copilot", editable = "kernels/kernel_copilot" },
     { name = "kernel-echo", editable = "kernels/kernel_echo" },
+    { name = "kernel-opencode", editable = "kernels/kernel_opencode" },
     { name = "uvicorn" },
 ]
+
+[[package]]
+name = "kernel-opencode"
+version = "0.1.0"
+source = { editable = "kernels/kernel_opencode" }
+dependencies = [
+    { name = "kernel" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
 
 [[package]]
 name = "linkify-it-py"

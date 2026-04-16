@@ -7,6 +7,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl && \
     curl -fsSL https://gh.io/copilot-install | bash && \
     curl -fsSL https://claude.ai/install.sh | bash && \
+    curl -fsSL https://opencode.ai/install | bash && \
     apt-get purge -y curl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
@@ -24,6 +25,7 @@ COPY kernels/kernel_claude_code kernels/kernel_claude_code
 COPY kernels/kernel_echo kernels/kernel_echo
 COPY kernels/kernel_codex kernels/kernel_codex
 COPY kernels/kernel_copilot kernels/kernel_copilot
+COPY kernels/kernel_opencode kernels/kernel_opencode
 COPY kernels/kernel_host kernels/kernel_host
 
 # Install kernel_host and all its dependencies

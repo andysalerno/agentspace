@@ -17,6 +17,7 @@ kernel-claude-code = { workspace = true }
 kernel-echo = { workspace = true }
 kernel-codex = { workspace = true }
 kernel-copilot = { workspace = true }
+kernel-opencode = { workspace = true }
 kernel-host = { workspace = true }
 agent-host = { workspace = true }
 client-service = { workspace = true }
@@ -46,6 +47,7 @@ ignore = [
 "kernels/kernel_claude_code/tests/test_claude_code.py" = ["E501", "SLF001"]
 "kernels/kernel_copilot/tests/test_copilot.py" = ["E501", "SLF001"]
 "kernels/kernel_codex/tests/test_codex.py" = ["E501", "SLF001"]
+"kernels/kernel_opencode/tests/test_opencode.py" = ["E501", "SLF001"]
 
 [tool.pyright]
 pythonVersion = "3.13"
@@ -58,6 +60,7 @@ extraPaths = [
     "kernels/kernel_echo/src",
     "kernels/kernel_codex/src",
     "kernels/kernel_copilot/src",
+    "kernels/kernel_opencode/src",
     "kernels/kernel_host/src",
     "services/agent_host/src",
     "services/client_service/src",
