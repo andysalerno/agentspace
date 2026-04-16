@@ -50,16 +50,22 @@ In `src/kernel_<name>/__init__.py`, implement a class that satisfies the `Kernel
 - **Properties:** `name` (str), `status` (KernelStatus), `resume_token` (str | None)
 - **Methods:** `start(config)`, `send(message)`, `recv()` (async iterator), `stop()`
 
-**Pattern:** Most CLI kernels follow the same structure (see kernel_codex, kernel_copilot, kernel_opencode as examples):
+**Pattern for CLI-wrapping kernels** (see kernel_codex, kernel_copilot, kernel_opencode):
 - `start()` saves config, generates session ID, queues a `session_start` event
 - `send(message)` spawns the CLI subprocess with the message, then reads output in a background task
 - `recv()` yields events from an internal asyncio queue
 - `stop()` terminates the subprocess
 
-**Key implementation details:**
-- Build the CLI command in `_build_command(message)` — map `KernelConfig.env` entries to CLI flags
+**Pattern for non-CLI kernels** (see kernel_echo):
+- Purely in-process, no subprocess — just queue events directly
+- Useful for testing or for wrapping APIs/SDKs instead of CLIs.
+
+A kernel does NOT have to wrap a CLI. It just needs to satisfy the protocol. It could call an HTTP API, use a Python SDK, or do anything else.
+
+**Key implementation details for CLI kernels:**
+- Build the CLI command in `_build_command(message)` — map `KernelConfig.env` entries to CLI flags. Every CLI is different — check `--help` to learn the flags.
 - Build env vars in `_build_env()` — forward API keys etc from `KernelConfig.env`
-- Parse stdout JSON in `_map_event(obj)` — translate the CLI's JSON event format into standard `KernelEvent` types
+- Parse stdout in `_map_event(obj)` — translate the CLI's output format into standard `KernelEvent` types. The output format is entirely CLI-specific (JSONL, plain text, SSE, etc.).
 - Read stderr as error events
 - Use `KernelConfig.session_id` and `KernelConfig.env` for session resume, model selection, workspace dir, etc.
 
@@ -75,9 +81,9 @@ In `src/kernel_<name>/__init__.py`, implement a class that satisfies the `Kernel
 
 ### 3. Write tests
 
-In `tests/test_<name>.py`, capture real JSONL output from the CLI tool and use it as test fixtures. Test:
-- Event mapping for each event type the CLI emits
-- Command building with various config options (model, session resume, etc.)
+In `tests/test_<name>.py`, capture real output from the tool and use it as test fixtures. Test:
+- Event mapping for each event type the tool emits
+- For CLI kernels: command building with various config options (model, session resume, etc.)
 - Full conversation flows (simple text, tool use)
 - Session ID capture
 
@@ -132,7 +138,9 @@ just stack-build  # Docker images should build
 
 ## Tips
 
-- Run `<cli-tool> --help` and `<cli-tool> run --help` to understand the CLI interface
-- Run `<cli-tool> run --format json "say hello"` to capture sample JSON output for test fixtures
-- The JSON event format varies by CLI — the core job of the kernel is mapping these to standardized `KernelEvent` types
-- Look at existing kernels for the closest match to your CLI's event format and copy from there
+- Every CLI/tool is different. Start by exploring its interface (`--help`, docs, etc.) to understand how to invoke it non-interactively and get structured output.
+- Try to find a way to get JSON or structured output from the tool — this makes parsing much easier. Examples: `copilot --output-format json`, `codex exec --json`, `opencode run --format json`. If there's no JSON mode, you'll need to parse plain text.
+- Run the tool with a simple prompt (e.g. "say hello") and a tool-using prompt (e.g. "list files in the current directory") to capture sample output for test fixtures.
+- The core job of every kernel is mapping the tool's native output into standardized `KernelEvent` types.
+- Look at existing kernels for the closest match to your tool's behavior and copy from there.
+- Not all kernels wrap CLIs — a kernel could wrap an HTTP API, a Python SDK, or anything else. The only requirement is satisfying the `Kernel` protocol.
