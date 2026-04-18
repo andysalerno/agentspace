@@ -171,6 +171,7 @@ textarea {
   cursor: pointer;
   font-size: 0.9rem;
   transition: background 0.15s, color 0.15s;
+  position: relative;
 }
 
 .sidebar-nav-item:hover {
@@ -230,6 +231,11 @@ textarea {
   grid-template-columns: 240px 1fr;
   gap: 16px;
   align-items: start;
+}
+
+.config-kernels-list,
+.config-kernels-detail {
+  padding: 16px 20px;
 }
 
 .config-kernels-list h3,
