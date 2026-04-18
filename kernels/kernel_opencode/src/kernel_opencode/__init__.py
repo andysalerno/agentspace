@@ -133,6 +133,7 @@ class OpenCodeKernel:
             "--format",
             "json",
             "--dangerously-skip-permissions",
+            "--thinking",
         ]
 
         model = self._config.env.get("OPENCODE_MODEL")
