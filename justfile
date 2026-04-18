@@ -23,6 +23,10 @@ test:
 webui-outdated:
   npm --prefix clients/webui outdated
 
+# Static analysis for the webui (knip: unused/unlisted deps, dead exports)
+webui-lint:
+  npm --prefix clients/webui run lint
+
 # Full stack compose workflow
 stack-build:
   podman compose -f compose.yaml build

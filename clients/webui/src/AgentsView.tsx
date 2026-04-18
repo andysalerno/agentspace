@@ -1,4 +1,5 @@
-import { FormEvent, useEffect, useState } from "react";
+import type { FormEvent} from "react";
+import { useEffect, useState } from "react";
 import type { Agent, Skill } from "./types";
 import CodeEditor from "./CodeEditor";
 

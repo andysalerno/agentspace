@@ -1,4 +1,5 @@
-import { FormEvent, useState } from "react";
+import type { FormEvent} from "react";
+import { useState } from "react";
 import { api } from "./api";
 import type { Skill } from "./types";
 import CodeEditor from "./CodeEditor";
@@ -272,7 +273,7 @@ export default function SkillsView({
                                             if (expandedSkill?.skill_id === skill.skill_id) {
                                                 startEditing(expandedSkill);
                                             } else {
-                                                api.getSkill(skill.skill_id).then(startEditing);
+                                                void api.getSkill(skill.skill_id).then(startEditing);
                                             }
                                         }}
                                         type="button"

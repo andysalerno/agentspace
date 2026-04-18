@@ -1,4 +1,5 @@
-import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
+import type { FormEvent, KeyboardEvent} from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
@@ -83,7 +84,7 @@ export default function ChatView({
         setShowNewSession(false);
     }
 
-    async function handleSendMessage(event: FormEvent<HTMLFormElement>) {
+    function handleSendMessage(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         if (!messageDraft.trim()) return;
         const msg = messageDraft.trim();
