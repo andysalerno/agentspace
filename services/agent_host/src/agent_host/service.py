@@ -111,7 +111,7 @@ class SessionRecord:
 
 class DockerKernelRuntime:
     def __init__(self) -> None:
-        self._client = docker.from_env()
+        self._client_instance: docker.DockerClient | None = None
         self._kernel_image = os.environ.get(
             "AGENT_HOST_KERNEL_IMAGE",
             "agentspace-kernel-kernel:latest",
@@ -139,6 +139,15 @@ class DockerKernelRuntime:
             "AGENT_HOST_SKILLS_DIR",
             "/skills",
         )
+
+    @property
+    def _client(self) -> docker.DockerClient:
+        # Lazy: avoid connecting to the Docker daemon until first use,
+        # so importing this module (and constructing AgentHost for tests
+        # or app startup) does not require a running daemon.
+        if self._client_instance is None:
+            self._client_instance = docker.from_env()
+        return self._client_instance
 
     async def create_session(
         self,

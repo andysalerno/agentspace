@@ -12,3 +12,6 @@ node_modules/
 clients/webui/*.tsbuildinfo
 clients/webui/vite.config.js
 clients/webui/vite.config.d.ts
+
+# Bind-mounted runtime data (sqlite databases, etc.)
+mounts/data/

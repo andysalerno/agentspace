@@ -22,6 +22,12 @@ from client_service.models import (
     ToolCallRecord,
     utc_now,
 )
+from client_service.storage.agents import (
+    AgentExistsError,
+    AgentMissingError,
+    AgentStore,
+    InMemoryAgentStore,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -65,9 +71,13 @@ VISIBLE_ASSISTANT_EVENT_TYPES = frozenset(
 
 
 class ClientService:
-    def __init__(self, agent_host_client: AgentHostClient | None = None) -> None:
+    def __init__(
+        self,
+        agent_host_client: AgentHostClient | None = None,
+        agent_store: AgentStore | None = None,
+    ) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
-        self._agents: dict[str, AgentRecord] = {}
+        self._agent_store: AgentStore = agent_store or InMemoryAgentStore()
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
 
@@ -91,22 +101,24 @@ class ClientService:
             env_vars=env_vars,
         )
         async with self._lock:
-            if agent.agent_id in self._agents:
-                raise AgentAlreadyExistsError(agent.agent_id)
-            self._agents[agent.agent_id] = agent
+            try:
+                await self._agent_store.insert(agent)
+            except AgentExistsError as exc:
+                raise AgentAlreadyExistsError(agent.agent_id) from exc
         logger.info("created agent %s using harness %s", agent.agent_id, harness.value)
         return agent.summary()
 
     async def list_agents(self) -> list[dict[str, object]]:
         async with self._lock:
-            agents = [agent.summary() for agent in self._agents.values()]
+            agents = [agent.summary() for agent in await self._agent_store.list()]
         return sorted(agents, key=lambda item: str(item["created_at"]))
 
     async def list_harnesses(self) -> list[str]:
         return [harness.value for harness in HarnessName]
 
     async def get_agent(self, agent_id: str) -> dict[str, object]:
-        return self._get_agent(agent_id).summary()
+        agent = await self._require_agent(agent_id)
+        return agent.summary()
 
     async def update_agent(
         self,
@@ -118,29 +130,34 @@ class ClientService:
         skills: list[str] | None,
         env_vars: str | None,
     ) -> dict[str, object]:
-        agent = self._get_agent(agent_id)
-        if name is not None:
-            agent.name = name
-        if harness is not None:
-            agent.harness = harness
-        if system_prompt is not None:
-            agent.system_prompt = system_prompt
-        if skills is not None:
-            agent.skills = list(skills)
-        if env_vars is not None:
-            agent.env_vars = env_vars
-        agent.updated_at = utc_now()
-        return agent.summary()
+        async with self._lock:
+            agent = await self._require_agent(agent_id)
+            if name is not None:
+                agent.name = name
+            if harness is not None:
+                agent.harness = harness
+            if system_prompt is not None:
+                agent.system_prompt = system_prompt
+            if skills is not None:
+                agent.skills = list(skills)
+            if env_vars is not None:
+                agent.env_vars = env_vars
+            agent.updated_at = utc_now()
+            try:
+                await self._agent_store.update(agent)
+            except AgentMissingError as exc:
+                raise AgentNotFoundError(agent_id) from exc
+            return agent.summary()
 
     async def delete_agent(self, agent_id: str) -> None:
         async with self._lock:
-            agent = self._agents.pop(agent_id, None)
+            removed = await self._agent_store.delete(agent_id)
             session_ids = [
                 session_id
                 for session_id, session in self._sessions.items()
                 if session.agent_id == agent_id
             ]
-        if agent is None:
+        if not removed:
             raise AgentNotFoundError(agent_id)
         for session_id in session_ids:
             if session_id in self._sessions:
@@ -153,7 +170,7 @@ class ClientService:
         channel_name: str | None = None,
         client_type: ClientType | None = None,
     ) -> dict[str, object]:
-        agent = self._get_agent(agent_id)
+        agent = await self._require_agent(agent_id)
         env = parse_env_vars(agent.env_vars)
         upstream = await self._agent_host.create_session(
             harness=agent.harness,
@@ -414,11 +431,11 @@ class ClientService:
             raise SessionNotFoundError(session_id)
         await self._agent_host.destroy_session(session.agent_host_session_id)
 
-    def _get_agent(self, agent_id: str) -> AgentRecord:
-        try:
-            return self._agents[agent_id]
-        except KeyError as exc:
-            raise AgentNotFoundError(agent_id) from exc
+    async def _require_agent(self, agent_id: str) -> AgentRecord:
+        agent = await self._agent_store.get(agent_id)
+        if agent is None:
+            raise AgentNotFoundError(agent_id)
+        return agent
 
     def _get_session(self, session_id: str) -> SessionRecord:
         try:

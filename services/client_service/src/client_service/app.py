@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -19,11 +22,43 @@ from client_service.service import (
     KernelNotFoundError,
     SessionNotFoundError,
 )
+from client_service.storage import Database, SqliteAgentStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-app = FastAPI(title="Client Service", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+
+def _build_service() -> tuple[ClientService, Database | None]:
+    db_path = os.environ.get("CLIENT_SERVICE_DB_PATH")
+    if not db_path:
+        logger.info(
+            "CLIENT_SERVICE_DB_PATH unset; using in-memory agent store",
+        )
+        return ClientService(), None
+    database = Database(db_path)
+    store = SqliteAgentStore(database)
+    return ClientService(agent_store=store), database
+
+
+service, _database = _build_service()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    if _database is not None:
+        await _database.connect()
+        # SqliteAgentStore is the only store on the database for now.
+        await SqliteAgentStore(_database).initialize()
+    try:
+        yield
+    finally:
+        if _database is not None:
+            await _database.close()
+
+
+app = FastAPI(title="Client Service", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,7 +66,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-service = ClientService()
 
 
 class CreateAgentRequest(BaseModel):

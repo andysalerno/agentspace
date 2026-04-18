@@ -47,8 +47,11 @@ services:
       - LOG_LEVEL=INFO
       - CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://agent-host:8001
       - CLIENT_SERVICE_AGENT_HOST_TIMEOUT=60
+      - CLIENT_SERVICE_DB_PATH=/data/client_service.sqlite
     ports:
       - "8002:8002"
+    volumes:
+      - ./mounts/data/client_service:/data
     networks:
       - agentspace
 
