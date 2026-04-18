@@ -41,7 +41,7 @@ const navItems: { id: ViewId; label: string; icon: ReactNode }[] = [
     },
     {
         id: "kernels",
-        label: "Kernels",
+        label: "Running Kernels",
         icon: (
             <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
                 <path d="M13 7H7v6h6V7zM6 2v2H4a2 2 0 00-2 2v1h2v2H2v2h2v2H2v1a2 2 0 002 2h2v2h2v-2h2v2h2v-2h2v2h2v-2h2a2 2 0 002-2v-1h-2v-2h2V9h-2V7h2V6a2 2 0 00-2-2h-2V2h-2v2h-2V2H8v2H6V2z" />
