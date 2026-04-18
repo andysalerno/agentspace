@@ -129,6 +129,25 @@ def test_healthz(client: TestClient) -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_info_returns_filtered_env(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AGENT_HOST_FOO", "foo-value")
+    monkeypatch.setenv("AGENT_HOST_BAR", "bar-value")
+    monkeypatch.setenv("UNRELATED_VAR", "should-not-appear")
+
+    response = client.get("/info")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["service"] == "agent_host"
+    assert payload["env_prefix"] == "AGENT_HOST_"
+    assert payload["env"]["AGENT_HOST_FOO"] == "foo-value"
+    assert payload["env"]["AGENT_HOST_BAR"] == "bar-value"
+    assert "UNRELATED_VAR" not in payload["env"]
+
+
 def test_session_lifecycle(client: TestClient) -> None:
     created = client.post("/sessions", json={"harness": "copilot-cli"})
     session_id = created.json()["session_id"]

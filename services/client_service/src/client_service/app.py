@@ -66,6 +66,11 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/info")
+async def info() -> dict[str, object]:
+    return await service.info()
+
+
 @app.get("/harnesses")
 async def list_harnesses() -> list[str]:
     return await service.list_harnesses()

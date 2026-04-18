@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import uuid
 from dataclasses import asdict
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
+CLIENT_SERVICE_ENV_PREFIX = "CLIENT_SERVICE_"
 
 
 class AgentNotFoundError(KeyError):
@@ -286,6 +288,30 @@ class ClientService:
 
     async def delete_skill(self, skill_id: str) -> None:
         await self._agent_host.delete_skill(skill_id)
+
+    async def info(self) -> dict[str, object]:
+        client_env = {
+            key: value
+            for key, value in os.environ.items()
+            if key.startswith(CLIENT_SERVICE_ENV_PREFIX)
+        }
+        client_section: dict[str, object] = {
+            "service": "client_service",
+            "env_prefix": CLIENT_SERVICE_ENV_PREFIX,
+            "env": client_env,
+        }
+
+        agent_host_section: dict[str, object]
+        try:
+            agent_host_section = await self._agent_host.info()
+        except Exception as exc:  # noqa: BLE001 - /info should degrade gracefully
+            logger.warning("failed to fetch agent_host info: %s", exc)
+            agent_host_section = {"service": "agent_host", "error": str(exc)}
+
+        return {
+            "client_service": client_section,
+            "agent_host": agent_host_section,
+        }
 
     async def _send_to_session(
         self,

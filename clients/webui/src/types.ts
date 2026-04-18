@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills";
+export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "info";
 
 export type Harness = string;
 
@@ -95,3 +95,15 @@ export type MessageStreamFinalChunk = {
 };
 
 export type MessageStreamChunk = MessageStreamEventChunk | MessageStreamFinalChunk;
+
+export type ServiceInfoSection = {
+  service: string;
+  env_prefix?: string;
+  env?: Record<string, string>;
+  error?: string;
+};
+
+export type SystemInfo = {
+  client_service: ServiceInfoSection;
+  agent_host: ServiceInfoSection;
+};

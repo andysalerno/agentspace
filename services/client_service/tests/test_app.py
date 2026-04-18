@@ -240,6 +240,20 @@ class StubClientService:
             _raise_skill_not_found("DELETE", skill_id)
         del self.skills[skill_id]
 
+    async def info(self) -> dict[str, object]:
+        return {
+            "client_service": {
+                "service": "client_service",
+                "env_prefix": "CLIENT_SERVICE_",
+                "env": {"CLIENT_SERVICE_STUB": "1"},
+            },
+            "agent_host": {
+                "service": "agent_host",
+                "env_prefix": "AGENT_HOST_",
+                "env": {"AGENT_HOST_STUB": "1"},
+            },
+        }
+
     def _events(self) -> list[KernelEvent]:
         return [
             session_start("host-1", "copilot-cli"),
@@ -313,6 +327,16 @@ def test_list_harnesses_route(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json() == ["claude-code", "echo", "copilot-cli", "codex"]
+
+
+def test_info_route_aggregates_sections(client: TestClient) -> None:
+    response = client.get("/info")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["client_service"]["env"]["CLIENT_SERVICE_STUB"] == "1"
+    assert payload["agent_host"]["env"]["AGENT_HOST_STUB"] == "1"
+    assert "webui" not in payload
 
 
 def test_message_stream_route(client: TestClient) -> None:

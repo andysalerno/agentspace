@@ -5,9 +5,11 @@ import type {
   MessageStreamChunk,
   MessageStreamFinalChunk,
   SendMessageResponse,
+  ServiceInfoSection,
   SessionDetail,
   SessionSummary,
   Skill,
+  SystemInfo,
 } from "./types";
 
 const apiBase = "/api";
@@ -192,4 +194,16 @@ export const api = {
     }),
   deleteSkill: (skillId: string) =>
     requestJson<void>(`/skills/${skillId}`, { method: "DELETE" }),
+
+  getInfo: () => requestJson<SystemInfo>("/info"),
+
+  // Webui-local config: served as a static file at /info.json by the
+  // webui's nginx, generated at container start from WEBUI_CLIENT* env vars.
+  getWebuiInfo: async (): Promise<ServiceInfoSection> => {
+    const response = await fetch("/info.json");
+    if (!response.ok) {
+      throw new Error(`${response.status} ${response.statusText}`);
+    }
+    return (await response.json()) as ServiceInfoSection;
+  },
 };

@@ -17,6 +17,7 @@ import AgentsView from "./AgentsView";
 import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
 import SkillsView from "./SkillsView";
+import InfoView from "./InfoView";
 
 function createLocalMessage(
   sessionId: string,
@@ -409,6 +410,8 @@ export default function App() {
             busy={busy}
           />
         );
+      case "info":
+        return <InfoView />;
     }
   }
 

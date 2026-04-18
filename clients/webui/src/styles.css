@@ -1148,3 +1148,47 @@ button:disabled {
     min-width: 200px;
   }
 }
+
+/* ─── Info View ─── */
+.info-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.info-section .card-body h3 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+  text-transform: lowercase;
+  font-family: var(--font-mono, monospace);
+}
+
+.info-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 0.875rem;
+}
+
+.info-table th,
+.info-table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  vertical-align: top;
+}
+
+.info-table th {
+  font-weight: 600;
+  color: var(--text-muted, inherit);
+}
+
+.info-table td code {
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.info-error {
+  color: var(--danger, #e06c75);
+  margin: 8px 0 0;
+}

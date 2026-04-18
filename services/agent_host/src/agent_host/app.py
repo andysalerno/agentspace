@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
+
+ENV_PREFIX = "AGENT_HOST_"
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -62,6 +65,12 @@ def _serialize_events(events: list[KernelEvent]) -> list[dict[str, Any]]:
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/info")
+async def info() -> dict[str, Any]:
+    env = {key: value for key, value in os.environ.items() if key.startswith(ENV_PREFIX)}
+    return {"service": "agent_host", "env_prefix": ENV_PREFIX, "env": env}
 
 
 @app.post("/sessions")

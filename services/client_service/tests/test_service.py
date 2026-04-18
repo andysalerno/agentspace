@@ -147,6 +147,13 @@ class StubAgentHostClient:
             raise KeyError(msg)
         del self._skills[skill_id]
 
+    async def info(self) -> dict[str, object]:
+        return {
+            "service": "agent_host",
+            "env_prefix": "AGENT_HOST_",
+            "env": {"AGENT_HOST_STUB": "1"},
+        }
+
 
 @pytest.mark.asyncio
 async def test_agent_and_session_lifecycle() -> None:
@@ -348,6 +355,49 @@ async def test_missing_records_raise() -> None:
 
     with pytest.raises(SessionNotFoundError):
         await service.send_message("missing", "hello")
+
+
+@pytest.mark.asyncio
+async def test_info_aggregates_and_filters_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLIENT_SERVICE_FOO", "foo-value")
+    monkeypatch.setenv("UNRELATED_VAR", "should-not-appear")
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    payload = await service.info()
+
+    client_section = cast("dict[str, object]", payload["client_service"])
+    client_env = cast("dict[str, str]", client_section["env"])
+    assert client_section["service"] == "client_service"
+    assert client_section["env_prefix"] == "CLIENT_SERVICE_"
+    assert client_env["CLIENT_SERVICE_FOO"] == "foo-value"
+    assert "UNRELATED_VAR" not in client_env
+
+    agent_host_section = cast("dict[str, object]", payload["agent_host"])
+    assert agent_host_section["service"] == "agent_host"
+    assert "error" not in agent_host_section
+    assert "webui" not in payload
+
+
+@pytest.mark.asyncio
+async def test_info_degrades_gracefully_when_agent_host_fails() -> None:
+    class FailingClient(StubAgentHostClient):
+        async def info(self) -> dict[str, object]:
+            msg = "boom"
+            raise RuntimeError(msg)
+
+    runtime = cast("AgentHostClient", FailingClient())
+    service = ClientService(agent_host_client=runtime)
+
+    payload = await service.info()
+
+    agent_host_section = cast("dict[str, object]", payload["agent_host"])
+    assert agent_host_section["service"] == "agent_host"
+    assert agent_host_section["error"] == "boom"
+    # client_service section should still be present even when upstream fails.
+    assert "client_service" in payload
 
 
 @pytest.mark.asyncio

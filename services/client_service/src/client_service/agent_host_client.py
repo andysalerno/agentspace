@@ -72,6 +72,8 @@ class AgentHostClient(Protocol):
 
     async def delete_skill(self, skill_id: str) -> None: ...
 
+    async def info(self) -> JsonDict: ...
+
 
 @dataclass(frozen=True, slots=True)
 class HttpAgentHostClient:
@@ -203,6 +205,9 @@ class HttpAgentHostClient:
         ) as client:
             response = await client.delete(f"/skills/{skill_id}")
         response.raise_for_status()
+
+    async def info(self) -> JsonDict:
+        return cast("JsonDict", await self._request_json("GET", "/info"))
 
     async def _request_json(
         self,
