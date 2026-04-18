@@ -387,6 +387,10 @@ export default function App() {
             onCreateAgent={handleCreateAgent}
             onUpdateAgent={handleUpdateAgent}
             onDeleteAgent={handleDeleteAgent}
+            onStartSession={async (agentId) => {
+              await handleCreateSession(agentId, "");
+              setViewId("chat");
+            }}
             busy={busy}
           />
         );

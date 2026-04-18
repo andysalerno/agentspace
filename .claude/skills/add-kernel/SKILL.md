@@ -1,3 +1,8 @@
+---
+name: add-kernel
+description: "Add a new kernel to AgentSpace by implementing the Kernel protocol and wrapping an external CLI agent."
+---
+
 # Skill: Adding a New Kernel to AgentSpace
 
 ## Overview

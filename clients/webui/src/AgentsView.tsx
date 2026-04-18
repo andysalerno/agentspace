@@ -32,6 +32,7 @@ type AgentsViewProps = {
     }) => Promise<void>;
     onUpdateAgent: (agentId: string, patch: { skills: string[] }) => Promise<void>;
     onDeleteAgent: (agentId: string) => Promise<void>;
+    onStartSession: (agentId: string) => Promise<void> | void;
     busy: boolean;
 };
 
@@ -42,6 +43,7 @@ export default function AgentsView({
     onCreateAgent,
     onUpdateAgent,
     onDeleteAgent,
+    onStartSession,
     busy,
 }: AgentsViewProps) {
     const [form, setForm] = useState({
@@ -250,6 +252,14 @@ export default function AgentsView({
                                 Created {new Date(agent.created_at).toLocaleDateString()}
                             </span>
                             <div className="card-footer-actions">
+                                <button
+                                    className="small"
+                                    disabled={busy}
+                                    onClick={() => onStartSession(agent.agent_id)}
+                                    type="button"
+                                >
+                                    New Session
+                                </button>
                                 {editingSkillsFor !== agent.agent_id && skills.length > 0 && (
                                     <button
                                         className="secondary-button small"
