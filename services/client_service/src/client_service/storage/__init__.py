@@ -14,10 +14,18 @@ from client_service.storage.agents import (
     SqliteAgentStore,
 )
 from client_service.storage.db import Database
+from client_service.storage.kernel_configs import (
+    InMemoryKernelConfigStore,
+    KernelConfigStore,
+    SqliteKernelConfigStore,
+)
 
 __all__ = [
     "AgentStore",
     "Database",
     "InMemoryAgentStore",
+    "InMemoryKernelConfigStore",
+    "KernelConfigStore",
     "SqliteAgentStore",
+    "SqliteKernelConfigStore",
 ]

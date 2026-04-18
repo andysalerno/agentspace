@@ -28,6 +28,10 @@ from client_service.storage.agents import (
     AgentStore,
     InMemoryAgentStore,
 )
+from client_service.storage.kernel_configs import (
+    InMemoryKernelConfigStore,
+    KernelConfigStore,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -75,9 +79,13 @@ class ClientService:
         self,
         agent_host_client: AgentHostClient | None = None,
         agent_store: AgentStore | None = None,
+        kernel_config_store: KernelConfigStore | None = None,
     ) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
         self._agent_store: AgentStore = agent_store or InMemoryAgentStore()
+        self._kernel_config_store: KernelConfigStore = (
+            kernel_config_store or InMemoryKernelConfigStore()
+        )
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
 
@@ -115,6 +123,29 @@ class ClientService:
 
     async def list_harnesses(self) -> list[str]:
         return [harness.value for harness in HarnessName]
+
+    async def list_kernel_configs(self) -> list[dict[str, object]]:
+        records = await self._kernel_config_store.list()
+        return [record.summary() for record in records]
+
+    async def get_kernel_config(self, harness: HarnessName) -> dict[str, object]:
+        record = await self._kernel_config_store.get(harness)
+        if record is None:
+            return {
+                "harness": harness.value,
+                "env_vars": "",
+                "updated_at": None,
+            }
+        return record.summary()
+
+    async def update_kernel_config(
+        self,
+        harness: HarnessName,
+        env_vars: str,
+    ) -> dict[str, object]:
+        record = await self._kernel_config_store.upsert(harness, env_vars)
+        logger.info("updated kernel config for %s", harness.value)
+        return record.summary()
 
     async def get_agent(self, agent_id: str) -> dict[str, object]:
         agent = await self._require_agent(agent_id)

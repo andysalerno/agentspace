@@ -1,6 +1,7 @@
 import type { FormEvent} from "react";
 import { useEffect, useState } from "react";
 import type { Agent, Skill } from "./types";
+import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 
 const DEFAULT_HARNESS = "copilot-cli";
@@ -58,6 +59,7 @@ export default function AgentsView({
     const [showForm, setShowForm] = useState(false);
     const [editingSkillsFor, setEditingSkillsFor] = useState<string | null>(null);
     const [editSkills, setEditSkills] = useState<string[]>([]);
+    const [envDirty, setEnvDirty] = useState(false);
 
     useEffect(() => {
         if (harnesses.length === 0) {
@@ -67,6 +69,24 @@ export default function AgentsView({
             setForm((prev) => ({ ...prev, harness: getInitialHarness(harnesses) }));
         }
     }, [form.harness, harnesses]);
+
+    useEffect(() => {
+        if (!showForm) return;
+        if (envDirty) return;
+        if (!form.harness) return;
+        let cancelled = false;
+        api.getKernelConfig(form.harness)
+            .then((config) => {
+                if (cancelled) return;
+                setForm((prev) => ({ ...prev, env_vars: config.env_vars }));
+            })
+            .catch(() => {
+                // non-fatal: prefill is a convenience
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [showForm, form.harness, envDirty]);
 
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -79,6 +99,7 @@ export default function AgentsView({
             skills: [],
             env_vars: "",
         });
+        setEnvDirty(false);
         setShowForm(false);
     }
 
@@ -113,7 +134,7 @@ export default function AgentsView({
         <div className="view-content">
             <div className="view-header">
                 <h2>Agents</h2>
-                <button onClick={() => setShowForm(!showForm)} type="button">
+                <button onClick={() => { setShowForm(!showForm); if (showForm) setEnvDirty(false); }} type="button">
                     {showForm ? "Cancel" : "New Agent"}
                 </button>
             </div>
@@ -182,7 +203,7 @@ export default function AgentsView({
                         <label>Environment Variables</label>
                         <CodeEditor
                             value={form.env_vars}
-                            onChange={(v) => setForm({ ...form, env_vars: v })}
+                            onChange={(v) => { setForm({ ...form, env_vars: v }); setEnvDirty(true); }}
                             language="ini"
                             height="120px"
                         />

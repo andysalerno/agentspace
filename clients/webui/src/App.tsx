@@ -18,6 +18,7 @@ import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
 import SkillsView from "./SkillsView";
 import InfoView from "./InfoView";
+import ConfigKernelsView from "./ConfigKernelsView";
 
 function createLocalMessage(
   sessionId: string,
@@ -416,6 +417,13 @@ export default function App() {
         );
       case "info":
         return <InfoView />;
+      case "config-kernels":
+        return (
+          <ConfigKernelsView
+            harnesses={harnesses}
+            onError={(message) => setError(message)}
+          />
+        );
     }
   }
 

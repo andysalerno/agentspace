@@ -72,6 +72,20 @@ class AgentRecord:
 
 
 @dataclass(slots=True)
+class KernelConfigRecord:
+    harness: HarnessName
+    env_vars: str = ""
+    updated_at: str = field(default_factory=utc_now)
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "harness": self.harness.value,
+            "env_vars": self.env_vars,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(slots=True)
 class MessageRecord:
     message_id: str
     session_id: str

@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "info";
+export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "info" | "config-kernels";
 
 export type Harness = string;
 
@@ -106,4 +106,10 @@ export type ServiceInfoSection = {
 export type SystemInfo = {
   client_service: ServiceInfoSection;
   agent_host: ServiceInfoSection;
+};
+
+export type KernelConfig = {
+  harness: string;
+  env_vars: string;
+  updated_at: string | null;
 };

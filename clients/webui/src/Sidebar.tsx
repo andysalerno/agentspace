@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { ReactNode } from "react";
 import type { ViewId } from "./types";
 
@@ -11,7 +12,10 @@ type SidebarProps = {
     onToggleDarkMode: () => void;
 };
 
-const navItems: { id: ViewId; label: string; icon: ReactNode }[] = [
+type NavItem = { id: ViewId; label: string; icon: ReactNode };
+type NavGroup = { id: string; label: string; icon: ReactNode; items: NavItem[] };
+
+const navItems: NavItem[] = [
     {
         id: "chat",
         label: "Chat",
@@ -68,7 +72,50 @@ const navItems: { id: ViewId; label: string; icon: ReactNode }[] = [
     },
 ];
 
+const navGroups: NavGroup[] = [
+    {
+        id: "configuration",
+        label: "Configuration",
+        icon: (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+            </svg>
+        ),
+        items: [
+            {
+                id: "config-kernels",
+                label: "Kernels",
+                icon: (
+                    <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
+                        <path d="M13 7H7v6h6V7zM6 2v2H4a2 2 0 00-2 2v1h2v2H2v2h2v2H2v1a2 2 0 002 2h2v2h2v-2h2v2h2v-2h2v2h2v-2h2a2 2 0 002-2v-1h-2v-2h2V9h-2V7h2V6a2 2 0 00-2-2h-2V2h-2v2h-2V2H8v2H6V2z" />
+                    </svg>
+                ),
+            },
+        ],
+    },
+];
+
 export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, onToggleCollapse, darkMode, onToggleDarkMode }: SidebarProps) {
+    const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() => {
+        const stored = localStorage.getItem("sidebar-expanded-groups");
+        if (stored) {
+            try {
+                return JSON.parse(stored) as Record<string, boolean>;
+            } catch {
+                return {};
+            }
+        }
+        return {};
+    });
+
+    function toggleGroup(groupId: string) {
+        setExpandedGroups((prev) => {
+            const next = { ...prev, [groupId]: !prev[groupId] };
+            localStorage.setItem("sidebar-expanded-groups", JSON.stringify(next));
+            return next;
+        });
+    }
+
     return (
         <nav className={`sidebar ${collapsed ? "collapsed" : ""}`}>
             <div className="sidebar-header">
@@ -88,6 +135,48 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                         </button>
                     </li>
                 ))}
+                {navGroups.map((group) => {
+                    const isExpanded = expandedGroups[group.id] ?? false;
+                    const groupActive = group.items.some((item) => item.id === activeView);
+                    return (
+                        <li key={group.id}>
+                            <button
+                                className={`sidebar-nav-item ${groupActive ? "active" : ""}`}
+                                onClick={() => toggleGroup(group.id)}
+                                type="button"
+                            >
+                                {group.icon}
+                                <span>{group.label}</span>
+                                <svg
+                                    className="sidebar-group-chevron"
+                                    width="12"
+                                    height="12"
+                                    viewBox="0 0 20 20"
+                                    fill="currentColor"
+                                    style={{ transform: isExpanded ? "rotate(90deg)" : "none" }}
+                                >
+                                    <path d="M6 4l8 6-8 6V4z" />
+                                </svg>
+                            </button>
+                            {isExpanded && (
+                                <ul className="sidebar-nav-sub">
+                                    {group.items.map((item) => (
+                                        <li key={item.id}>
+                                            <button
+                                                className={`sidebar-nav-item sidebar-nav-subitem ${activeView === item.id ? "active" : ""}`}
+                                                onClick={() => onNavigate(item.id)}
+                                                type="button"
+                                            >
+                                                {item.icon}
+                                                <span>{item.label}</span>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </li>
+                    );
+                })}
             </ul>
             <div className="sidebar-footer">
                 <button className="sidebar-nav-item" onClick={onToggleDarkMode} type="button" title={darkMode ? "Light mode" : "Dark mode"}>

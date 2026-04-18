@@ -22,7 +22,7 @@ from client_service.service import (
     KernelNotFoundError,
     SessionNotFoundError,
 )
-from client_service.storage import Database, SqliteAgentStore
+from client_service.storage import Database, SqliteAgentStore, SqliteKernelConfigStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -38,8 +38,15 @@ def _build_service() -> tuple[ClientService, Database | None]:
         )
         return ClientService(), None
     database = Database(db_path)
-    store = SqliteAgentStore(database)
-    return ClientService(agent_store=store), database
+    agent_store = SqliteAgentStore(database)
+    kernel_config_store = SqliteKernelConfigStore(database)
+    return (
+        ClientService(
+            agent_store=agent_store,
+            kernel_config_store=kernel_config_store,
+        ),
+        database,
+    )
 
 
 service, _database = _build_service()
@@ -49,8 +56,8 @@ service, _database = _build_service()
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if _database is not None:
         await _database.connect()
-        # SqliteAgentStore is the only store on the database for now.
         await SqliteAgentStore(_database).initialize()
+        await SqliteKernelConfigStore(_database).initialize()
     try:
         yield
     finally:
@@ -108,6 +115,28 @@ async def info() -> dict[str, object]:
 @app.get("/harnesses")
 async def list_harnesses() -> list[str]:
     return await service.list_harnesses()
+
+
+class UpdateKernelConfigRequest(BaseModel):
+    env_vars: str = ""
+
+
+@app.get("/kernel-configs")
+async def list_kernel_configs() -> list[dict[str, object]]:
+    return await service.list_kernel_configs()
+
+
+@app.get("/kernel-configs/{harness}")
+async def get_kernel_config(harness: HarnessName) -> dict[str, object]:
+    return await service.get_kernel_config(harness)
+
+
+@app.put("/kernel-configs/{harness}")
+async def update_kernel_config(
+    harness: HarnessName,
+    payload: UpdateKernelConfigRequest,
+) -> dict[str, object]:
+    return await service.update_kernel_config(harness, payload.env_vars)
 
 
 @app.post("/agents")

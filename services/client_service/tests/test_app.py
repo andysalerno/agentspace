@@ -30,6 +30,7 @@ class StubClientService:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.killed_kernels: list[str] = []
         self.skills: dict[str, dict[str, object]] = {}
+        self.kernel_configs: dict[str, dict[str, object]] = {}
 
     async def create_agent(
         self,
@@ -240,6 +241,32 @@ class StubClientService:
             _raise_skill_not_found("DELETE", skill_id)
         del self.skills[skill_id]
 
+    async def list_kernel_configs(self) -> list[dict[str, object]]:
+        return list(self.kernel_configs.values())
+
+    async def get_kernel_config(self, harness: HarnessName) -> dict[str, object]:
+        existing = self.kernel_configs.get(harness.value)
+        if existing is not None:
+            return dict(existing)
+        return {
+            "harness": harness.value,
+            "env_vars": "",
+            "updated_at": None,
+        }
+
+    async def update_kernel_config(
+        self,
+        harness: HarnessName,
+        env_vars: str,
+    ) -> dict[str, object]:
+        record: dict[str, object] = {
+            "harness": harness.value,
+            "env_vars": env_vars,
+            "updated_at": "now",
+        }
+        self.kernel_configs[harness.value] = record
+        return dict(record)
+
     async def info(self) -> dict[str, object]:
         return {
             "client_service": {
@@ -440,5 +467,42 @@ def test_invalid_skill_id_returns_422(client: TestClient) -> None:
         "/skills",
         json={"skill_id": "Bad Skill", "files": {"SKILL.md": "# Bad"}},
     )
+
+    assert response.status_code == 422
+
+
+def test_kernel_config_get_returns_empty_default(client: TestClient) -> None:
+    response = client.get("/kernel-configs/opencode")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "harness": "opencode",
+        "env_vars": "",
+        "updated_at": None,
+    }
+
+
+def test_kernel_config_put_and_get_roundtrip(client: TestClient) -> None:
+    put_response = client.put(
+        "/kernel-configs/opencode",
+        json={"env_vars": "OPENCODE_MODEL=gpt-5\nOPENCODE_AGENT=plan"},
+    )
+    get_response = client.get("/kernel-configs/opencode")
+    list_response = client.get("/kernel-configs")
+
+    assert put_response.status_code == 200
+    assert put_response.json()["env_vars"] == (
+        "OPENCODE_MODEL=gpt-5\nOPENCODE_AGENT=plan"
+    )
+    assert get_response.status_code == 200
+    assert get_response.json()["env_vars"] == (
+        "OPENCODE_MODEL=gpt-5\nOPENCODE_AGENT=plan"
+    )
+    assert list_response.status_code == 200
+    assert len(list_response.json()) == 1
+
+
+def test_kernel_config_invalid_harness_returns_422(client: TestClient) -> None:
+    response = client.get("/kernel-configs/not-a-harness")
 
     assert response.status_code == 422

@@ -1,5 +1,6 @@
 import type {
   Agent,
+  KernelConfig,
   KernelEvent,
   KernelSummary,
   MessageStreamChunk,
@@ -196,6 +197,14 @@ export const api = {
     requestJson<void>(`/skills/${skillId}`, { method: "DELETE" }),
 
   getInfo: () => requestJson<SystemInfo>("/info"),
+
+  getKernelConfig: (harness: string) =>
+    requestJson<KernelConfig>(`/kernel-configs/${harness}`),
+  updateKernelConfig: (harness: string, envVars: string) =>
+    requestJson<KernelConfig>(`/kernel-configs/${harness}`, {
+      method: "PUT",
+      body: JSON.stringify({ env_vars: envVars }),
+    }),
 
   // Webui-local config: served as a static file at /info.json by the
   // webui's nginx, generated at container start from WEBUI_CLIENT* env vars.
