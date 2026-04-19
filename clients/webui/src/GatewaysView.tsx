@@ -1,7 +1,7 @@
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import { api } from "./api";
-import type { Agent, Gateway } from "./types";
+import type { Agent, Gateway, GatewayConfigField, GatewaySchema } from "./types";
 
 type SecretEntry = { key: string; value: string };
 
@@ -43,6 +43,43 @@ function secretsToRecord(entries: SecretEntry[]): Record<string, string> {
     return record;
 }
 
+function mergeEnvLines(
+    schemaFields: GatewayConfigField[],
+    schemaValues: Record<string, string>,
+    extraEnv: string,
+): string {
+    const lines: string[] = [];
+    for (const field of schemaFields) {
+        if (field.kind !== "env") continue;
+        const value = schemaValues[field.key]?.trim();
+        if (value) {
+            lines.push(`${field.key}=${value}`);
+        }
+    }
+    const trimmedExtra = extraEnv.trim();
+    if (trimmedExtra) {
+        lines.push(trimmedExtra);
+    }
+    return lines.join("\n");
+}
+
+function mergeSecrets(
+    schemaFields: GatewayConfigField[],
+    schemaValues: Record<string, string>,
+    extraSecrets: SecretEntry[],
+): Record<string, string> {
+    const merged: Record<string, string> = {};
+    for (const field of schemaFields) {
+        if (field.kind !== "secret") continue;
+        const value = schemaValues[field.key];
+        if (value && value.length > 0) {
+            merged[field.key] = value;
+        }
+    }
+    Object.assign(merged, secretsToRecord(extraSecrets));
+    return merged;
+}
+
 export default function GatewaysView({
     gateways,
     agents,
@@ -62,6 +99,9 @@ export default function GatewaysView({
     const [enabled, setEnabled] = useState(false);
     const [envVars, setEnvVars] = useState("");
     const [newSecrets, setNewSecrets] = useState<SecretEntry[]>([]);
+    const [schema, setSchema] = useState<GatewaySchema | null>(null);
+    const [schemaLoading, setSchemaLoading] = useState(false);
+    const [schemaValues, setSchemaValues] = useState<Record<string, string>>({});
 
     const [expandedGatewayId, setExpandedGatewayId] = useState<string | null>(null);
     const [logs, setLogs] = useState<string[] | null>(null);
@@ -72,6 +112,37 @@ export default function GatewaysView({
             setGatewayType(gatewayTypes[0]);
         }
     }, [gatewayTypes, gatewayType]);
+
+    useEffect(() => {
+        if (!gatewayType) {
+            setSchema(null);
+            setSchemaValues({});
+            return;
+        }
+        let cancelled = false;
+        setSchemaLoading(true);
+        api.getGatewayTypeSchema(gatewayType)
+            .then((result) => {
+                if (cancelled) return;
+                setSchema(result);
+                const initial: Record<string, string> = {};
+                for (const field of result.fields) {
+                    initial[field.key] = field.default ?? "";
+                }
+                setSchemaValues(initial);
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setSchema({ fields: [] });
+                setSchemaValues({});
+            })
+            .finally(() => {
+                if (!cancelled) setSchemaLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [gatewayType]);
 
     useEffect(() => {
         if (agents.length > 0 && !agents.some((a) => a.agent_id === agentId)) {
@@ -93,21 +164,31 @@ export default function GatewaysView({
 
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
+        const fields = schema?.fields ?? [];
         await onCreateGateway({
             gateway_id: gatewayId,
             name: gatewayName,
             gateway_type: gatewayType,
             agent_id: agentId,
             enabled,
-            env_vars: envVars,
-            secrets: secretsToRecord(newSecrets),
+            env_vars: mergeEnvLines(fields, schemaValues, envVars),
+            secrets: mergeSecrets(fields, schemaValues, newSecrets),
         });
         setGatewayId("");
         setGatewayName("");
         setEnabled(false);
         setEnvVars("");
         setNewSecrets([]);
+        setSchemaValues(() => {
+            const reset: Record<string, string> = {};
+            for (const f of fields) reset[f.key] = f.default ?? "";
+            return reset;
+        });
         setShowForm(false);
+    }
+
+    function updateSchemaValue(key: string, value: string) {
+        setSchemaValues((prev) => ({ ...prev, [key]: value }));
     }
 
     async function handleToggleLogs(gateway: Gateway) {
@@ -194,10 +275,36 @@ export default function GatewaysView({
                         />
                         Auto-start on boot
                     </label>
+                    {schema && schema.fields.length > 0 && (
+                        <fieldset className="schema-fields">
+                            <legend>Gateway environment variables</legend>
+                            {schema.fields.map((f) => (
+                                <label key={f.key}>
+                                    {f.label}
+                                    {f.required && <span aria-hidden="true"> *</span>}
+                                    <input
+                                        type={f.kind === "secret" ? "password" : "text"}
+                                        required={f.required}
+                                        placeholder={f.placeholder ?? f.default ?? ""}
+                                        value={schemaValues[f.key] ?? ""}
+                                        onChange={(e) =>
+                                            updateSchemaValue(f.key, e.target.value)
+                                        }
+                                    />
+                                    {f.description && (
+                                        <small className="field-help">{f.description}</small>
+                                    )}
+                                </label>
+                            ))}
+                        </fieldset>
+                    )}
+                    {schemaLoading && (
+                        <small className="field-help">Loading gateway schema…</small>
+                    )}
                     <label>
-                        Environment variables (.env format)
+                        Other environment variables (.env format)
                         <textarea
-                            placeholder="ECHO_TOKEN=value"
+                            placeholder="EXTRA_VAR=value"
                             rows={4}
                             value={envVars}
                             onChange={(e) => setEnvVars(e.target.value)}
@@ -205,7 +312,9 @@ export default function GatewaysView({
                     </label>
                     <div className="skill-files-section">
                         <div className="skill-files-header">
-                            <span className="skill-files-label">Secrets (passed as env)</span>
+                            <span className="skill-files-label">
+                                Other secrets (passed as env)
+                            </span>
                             <button
                                 className="secondary-button small"
                                 onClick={addSecret}

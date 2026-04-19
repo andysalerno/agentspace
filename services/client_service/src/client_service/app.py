@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from gateway.protocol import GatewayType
+from gateway.schema import get_schema as get_gateway_schema
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
@@ -417,6 +418,11 @@ class UpdateGatewayRequest(BaseModel):
 @app.get("/gateway-types")
 async def list_gateway_types() -> list[str]:
     return [gateway_type.value for gateway_type in GatewayType]
+
+
+@app.get("/gateway-types/{gateway_type}/schema")
+async def get_gateway_type_schema(gateway_type: GatewayType) -> dict[str, Any]:
+    return get_gateway_schema(gateway_type).to_dict()
 
 
 @app.get("/gateways")

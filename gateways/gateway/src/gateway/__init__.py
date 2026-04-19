@@ -8,14 +8,24 @@ from gateway.protocol import (
     GatewayStatus,
     GatewayType,
 )
+from gateway.schema import (
+    GATEWAY_SCHEMAS,
+    GatewayConfigField,
+    GatewaySchema,
+    get_schema,
+)
 
 __all__ = [
+    "GATEWAY_SCHEMAS",
     "ClientServiceClient",
     "ClientServiceError",
     "Gateway",
     "GatewayConfig",
+    "GatewayConfigField",
     "GatewayEvent",
     "GatewayEventType",
+    "GatewaySchema",
     "GatewayStatus",
     "GatewayType",
+    "get_schema",
 ]

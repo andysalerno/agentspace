@@ -480,9 +480,9 @@ async def test_empty_owner_dm_logs_intent_hint() -> None:
     await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
     assert fake.sent_messages == []
     events = list(gateway._events)  # type: ignore[reportPrivateUsage]  # noqa: SLF001
-    assert any(
-        e.message and "Message Content" in e.message for e in events
-    ), "expected an event hinting at the Message Content intent"
+    assert any(e.message and "Message Content" in e.message for e in events), (
+        "expected an event hinting at the Message Content intent"
+    )
 
 
 @pytest.mark.asyncio

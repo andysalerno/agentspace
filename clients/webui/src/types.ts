@@ -116,6 +116,22 @@ export type KernelConfig = {
 
 export type GatewayType = string;
 
+export type GatewayConfigFieldKind = "env" | "secret";
+
+export type GatewayConfigField = {
+  key: string;
+  label: string;
+  kind: GatewayConfigFieldKind;
+  required?: boolean;
+  description?: string;
+  default?: string;
+  placeholder?: string;
+};
+
+export type GatewaySchema = {
+  fields: GatewayConfigField[];
+};
+
 export type GatewayStatus = "stopped" | "starting" | "running" | "error";
 
 export type Gateway = {

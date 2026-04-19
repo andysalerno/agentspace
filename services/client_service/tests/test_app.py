@@ -607,6 +607,30 @@ def test_list_gateway_types(client: TestClient) -> None:
     assert "echo" in response.json()
 
 
+def test_gateway_type_schema_echo(client: TestClient) -> None:
+    response = client.get("/gateway-types/echo/schema")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"fields": []}
+
+
+def test_gateway_type_schema_discord(client: TestClient) -> None:
+    response = client.get("/gateway-types/discord/schema")
+    assert response.status_code == 200
+    body = response.json()
+    keys = [f["key"] for f in body["fields"]]
+    assert "DISCORD_BOT_TOKEN" in keys
+    assert "DISCORD_OWNER_USER_ID" in keys
+    token_field = next(f for f in body["fields"] if f["key"] == "DISCORD_BOT_TOKEN")
+    assert token_field["kind"] == "secret"
+    assert token_field["required"] is True
+
+
+def test_gateway_type_schema_unknown_returns_422(client: TestClient) -> None:
+    response = client.get("/gateway-types/not-a-type/schema")
+    assert response.status_code == 422
+
+
 def test_gateway_routes_lifecycle(client: TestClient) -> None:
     client.post("/agents", json={"agent_id": "agent-one", "name": "Agent One"})
 

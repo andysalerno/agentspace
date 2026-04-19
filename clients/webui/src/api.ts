@@ -1,6 +1,7 @@
 import type {
   Agent,
   Gateway,
+  GatewaySchema,
   GatewayType,
   KernelConfig,
   KernelEvent,
@@ -220,6 +221,8 @@ export const api = {
 
   // Gateways
   listGatewayTypes: () => requestJson<GatewayType[]>("/gateway-types"),
+  getGatewayTypeSchema: (gatewayType: GatewayType) =>
+    requestJson<GatewaySchema>(`/gateway-types/${gatewayType}/schema`),
   listGateways: () => requestJson<Gateway[]>("/gateways"),
   getGateway: (gatewayId: string) => requestJson<Gateway>(`/gateways/${gatewayId}`),
   createGateway: (payload: {
