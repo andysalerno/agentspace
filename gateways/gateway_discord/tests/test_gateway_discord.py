@@ -26,6 +26,13 @@ def test_chunk_returns_empty_list_for_empty_text() -> None:
     assert _chunk("\n\n\n", 100) == []
 
 
+def test_chunk_returns_empty_list_for_whitespace_only_text() -> None:
+    # Discord rejects sends of pure-whitespace content with a 400 — make sure
+    # _chunk strips it before it reaches the wire.
+    assert _chunk("   ", 100) == []
+    assert _chunk(" \t\n  \r\n ", 100) == []
+
+
 def test_chunk_returns_single_chunk_when_under_limit() -> None:
     assert _chunk("hello world", 100) == ["hello world"]
 

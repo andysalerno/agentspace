@@ -49,7 +49,7 @@ def _chunk(text: str, max_chars: int) -> list[str]:  # noqa: C901
     if max_chars <= 0:
         msg = "max_chars must be positive"
         raise ValueError(msg)
-    stripped = text.strip("\n")
+    stripped = text.strip()
     if not stripped:
         return []
     if len(stripped) <= max_chars:
