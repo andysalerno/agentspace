@@ -12,6 +12,7 @@ services:
     build:
       context: .
       dockerfile: gateways/gateway_host/Dockerfile
+    entrypoint: []
     command: ["python", "-c", "print('gateway image ready')"]
     restart: "no"
 
