@@ -8,6 +8,7 @@ import logging
 import os
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from kernel.events import (
@@ -80,6 +81,21 @@ class OpenCodeKernel:
 
         self._status = KernelStatus.BUSY
         await self._queue.put(status_event(KernelStatus.BUSY))
+
+        try:
+            self._write_provider_config()
+        except ValueError as exc:
+            await self._queue.put(error(str(exc)))
+            await self._finish(KernelStatus.ERROR)
+            return
+        except OSError as exc:
+            logger.exception("failed to write opencode provider config")
+            detail = exc.strerror or type(exc).__name__
+            await self._queue.put(
+                error(f"failed to write opencode provider config: {detail}"),
+            )
+            await self._finish(KernelStatus.ERROR)
+            return
 
         cmd = self._build_command(message)
         env = self._build_env()
@@ -163,6 +179,58 @@ class OpenCodeKernel:
                 cmd.append(arg)
 
         return cmd
+
+    def _write_provider_config(self) -> None:
+        """Write the opencode provider config to ~/.config/opencode/opencode.json.
+
+        Pulls the base URL, API key, and model name from environment
+        variables forwarded via the kernel template. Raises ``ValueError``
+        if any of the required variables is missing or empty so the failure
+        is surfaced to the client instead of producing a confusing
+        downstream auth error.
+        """
+        env_get = self._config.env.get
+        required = {
+            "KERNEL_OPENCODE_BASE_URL": env_get("KERNEL_OPENCODE_BASE_URL"),
+            "KERNEL_OPENCODE_API_KEY": env_get("KERNEL_OPENCODE_API_KEY"),
+            "KERNEL_OPENCODE_MODEL_NAME": env_get("KERNEL_OPENCODE_MODEL_NAME"),
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            msg = (
+                "opencode kernel is missing required environment "
+                f"variable(s): {', '.join(missing)}. Set them on the agent's "
+                "Environment Variables field."
+            )
+            raise ValueError(msg)
+
+        base_url = required["KERNEL_OPENCODE_BASE_URL"]
+        api_key = required["KERNEL_OPENCODE_API_KEY"]
+        model_name = required["KERNEL_OPENCODE_MODEL_NAME"]
+
+        config = {
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {
+                "customprovider": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "customprovider",
+                    "options": {
+                        "baseURL": base_url,
+                        "apiKey": api_key,
+                    },
+                    "models": {
+                        model_name: {
+                            "name": model_name,
+                        },
+                    },
+                },
+            },
+        }
+
+        config_path = Path.home() / ".config" / "opencode" / "opencode.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config, indent=2))
+        logger.info("wrote opencode provider config to %s", config_path)
 
     def _build_env(self) -> dict[str, str]:
         env = {**os.environ}
