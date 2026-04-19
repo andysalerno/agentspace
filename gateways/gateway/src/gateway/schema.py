@@ -81,6 +81,30 @@ _DISCORD_SCHEMA = GatewaySchema(
             ),
             default="1900",
         ),
+        GatewayConfigField(
+            key="DISCORD_SIMULATED_TYPING_ENABLED",
+            label="Simulated typing enabled",
+            kind="env",
+            required=False,
+            description=(
+                "If true, deliver the agent reply as multiple messages "
+                "(split on paragraph boundaries) with a typing indicator "
+                "and a per-paragraph delay sized by SIMULATED_TYPING_WPM. "
+                "Makes responses feel human-paced."
+            ),
+            default="false",
+        ),
+        GatewayConfigField(
+            key="DISCORD_SIMULATED_TYPING_WPM",
+            label="Simulated typing speed (wpm)",
+            kind="env",
+            required=False,
+            description=(
+                "Words-per-minute used to size simulated typing delays. "
+                "Ignored when SIMULATED_TYPING_ENABLED is false."
+            ),
+            default="220",
+        ),
     ),
 )
 

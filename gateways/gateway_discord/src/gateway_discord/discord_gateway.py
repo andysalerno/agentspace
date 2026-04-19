@@ -21,6 +21,11 @@ import discord
 from fastapi import APIRouter
 from gateway.events import GatewayEvent, GatewayEventType
 from gateway.protocol import GatewayConfig, GatewayStatus, GatewayType
+from gateway.simulated_typing import (
+    DEFAULT_WPM,
+    SimulatedTypingConfig,
+    plan_simulated_typing,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -39,6 +44,11 @@ class _ClientFactory(Protocol):
 
 def _default_client_factory(*, intents: discord.Intents) -> discord.Client:
     return discord.Client(intents=intents)
+
+
+def _parse_bool_env(value: str) -> bool:
+    """Parse a permissive boolean from an env-string."""
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _chunk(text: str, max_chars: int) -> list[str]:  # noqa: C901
@@ -137,6 +147,9 @@ class DiscordGateway:
         self._session_id: str | None = None
         self._owner_id: int | None = None
         self._chunk_max: int = DEFAULT_CHUNK_MAX_CHARS
+        self._sim_typing_cfg: SimulatedTypingConfig = SimulatedTypingConfig(
+            enabled=False,
+        )
         self._send_lock = asyncio.Lock()
         self._events: deque[GatewayEvent] = deque(maxlen=EVENTS_LIMIT)
         self._ready_event = asyncio.Event()
@@ -188,6 +201,24 @@ class DiscordGateway:
             limit = DISCORD_MAX_MESSAGE_CHARS - 1
             self._fail(f"DISCORD_CHUNK_MAX_CHARS must be in 1..{limit}")
             return
+
+        sim_enabled = _parse_bool_env(
+            config.env.get("DISCORD_SIMULATED_TYPING_ENABLED", "false"),
+        )
+        try:
+            sim_wpm = int(
+                config.env.get("DISCORD_SIMULATED_TYPING_WPM", DEFAULT_WPM),
+            )
+        except ValueError as exc:
+            self._fail(f"DISCORD_SIMULATED_TYPING_WPM must be an integer: {exc}")
+            return
+        if sim_wpm <= 0:
+            self._fail("DISCORD_SIMULATED_TYPING_WPM must be > 0")
+            return
+        self._sim_typing_cfg = SimulatedTypingConfig(
+            enabled=sim_enabled,
+            wpm=sim_wpm,
+        )
 
         intents = discord.Intents.default()
         intents.message_content = True
@@ -380,7 +411,7 @@ class DiscordGateway:
                 return
 
             try:
-                await self._send_chunked(channel, reply)
+                await self._deliver_reply(channel, reply)
             except Exception as exc:  # noqa: BLE001 - keep gateway alive
                 logger.warning("discord send failed: %s", exc)
                 self._record_event(
@@ -481,10 +512,29 @@ class DiscordGateway:
         self._session_id = str(session["session_id"])
         return self._session_id
 
+    async def _deliver_reply(self, channel: _ChannelLike, reply: str) -> None:
+        """Deliver an assistant reply, optionally with simulated typing.
+
+        With simulated typing disabled, behaves like the previous
+        single-message path: chunked-send the whole reply.
+
+        With it enabled, splits the reply into paragraph-sized pieces and
+        sleeps under a typing indicator before each one, sized by WPM.
+        Each typing context is closed *before* the corresponding send so
+        Discord's typing indicator never lingers visibly after a message
+        lands (see commit 77cb0d4).
+        """
+        chunks = plan_simulated_typing(reply, self._sim_typing_cfg)
+        for piece in chunks:
+            if piece.delay_s > 0:
+                async with self._typing_indicator(channel):
+                    await asyncio.sleep(piece.delay_s)
+            await self._send_chunked(channel, piece.content)
+
     async def _send_chunked(self, channel: _ChannelLike, text: str) -> None:
-        # The outer turn already holds an open channel.typing() context, so
-        # the indicator stays on between chunks for free; no inter-chunk
-        # sleep is needed.
+        # Final safety pass: if any single planned chunk still exceeds
+        # Discord's 2000-char limit (e.g. a giant code block in one
+        # paragraph), split it down to size before sending.
         for chunk in _chunk(text, self._chunk_max):
             await channel.send(chunk)
 

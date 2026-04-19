@@ -14,6 +14,11 @@ from gateway.schema import (
     GatewaySchema,
     get_schema,
 )
+from gateway.simulated_typing import (
+    SimulatedTypingConfig,
+    TypingChunk,
+    plan_simulated_typing,
+)
 
 __all__ = [
     "GATEWAY_SCHEMAS",
@@ -27,5 +32,8 @@ __all__ = [
     "GatewaySchema",
     "GatewayStatus",
     "GatewayType",
+    "SimulatedTypingConfig",
+    "TypingChunk",
     "get_schema",
+    "plan_simulated_typing",
 ]

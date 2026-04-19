@@ -9,7 +9,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from gateway.protocol import GatewayConfig, GatewayStatus
+from gateway.simulated_typing import SimulatedTypingConfig
 from gateway_discord import DiscordGateway
+from gateway_discord import discord_gateway as gw_mod
 from gateway_discord.discord_gateway import _chunk  # type: ignore[reportPrivateUsage]
 
 if TYPE_CHECKING:
@@ -195,6 +197,12 @@ def _ready_gateway(client: FakeClient, **env_overrides: str) -> DiscordGateway:
     gateway._config = config  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     gateway._owner_id = int(config.env["DISCORD_OWNER_USER_ID"])  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     gateway._chunk_max = int(config.env["DISCORD_CHUNK_MAX_CHARS"])  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    sim_enabled = config.env.get("DISCORD_SIMULATED_TYPING_ENABLED", "false")
+    sim_wpm = int(config.env.get("DISCORD_SIMULATED_TYPING_WPM", "220"))
+    gateway._sim_typing_cfg = SimulatedTypingConfig(  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+        enabled=sim_enabled.strip().lower() in {"1", "true", "yes", "on"},
+        wpm=sim_wpm,
+    )
     gateway._status = GatewayStatus.RUNNING  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     # _swap_reaction needs self._client.user to identify which reaction to
     # remove; supply a minimal stub so reaction-swap tests can run.
@@ -421,6 +429,91 @@ async def test_long_reply_is_chunked() -> None:
     # Every chunk was sent with typing already closed (no overlap that could
     # cause the indicator to briefly reappear after the reply).
     assert channel.typing_active_at_send == [0] * len(channel.sent)
+
+
+@pytest.mark.asyncio
+async def test_simulated_typing_sends_per_paragraph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With simulated typing on, each paragraph is its own message with delay.
+
+    Validates the full pipeline:
+      * agent reply is split into paragraphs
+      * each paragraph is preceded by an asyncio.sleep
+      * typing context is opened per paragraph
+      * typing is closed BEFORE each send (no phantom indicator after the
+        message lands)
+    """
+    reply = "first paragraph\n\nsecond paragraph\n\nthird paragraph"
+    fake = FakeClient(reply=reply)
+    gateway = _ready_gateway(
+        fake,
+        DISCORD_SIMULATED_TYPING_ENABLED="true",
+        DISCORD_SIMULATED_TYPING_WPM="60",
+    )
+
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    # Patch the symbol the gateway resolves at call time.
+    monkeypatch.setattr(gw_mod.asyncio, "sleep", _record_sleep)
+
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="prompt",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    # One Discord message per paragraph.
+    assert channel.sent == [
+        "first paragraph",
+        "second paragraph",
+        "third paragraph",
+    ]
+    # One typing context per paragraph (none for the agent call here because
+    # the FakeClient returns instantly, but the agent-call typing context
+    # still fires; that's fine).  Total = 1 (agent) + 3 (sim) = 4.
+    assert channel.typing_calls == 4
+    assert channel.typing_active == 0
+    # Typing was closed before EACH send.
+    assert channel.typing_active_at_send == [0, 0, 0]
+    # Three simulated-typing sleeps were requested (one per paragraph), all
+    # positive.
+    assert len(sleep_calls) == 3
+    assert all(d > 0 for d in sleep_calls)
+
+
+@pytest.mark.asyncio
+async def test_simulated_typing_disabled_uses_single_send() -> None:
+    """With simulated typing off (default), behavior is the legacy path."""
+    reply = "first paragraph\n\nsecond paragraph"
+    fake = FakeClient(reply=reply)
+    gateway = _ready_gateway(fake)
+    # Default sim-typing config should be disabled.
+    assert gateway._sim_typing_cfg == SimulatedTypingConfig(  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+        enabled=False,
+        wpm=220,
+    )
+
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="prompt",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    # Single chunked send — _chunk preserves paragraph breaks but in this
+    # case the whole reply fits in one Discord message (chunk_max=20 in
+    # tests, but each paragraph fits, and _chunk packs paragraphs together
+    # up to the limit).  Just assert: no per-paragraph sleeps requested.
+    # (We can't easily assert this without monkeypatching sleep; instead
+    # assert exactly one typing_call from the agent-call wrapper.)
+    assert channel.typing_calls == 1
 
 
 @pytest.mark.asyncio
