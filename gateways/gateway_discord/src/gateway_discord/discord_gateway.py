@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 EVENTS_LIMIT = 200
 DEFAULT_TYPING_DELAY_MS = 600
 DEFAULT_CHUNK_MAX_CHARS = 1900
+DISCORD_MAX_MESSAGE_CHARS = 2000
 LOGIN_TIMEOUT_S = 30.0
 
 
@@ -174,8 +175,9 @@ class DiscordGateway:
             self._fail(f"invalid numeric env: {exc}")
             return
 
-        if self._chunk_max <= 0:
-            self._fail("DISCORD_CHUNK_MAX_CHARS must be positive")
+        if self._chunk_max <= 0 or self._chunk_max >= DISCORD_MAX_MESSAGE_CHARS:
+            limit = DISCORD_MAX_MESSAGE_CHARS - 1
+            self._fail(f"DISCORD_CHUNK_MAX_CHARS must be in 1..{limit}")
             return
 
         intents = discord.Intents.default()
@@ -194,6 +196,7 @@ class DiscordGateway:
         )
 
         self._client_task = asyncio.create_task(client.start(token))
+        self._client_task.add_done_callback(self._on_client_task_done)
 
         try:
             await asyncio.wait_for(self._ready_event.wait(), timeout=LOGIN_TIMEOUT_S)
@@ -262,8 +265,11 @@ class DiscordGateway:
 
         _ = (on_ready, on_message)
 
-    async def _on_message(self, message: discord.Message) -> None:  # noqa: PLR0911
+    async def _on_message(self, message: discord.Message) -> None:  # noqa: C901, PLR0911
         if self._config is None:
+            return
+        # ERROR is terminal until the gateway is restarted (see DISCORD_PLAN.md).
+        if self._status is not GatewayStatus.RUNNING:
             return
         author = message.author
         if author.bot:
@@ -281,6 +287,21 @@ class DiscordGateway:
             return
         text = (message.content or "").strip()
         if not text:
+            # Most likely cause: the privileged "Message Content" intent is
+            # disabled in the Discord Developer Portal, so discord.py delivers
+            # the message with empty content.  Surface a hint instead of
+            # silently dropping the turn.
+            self._record_event(
+                GatewayEvent(
+                    type=GatewayEventType.STATUS,
+                    sender=str(author.id),
+                    message=(
+                        "received owner DM with empty content — "
+                        "check that the 'Message Content' intent is enabled "
+                        "for this bot in the Discord Developer Portal"
+                    ),
+                ),
+            )
             return
 
         self._record_event(
@@ -319,6 +340,19 @@ class DiscordGateway:
 
             reply = _extract_assistant_text(response)
             if not reply:
+                # Agent produced no assistant text — don't ghost the user.
+                self._record_event(
+                    GatewayEvent(
+                        type=GatewayEventType.STATUS,
+                        sender=str(author.id),
+                        message="agent returned empty assistant reply",
+                        session_id=session_id,
+                    ),
+                )
+                with contextlib.suppress(Exception):
+                    await cast("_ChannelLike", message.channel).send(
+                        "(agent produced no reply)",
+                    )
                 return
 
             try:
@@ -406,6 +440,29 @@ class DiscordGateway:
                 await task
         self._client = None
         self._client_task = None
+
+    def _on_client_task_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is None:
+            return
+        # The discord client task ended unexpectedly while we still believed
+        # the gateway was healthy.  Flip to ERROR so /gateway/status reflects
+        # reality without waiting for the next inbound DM to fail.
+        if self._status in (GatewayStatus.RUNNING, GatewayStatus.STARTING):
+            self._status = GatewayStatus.ERROR
+            self._last_error = f"discord client task crashed: {exc}"
+            self._record_event(
+                GatewayEvent(
+                    type=GatewayEventType.ERROR,
+                    message=self._last_error,
+                ),
+            )
+            logger.error(
+                "discord client task ended unexpectedly: %s",
+                exc,
+            )
 
     def _fail(self, reason: str) -> None:
         self._status = GatewayStatus.ERROR

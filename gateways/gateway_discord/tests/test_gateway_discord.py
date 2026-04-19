@@ -414,3 +414,129 @@ async def test_router_status_and_events() -> None:
     types = [event["type"] for event in events]
     assert "inbound" in types
     assert "outbound" in types
+
+
+# --- Review-fix regression tests --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_error_state_blocks_subsequent_messages() -> None:
+    """Once the gateway is ERROR, further owner DMs are dropped (not retried)."""
+    fake = FakeClient(fail_send=True)
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg1 = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="first",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg1))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert gateway.status is GatewayStatus.ERROR
+    sends_after_first = len(fake.sent_messages)
+
+    msg2 = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="second",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg2))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    # No additional client_service calls after entering ERROR.
+    assert len(fake.sent_messages) == sends_after_first
+
+
+@pytest.mark.asyncio
+async def test_empty_assistant_reply_is_surfaced() -> None:
+    fake = FakeClient(reply="")
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert any("no reply" in s for s in channel.sent)
+    events = list(gateway._events)  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert any(e.message and "empty assistant reply" in e.message for e in events)
+
+
+@pytest.mark.asyncio
+async def test_empty_owner_dm_logs_intent_hint() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert fake.sent_messages == []
+    events = list(gateway._events)  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert any(
+        e.message and "Message Content" in e.message for e in events
+    ), "expected an event hinting at the Message Content intent"
+
+
+@pytest.mark.asyncio
+async def test_chunk_max_above_discord_limit_fails_start() -> None:
+    fake = FakeClient()
+    gateway = DiscordGateway()
+    config = GatewayConfig(
+        gateway_id="gw-1",
+        agent_id="agent-1",
+        client=cast("ClientServiceClient", fake),
+        env={
+            "DISCORD_BOT_TOKEN": "tok",
+            "DISCORD_OWNER_USER_ID": "111",
+            "DISCORD_CHUNK_MAX_CHARS": "5000",
+        },
+    )
+    await gateway.start(config)
+    assert gateway.status is GatewayStatus.ERROR
+    assert "DISCORD_CHUNK_MAX_CHARS" in (gateway.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_crashed_client_task_flips_status_to_error() -> None:
+    """If the discord client task ends with an exception, status flips to ERROR."""
+
+    class _CrashingClient:
+        def __init__(self) -> None:
+            self.user = type("U", (), {"name": "fake-bot"})()
+            self._handlers: dict[str, object] = {}
+            self.closed = False
+
+        def event(self, fn: object) -> object:
+            self._handlers[getattr(fn, "__name__", "")] = fn
+            return fn
+
+        async def start(self, token: str) -> None:
+            del token
+            on_ready = self._handlers.get("on_ready")
+            if on_ready is not None:
+                await cast("object", on_ready).__call__()  # type: ignore[attr-defined]
+            # Pretend the WSS died.
+            msg = "wss closed"
+            raise RuntimeError(msg)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    crashing = _CrashingClient()
+
+    def factory(*, intents: object) -> object:  # noqa: ARG001
+        return crashing
+
+    gateway = DiscordGateway(client_factory=cast("object", factory))  # type: ignore[arg-type]
+    fake = FakeClient()
+    config = _make_config(fake)
+    await gateway.start(config)
+
+    # Give the done-callback a chance to run on the next event-loop tick.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert gateway.status is GatewayStatus.ERROR
+    assert gateway.last_error is not None
+    assert "crashed" in gateway.last_error
