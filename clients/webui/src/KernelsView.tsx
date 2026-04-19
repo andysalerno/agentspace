@@ -5,16 +5,26 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { queryKeys, useKernels } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import type { KernelStats, KernelSummary } from "./types";
 
 const LOG_POLL_INTERVAL_MS = 1000;
+const DEFAULT_LOG_TAIL = 2000;
+
+type LogSource = "harness" | "container";
+
+type LogsModalState = {
+    sessionId: string;
+    source: LogSource;
+};
 
 export default function KernelsView() {
     const { data: kernels = [] } = useKernels();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
 
-    const [logsFor, setLogsFor] = useState<string | null>(null);
+    const [logsState, setLogsState] = useState<LogsModalState | null>(null);
     const [follow, setFollow] = useState(true);
+    const [openMenuFor, setOpenMenuFor] = useState<string | null>(null);
     const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
     const followRef = useRef(follow);
 
@@ -24,15 +34,30 @@ export default function KernelsView() {
         onError: reportError,
     });
 
-    const logsQuery = useQuery({
-        queryKey: logsFor ? queryKeys.kernelLogs(logsFor) : (["kernels", "__none__", "logs"] as const),
-        queryFn: () => api.kernelLogs(logsFor as string),
-        enabled: logsFor !== null,
+    const harnessLogsQuery = useQuery({
+        queryKey: logsState
+            ? queryKeys.kernelLogs(logsState.sessionId)
+            : (["kernels", "__none__", "logs"] as const),
+        queryFn: () => api.kernelLogs(logsState!.sessionId),
+        enabled: logsState?.source === "harness",
         refetchInterval: LOG_POLL_INTERVAL_MS,
     });
+
+    const containerLogsQuery = useQuery({
+        queryKey: logsState
+            ? queryKeys.kernelContainerLogs(logsState.sessionId)
+            : (["kernels", "__none__", "container-logs"] as const),
+        queryFn: () =>
+            api.kernelContainerLogs(logsState!.sessionId, DEFAULT_LOG_TAIL),
+        enabled: logsState?.source === "container",
+        refetchInterval: LOG_POLL_INTERVAL_MS,
+    });
+
+    const activeQuery =
+        logsState?.source === "container" ? containerLogsQuery : harnessLogsQuery;
     const logLines = useMemo(
-        () => logsQuery.data?.lines ?? [],
-        [logsQuery.data],
+        () => activeQuery.data?.lines ?? [],
+        [activeQuery.data],
     );
 
     useEffect(() => {
@@ -44,9 +69,6 @@ export default function KernelsView() {
         if (!ed) {
             return;
         }
-        // Use scroll position rather than revealLine: with wordWrap="on",
-        // a single model line can span many visual rows, and revealLine only
-        // guarantees the model line is visible -- not the final wrapped row.
         ed.setScrollPosition({ scrollTop: ed.getScrollHeight() });
     }
 
@@ -62,6 +84,38 @@ export default function KernelsView() {
         }
     }, [follow]);
 
+    function closeLogs() {
+        setLogsState(null);
+        editorRef.current = null;
+    }
+
+    useEffect(() => {
+        if (logsState === null) {
+            return;
+        }
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                closeLogs();
+            }
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, [logsState]);
+
+    useEffect(() => {
+        if (openMenuFor === null) {
+            return;
+        }
+        const onClick = () => setOpenMenuFor(null);
+        const handle = window.setTimeout(() => {
+            window.addEventListener("click", onClick);
+        }, 0);
+        return () => {
+            window.clearTimeout(handle);
+            window.removeEventListener("click", onClick);
+        };
+    }, [openMenuFor]);
+
     const handleEditorMount: OnMount = (editorInstance) => {
         editorRef.current = editorInstance;
         if (followRef.current) {
@@ -69,20 +123,48 @@ export default function KernelsView() {
         }
     };
 
-    function openLogs(sessionId: string) {
-        setLogsFor(sessionId);
+    function openLogs(sessionId: string, source: LogSource = "harness") {
+        setLogsState({ sessionId, source });
         setFollow(true);
     }
 
-    function closeLogs() {
-        setLogsFor(null);
-        editorRef.current = null;
+    function setLogSource(source: LogSource) {
+        if (!logsState) return;
+        setLogsState({ ...logsState, source });
+        setFollow(true);
+    }
+
+    async function downloadAllLogs() {
+        if (!logsState) return;
+        try {
+            const result =
+                logsState.source === "container"
+                    ? await api.kernelContainerLogs(logsState.sessionId, "all")
+                    : await api.kernelLogs(logsState.sessionId);
+            const blob = new Blob([result.lines.join("\n")], {
+                type: "text/plain;charset=utf-8",
+            });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `kernel-${logsState.sessionId.slice(0, 12)}-${logsState.source}.txt`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+        } catch (err) {
+            reportError(err as Error);
+        }
     }
 
     const editorTheme =
         document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light";
 
-    const loadingLogs = logsQuery.isFetching && logsQuery.isLoading;
+    const loadingLogs = activeQuery.isFetching && activeQuery.isLoading;
+    const tailNote =
+        logsState?.source === "container"
+            ? `Last ${DEFAULT_LOG_TAIL.toLocaleString()} lines · auto-refresh 1s`
+            : "Auto-refresh 1s";
 
     return (
         <div className="view-content">
@@ -91,113 +173,251 @@ export default function KernelsView() {
                 <span className="muted">{kernels.length} active</span>
             </div>
 
-            {logsFor && (
-                <div className="kernel-logs-panel card">
-                    <div className="kernel-logs-header">
-                        <h3>Logs — {logsFor.slice(0, 12)}…</h3>
-                        <div className="card-footer-actions">
-                            <label
-                                className="muted small"
-                                style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", cursor: "pointer" }}
-                            >
-                                <input
-                                    type="checkbox"
-                                    checked={follow}
-                                    onChange={(e) => setFollow(e.target.checked)}
-                                />
-                                Follow
-                            </label>
-                            <span className="muted small">
-                                {loadingLogs ? "Loading…" : "Auto-refresh: 1s"}
-                            </span>
-                            <button
-                                className="secondary-button small"
-                                onClick={closeLogs}
-                                type="button"
-                            >
-                                Close
-                            </button>
-                        </div>
-                    </div>
-                    <div
-                        style={{
-                            border: "1px solid var(--border-color)",
-                            borderRadius: "var(--radius-sm)",
-                            overflow: "hidden",
-                        }}
-                    >
-                        <Editor
-                            height="400px"
-                            language="log"
-                            value={logLines.length > 0 ? logLines.join("\n") : "(no logs yet)"}
-                            theme={editorTheme}
-                            onMount={handleEditorMount}
-                            options={{
-                                readOnly: true,
-                                domReadOnly: true,
-                                minimap: { enabled: false },
-                                lineNumbers: "on",
-                                scrollBeyondLastLine: false,
-                                wordWrap: "on",
-                                fontSize: 12,
-                                automaticLayout: true,
-                                fixedOverflowWidgets: true,
-                                renderLineHighlight: "none",
-                            }}
-                        />
-                    </div>
-                </div>
-            )}
-
             {kernels.length > 0 ? (
-                <div className="card-grid">
-                    {kernels.map((kernel) => (
-                        <div className="card" key={kernel.session_id}>
-                            <div className="card-body">
-                                <h3>{kernel.harness}</h3>
-                                <div className="mono muted">{kernel.session_id.slice(0, 8)}…</div>
-                                <div className="detail-grid">
-                                    <span className="detail-label">Status</span>
-                                    <span className={`status-badge ${kernel.status}`}>{kernel.status}</span>
-                                    <span className="detail-label">Turns</span>
-                                    <span>{kernel.turns}</span>
-                                </div>
-                                {kernel.client_session_ids.length > 0 && (
-                                    <div className="tag-row">
-                                        {kernel.client_session_ids.map((id) => (
-                                            <span className="tag" key={id}>
-                                                {id.slice(0, 8)}…
-                                            </span>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
-                            <div className="card-footer">
-                                <span className="muted">{kernel.turns} turn{kernel.turns !== 1 ? "s" : ""}</span>
-                                <div className="card-footer-actions">
-                                    <button
-                                        className="secondary-button small"
-                                        onClick={() => openLogs(kernel.session_id)}
-                                        type="button"
-                                    >
-                                        View Logs
-                                    </button>
-                                    <button
-                                        className="danger-button small"
-                                        disabled={killMutation.isPending}
-                                        onClick={() => killMutation.mutate(kernel.session_id)}
-                                        type="button"
-                                    >
-                                        Kill
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    ))}
+                <div className="table-container">
+                    <table className="data-table kernels-table">
+                        <thead>
+                            <tr>
+                                <th>Harness</th>
+                                <th>Session</th>
+                                <th>Container</th>
+                                <th>Status</th>
+                                <th className="num">CPU</th>
+                                <th className="num">Memory</th>
+                                <th className="num">Turns</th>
+                                <th>Clients</th>
+                                <th aria-label="Actions"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {kernels.map((kernel) => (
+                                <KernelRow
+                                    key={kernel.session_id}
+                                    kernel={kernel}
+                                    isMenuOpen={openMenuFor === kernel.session_id}
+                                    onToggleMenu={() =>
+                                        setOpenMenuFor((current) =>
+                                            current === kernel.session_id
+                                                ? null
+                                                : kernel.session_id,
+                                        )
+                                    }
+                                    onViewLogs={() => {
+                                        setOpenMenuFor(null);
+                                        openLogs(kernel.session_id);
+                                    }}
+                                    onKill={() => {
+                                        setOpenMenuFor(null);
+                                        killMutation.mutate(kernel.session_id);
+                                    }}
+                                    killDisabled={killMutation.isPending}
+                                />
+                            ))}
+                        </tbody>
+                    </table>
                 </div>
             ) : (
                 <div className="empty-state">No active kernels.</div>
             )}
+
+            {logsState && (
+                <div
+                    className="tool-detail-overlay"
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget) {
+                            closeLogs();
+                        }
+                    }}
+                >
+                    <div className="logs-modal">
+                        <div className="logs-modal-header">
+                            <div className="logs-modal-title">
+                                <h3>Kernel logs — {logsState.sessionId.slice(0, 12)}…</h3>
+                                <span className="muted small">{tailNote}</span>
+                            </div>
+                            <div className="logs-modal-actions">
+                                <label className="muted small log-source-select">
+                                    Source:&nbsp;
+                                    <select
+                                        value={logsState.source}
+                                        onChange={(e) =>
+                                            setLogSource(e.target.value as LogSource)
+                                        }
+                                    >
+                                        <option value="harness">Harness logs</option>
+                                        <option value="container">Container logs</option>
+                                    </select>
+                                </label>
+                                <label className="muted small follow-toggle">
+                                    <input
+                                        type="checkbox"
+                                        checked={follow}
+                                        onChange={(e) => setFollow(e.target.checked)}
+                                    />
+                                    Follow
+                                </label>
+                                <span className="muted small">
+                                    {loadingLogs ? "Loading…" : ""}
+                                </span>
+                                <button
+                                    className="secondary-button small"
+                                    onClick={() => void downloadAllLogs()}
+                                    type="button"
+                                >
+                                    Download all
+                                </button>
+                                <button
+                                    className="secondary-button small"
+                                    onClick={closeLogs}
+                                    type="button"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+                        <div className="logs-modal-body">
+                            <Editor
+                                height="100%"
+                                language="log"
+                                value={logLines.length > 0 ? logLines.join("\n") : "(no logs yet)"}
+                                theme={editorTheme}
+                                onMount={handleEditorMount}
+                                options={{
+                                    readOnly: true,
+                                    domReadOnly: true,
+                                    minimap: { enabled: false },
+                                    lineNumbers: "on",
+                                    scrollBeyondLastLine: false,
+                                    wordWrap: "on",
+                                    fontSize: 12,
+                                    automaticLayout: true,
+                                    fixedOverflowWidgets: true,
+                                    renderLineHighlight: "none",
+                                }}
+                            />
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
+}
+
+type KernelRowProps = {
+    kernel: KernelSummary;
+    isMenuOpen: boolean;
+    onToggleMenu: () => void;
+    onViewLogs: () => void;
+    onKill: () => void;
+    killDisabled: boolean;
+};
+
+function KernelRow({
+    kernel,
+    isMenuOpen,
+    onToggleMenu,
+    onViewLogs,
+    onKill,
+    killDisabled,
+}: KernelRowProps) {
+    return (
+        <tr>
+            <td>{kernel.harness}</td>
+            <td className="mono">{kernel.session_id.slice(0, 12)}…</td>
+            <td className="mono">{kernel.container_name ?? "—"}</td>
+            <td>
+                <span className={`status-badge ${kernel.status}`}>{kernel.status}</span>
+            </td>
+            <td className="num mono">{formatCpu(kernel.stats)}</td>
+            <td className="num mono">{formatMemory(kernel.stats)}</td>
+            <td className="num">{kernel.turns}</td>
+            <td>
+                {kernel.client_session_ids.length > 0 ? (
+                    <span className="muted small">
+                        {kernel.client_session_ids.length} attached
+                    </span>
+                ) : (
+                    <span className="muted small">—</span>
+                )}
+            </td>
+            <td className="actions-cell">
+                <div className="kebab-wrapper">
+                    <button
+                        type="button"
+                        className="kebab-button"
+                        aria-haspopup="menu"
+                        aria-expanded={isMenuOpen}
+                        aria-label="Actions"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onToggleMenu();
+                        }}
+                    >
+                        ⋯
+                    </button>
+                    {isMenuOpen && (
+                        <div
+                            className="kebab-menu"
+                            role="menu"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            <button
+                                type="button"
+                                role="menuitem"
+                                className="kebab-menu-item"
+                                onClick={onViewLogs}
+                            >
+                                View logs
+                            </button>
+                            <button
+                                type="button"
+                                role="menuitem"
+                                className="kebab-menu-item danger"
+                                disabled={killDisabled}
+                                onClick={onKill}
+                            >
+                                Kill
+                            </button>
+                        </div>
+                    )}
+                </div>
+            </td>
+        </tr>
+    );
+}
+
+function formatCpu(stats: KernelStats | null): string {
+    if (!stats || stats.cpu_percent === null) {
+        return "—";
+    }
+    return `${stats.cpu_percent.toFixed(1)}%`;
+}
+
+function formatMemory(stats: KernelStats | null): string {
+    if (!stats || stats.memory_usage_bytes === null) {
+        return "—";
+    }
+    const used = formatBytes(stats.memory_usage_bytes);
+    if (stats.memory_limit_bytes === null || stats.memory_limit_bytes <= 0) {
+        return used;
+    }
+    const limit = formatBytes(stats.memory_limit_bytes);
+    const pct =
+        stats.memory_percent !== null ? ` (${stats.memory_percent.toFixed(1)}%)` : "";
+    return `${used} / ${limit}${pct}`;
+}
+
+function formatBytes(bytes: number): string {
+    if (bytes < 1024) {
+        return `${bytes} B`;
+    }
+    const units = ["KiB", "MiB", "GiB", "TiB"];
+    let value = bytes / 1024;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+        value /= 1024;
+        unitIndex += 1;
+    }
+    const precision = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+    return `${value.toFixed(precision)} ${units[unitIndex]}`;
 }

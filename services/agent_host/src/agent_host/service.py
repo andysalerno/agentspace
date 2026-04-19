@@ -79,6 +79,21 @@ class KernelRuntime(Protocol):
         session: KernelRuntimeSession,
     ) -> list[str]: ...
 
+    async def container_logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        tail: int | None,
+    ) -> list[str]: ...
+
+    async def stats(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> dict[str, Any] | None: ...
+
+    def container_name(self, *, session: KernelRuntimeSession) -> str | None: ...
+
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None: ...
 
 
@@ -97,6 +112,8 @@ class SessionRecord:
     history: list[list[KernelEvent]] = field(default_factory=_empty_history)
     status: KernelStatus = KernelStatus.IDLE
     resume_token: str | None = None
+    container_name: str | None = None
+    stats: dict[str, Any] | None = None
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -106,6 +123,8 @@ class SessionRecord:
             "turns": len(self.history),
             "resume_token": self.resume_token,
             "additional_paths": list(self.additional_paths),
+            "container_name": self.container_name,
+            "stats": self.stats,
         }
 
 
@@ -256,6 +275,33 @@ class DockerKernelRuntime:
         response.raise_for_status()
         return list(response.json()["lines"])
 
+    async def container_logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        tail: int | None,
+    ) -> list[str]:
+        handle = self._docker_session(session)
+        return await asyncio.to_thread(
+            self._docker_container_logs,
+            handle.container_name,
+            tail,
+        )
+
+    async def stats(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> dict[str, Any] | None:
+        handle = self._docker_session(session)
+        return await asyncio.to_thread(
+            self._docker_container_stats,
+            handle.container_name,
+        )
+
+    def container_name(self, *, session: KernelRuntimeSession) -> str | None:
+        return self._docker_session(session).container_name
+
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         handle = self._docker_session(session)
         await asyncio.to_thread(self._remove_container, handle.container_name)
@@ -327,6 +373,60 @@ class DockerKernelRuntime:
             return
         container.remove(force=True)
 
+    def _docker_container_logs(
+        self,
+        container_name: str,
+        tail: int | None,
+    ) -> list[str]:
+        try:
+            container = self._client.containers.get(container_name)
+        except NotFound:
+            return []
+        kwargs: dict[str, Any] = {"stdout": True, "stderr": True}
+        if tail is not None:
+            kwargs["tail"] = tail
+        try:
+            raw = cast(
+                "object",
+                container.logs(**kwargs),  # pyright: ignore[reportUnknownMemberType]
+            )
+        except DockerException as exc:
+            logger.warning(
+                "failed to fetch container logs for %s: %s",
+                container_name,
+                exc,
+            )
+            return []
+        if isinstance(raw, bytes):
+            return raw.decode(errors="replace").splitlines()
+        # Fallback: docker-py can return a generator if stream=True; we never
+        # ask for it, but be defensive.
+        return []
+
+    def _docker_container_stats(
+        self,
+        container_name: str,
+    ) -> dict[str, Any] | None:
+        try:
+            container = self._client.containers.get(container_name)
+        except NotFound:
+            return None
+        try:
+            raw = cast(
+                "object",
+                container.stats(stream=False),  # pyright: ignore[reportUnknownMemberType]
+            )
+        except DockerException as exc:
+            logger.warning(
+                "failed to fetch container stats for %s: %s",
+                container_name,
+                exc,
+            )
+            return None
+        if not isinstance(raw, dict):
+            return None
+        return _summarize_docker_stats(cast("dict[str, Any]", raw))
+
     async def _wait_until_ready(self, base_url: str) -> None:
         async with httpx.AsyncClient(timeout=5.0) as client:
             deadline = asyncio.get_running_loop().time() + self._startup_timeout
@@ -382,6 +482,7 @@ class AgentHost:
             env=merged_env,
             additional_paths=additional_paths,
             skills=skills,
+            container_name=self._runtime.container_name(session=runtime_session),
         )
         session_summary = await self._runtime.summary(session=runtime_session)
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
@@ -463,17 +564,59 @@ class AgentHost:
             skills=skills,
         )
 
-    async def get_session(self, session_id: str) -> dict[str, Any]:
+    async def get_session(
+        self,
+        session_id: str,
+        *,
+        with_stats: bool = False,
+    ) -> dict[str, Any]:
         record = self._get_session(session_id)
-        session_summary = await self._runtime.summary(session=record.runtime_session)
+        if with_stats:
+            session_summary, stats = await asyncio.gather(
+                self._runtime.summary(session=record.runtime_session),
+                self._runtime.stats(session=record.runtime_session),
+            )
+            # ``record.stats`` is a cache of the last fetched stats payload;
+            # it is only refreshed when the caller asks for ``with_stats``.
+            record.stats = stats
+        else:
+            session_summary = await self._runtime.summary(
+                session=record.runtime_session,
+            )
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
         record.status = _as_status(session_summary.get("status"), record.status)
         return record.summary()
 
-    async def list_sessions(self) -> list[dict[str, Any]]:
+    async def list_sessions(
+        self,
+        *,
+        with_stats: bool = False,
+    ) -> list[dict[str, Any]]:
         async with self._lock:
             session_ids = list(self._sessions)
-        return [await self.get_session(session_id) for session_id in session_ids]
+        results = await asyncio.gather(
+            *(
+                self.get_session(session_id, with_stats=with_stats)
+                for session_id in session_ids
+            ),
+            return_exceptions=True,
+        )
+        summaries: list[dict[str, Any]] = []
+        for session_id, result in zip(session_ids, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.warning(
+                    "failed to fetch summary for session %s: %s",
+                    session_id,
+                    result,
+                )
+                # Keep the row visible so the operator can still see and kill
+                # a misbehaving kernel; fall back to the last cached summary.
+                record = self._sessions.get(session_id)
+                if record is not None:
+                    summaries.append(record.summary())
+                continue
+            summaries.append(result)
+        return summaries
 
     async def history(self, session_id: str) -> list[list[KernelEvent]]:
         record = self._get_session(session_id)
@@ -484,6 +627,18 @@ class AgentHost:
     async def logs(self, session_id: str) -> list[str]:
         record = self._get_session(session_id)
         return await self._runtime.logs(session=record.runtime_session)
+
+    async def container_logs(
+        self,
+        session_id: str,
+        *,
+        tail: int | None = 2000,
+    ) -> list[str]:
+        record = self._get_session(session_id)
+        return await self._runtime.container_logs(
+            session=record.runtime_session,
+            tail=tail,
+        )
 
     def _get_session(self, session_id: str) -> SessionRecord:
         try:
@@ -518,3 +673,94 @@ def _as_resume_token(value: object) -> str | None:
 class DockerKernelSession:
     container_name: str
     base_url: str
+
+
+def _summarize_docker_stats(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert a raw ``docker stats`` payload into a small summary dict.
+
+    Returns a dict with ``cpu_percent``, ``memory_usage_bytes``,
+    ``memory_limit_bytes``, ``memory_percent``. Any missing field is ``None``.
+
+    Returns ``None`` if the payload is unusable (e.g. container not running).
+    """
+    cpu_stats = _as_dict(raw.get("cpu_stats"))
+    precpu_stats = _as_dict(raw.get("precpu_stats"))
+    memory_stats = _as_dict(raw.get("memory_stats"))
+
+    cpu_percent = _compute_cpu_percent(cpu_stats, precpu_stats)
+    memory_usage = _compute_memory_usage(memory_stats)
+    memory_limit = _as_int(memory_stats.get("limit"))
+    memory_percent: float | None
+    if memory_usage is not None and memory_limit is not None and memory_limit > 0:
+        memory_percent = (memory_usage / memory_limit) * 100.0
+    else:
+        memory_percent = None
+
+    if cpu_percent is None and memory_usage is None and memory_limit is None:
+        return None
+
+    return {
+        "cpu_percent": cpu_percent,
+        "memory_usage_bytes": memory_usage,
+        "memory_limit_bytes": memory_limit,
+        "memory_percent": memory_percent,
+    }
+
+
+def _compute_cpu_percent(
+    cpu_stats: dict[str, Any],
+    precpu_stats: dict[str, Any],
+) -> float | None:
+    cpu_usage = _as_dict(cpu_stats.get("cpu_usage"))
+    precpu_usage = _as_dict(precpu_stats.get("cpu_usage"))
+    total = _as_int(cpu_usage.get("total_usage"))
+    pre_total = _as_int(precpu_usage.get("total_usage"))
+    system = _as_int(cpu_stats.get("system_cpu_usage"))
+    pre_system = _as_int(precpu_stats.get("system_cpu_usage"))
+
+    if total is None or pre_total is None or system is None or pre_system is None:
+        return None
+
+    cpu_delta = total - pre_total
+    system_delta = system - pre_system
+    if system_delta <= 0 or cpu_delta < 0:
+        return None
+
+    online_cpus = _as_int(cpu_stats.get("online_cpus"))
+    if online_cpus is None or online_cpus <= 0:
+        per_cpu: object = cpu_usage.get("percpu_usage")
+        online_cpus = (
+            len(cast("list[object]", per_cpu)) if isinstance(per_cpu, list) else 1
+        )
+    if online_cpus <= 0:
+        online_cpus = 1
+
+    return (cpu_delta / system_delta) * online_cpus * 100.0
+
+
+def _compute_memory_usage(memory_stats: dict[str, Any]) -> int | None:
+    usage = _as_int(memory_stats.get("usage"))
+    if usage is None:
+        return None
+    stats_section = _as_dict(memory_stats.get("stats"))
+    # cgroup v1 reports ``cache``; cgroup v2 reports ``inactive_file``.
+    cache = _as_int(stats_section.get("cache"))
+    if cache is None:
+        cache = _as_int(stats_section.get("inactive_file"))
+    if cache is not None and cache <= usage:
+        return usage - cache
+    return usage
+
+
+def _as_dict(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return cast("dict[str, Any]", value)
+    return {}
+
+
+def _as_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    return None

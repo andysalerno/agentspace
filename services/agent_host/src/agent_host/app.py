@@ -4,12 +4,12 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
@@ -93,14 +93,19 @@ async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
 
 
 @app.get("/sessions")
-async def list_sessions() -> list[dict[str, Any]]:
-    return await host.list_sessions()
+async def list_sessions(
+    with_stats: Annotated[bool, Query()] = False,  # noqa: FBT002 - FastAPI query param
+) -> list[dict[str, Any]]:
+    return await host.list_sessions(with_stats=with_stats)
 
 
 @app.get("/sessions/{session_id}")
-async def get_session(session_id: str) -> dict[str, Any]:
+async def get_session(
+    session_id: str,
+    with_stats: Annotated[bool, Query()] = False,  # noqa: FBT002 - FastAPI query param
+) -> dict[str, Any]:
     try:
-        return await host.get_session(session_id)
+        return await host.get_session(session_id, with_stats=with_stats)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -154,6 +159,20 @@ async def history(session_id: str) -> dict[str, Any]:
 async def session_logs(session_id: str) -> dict[str, Any]:
     try:
         lines = await host.logs(session_id)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"lines": lines}
+
+
+@app.get("/sessions/{session_id}/container-logs")
+async def session_container_logs(
+    session_id: str,
+    tail: Annotated[int, Query(ge=1, le=50_000)] = 2000,
+    all_logs: Annotated[bool, Query(alias="all")] = False,  # noqa: FBT002 - FastAPI query param
+) -> dict[str, Any]:
+    effective_tail: int | None = None if all_logs else tail
+    try:
+        lines = await host.container_logs(session_id, tail=effective_tail)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"lines": lines}

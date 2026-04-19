@@ -108,8 +108,8 @@ class ApiClient:
             timeout = httpx.Timeout(self.timeout, read=None)
             async with (
                 httpx.AsyncClient(
-                base_url=self.base_url,
-                timeout=timeout,
+                    base_url=self.base_url,
+                    timeout=timeout,
                 ) as client,
                 client.stream(
                     "POST",

@@ -107,6 +107,34 @@ class StubRuntime:
         del session
         return ['{"type":"stub","data":{}}']
 
+    async def container_logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        tail: int | None,
+    ) -> list[str]:
+        container_name = self._session_key(session)
+        lines = [f"{container_name} container line {i}" for i in range(5)]
+        if tail is not None and tail > 0:
+            return lines[-tail:]
+        return lines
+
+    async def stats(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> dict[str, object] | None:
+        del session
+        return {
+            "cpu_percent": 1.0,
+            "memory_usage_bytes": 100,
+            "memory_limit_bytes": 1000,
+            "memory_percent": 10.0,
+        }
+
+    def container_name(self, *, session: KernelRuntimeSession) -> str | None:
+        return self._session_key(session)
+
     def _session_key(self, session: KernelRuntimeSession) -> str:
         assert isinstance(session.value, str)
         return session.value

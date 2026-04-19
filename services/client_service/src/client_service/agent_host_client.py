@@ -32,7 +32,7 @@ class AgentHostClient(Protocol):
 
     async def get_session(self, session_id: str) -> JsonDict: ...
 
-    async def list_sessions(self) -> JsonList: ...
+    async def list_sessions(self, *, with_stats: bool = False) -> JsonList: ...
 
     async def send_message(
         self,
@@ -49,6 +49,13 @@ class AgentHostClient(Protocol):
     async def history(self, session_id: str) -> list[list[KernelEvent]]: ...
 
     async def logs(self, session_id: str) -> list[str]: ...
+
+    async def container_logs(
+        self,
+        session_id: str,
+        *,
+        tail: int | None,
+    ) -> list[str]: ...
 
     async def reset_session(self, session_id: str) -> JsonDict: ...
 
@@ -121,8 +128,9 @@ class HttpAgentHostClient:
         response = await self._request_json("GET", f"/sessions/{session_id}")
         return cast("JsonDict", response)
 
-    async def list_sessions(self) -> JsonList:
-        return cast("JsonList", await self._request_json("GET", "/sessions"))
+    async def list_sessions(self, *, with_stats: bool = False) -> JsonList:
+        path = "/sessions?with_stats=true" if with_stats else "/sessions"
+        return cast("JsonList", await self._request_json("GET", path))
 
     async def send_message(self, session_id: str, message: str) -> list[KernelEvent]:
         return [event async for event in self.stream_message(session_id, message)]
@@ -171,6 +179,18 @@ class HttpAgentHostClient:
             "GET",
             f"/sessions/{session_id}/logs",
         )
+        return cast("list[str]", cast("JsonDict", response)["lines"])
+
+    async def container_logs(
+        self,
+        session_id: str,
+        *,
+        tail: int | None,
+    ) -> list[str]:
+        path = f"/sessions/{session_id}/container-logs"
+        if tail is not None:
+            path = f"{path}?tail={tail}"
+        response = await self._request_json("GET", path)
         return cast("list[str]", cast("JsonDict", response)["lines"])
 
     async def reset_session(self, session_id: str) -> JsonDict:

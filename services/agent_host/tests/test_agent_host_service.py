@@ -8,6 +8,7 @@ from agent_host.service import (
     AgentHost,
     KernelRuntimeSession,
     SessionNotFoundError,
+    _summarize_docker_stats,  # pyright: ignore[reportPrivateUsage]
 )
 from kernel.events import (
     KernelEvent,
@@ -121,6 +122,33 @@ class StubRuntime:
         del session
         return ['{"type":"stub","data":{}}']
 
+    async def container_logs(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        tail: int | None,
+    ) -> list[str]:
+        container_name = self._session_key(session)
+        if tail is not None and tail > 0:
+            return [f"{container_name} container line {i}" for i in range(tail)][:3]
+        return [f"{container_name} container line {i}" for i in range(5)]
+
+    async def stats(
+        self,
+        *,
+        session: KernelRuntimeSession,
+    ) -> dict[str, Any] | None:
+        del session
+        return {
+            "cpu_percent": 12.5,
+            "memory_usage_bytes": 50_000_000,
+            "memory_limit_bytes": 200_000_000,
+            "memory_percent": 25.0,
+        }
+
+    def container_name(self, *, session: KernelRuntimeSession) -> str | None:
+        return self._session_key(session)
+
     def _session_key(self, session: KernelRuntimeSession) -> str:
         assert isinstance(session.value, str)
         return session.value
@@ -231,3 +259,114 @@ def test_skills_mount_paths_covers_all_harnesses() -> None:
 
 def test_copilot_skills_mount_path() -> None:
     assert SKILLS_MOUNT_PATHS[HarnessName.COPILOT_CLI] == "/root/.copilot/skills"
+
+
+def test_summarize_docker_stats_computes_percentages() -> None:
+    raw: dict[str, Any] = {
+        "cpu_stats": {
+            "cpu_usage": {"total_usage": 200},
+            "system_cpu_usage": 1000,
+            "online_cpus": 2,
+        },
+        "precpu_stats": {
+            "cpu_usage": {"total_usage": 100},
+            "system_cpu_usage": 500,
+        },
+        "memory_stats": {
+            "usage": 200,
+            "limit": 1000,
+            "stats": {"cache": 50},
+        },
+    }
+
+    summary = _summarize_docker_stats(raw)
+
+    assert summary is not None
+    cpu_percent = summary["cpu_percent"]
+    memory_percent = summary["memory_percent"]
+    assert isinstance(cpu_percent, float)
+    assert isinstance(memory_percent, float)
+    assert abs(cpu_percent - 40.0) < 1e-6
+    assert summary["memory_usage_bytes"] == 150
+    assert summary["memory_limit_bytes"] == 1000
+    assert abs(memory_percent - 15.0) < 1e-6
+
+
+def test_summarize_docker_stats_handles_missing_fields() -> None:
+    summary = _summarize_docker_stats({})
+
+    assert summary is None
+
+
+def test_summarize_docker_stats_uses_cgroup_v2_inactive_file() -> None:
+    raw: dict[str, Any] = {
+        "memory_stats": {
+            "usage": 200,
+            "limit": 1000,
+            "stats": {"inactive_file": 75},
+        },
+    }
+
+    summary = _summarize_docker_stats(raw)
+
+    assert summary is not None
+    assert summary["memory_usage_bytes"] == 125
+    assert summary["cpu_percent"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_session_includes_container_name_and_stats() -> None:
+    runtime = StubRuntime()
+    host = AgentHost(runtime=runtime)
+
+    session = await host.create_session(harness=HarnessName.ECHO)
+    fetched = await host.get_session(session["session_id"], with_stats=True)
+
+    assert fetched["container_name"] == f"container-{session['session_id'][:8]}"
+    stats = fetched["stats"]
+    assert isinstance(stats, dict)
+    assert stats["cpu_percent"] == 12.5
+    assert stats["memory_usage_bytes"] == 50_000_000
+
+
+@pytest.mark.asyncio
+async def test_get_session_omits_stats_by_default() -> None:
+    runtime = StubRuntime()
+    host = AgentHost(runtime=runtime)
+
+    session = await host.create_session(harness=HarnessName.ECHO)
+    fetched = await host.get_session(session["session_id"])
+
+    assert fetched["stats"] is None
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_returns_cached_summary_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = StubRuntime()
+    host = AgentHost(runtime=runtime)
+
+    session = await host.create_session(harness=HarnessName.ECHO)
+
+    async def boom(**_kwargs: object) -> dict[str, Any]:
+        msg = "kernel unreachable"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(runtime, "summary", boom)
+
+    summaries = await host.list_sessions()
+
+    assert len(summaries) == 1
+    assert summaries[0]["session_id"] == session["session_id"]
+
+
+@pytest.mark.asyncio
+async def test_container_logs_default_tail_passed_through() -> None:
+    runtime = StubRuntime()
+    host = AgentHost(runtime=runtime)
+
+    session = await host.create_session(harness=HarnessName.ECHO)
+    lines = await host.container_logs(session["session_id"], tail=None)
+
+    assert len(lines) == 5

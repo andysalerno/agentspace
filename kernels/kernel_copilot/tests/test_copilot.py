@@ -294,7 +294,8 @@ class TestCopilotKernelLifecycle:
         create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
         monkeypatch.setattr("kernel_copilot._ensure_directory", lambda _path: None)
         monkeypatch.setattr(
-            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess,
+            "kernel_copilot.asyncio.create_subprocess_exec",
+            create_subprocess,
         )
 
         await kernel.send("hello")
@@ -334,7 +335,9 @@ class TestCopilotKernelLifecycle:
             EventType.STATUS,
             EventType.SESSION_END,
         ]
-        assert events[2].message == "failed to start copilot CLI: workspace setup failed"
+        assert (
+            events[2].message == "failed to start copilot CLI: workspace setup failed"
+        )
 
     @pytest.mark.asyncio
     async def test_send_creates_workspace_dir(
@@ -352,7 +355,8 @@ class TestCopilotKernelLifecycle:
         create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
         monkeypatch.setattr("kernel_copilot._ensure_directory", fake_ensure_directory)
         monkeypatch.setattr(
-            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess,
+            "kernel_copilot.asyncio.create_subprocess_exec",
+            create_subprocess,
         )
 
         await kernel.send("hello")
@@ -375,7 +379,8 @@ class TestCopilotKernelLifecycle:
         create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
         monkeypatch.setattr("kernel_copilot._ensure_directory", fake_ensure_directory)
         monkeypatch.setattr(
-            "kernel_copilot.asyncio.create_subprocess_exec", create_subprocess,
+            "kernel_copilot.asyncio.create_subprocess_exec",
+            create_subprocess,
         )
 
         await kernel.send("hello")

@@ -62,7 +62,12 @@ class StubAgentHostClient:
             "status": self._sessions[session_id]["status"],
         }
 
-    async def list_sessions(self) -> list[dict[str, object]]:
+    async def list_sessions(
+        self,
+        *,
+        with_stats: bool = False,
+    ) -> list[dict[str, object]]:
+        del with_stats
         return [await self.get_session(session_id) for session_id in self._sessions]
 
     async def send_message(self, session_id: str, message: str) -> list[KernelEvent]:
@@ -114,6 +119,20 @@ class StubAgentHostClient:
             msg = f"session not found: {session_id}"
             raise KeyError(msg)
         return ['{"type":"stub","data":{}}']
+
+    async def container_logs(
+        self,
+        session_id: str,
+        *,
+        tail: int | None,
+    ) -> list[str]:
+        if session_id not in self._sessions:
+            msg = f"session not found: {session_id}"
+            raise KeyError(msg)
+        lines = [f"container line {i}" for i in range(5)]
+        if tail is not None and tail > 0:
+            return lines[-tail:]
+        return lines
 
     async def create_skill(
         self,
@@ -510,6 +529,33 @@ async def test_kill_kernel_not_found_raises() -> None:
 
     with pytest.raises(KernelNotFoundError):
         await service.kill_kernel("nonexistent")
+
+
+@pytest.mark.asyncio
+async def test_kernel_container_logs_proxies_to_agent_host() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    await service.create_agent(agent_id="test-agent", name="Test Agent")
+    session = await service.create_session(
+        agent_id="test-agent",
+        channel_name="webui",
+        client_type=ClientType.WEBUI,
+    )
+    kernel_session_id = str(session["agent_host_session_id"])
+
+    lines = await service.kernel_container_logs(kernel_session_id, tail=2)
+
+    assert lines == ["container line 3", "container line 4"]
+
+
+@pytest.mark.asyncio
+async def test_kernel_container_logs_not_found_raises() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    with pytest.raises(KernelNotFoundError):
+        await service.kernel_container_logs("nonexistent", tail=None)
 
 
 @pytest.mark.asyncio

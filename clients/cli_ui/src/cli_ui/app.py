@@ -81,6 +81,7 @@ def _apply_stream_event(
         assistant_message["tool_calls"] = tool_calls
     return assistant_message
 
+
 # ──────────────────────────────────────────────────────────────────
 # Chat Screen
 # ──────────────────────────────────────────────────────────────────

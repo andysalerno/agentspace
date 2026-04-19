@@ -51,6 +51,13 @@ export type SessionDetail = SessionSummary & {
   messages: ChatMessage[];
 };
 
+export type KernelStats = {
+  cpu_percent: number | null;
+  memory_usage_bytes: number | null;
+  memory_limit_bytes: number | null;
+  memory_percent: number | null;
+};
+
 export type KernelSummary = {
   session_id: string;
   harness: string;
@@ -61,6 +68,8 @@ export type KernelSummary = {
   client_session_ids: string[];
   channel_names: string[];
   agent_ids: string[];
+  container_name: string | null;
+  stats: KernelStats | null;
 };
 
 export type SendMessageResponse = {

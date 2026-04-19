@@ -936,7 +936,7 @@ button:disabled {
   font-size: 0.85rem;
 }
 
-/* ─── Kernel Logs ─── */
+/* ─── Kernel Logs (legacy inline panel; kept for safety) ─── */
 .kernel-logs-panel {
   margin-bottom: 24px;
 }
@@ -967,6 +967,149 @@ button:disabled {
   white-space: pre-wrap;
   word-break: break-all;
   border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+}
+
+/* ─── Kernels Table ─── */
+.data-table .num {
+  text-align: right;
+}
+
+.data-table .actions-cell {
+  width: 1%;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.kebab-wrapper {
+  position: relative;
+  display: inline-block;
+}
+
+.kebab-button {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 2px 8px;
+}
+
+.kebab-button:hover,
+.kebab-button[aria-expanded="true"] {
+  background: var(--table-hover-bg);
+  border-color: var(--border-color);
+  color: var(--text-primary);
+}
+
+.kebab-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 160px;
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+
+.kebab-menu-item {
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 0.85rem;
+  padding: 8px 14px;
+  text-align: left;
+  width: 100%;
+}
+
+.kebab-menu-item:hover:not(:disabled) {
+  background: var(--table-hover-bg);
+}
+
+.kebab-menu-item:disabled {
+  color: var(--text-secondary);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.kebab-menu-item.danger {
+  color: var(--danger-color, #d33);
+}
+
+.kebab-menu-item.danger:hover:not(:disabled) {
+  background: rgba(211, 51, 51, 0.1);
+}
+
+/* ─── Logs Modal ─── */
+.logs-modal {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  width: min(1100px, 92vw);
+  height: min(80vh, 800px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+}
+
+.logs-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.logs-modal-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.logs-modal-title h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-family: "Cascadia Code", "Fira Code", monospace;
+}
+
+.logs-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.log-source-select select {
+  background: var(--card-bg);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  padding: 2px 6px;
+}
+
+.follow-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.logs-modal-body {
+  flex: 1;
+  overflow: hidden;
+  background: var(--card-bg);
 }
 
 .tag-row {

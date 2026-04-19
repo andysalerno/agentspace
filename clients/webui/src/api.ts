@@ -182,6 +182,15 @@ export const api = {
     requestJson<void>(`/kernels/${sessionId}`, { method: "DELETE" }),
   kernelLogs: (sessionId: string) =>
     requestJson<{ lines: string[] }>(`/kernels/${sessionId}/logs`),
+  kernelContainerLogs: (
+    sessionId: string,
+    tail: number | "all" = 2000,
+  ) => {
+    const query = tail === "all" ? "?all=true" : `?tail=${tail}`;
+    return requestJson<{ lines: string[] }>(
+      `/kernels/${sessionId}/container-logs${query}`,
+    );
+  },
 
   // Skills
   listSkills: () => requestJson<Skill[]>("/skills"),

@@ -281,7 +281,7 @@ class ClientService:
         return self._stream_to_session(session, message)
 
     async def list_kernels(self) -> list[dict[str, object]]:
-        upstream_sessions = await self._agent_host.list_sessions()
+        upstream_sessions = await self._agent_host.list_sessions(with_stats=True)
         kernels: list[dict[str, object]] = []
         for upstream in upstream_sessions:
             agent_host_session_id = str(upstream["session_id"])
@@ -339,6 +339,23 @@ class ClientService:
         if not found:
             raise KernelNotFoundError(kernel_session_id)
         return await self._agent_host.logs(kernel_session_id)
+
+    async def kernel_container_logs(
+        self,
+        kernel_session_id: str,
+        *,
+        tail: int | None,
+    ) -> list[str]:
+        upstream_sessions = await self._agent_host.list_sessions()
+        found = any(
+            str(s["session_id"]) == kernel_session_id for s in upstream_sessions
+        )
+        if not found:
+            raise KernelNotFoundError(kernel_session_id)
+        return await self._agent_host.container_logs(
+            kernel_session_id,
+            tail=tail,
+        )
 
     # --- Skills (proxied to agent_host) ---
 

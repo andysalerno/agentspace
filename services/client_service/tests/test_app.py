@@ -196,6 +196,13 @@ class StubClientService:
                 "turns": 1,
                 "resume_token": "resume-1",
                 "additional_paths": [],
+                "container_name": "agentspace-kernel-host-1",
+                "stats": {
+                    "cpu_percent": 1.5,
+                    "memory_usage_bytes": 1024,
+                    "memory_limit_bytes": 8192,
+                    "memory_percent": 12.5,
+                },
                 "client_session_ids": ["session-1"],
                 "channel_names": ["webui"],
                 "agent_ids": ["agent-one"],
@@ -211,6 +218,19 @@ class StubClientService:
         if kernel_session_id != "host-1":
             raise KernelNotFoundError(kernel_session_id)
         return ['{"type":"stub","data":{}}']
+
+    async def kernel_container_logs(
+        self,
+        kernel_session_id: str,
+        *,
+        tail: int | None,
+    ) -> list[str]:
+        if kernel_session_id != "host-1":
+            raise KernelNotFoundError(kernel_session_id)
+        lines = [f"container log line {i}" for i in range(5)]
+        if tail is not None and tail > 0:
+            return lines[-tail:]
+        return lines
 
     async def create_skill(
         self,
@@ -504,6 +524,31 @@ def test_kernel_logs(client: TestClient) -> None:
 
 def test_kernel_logs_not_found(client: TestClient) -> None:
     response = client.get("/kernels/nonexistent/logs")
+
+    assert response.status_code == 404
+
+
+def test_kernel_container_logs(client: TestClient) -> None:
+    response = client.get("/kernels/host-1/container-logs")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert isinstance(body["lines"], list)
+    assert all(line.startswith("container log line ") for line in body["lines"])
+
+
+def test_kernel_container_logs_tail(client: TestClient) -> None:
+    response = client.get("/kernels/host-1/container-logs?tail=2")
+
+    assert response.status_code == 200
+    assert response.json()["lines"] == [
+        "container log line 3",
+        "container log line 4",
+    ]
+
+
+def test_kernel_container_logs_not_found(client: TestClient) -> None:
+    response = client.get("/kernels/nonexistent/container-logs")
 
     assert response.status_code == 404
 

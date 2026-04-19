@@ -6,10 +6,10 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from gateway.protocol import GatewayType
@@ -321,6 +321,23 @@ async def kill_kernel(kernel_session_id: str) -> None:
 async def kernel_logs(kernel_session_id: str) -> dict[str, Any]:
     try:
         lines = await service.kernel_logs(kernel_session_id)
+    except KernelNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"lines": lines}
+
+
+@app.get("/kernels/{kernel_session_id}/container-logs")
+async def kernel_container_logs(
+    kernel_session_id: str,
+    tail: Annotated[int, Query(ge=1, le=50_000)] = 2000,
+    all_logs: Annotated[bool, Query(alias="all")] = False,  # noqa: FBT002 - FastAPI query param
+) -> dict[str, Any]:
+    effective_tail: int | None = None if all_logs else tail
+    try:
+        lines = await service.kernel_container_logs(
+            kernel_session_id,
+            tail=effective_tail,
+        )
     except KernelNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"lines": lines}

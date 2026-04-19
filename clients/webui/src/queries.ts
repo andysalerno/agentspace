@@ -12,6 +12,8 @@ export const queryKeys = {
   session: (sessionId: string) => ["sessions", sessionId] as const,
   kernels: ["kernels"] as const,
   kernelLogs: (sessionId: string) => ["kernels", sessionId, "logs"] as const,
+  kernelContainerLogs: (sessionId: string) =>
+    ["kernels", sessionId, "container-logs"] as const,
   skills: ["skills"] as const,
   skill: (skillId: string) => ["skills", skillId] as const,
   gateways: ["gateways"] as const,
@@ -65,7 +67,7 @@ export const useKernels = () =>
   useQuery({
     queryKey: queryKeys.kernels,
     queryFn: api.listKernels,
-    refetchInterval: POLL_MS,
+    refetchInterval: 2_000,
   });
 
 export const useSkills = () =>
