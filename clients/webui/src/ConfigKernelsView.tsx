@@ -1,12 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import { withRequiredEnvKeys } from "./envPrefill";
-
-type ConfigKernelsViewProps = {
-    harnesses: string[];
-    onError: (message: string) => void;
-};
+import { queryKeys, useHarnesses, useKernelConfig } from "./queries";
+import { useErrorContext } from "./ErrorContext";
 
 const CONFIGURABLE_HARNESSES = new Set(["opencode"]);
 
@@ -24,63 +22,80 @@ function formatHarnessLabel(harness: string): string {
         .join(" ");
 }
 
-export default function ConfigKernelsView({ harnesses, onError }: ConfigKernelsViewProps) {
+export default function ConfigKernelsView() {
+    const { data: harnesses = [] } = useHarnesses();
+    const { reportError } = useErrorContext();
+    const queryClient = useQueryClient();
+
     const [selected, setSelected] = useState<string | null>(null);
     const [envVars, setEnvVars] = useState("");
-    const [loading, setLoading] = useState(false);
-    const [saving, setSaving] = useState(false);
-    const [updatedAt, setUpdatedAt] = useState<string | null>(null);
     const [dirty, setDirty] = useState(false);
     const [savedNotice, setSavedNotice] = useState(false);
-    const [loadError, setLoadError] = useState<string | null>(null);
 
     // Fall back to the first harness until the user picks one explicitly.
-    // Computed in render so we don't need an effect to assign a default.
     const effectiveSelected: string | null = selected ?? harnesses[0] ?? null;
+    const isConfigurable =
+        effectiveSelected !== null && CONFIGURABLE_HARNESSES.has(effectiveSelected);
 
+    const configQuery = useKernelConfig(isConfigurable ? effectiveSelected : null);
+
+    // Track which server payload (keyed by harness + updated_at) has been
+    // copied into the editor. This prevents a stale `configQuery.data`
+    // (still in cache before the post-save refetch lands) from clobbering
+    // the freshly-saved value the mutation just wrote into local state.
+    const appliedRef = useRef<string | null>(null);
+
+    // Sync server config into local editor state when it changes (and we're
+    // not mid-edit). The editor needs its own state for the dirty/saved
+    // tracking.
     useEffect(() => {
-        if (effectiveSelected === null) return;
-        if (!CONFIGURABLE_HARNESSES.has(effectiveSelected)) {
+        if (!isConfigurable || effectiveSelected === null) {
             setEnvVars("");
-            setUpdatedAt(null);
             setDirty(false);
-            setLoadError(null);
+            appliedRef.current = null;
             return;
         }
-        setLoading(true);
+        const data = configQuery.data;
+        if (!data || dirty) return;
+        const stamp = `${effectiveSelected}::${data.updated_at}`;
+        if (appliedRef.current === stamp) return;
+        appliedRef.current = stamp;
+        setEnvVars(withRequiredEnvKeys(data.env_vars, effectiveSelected));
+    }, [configQuery.data, isConfigurable, effectiveSelected, dirty]);
+
+    // When the selected harness changes, clear dirty/saved state.
+    useEffect(() => {
+        setDirty(false);
         setSavedNotice(false);
-        setLoadError(null);
-        api.getKernelConfig(effectiveSelected)
-            .then((config) => {
-                setEnvVars(withRequiredEnvKeys(config.env_vars, effectiveSelected));
-                setUpdatedAt(config.updated_at);
-                setDirty(false);
-            })
-            .catch((err: Error) => {
-                setLoadError(err.message);
-                // Still surface required keys so the user knows what to fill
-                // in even when the stored config can't be loaded.
-                setEnvVars((prev) => withRequiredEnvKeys(prev, effectiveSelected));
-            })
-            .finally(() => setLoading(false));
     }, [effectiveSelected]);
 
-    async function handleSave() {
-        if (effectiveSelected === null) return;
-        setSaving(true);
-        setSavedNotice(false);
-        try {
-            const config = await api.updateKernelConfig(effectiveSelected, envVars);
-            setEnvVars(withRequiredEnvKeys(config.env_vars, effectiveSelected));
-            setUpdatedAt(config.updated_at);
+    const saveMutation = useMutation({
+        mutationFn: ({ harness, value }: { harness: string; value: string }) =>
+            api.updateKernelConfig(harness, value),
+        onSuccess: (config, variables) => {
+            setEnvVars(withRequiredEnvKeys(config.env_vars, variables.harness));
             setDirty(false);
             setSavedNotice(true);
-        } catch (err) {
-            onError((err as Error).message);
-        } finally {
-            setSaving(false);
-        }
+            // Mark this payload as already applied so the sync effect won't
+            // re-copy the (still-stale) cached value back into the editor
+            // before the invalidation refetch completes.
+            appliedRef.current = `${variables.harness}::${config.updated_at}`;
+            void queryClient.invalidateQueries({
+                queryKey: queryKeys.kernelConfig(variables.harness),
+            });
+        },
+        onError: reportError,
+    });
+
+    function handleSave() {
+        if (effectiveSelected === null) return;
+        setSavedNotice(false);
+        saveMutation.mutate({ harness: effectiveSelected, value: envVars });
     }
+
+    const updatedAt = configQuery.data?.updated_at ?? null;
+    const loadError = configQuery.error;
+    const loading = configQuery.isFetching;
 
     return (
         <div className="view-content">
@@ -120,13 +135,13 @@ export default function ConfigKernelsView({ harnesses, onError }: ConfigKernelsV
                     {effectiveSelected === null && (
                         <div className="empty-state">Select a kernel.</div>
                     )}
-                    {effectiveSelected !== null && !CONFIGURABLE_HARNESSES.has(effectiveSelected) && (
+                    {effectiveSelected !== null && !isConfigurable && (
                         <div>
                             <h3>{formatHarnessLabel(effectiveSelected)}</h3>
                             <p className="muted">Configuration for this kernel is a work in progress.</p>
                         </div>
                     )}
-                    {effectiveSelected !== null && CONFIGURABLE_HARNESSES.has(effectiveSelected) && (
+                    {effectiveSelected !== null && isConfigurable && (
                         <div>
                             <h3>{formatHarnessLabel(effectiveSelected)}</h3>
                             <p className="muted">
@@ -136,7 +151,8 @@ export default function ConfigKernelsView({ harnesses, onError }: ConfigKernelsV
                             </p>
                             {loadError !== null && (
                                 <p className="muted" style={{ color: "var(--danger, #c44)" }}>
-                                    Failed to load: {loadError}
+                                    Failed to load:{" "}
+                                    {loadError instanceof Error ? loadError.message : String(loadError)}
                                 </p>
                             )}
                             <label>Environment Variables</label>
@@ -148,8 +164,12 @@ export default function ConfigKernelsView({ harnesses, onError }: ConfigKernelsV
                             />
                             <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
                             <div className="form-actions" style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
-                                <button disabled={saving || loading || !dirty} onClick={() => { void handleSave(); }} type="button">
-                                    {saving ? "Saving…" : "Save"}
+                                <button
+                                    disabled={saveMutation.isPending || loading || !dirty}
+                                    onClick={handleSave}
+                                    type="button"
+                                >
+                                    {saveMutation.isPending ? "Saving…" : "Save"}
                                 </button>
                                 {updatedAt !== null && (
                                     <span className="muted">

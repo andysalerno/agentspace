@@ -1,16 +1,12 @@
-import type { Agent, SessionSummary } from "./types";
+import { useAgents, useSessions } from "./queries";
 
 type SessionsViewProps = {
-    sessions: SessionSummary[];
-    agents: Agent[];
     onNavigateToChat: (sessionId: string) => void;
 };
 
-export default function SessionsView({
-    sessions,
-    agents,
-    onNavigateToChat,
-}: SessionsViewProps) {
+export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
+    const { data: sessions = [] } = useSessions();
+    const { data: agents = [] } = useAgents();
     const agentMap = Object.fromEntries(agents.map((a) => [a.agent_id, a]));
 
     return (

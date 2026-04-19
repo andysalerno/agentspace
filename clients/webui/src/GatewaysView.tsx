@@ -1,38 +1,18 @@
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { Agent, Gateway, GatewayConfigField, GatewaySchema } from "./types";
+import type { Gateway, GatewayConfigField } from "./types";
+import {
+    queryKeys,
+    useAgents,
+    useGateways,
+    useGatewaySchema,
+    useGatewayTypes,
+} from "./queries";
+import { useErrorContext } from "./ErrorContext";
 
 type SecretEntry = { key: string; value: string };
-
-type GatewaysViewProps = {
-    gateways: Gateway[];
-    agents: Agent[];
-    gatewayTypes: string[];
-    onCreateGateway: (payload: {
-        gateway_id: string;
-        name: string;
-        gateway_type: string;
-        agent_id: string;
-        enabled: boolean;
-        env_vars: string;
-        secrets: Record<string, string>;
-    }) => Promise<void>;
-    onUpdateGateway: (
-        gatewayId: string,
-        payload: {
-            name?: string;
-            agent_id?: string;
-            enabled?: boolean;
-            env_vars?: string;
-            secrets?: Record<string, string>;
-        },
-    ) => Promise<void>;
-    onDeleteGateway: (gatewayId: string) => Promise<void>;
-    onStartGateway: (gatewayId: string) => Promise<void>;
-    onStopGateway: (gatewayId: string) => Promise<void>;
-    busy: boolean;
-};
 
 function secretsToRecord(entries: SecretEntry[]): Record<string, string> {
     const record: Record<string, string> = {};
@@ -93,75 +73,124 @@ function mergeSecrets(
     return merged;
 }
 
-export default function GatewaysView({
-    gateways,
-    agents,
-    gatewayTypes,
-    onCreateGateway,
-    onUpdateGateway,
-    onDeleteGateway,
-    onStartGateway,
-    onStopGateway,
-    busy,
-}: GatewaysViewProps) {
+export default function GatewaysView() {
+    const { data: gateways = [] } = useGateways();
+    const { data: agents = [] } = useAgents();
+    const { data: gatewayTypes = [] } = useGatewayTypes();
+    const queryClient = useQueryClient();
+    const { reportError } = useErrorContext();
+
     const [showForm, setShowForm] = useState(false);
     const [gatewayId, setGatewayId] = useState("");
     const [gatewayName, setGatewayName] = useState("");
-    const [gatewayType, setGatewayType] = useState(gatewayTypes[0] ?? "echo");
-    const [agentId, setAgentId] = useState(agents[0]?.agent_id ?? "");
+    const [gatewayType, setGatewayType] = useState("");
+    const [agentId, setAgentId] = useState("");
     const [enabled, setEnabled] = useState(false);
     const [envVars, setEnvVars] = useState("");
     const [newSecrets, setNewSecrets] = useState<SecretEntry[]>([]);
-    const [schema, setSchema] = useState<GatewaySchema | null>(null);
-    const [schemaLoading, setSchemaLoading] = useState(false);
     const [schemaValues, setSchemaValues] = useState<Record<string, string>>({});
-
     const [expandedGatewayId, setExpandedGatewayId] = useState<string | null>(null);
-    const [logs, setLogs] = useState<string[] | null>(null);
-    const [logsLoading, setLogsLoading] = useState(false);
 
+    const schemaQuery = useGatewaySchema(gatewayType || null);
+    const schema = schemaQuery.data ?? null;
+    const schemaLoading = schemaQuery.isFetching;
+
+    const logsQuery = useQuery({
+        queryKey: expandedGatewayId
+            ? queryKeys.gatewayLogs(expandedGatewayId)
+            : (["gateways", "__none__", "logs"] as const),
+        queryFn: () => api.gatewayLogs(expandedGatewayId as string),
+        enabled: expandedGatewayId !== null,
+    });
+
+    const invalidateGateways = () =>
+        queryClient.invalidateQueries({ queryKey: queryKeys.gateways });
+
+    const createMutation = useMutation({
+        mutationFn: (payload: {
+            gateway_id: string;
+            name: string;
+            gateway_type: string;
+            agent_id: string;
+            enabled: boolean;
+            env_vars: string;
+            secrets: Record<string, string>;
+        }) => api.createGateway(payload),
+        onSuccess: () => invalidateGateways(),
+        onError: reportError,
+    });
+
+    const updateMutation = useMutation({
+        mutationFn: ({
+            gatewayId,
+            payload,
+        }: {
+            gatewayId: string;
+            payload: {
+                name?: string;
+                agent_id?: string;
+                enabled?: boolean;
+                env_vars?: string;
+                secrets?: Record<string, string>;
+            };
+        }) => api.updateGateway(gatewayId, payload),
+        onSuccess: () => invalidateGateways(),
+        onError: reportError,
+    });
+
+    const deleteMutation = useMutation({
+        mutationFn: (gatewayId: string) => api.deleteGateway(gatewayId),
+        onSuccess: () => invalidateGateways(),
+        onError: reportError,
+    });
+
+    const startMutation = useMutation({
+        mutationFn: (gatewayId: string) => api.startGateway(gatewayId),
+        onSuccess: () => invalidateGateways(),
+        onError: reportError,
+    });
+
+    const stopMutation = useMutation({
+        mutationFn: (gatewayId: string) => api.stopGateway(gatewayId),
+        onSuccess: () => invalidateGateways(),
+        onError: reportError,
+    });
+
+    const busy =
+        createMutation.isPending
+        || updateMutation.isPending
+        || deleteMutation.isPending
+        || startMutation.isPending
+        || stopMutation.isPending;
+
+    // Default the gateway type to the first available option once types load.
     useEffect(() => {
-        if (gatewayTypes.length > 0 && !gatewayTypes.includes(gatewayType)) {
+        if (gatewayTypes.length === 0) return;
+        if (!gatewayType || !gatewayTypes.includes(gatewayType)) {
             setGatewayType(gatewayTypes[0]);
         }
     }, [gatewayTypes, gatewayType]);
 
+    // Default the agent to the first available agent once agents load.
     useEffect(() => {
-        if (!gatewayType) {
-            setSchema(null);
-            setSchemaValues({});
-            return;
-        }
-        let cancelled = false;
-        setSchemaLoading(true);
-        api.getGatewayTypeSchema(gatewayType)
-            .then((result) => {
-                if (cancelled) return;
-                setSchema(result);
-                const initial: Record<string, string> = {};
-                for (const field of result.fields) {
-                    initial[field.key] = field.default ?? "";
-                }
-                setSchemaValues(initial);
-            })
-            .catch(() => {
-                if (cancelled) return;
-                setSchema({ fields: [] });
-                setSchemaValues({});
-            })
-            .finally(() => {
-                if (!cancelled) setSchemaLoading(false);
-            });
-        return () => {
-            cancelled = true;
-        };
-    }, [gatewayType]);
-
-    useEffect(() => {
-        if (agents.length > 0 && !agents.some((a) => a.agent_id === agentId)) {
+        if (agents.length === 0) return;
+        if (!agentId || !agents.some((a) => a.agent_id === agentId)) {
             setAgentId(agents[0].agent_id);
         }
     }, [agents, agentId]);
+
+    // Reset schema value defaults whenever the schema loads/changes.
+    useEffect(() => {
+        if (!schema) {
+            setSchemaValues({});
+            return;
+        }
+        const initial: Record<string, string> = {};
+        for (const field of schema.fields) {
+            initial[field.key] = field.default ?? "";
+        }
+        setSchemaValues(initial);
+    }, [schema]);
 
     function updateSecret(index: number, field: "key" | "value", value: string) {
         setNewSecrets((prev) => prev.map((s, i) => (i === index ? { ...s, [field]: value } : s)));
@@ -178,7 +207,7 @@ export default function GatewaysView({
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         const fields = schema?.fields ?? [];
-        await onCreateGateway({
+        await createMutation.mutateAsync({
             gateway_id: gatewayId,
             name: gatewayName,
             gateway_type: gatewayType,
@@ -204,20 +233,12 @@ export default function GatewaysView({
         setSchemaValues((prev) => ({ ...prev, [key]: value }));
     }
 
-    async function handleToggleLogs(gateway: Gateway) {
+    function handleToggleLogs(gateway: Gateway) {
         if (expandedGatewayId === gateway.gateway_id) {
             setExpandedGatewayId(null);
-            setLogs(null);
             return;
         }
-        setLogsLoading(true);
-        try {
-            const result = await api.gatewayLogs(gateway.gateway_id);
-            setLogs(result.lines);
-            setExpandedGatewayId(gateway.gateway_id);
-        } finally {
-            setLogsLoading(false);
-        }
+        setExpandedGatewayId(gateway.gateway_id);
     }
 
     return (
@@ -230,7 +251,7 @@ export default function GatewaysView({
             </div>
 
             {showForm && (
-                <form className="create-form card" onSubmit={handleSubmit}>
+                <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Gateway ID
                         <input
@@ -407,14 +428,14 @@ export default function GatewaysView({
                                     </div>
                                 )}
                             </div>
-                            {expandedGatewayId === gateway.gateway_id && logs && (
-                                <pre className="skill-file-content">{logs.join("\n")}</pre>
+                            {expandedGatewayId === gateway.gateway_id && logsQuery.data && (
+                                <pre className="skill-file-content">{logsQuery.data.lines.join("\n")}</pre>
                             )}
                         </div>
                         <div className="card-footer">
                             <button
                                 className="secondary-button small"
-                                disabled={logsLoading}
+                                disabled={logsQuery.isFetching && expandedGatewayId === gateway.gateway_id}
                                 onClick={() => handleToggleLogs(gateway)}
                                 type="button"
                             >
@@ -427,7 +448,7 @@ export default function GatewaysView({
                                     <button
                                         className="secondary-button small"
                                         disabled={busy}
-                                        onClick={() => onStopGateway(gateway.gateway_id)}
+                                        onClick={() => stopMutation.mutate(gateway.gateway_id)}
                                         type="button"
                                     >
                                         Stop
@@ -436,7 +457,7 @@ export default function GatewaysView({
                                     <button
                                         className="small"
                                         disabled={busy}
-                                        onClick={() => onStartGateway(gateway.gateway_id)}
+                                        onClick={() => startMutation.mutate(gateway.gateway_id)}
                                         type="button"
                                     >
                                         Start
@@ -446,8 +467,9 @@ export default function GatewaysView({
                                     className="secondary-button small"
                                     disabled={busy}
                                     onClick={() =>
-                                        onUpdateGateway(gateway.gateway_id, {
-                                            enabled: !gateway.enabled,
+                                        updateMutation.mutate({
+                                            gatewayId: gateway.gateway_id,
+                                            payload: { enabled: !gateway.enabled },
                                         })
                                     }
                                     type="button"
@@ -457,7 +479,7 @@ export default function GatewaysView({
                                 <button
                                     className="danger-button small"
                                     disabled={busy}
-                                    onClick={() => onDeleteGateway(gateway.gateway_id)}
+                                    onClick={() => deleteMutation.mutate(gateway.gateway_id)}
                                     type="button"
                                 >
                                     Delete

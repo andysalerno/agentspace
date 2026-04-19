@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
-import { api } from "./api";
-import type { ServiceInfoSection, SystemInfo } from "./types";
+import { useQueryClient } from "@tanstack/react-query";
+import type { ServiceInfoSection } from "./types";
+import { queryKeys, useSystemInfo, useWebuiInfo } from "./queries";
 
 function Section({ title, section }: { title: string; section: ServiceInfoSection | undefined }) {
   if (!section) {
@@ -53,38 +53,29 @@ function Section({ title, section }: { title: string; section: ServiceInfoSectio
 }
 
 export default function InfoView() {
-  const [info, setInfo] = useState<SystemInfo | null>(null);
-  const [webuiInfo, setWebuiInfo] = useState<ServiceInfoSection | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const systemInfoQuery = useSystemInfo();
+  const webuiInfoQuery = useWebuiInfo();
+  const queryClient = useQueryClient();
 
-  async function load() {
-    setLoading(true);
-    setError(null);
-    const [systemResult, webuiResult] = await Promise.allSettled([
-      api.getInfo(),
-      api.getWebuiInfo(),
-    ]);
-    if (systemResult.status === "fulfilled") {
-      setInfo(systemResult.value);
-    } else {
-      setError(systemResult.reason instanceof Error ? systemResult.reason.message : String(systemResult.reason));
-    }
-    if (webuiResult.status === "fulfilled") {
-      setWebuiInfo(webuiResult.value);
-    } else {
-      setWebuiInfo({
-        service: "webui",
-        env_prefix: "WEBUI_CLIENT",
-        error: webuiResult.reason instanceof Error ? webuiResult.reason.message : String(webuiResult.reason),
-      });
-    }
-    setLoading(false);
+  const loading = systemInfoQuery.isFetching || webuiInfoQuery.isFetching;
+  const error = systemInfoQuery.error;
+  const webuiInfo: ServiceInfoSection | undefined = webuiInfoQuery.data ?? (
+    webuiInfoQuery.error
+      ? {
+          service: "webui",
+          env_prefix: "WEBUI_CLIENT",
+          error:
+            webuiInfoQuery.error instanceof Error
+              ? webuiInfoQuery.error.message
+              : String(webuiInfoQuery.error),
+        }
+      : undefined
+  );
+
+  function refresh() {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.systemInfo });
+    void queryClient.invalidateQueries({ queryKey: queryKeys.webuiInfo });
   }
-
-  useEffect(() => {
-    void load();
-  }, []);
 
   return (
     <div className="view-content">
@@ -92,18 +83,22 @@ export default function InfoView() {
         <h2>System Info</h2>
         <button
           className="secondary-button small"
-          onClick={() => void load()}
+          onClick={refresh}
           type="button"
           disabled={loading}
         >
           {loading ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      {error && <div className="error-banner"><span>{error}</span></div>}
+      {error && (
+        <div className="error-banner">
+          <span>{error instanceof Error ? error.message : String(error)}</span>
+        </div>
+      )}
       <div className="info-sections">
-        <Section title="agent_host" section={info?.agent_host} />
-        <Section title="client_service" section={info?.client_service} />
-        <Section title="webui" section={webuiInfo ?? undefined} />
+        <Section title="agent_host" section={systemInfoQuery.data?.agent_host} />
+        <Section title="client_service" section={systemInfoQuery.data?.client_service} />
+        <Section title="webui" section={webuiInfo} />
       </div>
     </div>
   );

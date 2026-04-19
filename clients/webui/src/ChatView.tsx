@@ -1,25 +1,88 @@
-import type { FormEvent, KeyboardEvent} from "react";
-import { useEffect, useState } from "react";
+import type { FormEvent, KeyboardEvent } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
-import type { Agent, ChatMessage, SessionDetail, SessionSummary, ToolCall } from "./types";
+import { api } from "./api";
+import type {
+    ChatMessage,
+    KernelEvent,
+    MessageStreamFinalChunk,
+    SessionDetail,
+    ToolCall,
+} from "./types";
 import ToolDetailPane from "./ToolDetailPane";
+import {
+    queryKeys,
+    useAgents,
+    useSession,
+    useSessions,
+} from "./queries";
+import { useErrorContext } from "./ErrorContext";
 
 type ChatViewProps = {
-    agents: Agent[];
-    sessions: SessionSummary[];
     selectedSessionId: string | null;
-    selectedSession: SessionDetail | null;
-    onSelectSession: (sessionId: string) => void;
-    onCreateSession: (agentId: string, channelName: string) => Promise<void>;
-    onSendMessage: (message: string) => void;
-    onResetSession: () => Promise<void>;
-    busy: boolean;
-    streamingMessage: ChatMessage | null;
+    onSelectSession: (sessionId: string | null) => void;
 };
 
 const markdownPlugins = [remarkGfm, remarkBreaks];
+
+function createLocalMessage(
+    sessionId: string,
+    role: "user" | "assistant",
+    content: string,
+): ChatMessage {
+    return {
+        message_id: `${role}-${crypto.randomUUID()}`,
+        session_id: sessionId,
+        role,
+        content,
+        created_at: new Date().toISOString(),
+        tool_calls: [],
+    };
+}
+
+function applyEventToAssistant(
+    message: ChatMessage,
+    event: KernelEvent,
+): ChatMessage {
+    if (event.type === "text_delta" && event.content) {
+        return { ...message, content: `${message.content}${event.content}` };
+    }
+
+    if (event.type === "reasoning_delta" && event.content) {
+        return {
+            ...message,
+            reasoning: `${message.reasoning ?? ""}${event.content}`,
+        };
+    }
+
+    if (event.type === "tool_call" && event.tool) {
+        const nextToolCalls = [
+            ...(message.tool_calls ?? []),
+            {
+                tool: event.tool,
+                input: event.input ? JSON.stringify(event.input, null, 2) : undefined,
+            } satisfies ToolCall,
+        ];
+        return { ...message, tool_calls: nextToolCalls };
+    }
+
+    if (event.type === "tool_result" && event.tool && event.output) {
+        const toolCalls = [...(message.tool_calls ?? [])];
+        const toolIndex = toolCalls.findIndex(
+            (toolCall) => toolCall.tool === event.tool && toolCall.output === undefined,
+        );
+        if (toolIndex >= 0) {
+            const toolCall = toolCalls[toolIndex];
+            toolCalls[toolIndex] = { ...toolCall, output: event.output };
+            return { ...message, tool_calls: toolCalls };
+        }
+    }
+
+    return message;
+}
 
 function MessageMarkdown({
     content,
@@ -52,23 +115,52 @@ function MessageMarkdown({
     );
 }
 
-export default function ChatView({
-    agents,
-    sessions,
-    selectedSessionId,
-    selectedSession,
-    onSelectSession,
-    onCreateSession,
-    onSendMessage,
-    onResetSession,
-    busy,
-    streamingMessage,
-}: ChatViewProps) {
+export default function ChatView({ selectedSessionId, onSelectSession }: ChatViewProps) {
+    const { data: agents = [] } = useAgents();
+    const { data: sessions = [] } = useSessions();
+    const queryClient = useQueryClient();
+    const { reportError } = useErrorContext();
+
     const [messageDraft, setMessageDraft] = useState("");
     const [newSessionAgentId, setNewSessionAgentId] = useState("");
     const [newSessionChannelName, setNewSessionChannelName] = useState("");
     const [showNewSession, setShowNewSession] = useState(false);
     const [selectedToolCall, setSelectedToolCall] = useState<ToolCall | null>(null);
+
+    // Streaming local state (true client state — not server-cached).
+    const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
+    const [streaming, setStreaming] = useState(false);
+    // Pause session polling while streaming so background refetches can't
+    // overwrite the optimistic user message we wrote into the cache.
+    const { data: selectedSession = null } = useSession(selectedSessionId, {
+        poll: !streaming,
+    });
+    const streamControllerRef = useRef<AbortController | null>(null);
+    const streamingSessionIdRef = useRef<string | null>(null);
+
+    const createSessionMutation = useMutation({
+        mutationFn: (payload: { agent_id: string; channel_name: string | null }) =>
+            api.createSession({
+                agent_id: payload.agent_id,
+                channel_name: payload.channel_name,
+                client_type: "webui",
+            }),
+        onSuccess: (session) => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            onSelectSession(session.session_id);
+        },
+        onError: reportError,
+    });
+
+    const resetMutation = useMutation({
+        mutationFn: (sessionId: string) => api.resetSession(sessionId),
+        onSuccess: (_, sessionId) => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
+        },
+        onError: reportError,
+    });
 
     useEffect(() => {
         if (!newSessionAgentId && agents.length > 0) {
@@ -76,12 +168,109 @@ export default function ChatView({
         }
     }, [agents, newSessionAgentId]);
 
+    // Abort any in-flight stream when the selected session changes.
+    useEffect(() => {
+        if (
+            streamingSessionIdRef.current !== null
+            && streamingSessionIdRef.current !== selectedSessionId
+        ) {
+            streamControllerRef.current?.abort();
+            streamControllerRef.current = null;
+            streamingSessionIdRef.current = null;
+            setStreamingMessage(null);
+            setStreaming(false);
+        }
+    }, [selectedSessionId]);
+
+    // Abort on unmount.
+    useEffect(() => {
+        return () => {
+            streamControllerRef.current?.abort();
+        };
+    }, []);
+
+    function appendMessageToCache(sessionId: string, message: ChatMessage) {
+        queryClient.setQueryData<SessionDetail | undefined>(
+            queryKeys.session(sessionId),
+            (current) => {
+                if (!current || current.session_id !== sessionId) return current;
+                return { ...current, messages: [...current.messages, message] };
+            },
+        );
+    }
+
+    function applyFinalChunk(sessionId: string, chunk: MessageStreamFinalChunk) {
+        queryClient.setQueryData<SessionDetail | undefined>(
+            queryKeys.session(sessionId),
+            (current) => {
+                if (!current || current.session_id !== sessionId) return current;
+                return {
+                    ...current,
+                    ...chunk.session,
+                    messages: [...current.messages, chunk.assistant_message],
+                };
+            },
+        );
+        void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
+        void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
+    }
+
     async function handleCreateSession(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         if (!newSessionAgentId) return;
-        await onCreateSession(newSessionAgentId, newSessionChannelName);
+        await createSessionMutation.mutateAsync({
+            agent_id: newSessionAgentId,
+            channel_name: newSessionChannelName || null,
+        });
         setNewSessionChannelName("");
         setShowNewSession(false);
+    }
+
+    function sendMessage(message: string) {
+        if (!selectedSessionId) return;
+        streamControllerRef.current?.abort();
+        streamControllerRef.current = null;
+        streamingSessionIdRef.current = null;
+
+        const activeSessionId = selectedSessionId;
+        const userMessage = createLocalMessage(activeSessionId, "user", message);
+        const pendingAssistant = createLocalMessage(activeSessionId, "assistant", "");
+
+        appendMessageToCache(activeSessionId, userMessage);
+        setStreamingMessage(pendingAssistant);
+        setStreaming(true);
+
+        const controller = api.streamMessage(activeSessionId, message, {
+            onEvent: (event) => {
+                setStreamingMessage((current) => {
+                    if (!current || current.session_id !== activeSessionId) {
+                        return current;
+                    }
+                    return applyEventToAssistant(current, event);
+                });
+            },
+            onFinal: (chunk) => {
+                applyFinalChunk(activeSessionId, chunk);
+                setStreamingMessage(null);
+                setStreaming(false);
+                streamControllerRef.current = null;
+                streamingSessionIdRef.current = null;
+            },
+            onError: (err) => {
+                setStreamingMessage(null);
+                setStreaming(false);
+                streamControllerRef.current = null;
+                streamingSessionIdRef.current = null;
+                void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+                void queryClient.invalidateQueries({
+                    queryKey: queryKeys.session(activeSessionId),
+                });
+                reportError(err);
+            },
+        });
+        streamControllerRef.current = controller;
+        streamingSessionIdRef.current = activeSessionId;
     }
 
     function handleSendMessage(event: FormEvent<HTMLFormElement>) {
@@ -89,8 +278,20 @@ export default function ChatView({
         if (!messageDraft.trim()) return;
         const msg = messageDraft.trim();
         setMessageDraft("");
-        onSendMessage(msg);
+        sendMessage(msg);
     }
+
+    function handleResetSession() {
+        if (!selectedSessionId) return;
+        streamControllerRef.current?.abort();
+        streamControllerRef.current = null;
+        streamingSessionIdRef.current = null;
+        setStreamingMessage(null);
+        setStreaming(false);
+        resetMutation.mutate(selectedSessionId);
+    }
+
+    const busy = streaming || createSessionMutation.isPending || resetMutation.isPending;
 
     return (
         <div className="chat-layout">
@@ -107,7 +308,7 @@ export default function ChatView({
                     </button>
                 </div>
                 {showNewSession && (
-                    <form className="compact-form" onSubmit={handleCreateSession}>
+                    <form className="compact-form" onSubmit={(e) => { void handleCreateSession(e); }}>
                         <select
                             value={newSessionAgentId}
                             onChange={(e) => setNewSessionAgentId(e.target.value)}
@@ -156,7 +357,7 @@ export default function ChatView({
                             <button
                                 className="secondary-button"
                                 disabled={busy}
-                                onClick={onResetSession}
+                                onClick={handleResetSession}
                                 type="button"
                             >
                                 Reset
@@ -239,7 +440,7 @@ export default function ChatView({
                                     if (e.key === "Enter" && !e.shiftKey) {
                                         e.preventDefault();
                                         if (messageDraft.trim() && !busy) {
-                                            void handleSendMessage(e as unknown as FormEvent<HTMLFormElement>);
+                                            handleSendMessage(e as unknown as FormEvent<HTMLFormElement>);
                                         }
                                     }
                                 }}

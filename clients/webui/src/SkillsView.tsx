@@ -1,18 +1,13 @@
-import type { FormEvent} from "react";
+import type { FormEvent } from "react";
 import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type { Skill } from "./types";
 import CodeEditor from "./CodeEditor";
+import { queryKeys, useSkills } from "./queries";
+import { useErrorContext } from "./ErrorContext";
 
 type FileEntry = { path: string; content: string };
-
-type SkillsViewProps = {
-    skills: Skill[];
-    onCreateSkill: (skillId: string, files: Record<string, string>) => Promise<void>;
-    onUpdateSkill: (skillId: string, files: Record<string, string>) => Promise<void>;
-    onDeleteSkill: (skillId: string) => Promise<void>;
-    busy: boolean;
-};
 
 function filesToRecord(entries: FileEntry[]): Record<string, string> {
     const record: Record<string, string> = {};
@@ -23,13 +18,11 @@ function filesToRecord(entries: FileEntry[]): Record<string, string> {
     return record;
 }
 
-export default function SkillsView({
-    skills,
-    onCreateSkill,
-    onUpdateSkill,
-    onDeleteSkill,
-    busy,
-}: SkillsViewProps) {
+export default function SkillsView() {
+    const { data: skills = [] } = useSkills();
+    const queryClient = useQueryClient();
+    const { reportError } = useErrorContext();
+
     const [showForm, setShowForm] = useState(false);
     const [skillId, setSkillId] = useState("");
     const [newFiles, setNewFiles] = useState<FileEntry[]>([{ path: "SKILL.md", content: "" }]);
@@ -38,6 +31,32 @@ export default function SkillsView({
     const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
     const [editFiles, setEditFiles] = useState<FileEntry[]>([]);
     const [loading, setLoading] = useState(false);
+
+    const invalidateSkills = () =>
+        queryClient.invalidateQueries({ queryKey: queryKeys.skills });
+
+    const createMutation = useMutation({
+        mutationFn: (payload: { skill_id: string; files: Record<string, string> }) =>
+            api.createSkill(payload),
+        onSuccess: () => invalidateSkills(),
+        onError: reportError,
+    });
+
+    const updateMutation = useMutation({
+        mutationFn: ({ skillId, files }: { skillId: string; files: Record<string, string> }) =>
+            api.updateSkill(skillId, files),
+        onSuccess: () => invalidateSkills(),
+        onError: reportError,
+    });
+
+    const deleteMutation = useMutation({
+        mutationFn: (skillId: string) => api.deleteSkill(skillId),
+        onSuccess: () => invalidateSkills(),
+        onError: reportError,
+    });
+
+    const busy =
+        createMutation.isPending || updateMutation.isPending || deleteMutation.isPending;
 
     function updateNewFile(index: number, field: "path" | "content", value: string) {
         setNewFiles((prev) => prev.map((f, i) => (i === index ? { ...f, [field]: value } : f)));
@@ -65,7 +84,7 @@ export default function SkillsView({
 
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
-        await onCreateSkill(skillId, filesToRecord(newFiles));
+        await createMutation.mutateAsync({ skill_id: skillId, files: filesToRecord(newFiles) });
         setSkillId("");
         setNewFiles([{ path: "SKILL.md", content: "" }]);
         setShowForm(false);
@@ -82,6 +101,8 @@ export default function SkillsView({
             const full = await api.getSkill(skill.skill_id);
             setExpandedSkill(full);
             setExpandedSkillId(skill.skill_id);
+        } catch (err) {
+            reportError(err);
         } finally {
             setLoading(false);
         }
@@ -95,13 +116,20 @@ export default function SkillsView({
         setEditingSkillId(skill.skill_id);
     }
 
-    async function handleSaveEdit(skillId: string) {
-        await onUpdateSkill(skillId, filesToRecord(editFiles));
+    async function handleSaveEdit(targetSkillId: string) {
+        await updateMutation.mutateAsync({
+            skillId: targetSkillId,
+            files: filesToRecord(editFiles),
+        });
         setEditingSkillId(null);
         // Refresh the expanded view
-        if (expandedSkillId === skillId) {
-            const full = await api.getSkill(skillId);
-            setExpandedSkill(full);
+        if (expandedSkillId === targetSkillId) {
+            try {
+                const full = await api.getSkill(targetSkillId);
+                setExpandedSkill(full);
+            } catch (err) {
+                reportError(err);
+            }
         }
     }
 
@@ -115,7 +143,7 @@ export default function SkillsView({
             </div>
 
             {showForm && (
-                <form className="create-form card" onSubmit={handleSubmit}>
+                <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Skill ID
                         <input
@@ -239,7 +267,7 @@ export default function SkillsView({
                                         <button
                                             className="small"
                                             disabled={busy}
-                                            onClick={() => handleSaveEdit(skill.skill_id)}
+                                            onClick={() => { void handleSaveEdit(skill.skill_id); }}
                                             type="button"
                                         >
                                             Save
@@ -259,7 +287,7 @@ export default function SkillsView({
                             <button
                                 className="secondary-button small"
                                 disabled={loading}
-                                onClick={() => handleToggleExpand(skill)}
+                                onClick={() => { void handleToggleExpand(skill); }}
                                 type="button"
                             >
                                 {expandedSkillId === skill.skill_id ? "Collapse" : "View Files"}
@@ -273,7 +301,7 @@ export default function SkillsView({
                                             if (expandedSkill?.skill_id === skill.skill_id) {
                                                 startEditing(expandedSkill);
                                             } else {
-                                                void api.getSkill(skill.skill_id).then(startEditing);
+                                                void api.getSkill(skill.skill_id).then(startEditing).catch(reportError);
                                             }
                                         }}
                                         type="button"
@@ -285,7 +313,7 @@ export default function SkillsView({
                                     <button
                                         className="danger-button small"
                                         disabled={busy}
-                                        onClick={() => onDeleteSkill(skill.skill_id)}
+                                        onClick={() => deleteMutation.mutate(skill.skill_id)}
                                         type="button"
                                     >
                                         Delete

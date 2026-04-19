@@ -1,29 +1,39 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { KernelSummary } from "./types";
-
-type KernelsViewProps = {
-    kernels: KernelSummary[];
-    onKillKernel: (sessionId: string) => void;
-    busy: boolean;
-};
+import { queryKeys, useKernels } from "./queries";
+import { useErrorContext } from "./ErrorContext";
 
 const LOG_POLL_INTERVAL_MS = 1000;
 
-export default function KernelsView({ kernels, onKillKernel, busy }: KernelsViewProps) {
+export default function KernelsView() {
+    const { data: kernels = [] } = useKernels();
+    const queryClient = useQueryClient();
+    const { reportError } = useErrorContext();
+
     const [logsFor, setLogsFor] = useState<string | null>(null);
-    const [logLines, setLogLines] = useState<string[]>([]);
-    const [loadingLogs, setLoadingLogs] = useState(false);
     const [follow, setFollow] = useState(true);
-    const logsForRef = useRef<string | null>(null);
     const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
     const followRef = useRef(follow);
 
-    useEffect(() => {
-        logsForRef.current = logsFor;
-    }, [logsFor]);
+    const killMutation = useMutation({
+        mutationFn: (sessionId: string) => api.killKernel(sessionId),
+        onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.kernels }),
+        onError: reportError,
+    });
+
+    const logsQuery = useQuery({
+        queryKey: logsFor ? queryKeys.kernelLogs(logsFor) : (["kernels", "__none__", "logs"] as const),
+        queryFn: () => api.kernelLogs(logsFor as string),
+        enabled: logsFor !== null,
+        refetchInterval: LOG_POLL_INTERVAL_MS,
+    });
+    const logLines = useMemo(
+        () => logsQuery.data?.lines ?? [],
+        [logsQuery.data],
+    );
 
     useEffect(() => {
         followRef.current = follow;
@@ -59,50 +69,20 @@ export default function KernelsView({ kernels, onKillKernel, busy }: KernelsView
         }
     };
 
-    async function fetchLogs(sessionId: string, showSpinner: boolean) {
-        if (showSpinner) {
-            setLoadingLogs(true);
-        }
-        try {
-            const data = await api.kernelLogs(sessionId);
-            if (logsForRef.current === sessionId) {
-                setLogLines(data.lines);
-            }
-        } finally {
-            if (showSpinner) {
-                setLoadingLogs(false);
-            }
-        }
-    }
-
-    async function openLogs(sessionId: string) {
+    function openLogs(sessionId: string) {
         setLogsFor(sessionId);
-        setLogLines([]);
         setFollow(true);
-        await fetchLogs(sessionId, true);
     }
 
     function closeLogs() {
         setLogsFor(null);
-        setLogLines([]);
         editorRef.current = null;
     }
 
-    useEffect(() => {
-        if (logsFor === null) {
-            return;
-        }
-        const sessionId = logsFor;
-        const interval = window.setInterval(() => {
-            void fetchLogs(sessionId, false);
-        }, LOG_POLL_INTERVAL_MS);
-        return () => {
-            window.clearInterval(interval);
-        };
-    }, [logsFor]);
-
     const editorTheme =
         document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light";
+
+    const loadingLogs = logsQuery.isFetching && logsQuery.isLoading;
 
     return (
         <div className="view-content">
@@ -197,16 +177,15 @@ export default function KernelsView({ kernels, onKillKernel, busy }: KernelsView
                                 <div className="card-footer-actions">
                                     <button
                                         className="secondary-button small"
-                                        disabled={loadingLogs}
-                                        onClick={() => void openLogs(kernel.session_id)}
+                                        onClick={() => openLogs(kernel.session_id)}
                                         type="button"
                                     >
                                         View Logs
                                     </button>
                                     <button
                                         className="danger-button small"
-                                        disabled={busy}
-                                        onClick={() => onKillKernel(kernel.session_id)}
+                                        disabled={killMutation.isPending}
+                                        onClick={() => killMutation.mutate(kernel.session_id)}
                                         type="button"
                                     >
                                         Kill

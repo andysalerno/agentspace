@@ -1,3 +1,7 @@
+## Features
+
+*These are large feature-work changes that are scheduled.*
+
 A shared todo list for multiple agents to read and select tasks from:
 
 - [x] Use Monaco editor in the webui everywhere (skills editor, etc)
@@ -17,3 +21,12 @@ A shared todo list for multiple agents to read and select tasks from:
 
 - [ ] FEAT: Improved "typing" indicator experience in the Discord gateway. When a Discord gateway receives a message, it should immediately trigger the "typing" indicator (however that is done via the Discord Bot API) such that the user in discord can see that the agent has received the message and is handling it.
 - [ ] FEAT: In addition to the above "typing" indicator improvement: we can be clever about the typing indicator, to make it feel more "natural". That is, the typing indicator can appear after a delay of 2sec, instead of immediately, since no human would immediately begin typing. It can have some random jitter applied so it's not always the same delay. It can start, stop, start again, if the bot's message is long. Plus, we can artificially split the bot's final output into multiple messages, perhaps at paragraph boundaries, and have a slight "typing" delay between them, to make it seem more natural.
+
+## Correctness and Quality
+
+*These are code quality, bugfixes, and correctness improvements that we plan to do.*
+
+- [ ] BUG: webui `queries.ts` uses `__none__` sentinel query keys for disabled queries (`useSession`, `useGatewaySchema`, `useKernelConfig`). Replace with TanStack Query v5's `skipToken` so the disabled state is type-safe and cannot collide with a real id of the same name. See https://tanstack.com/query/v5/docs/framework/react/guides/disabling-queries#typesafe-disabling-of-queries-using-skiptoken.
+- [ ] CLEANUP: in `KernelsView.tsx`, `loadingLogs = logsQuery.isFetching && logsQuery.isLoading` is redundant — `isLoading` already implies `isFetching` in TanStack Query v5. Simplify to `loadingLogs = logsQuery.isLoading`.
+- [ ] CLEANUP: `ErrorContext` exposes `setError` in the public context value but no caller uses it (everyone goes through `reportError` for `unknown → string` normalization). Remove `setError` from `ErrorContextValue` to tighten the API surface.
+- [ ] BUG: when an agent is deleted from `AgentsView`, the agent's sessions are not invalidated. The currently-selected chat session can then become stale and 404 on its next refetch. Fix: in `AgentsView.deleteMutation.onSuccess`, also invalidate `queryKeys.sessions`; if the deleted agent owns the currently-selected session, clear `selectedSessionId` (raise via callback prop or move the cleanup to `App`, which owns that state).

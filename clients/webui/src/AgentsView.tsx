@@ -1,9 +1,21 @@
-import type { FormEvent} from "react";
+import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
-import type { Agent, Skill } from "./types";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { Agent } from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import { withRequiredEnvKeys } from "./envPrefill";
+import {
+    queryKeys,
+    useAgents,
+    useHarnesses,
+    useSkills,
+} from "./queries";
+import { useErrorContext } from "./ErrorContext";
+
+type AgentsViewProps = {
+    onSessionCreated: (sessionId: string) => void;
+};
 
 const DEFAULT_HARNESS = "copilot-cli";
 
@@ -21,34 +33,13 @@ function formatHarnessLabel(harness: string): string {
         .join(" ");
 }
 
-type AgentsViewProps = {
-    agents: Agent[];
-    skills: Skill[];
-    harnesses: string[];
-    onCreateAgent: (form: {
-        agent_id: string;
-        name: string;
-        harness: string;
-        system_prompt: string;
-        skills: string[];
-        env_vars: string;
-    }) => Promise<void>;
-    onUpdateAgent: (agentId: string, patch: { skills: string[] }) => Promise<void>;
-    onDeleteAgent: (agentId: string) => Promise<void>;
-    onStartSession: (agentId: string) => Promise<void> | void;
-    busy: boolean;
-};
+export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
+    const { data: agents = [] } = useAgents();
+    const { data: skills = [] } = useSkills();
+    const { data: harnesses = [] } = useHarnesses();
+    const queryClient = useQueryClient();
+    const { reportError } = useErrorContext();
 
-export default function AgentsView({
-    agents,
-    skills,
-    harnesses,
-    onCreateAgent,
-    onUpdateAgent,
-    onDeleteAgent,
-    onStartSession,
-    busy,
-}: AgentsViewProps) {
     const [form, setForm] = useState({
         agent_id: "",
         name: "",
@@ -61,6 +52,55 @@ export default function AgentsView({
     const [editingSkillsFor, setEditingSkillsFor] = useState<string | null>(null);
     const [editSkills, setEditSkills] = useState<string[]>([]);
     const [envDirty, setEnvDirty] = useState(false);
+
+    const invalidateAgents = () =>
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents });
+
+    const createMutation = useMutation({
+        mutationFn: (payload: {
+            agent_id: string;
+            name: string;
+            harness: string;
+            system_prompt: string;
+            skills: string[];
+            env_vars: string;
+        }) => api.createAgent(payload),
+        onSuccess: () => invalidateAgents(),
+        onError: reportError,
+    });
+
+    const updateMutation = useMutation({
+        mutationFn: ({ agentId, patch }: { agentId: string; patch: { skills: string[] } }) =>
+            api.updateAgent(agentId, patch),
+        onSuccess: () => invalidateAgents(),
+        onError: reportError,
+    });
+
+    const deleteMutation = useMutation({
+        mutationFn: (agentId: string) => api.deleteAgent(agentId),
+        onSuccess: () => invalidateAgents(),
+        onError: reportError,
+    });
+
+    const startSessionMutation = useMutation({
+        mutationFn: (agentId: string) =>
+            api.createSession({
+                agent_id: agentId,
+                channel_name: null,
+                client_type: "webui",
+            }),
+        onSuccess: (session) => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            onSessionCreated(session.session_id);
+        },
+        onError: reportError,
+    });
+
+    const busy =
+        createMutation.isPending
+        || updateMutation.isPending
+        || deleteMutation.isPending
+        || startSessionMutation.isPending;
 
     useEffect(() => {
         if (harnesses.length === 0) {
@@ -100,7 +140,7 @@ export default function AgentsView({
 
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
-        await onCreateAgent(form);
+        await createMutation.mutateAsync(form);
         setForm({
             agent_id: "",
             name: "",
@@ -131,7 +171,7 @@ export default function AgentsView({
     }
 
     async function handleSaveSkills(agentId: string) {
-        await onUpdateAgent(agentId, { skills: editSkills });
+        await updateMutation.mutateAsync({ agentId, patch: { skills: editSkills } });
         setEditingSkillsFor(null);
     }
 
@@ -150,7 +190,7 @@ export default function AgentsView({
             </div>
 
             {showForm && (
-                <form className="create-form card" onSubmit={handleSubmit}>
+                <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Agent ID
                         <input
@@ -263,7 +303,7 @@ export default function AgentsView({
                                         <button
                                             className="small"
                                             disabled={busy}
-                                            onClick={() => handleSaveSkills(agent.agent_id)}
+                                            onClick={() => { void handleSaveSkills(agent.agent_id); }}
                                             type="button"
                                         >
                                             Save
@@ -287,7 +327,7 @@ export default function AgentsView({
                                 <button
                                     className="small"
                                     disabled={busy}
-                                    onClick={() => onStartSession(agent.agent_id)}
+                                    onClick={() => startSessionMutation.mutate(agent.agent_id)}
                                     type="button"
                                 >
                                     New Session
@@ -305,7 +345,7 @@ export default function AgentsView({
                                 <button
                                     className="danger-button small"
                                     disabled={busy}
-                                    onClick={() => onDeleteAgent(agent.agent_id)}
+                                    onClick={() => deleteMutation.mutate(agent.agent_id)}
                                     type="button"
                                 >
                                     Delete
