@@ -73,6 +73,66 @@ function mergeSecrets(
     return merged;
 }
 
+/** Parse `KEY=value` lines (skipping blanks and `#` comments) into a map. */
+function parseEnvVarsString(text: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const raw of text.split("\n")) {
+        const line = raw.trim();
+        if (!line || line.startsWith("#")) continue;
+        const eq = line.indexOf("=");
+        if (eq <= 0) continue;
+        const key = line.slice(0, eq).trim();
+        let value = line.slice(eq + 1).trim();
+        // Strip a single pair of matching surrounding quotes.
+        if (
+            value.length >= 2
+            && ((value.startsWith("\"") && value.endsWith("\""))
+                || (value.startsWith("'") && value.endsWith("'")))
+        ) {
+            value = value.slice(1, -1);
+        }
+        out[key] = value;
+    }
+    return out;
+}
+
+/**
+ * Split a stored `env_vars` blob into (a) values for schema-managed
+ * env fields and (b) the leftover lines that should populate the
+ * free-form textarea.
+ */
+function splitEnvForEdit(
+    envVars: string,
+    schemaFields: GatewayConfigField[],
+): { schemaValues: Record<string, string>; extraEnv: string } {
+    const parsed = parseEnvVarsString(envVars);
+    const schemaEnvKeys = new Set(
+        schemaFields.filter((f) => f.kind === "env").map((f) => f.key),
+    );
+    const schemaValues: Record<string, string> = {};
+    for (const f of schemaFields) {
+        if (f.kind === "env") {
+            schemaValues[f.key] = parsed[f.key] ?? f.default ?? "";
+        } else {
+            // Secret values are never returned by the API; leave blank
+            // so the user can rotate them without seeing a stale value.
+            schemaValues[f.key] = "";
+        }
+    }
+    const extraLines: string[] = [];
+    for (const raw of envVars.split("\n")) {
+        const line = raw.trim();
+        if (!line || line.startsWith("#")) continue;
+        const eq = line.indexOf("=");
+        if (eq <= 0) continue;
+        const key = line.slice(0, eq).trim();
+        if (!schemaEnvKeys.has(key)) {
+            extraLines.push(raw);
+        }
+    }
+    return { schemaValues, extraEnv: extraLines.join("\n") };
+}
+
 export default function GatewaysView() {
     const { data: gateways = [] } = useGateways();
     const { data: agents = [] } = useAgents();
@@ -91,9 +151,30 @@ export default function GatewaysView() {
     const [schemaValues, setSchemaValues] = useState<Record<string, string>>({});
     const [expandedGatewayId, setExpandedGatewayId] = useState<string | null>(null);
 
+    // --- Edit-form state (mirrors the create-form state above, but
+    // scoped to a single gateway being edited inline). ---
+    const [editingGatewayId, setEditingGatewayId] = useState<string | null>(null);
+    const [editName, setEditName] = useState("");
+    const [editAgentId, setEditAgentId] = useState("");
+    const [editEnabled, setEditEnabled] = useState(false);
+    const [editExtraEnv, setEditExtraEnv] = useState("");
+    const [editSchemaValues, setEditSchemaValues] = useState<Record<string, string>>({});
+    const [editNewSecrets, setEditNewSecrets] = useState<SecretEntry[]>([]);
+    // Snapshot of the ID we last hydrated form state for, so we don't
+    // overwrite in-flight user edits on every render.
+    const [editHydratedFor, setEditHydratedFor] = useState<string | null>(null);
+
+    const editingGateway = editingGatewayId
+        ? (gateways.find((g) => g.gateway_id === editingGatewayId) ?? null)
+        : null;
+
     const schemaQuery = useGatewaySchema(gatewayType || null);
     const schema = schemaQuery.data ?? null;
     const schemaLoading = schemaQuery.isFetching;
+
+    const editSchemaQuery = useGatewaySchema(editingGateway?.gateway_type ?? null);
+    const editSchema = editSchemaQuery.data ?? null;
+    const editSchemaLoading = editSchemaQuery.isFetching;
 
     const logsQuery = useQuery({
         queryKey: expandedGatewayId
@@ -192,6 +273,28 @@ export default function GatewaysView() {
         setSchemaValues(initial);
     }, [schema]);
 
+    // Hydrate the edit form once per (gateway, schema) pair.  We can't
+    // do this synchronously when the user clicks Edit because the
+    // schema may still be loading; this effect waits for both to be
+    // ready, then snapshots the gateway's current values into the
+    // form.  `editHydratedFor` ensures we don't clobber subsequent
+    // user edits on every render.
+    useEffect(() => {
+        if (!editingGateway || !editSchema) return;
+        if (editHydratedFor === editingGateway.gateway_id) return;
+        const { schemaValues: sv, extraEnv } = splitEnvForEdit(
+            editingGateway.env_vars,
+            editSchema.fields,
+        );
+        setEditName(editingGateway.name);
+        setEditAgentId(editingGateway.agent_id);
+        setEditEnabled(editingGateway.enabled);
+        setEditSchemaValues(sv);
+        setEditExtraEnv(extraEnv);
+        setEditNewSecrets([]);
+        setEditHydratedFor(editingGateway.gateway_id);
+    }, [editingGateway, editSchema, editHydratedFor]);
+
     function updateSecret(index: number, field: "key" | "value", value: string) {
         setNewSecrets((prev) => prev.map((s, i) => (i === index ? { ...s, [field]: value } : s)));
     }
@@ -231,6 +334,55 @@ export default function GatewaysView() {
 
     function updateSchemaValue(key: string, value: string) {
         setSchemaValues((prev) => ({ ...prev, [key]: value }));
+    }
+
+    // --- Edit helpers ---
+    function openEdit(gateway: Gateway) {
+        setEditingGatewayId(gateway.gateway_id);
+        setEditHydratedFor(null);  // force re-hydration when schema arrives
+    }
+
+    function cancelEdit() {
+        setEditingGatewayId(null);
+        setEditHydratedFor(null);
+    }
+
+    function updateEditSchemaValue(key: string, value: string) {
+        setEditSchemaValues((prev) => ({ ...prev, [key]: value }));
+    }
+
+    function updateEditSecret(index: number, field: "key" | "value", value: string) {
+        setEditNewSecrets((prev) =>
+            prev.map((s, i) => (i === index ? { ...s, [field]: value } : s)),
+        );
+    }
+
+    function addEditSecret() {
+        setEditNewSecrets((prev) => [...prev, { key: "", value: "" }]);
+    }
+
+    function removeEditSecret(index: number) {
+        setEditNewSecrets((prev) => prev.filter((_, i) => i !== index));
+    }
+
+    async function handleEditSubmit(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        if (!editingGateway || !editSchema) return;
+        const fields = editSchema.fields;
+        // `secrets` is sent as an OVERLAY (see service.update_gateway):
+        // only keys with a non-empty value are included, so existing
+        // unmodified secrets are preserved server-side.
+        await updateMutation.mutateAsync({
+            gatewayId: editingGateway.gateway_id,
+            payload: {
+                name: editName,
+                agent_id: editAgentId,
+                enabled: editEnabled,
+                env_vars: mergeEnvLines(fields, editSchemaValues, editExtraEnv),
+                secrets: mergeSecrets(fields, editSchemaValues, editNewSecrets),
+            },
+        });
+        cancelEdit();
     }
 
     function handleToggleLogs(gateway: Gateway) {
@@ -431,6 +583,154 @@ export default function GatewaysView() {
                             {expandedGatewayId === gateway.gateway_id && logsQuery.data && (
                                 <pre className="skill-file-content">{logsQuery.data.lines.join("\n")}</pre>
                             )}
+                            {editingGatewayId === gateway.gateway_id && (
+                                <form
+                                    className="create-form"
+                                    onSubmit={(e) => { void handleEditSubmit(e); }}
+                                >
+                                    {gateway.status === "running" && (
+                                        <small className="field-help">
+                                            This gateway is running. Saving will tear down its
+                                            container and respawn it with the new configuration.
+                                        </small>
+                                    )}
+                                    <label>
+                                        Name
+                                        <input
+                                            required
+                                            value={editName}
+                                            onChange={(e) => setEditName(e.target.value)}
+                                        />
+                                    </label>
+                                    <label>
+                                        Agent
+                                        <select
+                                            value={editAgentId}
+                                            onChange={(e) => setEditAgentId(e.target.value)}
+                                            required
+                                        >
+                                            <option disabled value="">
+                                                Select an agent
+                                            </option>
+                                            {agents.map((agent) => (
+                                                <option key={agent.agent_id} value={agent.agent_id}>
+                                                    {agent.name} ({agent.agent_id})
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                    <label className="checkbox-label">
+                                        <input
+                                            checked={editEnabled}
+                                            onChange={(e) => setEditEnabled(e.target.checked)}
+                                            type="checkbox"
+                                        />
+                                        Auto-start on boot
+                                    </label>
+                                    {editSchema && editSchema.fields.length > 0 && (
+                                        <fieldset className="schema-fields">
+                                            <legend>Gateway environment variables</legend>
+                                            {editSchema.fields.map((f) => {
+                                                const isExistingSecret =
+                                                    f.kind === "secret"
+                                                    && gateway.secret_keys.includes(f.key);
+                                                return (
+                                                    <label key={f.key}>
+                                                        {f.label}
+                                                        {f.required && <span aria-hidden="true"> *</span>}
+                                                        <input
+                                                            type={f.kind === "secret" ? "password" : "text"}
+                                                            // Don't enforce required on existing secrets:
+                                                            // empty means "keep current value".
+                                                            required={f.required && !isExistingSecret}
+                                                            placeholder={
+                                                                isExistingSecret
+                                                                    ? "(leave blank to keep current value)"
+                                                                    : (f.placeholder ?? f.default ?? "")
+                                                            }
+                                                            value={editSchemaValues[f.key] ?? ""}
+                                                            onChange={(e) =>
+                                                                updateEditSchemaValue(f.key, e.target.value)
+                                                            }
+                                                        />
+                                                        {f.description && (
+                                                            <small className="field-help">{f.description}</small>
+                                                        )}
+                                                    </label>
+                                                );
+                                            })}
+                                        </fieldset>
+                                    )}
+                                    {editSchemaLoading && (
+                                        <small className="field-help">Loading gateway schema…</small>
+                                    )}
+                                    <label>
+                                        Other environment variables (.env format)
+                                        <textarea
+                                            placeholder="EXTRA_VAR=value"
+                                            rows={4}
+                                            value={editExtraEnv}
+                                            onChange={(e) => setEditExtraEnv(e.target.value)}
+                                        />
+                                    </label>
+                                    <div className="skill-files-section">
+                                        <div className="skill-files-header">
+                                            <span className="skill-files-label">
+                                                Other secrets (passed as env)
+                                            </span>
+                                            <button
+                                                className="secondary-button small"
+                                                onClick={addEditSecret}
+                                                type="button"
+                                            >
+                                                + Add Secret
+                                            </button>
+                                        </div>
+                                        {editNewSecrets.map((secret, index) => (
+                                            <div className="skill-file-entry-header" key={index}>
+                                                <input
+                                                    placeholder="KEY"
+                                                    value={secret.key}
+                                                    onChange={(e) =>
+                                                        updateEditSecret(index, "key", e.target.value)
+                                                    }
+                                                />
+                                                <input
+                                                    placeholder="value"
+                                                    type="password"
+                                                    value={secret.value}
+                                                    onChange={(e) =>
+                                                        updateEditSecret(index, "value", e.target.value)
+                                                    }
+                                                />
+                                                <button
+                                                    className="icon-button danger-button"
+                                                    onClick={() => removeEditSecret(index)}
+                                                    type="button"
+                                                    title="Remove secret"
+                                                >
+                                                    ×
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div className="card-footer-actions">
+                                        <button
+                                            disabled={busy || !editAgentId || !editSchema}
+                                            type="submit"
+                                        >
+                                            Save Changes
+                                        </button>
+                                        <button
+                                            className="secondary-button"
+                                            onClick={cancelEdit}
+                                            type="button"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </form>
+                            )}
                         </div>
                         <div className="card-footer">
                             <button
@@ -475,6 +775,15 @@ export default function GatewaysView() {
                                     type="button"
                                 >
                                     {gateway.enabled ? "Disable" : "Enable"}
+                                </button>
+                                <button
+                                    className="secondary-button small"
+                                    disabled={busy}
+                                    onClick={() => openEdit(gateway)}
+                                    type="button"
+                                    title="Edit gateway configuration. Running gateways will be restarted to pick up changes."
+                                >
+                                    Edit
                                 </button>
                                 <button
                                     className="danger-button small"

@@ -561,26 +561,61 @@ class ClientService:
         env_vars: str | None = None,
         secrets: dict[str, str] | None = None,
     ) -> dict[str, object]:
+        """Update a gateway's persisted config and (if needed) restart it.
+
+        Semantics:
+
+        * Only fields passed as non-``None`` are touched.
+        * ``secrets`` is treated as an *overlay*: keys present in the dict
+          replace the corresponding stored values, but keys not in the
+          dict are preserved.  This lets the WebUI edit a single secret
+          without requiring the caller to re-supply every existing
+          secret value (which the API never returns).  To remove a
+          secret today, delete and recreate the gateway.
+        * If ``enabled`` toggles, the gateway is started or stopped to
+          match.
+        * If a config-affecting field (``agent_id``, ``env_vars``, or
+          ``secrets``) changes while the gateway is currently running,
+          the container is torn down and respawned with the new config.
+          Tear-down + respawn (rather than in-place reload) keeps the
+          state machine simple and matches the existing start/stop
+          paths.
+        """
         async with self._gateway_lock:
             record = await self._require_gateway(gateway_id)
             previously_enabled = record.enabled
+            was_running = record.status == "running"
+            config_changed = False
             if name is not None:
                 record.name = name
-            if agent_id is not None:
+            if agent_id is not None and agent_id != record.agent_id:
                 await self._require_agent(agent_id)
                 record.agent_id = agent_id
+                config_changed = True
             if enabled is not None:
                 record.enabled = enabled
-            if env_vars is not None:
+            if env_vars is not None and env_vars != record.env_vars:
                 record.env_vars = env_vars
+                config_changed = True
             if secrets is not None:
-                record.secrets = dict(secrets)
+                merged = dict(record.secrets)
+                merged.update(secrets)
+                if merged != record.secrets:
+                    record.secrets = merged
+                    config_changed = True
             record.updated_at = utc_now()
             await self._gateway_store.update(record)
+        # Enable/disable transitions take precedence: an "enable" implies
+        # a fresh start with whatever config was just persisted, so no
+        # extra restart is needed in that case.
         if enabled is True and not previously_enabled:
             await self.start_gateway(gateway_id)
         elif enabled is False and previously_enabled:
             await self.stop_gateway(gateway_id)
+        elif config_changed and was_running:
+            logger.info("config changed for running gateway %s; restarting", gateway_id)
+            await self.stop_gateway(gateway_id)
+            await self.start_gateway(gateway_id)
         return await self.get_gateway(gateway_id)
 
     async def delete_gateway(self, gateway_id: str) -> None:

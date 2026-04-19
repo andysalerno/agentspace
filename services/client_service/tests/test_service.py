@@ -40,6 +40,7 @@ class StubAgentHostClient:
         self._sessions: dict[str, dict[str, str]] = {}
         self._skills: dict[str, dict[str, object]] = {}
         self.gateways: dict[str, dict[str, object]] = {}
+        self.gateway_destroyed: list[str] = []
 
     async def create_session(
         self,
@@ -187,6 +188,7 @@ class StubAgentHostClient:
 
     async def destroy_gateway(self, gateway_id: str) -> None:
         self.gateways.pop(gateway_id, None)
+        self.gateway_destroyed.append(gateway_id)
 
 
 @pytest.mark.asyncio
@@ -660,6 +662,116 @@ async def test_gateway_lifecycle() -> None:
     await service.delete_gateway("echo-bridge")
     assert "echo-bridge" not in runtime.gateways
     assert await service.list_gateways() == []
+
+
+@pytest.mark.asyncio
+async def test_update_gateway_secrets_overlay_preserves_existing() -> None:
+    """Passing `secrets={NEW: ...}` to update overlays — it does NOT wipe.
+
+    This is the contract the WebUI relies on so a user can edit one
+    secret without re-entering every other one (which the API never
+    returns to them).
+    """
+    runtime = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", runtime))
+    await service.create_agent(agent_id="agent-one", name="Agent One")
+    await service.create_gateway(
+        gateway_id="bridge",
+        name="Bridge",
+        gateway_type=GatewayType.ECHO,
+        agent_id="agent-one",
+        enabled=False,
+        secrets={"TOKEN_A": "alpha", "TOKEN_B": "beta"},
+    )
+
+    updated = await service.update_gateway(
+        "bridge",
+        secrets={"TOKEN_B": "beta-rotated"},
+    )
+
+    # Both keys are still present; only TOKEN_B was rotated.
+    assert sorted(cast("list[str]", updated["secret_keys"])) == [
+        "TOKEN_A",
+        "TOKEN_B",
+    ]
+    inner = await service._require_gateway("bridge")  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert inner.secrets == {"TOKEN_A": "alpha", "TOKEN_B": "beta-rotated"}
+
+
+@pytest.mark.asyncio
+async def test_update_gateway_restarts_running_when_config_changes() -> None:
+    """Editing env_vars on a running gateway tears down + respawns it.
+
+    Verified by checking that the env the runtime sees post-update
+    reflects the new value, which the stub only refreshes on
+    create_gateway.
+    """
+    runtime = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", runtime))
+    await service.create_agent(agent_id="agent-one", name="Agent One")
+    await service.create_gateway(
+        gateway_id="bridge",
+        name="Bridge",
+        gateway_type=GatewayType.ECHO,
+        agent_id="agent-one",
+        enabled=True,
+        env_vars="MODE=initial",
+    )
+    assert runtime.gateways["bridge"]["env"] == {"MODE": "initial"}
+    assert runtime.gateway_destroyed == []
+
+    updated = await service.update_gateway(
+        "bridge",
+        env_vars="MODE=updated\nEXTRA=1",
+    )
+
+    assert updated["status"] == "running"
+    assert runtime.gateway_destroyed == ["bridge"]
+    assert runtime.gateways["bridge"]["env"] == {"MODE": "updated", "EXTRA": "1"}
+
+
+@pytest.mark.asyncio
+async def test_update_gateway_no_restart_when_only_metadata_changes() -> None:
+    """Renaming a running gateway does not bounce its container."""
+    runtime = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", runtime))
+    await service.create_agent(agent_id="agent-one", name="Agent One")
+    await service.create_gateway(
+        gateway_id="bridge",
+        name="Bridge",
+        gateway_type=GatewayType.ECHO,
+        agent_id="agent-one",
+        enabled=True,
+        env_vars="MODE=stable",
+    )
+    assert runtime.gateway_destroyed == []
+
+    await service.update_gateway("bridge", name="Renamed Bridge")
+
+    assert runtime.gateway_destroyed == []  # no respawn
+    inner = await service._require_gateway("bridge")  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    assert inner.name == "Renamed Bridge"
+
+
+@pytest.mark.asyncio
+async def test_update_gateway_no_restart_when_stopped() -> None:
+    """Editing config on a stopped gateway just persists; no spurious start."""
+    runtime = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", runtime))
+    await service.create_agent(agent_id="agent-one", name="Agent One")
+    await service.create_gateway(
+        gateway_id="bridge",
+        name="Bridge",
+        gateway_type=GatewayType.ECHO,
+        agent_id="agent-one",
+        enabled=False,
+        env_vars="MODE=initial",
+    )
+    assert "bridge" not in runtime.gateways
+
+    await service.update_gateway("bridge", env_vars="MODE=updated")
+
+    assert "bridge" not in runtime.gateways  # still not started
 
 
 @pytest.mark.asyncio
