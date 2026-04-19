@@ -730,8 +730,6 @@ class ClientService:
             return
         live_containers: dict[str, str | None] = {}
         for item in live:
-            if not isinstance(item, dict):
-                continue
             gid = item.get("gateway_id")
             if not isinstance(gid, str):
                 continue
