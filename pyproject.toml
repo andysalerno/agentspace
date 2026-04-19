@@ -21,6 +21,7 @@ kernel-opencode = { workspace = true }
 kernel-host = { workspace = true }
 gateway = { workspace = true }
 gateway-echo = { workspace = true }
+gateway-discord = { workspace = true }
 gateway-host = { workspace = true }
 agent-host = { workspace = true }
 client-service = { workspace = true }
@@ -67,6 +68,7 @@ extraPaths = [
     "kernels/kernel_host/src",
     "gateways/gateway/src",
     "gateways/gateway_echo/src",
+    "gateways/gateway_discord/src",
     "gateways/gateway_host/src",
     "services/agent_host/src",
     "services/client_service/src",

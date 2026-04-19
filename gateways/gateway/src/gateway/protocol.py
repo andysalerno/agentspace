@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 
 class GatewayType(StrEnum):
     ECHO = "echo"
+    DISCORD = "discord"
 
 
 class GatewayStatus(StrEnum):

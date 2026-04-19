@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from gateway.protocol import GatewayType
+from gateway_discord import DiscordGateway
 from gateway_echo import EchoGateway
 
 if TYPE_CHECKING:
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
 
 GATEWAY_REGISTRY: dict[GatewayType, type] = {
     GatewayType.ECHO: EchoGateway,
+    GatewayType.DISCORD: DiscordGateway,
 }
 
 

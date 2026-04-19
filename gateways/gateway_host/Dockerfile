@@ -11,6 +11,7 @@ WORKDIR /app
 COPY pyproject.toml pyproject.toml
 COPY gateways/gateway gateways/gateway
 COPY gateways/gateway_echo gateways/gateway_echo
+COPY gateways/gateway_discord gateways/gateway_discord
 COPY gateways/gateway_host gateways/gateway_host
 
 # Install gateway_host and all its dependencies

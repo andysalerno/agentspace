@@ -1,0 +1,416 @@
+from __future__ import annotations
+
+import asyncio
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from gateway.protocol import GatewayConfig, GatewayStatus
+from gateway_discord import DiscordGateway
+from gateway_discord.discord_gateway import _chunk  # type: ignore[reportPrivateUsage]
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+    from gateway.client import ClientServiceClient
+
+
+# --- _chunk pure-function tests --------------------------------------------
+
+
+def test_chunk_returns_empty_list_for_empty_text() -> None:
+    assert _chunk("", 100) == []
+    assert _chunk("\n\n\n", 100) == []
+
+
+def test_chunk_returns_single_chunk_when_under_limit() -> None:
+    assert _chunk("hello world", 100) == ["hello world"]
+
+
+def test_chunk_splits_on_paragraph_boundaries() -> None:
+    text = "para one\n\npara two\n\npara three"
+    chunks = _chunk(text, 12)
+    assert chunks == ["para one", "para two", "para three"]
+
+
+def test_chunk_splits_long_paragraph_on_lines() -> None:
+    text = "line a\nline b\nline c"
+    chunks = _chunk(text, 8)
+    assert chunks == ["line a", "line b", "line c"]
+    assert all(len(c) <= 8 for c in chunks)
+
+
+def test_chunk_hard_splits_long_line() -> None:
+    text = "a" * 25
+    chunks = _chunk(text, 10)
+    assert chunks == ["a" * 10, "a" * 10, "a" * 5]
+
+
+def test_chunk_packs_multiple_paragraphs_when_they_fit() -> None:
+    text = "aaa\n\nbbb\n\nccc"
+    # Each paragraph is 3 chars; combined "aaa\n\nbbb" is 8 chars.
+    chunks = _chunk(text, 8)
+    assert chunks == ["aaa\n\nbbb", "ccc"]
+
+
+def test_chunk_rejects_zero_max() -> None:
+    with pytest.raises(ValueError, match="must be positive"):
+        _chunk("x", 0)
+
+
+# --- Discord stubs ----------------------------------------------------------
+
+
+@dataclass
+class FakeAuthor:
+    id: int
+    bot: bool = False
+
+
+@dataclass
+class FakeChannel:
+    sent: list[str] = field(default_factory=list[str])
+    typing_calls: int = 0
+
+    async def send(self, content: str) -> object:
+        self.sent.append(content)
+        return None
+
+    def typing(self) -> object:
+        self.typing_calls += 1
+
+        @asynccontextmanager
+        async def _cm() -> AsyncIterator[None]:
+            yield
+
+        return _cm()
+
+
+@dataclass
+class FakeMessage:
+    author: FakeAuthor
+    content: str
+    channel: FakeChannel
+    guild: object | None = None
+
+
+@dataclass
+class FakeClient:
+    sessions_created: list[tuple[str, str | None]] = field(
+        default_factory=list[tuple[str, str | None]],
+    )
+    sent_messages: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    fail_send: bool = False
+    next_session_id: int = 0
+    reply: str = "hello back"
+
+    async def create_session(
+        self,
+        *,
+        agent_id: str,
+        channel_name: str | None = None,
+    ) -> dict[str, object]:
+        self.sessions_created.append((agent_id, channel_name))
+        self.next_session_id += 1
+        return {"session_id": f"sess-{self.next_session_id}"}
+
+    async def send_message(
+        self,
+        *,
+        session_id: str,
+        message: str,
+    ) -> dict[str, object]:
+        self.sent_messages.append((session_id, message))
+        if self.fail_send:
+            msg = "boom"
+            raise RuntimeError(msg)
+        return {"assistant_message": {"content": self.reply}}
+
+    async def delete_session(self, *, session_id: str) -> None:
+        del session_id
+
+
+def _make_config(client: FakeClient, **env_overrides: str) -> GatewayConfig:
+    env = {
+        "DISCORD_BOT_TOKEN": "fake-token",
+        "DISCORD_OWNER_USER_ID": "111",
+        "DISCORD_TYPING_DELAY_MS": "0",
+        "DISCORD_CHUNK_MAX_CHARS": "20",
+    }
+    env.update(env_overrides)
+    return GatewayConfig(
+        gateway_id="gw-1",
+        agent_id="agent-1",
+        client=cast("ClientServiceClient", client),
+        env=env,
+    )
+
+
+def _ready_gateway(client: FakeClient, **env_overrides: str) -> DiscordGateway:
+    """Build a DiscordGateway already in RUNNING state without touching discord.py."""
+    gateway = DiscordGateway()
+    config = _make_config(client, **env_overrides)
+    # Manually wire what start() would have produced after on_ready fires.
+    gateway._config = config  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    gateway._owner_id = int(config.env["DISCORD_OWNER_USER_ID"])  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    gateway._typing_delay_s = float(config.env["DISCORD_TYPING_DELAY_MS"]) / 1000.0  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    gateway._chunk_max = int(config.env["DISCORD_CHUNK_MAX_CHARS"])  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    gateway._status = GatewayStatus.RUNNING  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    return gateway
+
+
+# --- DiscordGateway behaviour tests -----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_owner_dm_creates_session_and_replies() -> None:
+    fake = FakeClient(reply="hello back")
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi there",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert fake.sessions_created == [("agent-1", "discord:dm:111")]
+    assert fake.sent_messages == [("sess-1", "hi there")]
+    assert channel.sent == ["hello back"]
+    assert gateway.status is GatewayStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_owner_dm_reuses_session_across_messages() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    for text in ("hi", "hello", "again"):
+        msg = FakeMessage(
+            author=FakeAuthor(id=111),
+            content=text,
+            channel=channel,
+        )
+        await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert len(fake.sessions_created) == 1
+    assert [s for s, _ in fake.sent_messages] == ["sess-1", "sess-1", "sess-1"]
+
+
+@pytest.mark.asyncio
+async def test_non_owner_dm_is_ignored() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=999),
+        content="hi",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert fake.sent_messages == []
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_guild_message_is_ignored() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi",
+        channel=channel,
+        guild=object(),
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert fake.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_bot_author_is_ignored() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111, bot=True),
+        content="hi",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert fake.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_empty_content_is_ignored() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="   ",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert fake.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_long_reply_is_chunked() -> None:
+    fake = FakeClient(reply="aaaaaaaaaa\n\nbbbbbbbbbb\n\ncccccccccc")
+    gateway = _ready_gateway(fake, DISCORD_TYPING_DELAY_MS="1")
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="prompt",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert len(channel.sent) >= 2
+    # typing was used between chunks (n-1 times)
+    assert channel.typing_calls == len(channel.sent) - 1
+
+
+@pytest.mark.asyncio
+async def test_send_message_failure_transitions_to_error() -> None:
+    fake = FakeClient(fail_send=True)
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    assert gateway.status is GatewayStatus.ERROR
+    assert gateway.last_error == "boom"
+    assert any("agent error" in s for s in channel.sent)
+
+
+@pytest.mark.asyncio
+async def test_start_fails_without_token() -> None:
+    fake = FakeClient()
+    gateway = DiscordGateway()
+    config = GatewayConfig(
+        gateway_id="gw-1",
+        agent_id="agent-1",
+        client=cast("ClientServiceClient", fake),
+        env={"DISCORD_OWNER_USER_ID": "111"},
+    )
+    await gateway.start(config)
+    assert gateway.status is GatewayStatus.ERROR
+    assert gateway.last_error is not None
+    assert "DISCORD_BOT_TOKEN" in gateway.last_error
+
+
+@pytest.mark.asyncio
+async def test_start_fails_without_owner() -> None:
+    fake = FakeClient()
+    gateway = DiscordGateway()
+    config = GatewayConfig(
+        gateway_id="gw-1",
+        agent_id="agent-1",
+        client=cast("ClientServiceClient", fake),
+        env={"DISCORD_BOT_TOKEN": "tok"},
+    )
+    await gateway.start(config)
+    assert gateway.status is GatewayStatus.ERROR
+    assert "DISCORD_OWNER_USER_ID" in (gateway.last_error or "")
+
+
+@pytest.mark.asyncio
+async def test_start_fails_with_non_numeric_owner() -> None:
+    fake = FakeClient()
+    gateway = DiscordGateway()
+    config = GatewayConfig(
+        gateway_id="gw-1",
+        agent_id="agent-1",
+        client=cast("ClientServiceClient", fake),
+        env={"DISCORD_BOT_TOKEN": "tok", "DISCORD_OWNER_USER_ID": "abc"},
+    )
+    await gateway.start(config)
+    assert gateway.status is GatewayStatus.ERROR
+    assert "integer" in (gateway.last_error or "")
+
+
+# --- Lifecycle test using a fake discord.Client factory ---------------------
+
+
+class _FakeDiscordClient:
+    def __init__(self) -> None:
+        self.started_with: str | None = None
+        self.closed = False
+        self.user = type("U", (), {"name": "fake-bot"})()
+        self._handlers: dict[str, object] = {}
+
+    def event(self, fn: object) -> object:
+        # discord.py's @client.event uses the function name as the event name.
+        self._handlers[getattr(fn, "__name__", "")] = fn
+        return fn
+
+    async def start(self, token: str) -> None:
+        self.started_with = token
+        # Fire on_ready immediately
+        on_ready = self._handlers.get("on_ready")
+        if on_ready is not None:
+            await cast("object", on_ready).__call__()  # type: ignore[attr-defined]
+        # Run forever until cancelled
+        await asyncio.Event().wait()
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_start_then_stop() -> None:
+    fake_client = _FakeDiscordClient()
+
+    def factory(*, intents: object) -> object:  # noqa: ARG001
+        return fake_client
+
+    gateway = DiscordGateway(client_factory=cast("object", factory))  # type: ignore[arg-type]
+    fake = FakeClient()
+    config = _make_config(fake)
+
+    await gateway.start(config)
+    assert gateway.status is GatewayStatus.RUNNING
+    assert fake_client.started_with == "fake-token"
+
+    await gateway.stop()
+    assert gateway.status is GatewayStatus.STOPPED
+    assert fake_client.closed
+
+
+# --- Router test ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_router_status_and_events() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi",
+        channel=channel,
+    )
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    app = FastAPI()
+    router = gateway.extra_router()
+    app.include_router(router)
+    client = TestClient(app)
+
+    status = client.get("/gateway/status").json()
+    assert status["status"] == "running"
+    assert status["owner_id"] == 111
+    assert status["session_id"] == "sess-1"
+
+    events = client.get("/gateway/events").json()["events"]
+    types = [event["type"] for event in events]
+    assert "inbound" in types
+    assert "outbound" in types
