@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -320,6 +321,34 @@ function KernelRow({
     onKill,
     killDisabled,
 }: KernelRowProps) {
+    const buttonRef = useRef<HTMLButtonElement | null>(null);
+    const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(
+        null,
+    );
+
+    useEffect(() => {
+        if (!isMenuOpen) {
+            setMenuPos(null);
+            return;
+        }
+        const update = () => {
+            const btn = buttonRef.current;
+            if (!btn) return;
+            const rect = btn.getBoundingClientRect();
+            setMenuPos({
+                top: rect.bottom + 4,
+                right: window.innerWidth - rect.right,
+            });
+        };
+        update();
+        window.addEventListener("scroll", update, true);
+        window.addEventListener("resize", update);
+        return () => {
+            window.removeEventListener("scroll", update, true);
+            window.removeEventListener("resize", update);
+        };
+    }, [isMenuOpen]);
+
     return (
         <tr>
             <td>{kernel.harness}</td>
@@ -341,24 +370,31 @@ function KernelRow({
                 )}
             </td>
             <td className="actions-cell">
-                <div className="kebab-wrapper">
-                    <button
-                        type="button"
-                        className="kebab-button"
-                        aria-haspopup="menu"
-                        aria-expanded={isMenuOpen}
-                        aria-label="Actions"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onToggleMenu();
-                        }}
-                    >
-                        ⋯
-                    </button>
-                    {isMenuOpen && (
+                <button
+                    ref={buttonRef}
+                    type="button"
+                    className="kebab-button"
+                    aria-haspopup="menu"
+                    aria-expanded={isMenuOpen}
+                    aria-label="Actions"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        onToggleMenu();
+                    }}
+                >
+                    ⋯
+                </button>
+                {isMenuOpen &&
+                    menuPos !== null &&
+                    createPortal(
                         <div
                             className="kebab-menu"
                             role="menu"
+                            style={{
+                                position: "fixed",
+                                top: menuPos.top,
+                                right: menuPos.right,
+                            }}
                             onClick={(e) => e.stopPropagation()}
                         >
                             <button
@@ -378,9 +414,9 @@ function KernelRow({
                             >
                                 Kill
                             </button>
-                        </div>
+                        </div>,
+                        document.body,
                     )}
-                </div>
             </td>
         </tr>
     );

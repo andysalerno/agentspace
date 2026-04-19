@@ -980,11 +980,6 @@ button:disabled {
   white-space: nowrap;
 }
 
-.kebab-wrapper {
-  position: relative;
-  display: inline-block;
-}
-
 .kebab-button {
   background: transparent;
   border: 1px solid transparent;
@@ -1004,9 +999,6 @@ button:disabled {
 }
 
 .kebab-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
   min-width: 160px;
   background: var(--card-bg);
   border: 1px solid var(--border-color);
