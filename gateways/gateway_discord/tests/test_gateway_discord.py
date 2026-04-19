@@ -82,6 +82,13 @@ class FakeAuthor:
 class FakeChannel:
     sent: list[str] = field(default_factory=list[str])
     typing_calls: int = 0
+    typing_entered: int = 0
+    typing_exited: int = 0
+
+    @property
+    def typing_active(self) -> int:
+        """Currently-open typing contexts (entered minus exited)."""
+        return self.typing_entered - self.typing_exited
 
     async def send(self, content: str) -> object:
         self.sent.append(content)
@@ -92,7 +99,11 @@ class FakeChannel:
 
         @asynccontextmanager
         async def _cm() -> AsyncIterator[None]:
-            yield
+            self.typing_entered += 1
+            try:
+                yield
+            finally:
+                self.typing_exited += 1
 
         return _cm()
 
@@ -216,7 +227,36 @@ async def test_owner_dm_creates_session_and_replies() -> None:
     # On success the EYES is removed and replaced with the CHECK MARK.
     assert msg.removed_reactions == ["\N{EYES}"]
     assert msg.reactions == ["\N{WHITE HEAVY CHECK MARK}"]
+    # Typing indicator was active during the turn and is fully closed now.
+    assert channel.typing_entered >= 1
+    assert channel.typing_active == 0
     assert gateway.status is GatewayStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_typing_indicator_stops_on_agent_failure() -> None:
+    """If the agent call raises, the typing context must still unwind cleanly.
+
+    This is the whole point of using channel.typing() as a context manager:
+    the user must never see a stuck "agent is typing" indicator after a
+    failed turn.
+    """
+    fake = FakeClient(fail_send=True)
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    # Typing was started, then properly stopped despite the agent failure.
+    assert channel.typing_entered >= 1
+    assert channel.typing_active == 0
+    # Failure path drives the gateway to ERROR (per existing contract).
+    assert gateway.status is GatewayStatus.ERROR
 
 
 @pytest.mark.asyncio
@@ -333,8 +373,11 @@ async def test_long_reply_is_chunked() -> None:
     )
     await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
     assert len(channel.sent) >= 2
-    # typing was used between chunks (n-1 times)
-    assert channel.typing_calls == len(channel.sent) - 1
+    # One outer typing context wraps the whole turn, plus one inter-chunk
+    # typing context per gap between chunks (n-1).  So total = 1 + (n-1) = n.
+    assert channel.typing_calls == len(channel.sent)
+    # All typing contexts closed cleanly.
+    assert channel.typing_active == 0
 
 
 @pytest.mark.asyncio
