@@ -104,6 +104,21 @@ class _ChannelLike(Protocol):
     def typing(self) -> contextlib.AbstractAsyncContextManager[object]: ...
 
 
+class _MessageLike(Protocol):
+    async def add_reaction(self, emoji: str) -> object: ...
+
+    async def remove_reaction(self, emoji: str, member: object) -> object: ...
+
+
+# Reactions used to give the user visible feedback about turn progress on
+# their own message:
+#   * EYES is added once the gateway acquires its send lock and starts
+#     processing the message (the agent may take a while to reply).
+#   * CHECK MARK replaces EYES once the assistant reply has been delivered.
+_PROCESSING_REACTION = "\N{EYES}"
+_DONE_REACTION = "\N{WHITE HEAVY CHECK MARK}"
+
+
 class DiscordGateway:
     """Single-DM Discord gateway."""
 
@@ -313,6 +328,11 @@ class DiscordGateway:
         )
 
         async with self._send_lock:
+            # Tell the user we've started working on their message.  Failure to
+            # react (missing permission, deleted message, etc.) must not abort
+            # the turn.
+            await self._react(message, _PROCESSING_REACTION)
+
             try:
                 session_id = await self._ensure_session()
             except Exception as exc:  # noqa: BLE001 - any failure should ERROR the gateway
@@ -372,6 +392,15 @@ class DiscordGateway:
                 )
                 return
 
+            # Reply delivered: swap the in-flight EYES for a CHECK MARK so
+            # the user can see at a glance which past messages have been
+            # answered (and which are still pending behind the lock).
+            await self._swap_reaction(
+                message,
+                from_emoji=_PROCESSING_REACTION,
+                to_emoji=_DONE_REACTION,
+            )
+
             self._record_event(
                 GatewayEvent(
                     type=GatewayEventType.OUTBOUND,
@@ -380,6 +409,33 @@ class DiscordGateway:
                     session_id=session_id,
                 ),
             )
+
+    async def _react(self, message: object, emoji: str) -> None:
+        """Add a reaction; log and swallow failures (cosmetic UX only)."""
+        try:
+            await cast("_MessageLike", message).add_reaction(emoji)
+        except Exception as exc:  # noqa: BLE001 - cosmetic, must not abort the turn
+            logger.debug("discord add_reaction(%r) failed: %s", emoji, exc)
+
+    async def _swap_reaction(
+        self,
+        message: object,
+        *,
+        from_emoji: str,
+        to_emoji: str,
+    ) -> None:
+        """Replace one of our own reactions with another. Failures are logged."""
+        client = self._client
+        if client is None:
+            return
+        try:
+            await cast("_MessageLike", message).remove_reaction(
+                from_emoji,
+                cast("object", client.user),
+            )
+        except Exception as exc:  # noqa: BLE001 - cosmetic, must not abort the turn
+            logger.debug("discord remove_reaction(%r) failed: %s", from_emoji, exc)
+        await self._react(message, to_emoji)
 
     async def _ensure_session(self) -> str:
         assert self._config is not None  # noqa: S101 - invariant

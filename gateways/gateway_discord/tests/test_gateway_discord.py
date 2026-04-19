@@ -15,6 +15,7 @@ from gateway_discord.discord_gateway import _chunk  # type: ignore[reportPrivate
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    import discord
     from gateway.client import ClientServiceClient
 
 
@@ -102,6 +103,22 @@ class FakeMessage:
     content: str
     channel: FakeChannel
     guild: object | None = None
+    reactions: list[str] = field(default_factory=list[str])
+    removed_reactions: list[str] = field(default_factory=list[str])
+    add_reaction_error: BaseException | None = None
+
+    async def add_reaction(self, emoji: str) -> object:
+        if self.add_reaction_error is not None:
+            raise self.add_reaction_error
+        self.reactions.append(emoji)
+        return None
+
+    async def remove_reaction(self, emoji: str, member: object) -> object:
+        del member
+        self.removed_reactions.append(emoji)
+        if emoji in self.reactions:
+            self.reactions.remove(emoji)
+        return None
 
 
 @dataclass
@@ -166,7 +183,15 @@ def _ready_gateway(client: FakeClient, **env_overrides: str) -> DiscordGateway:
     gateway._typing_delay_s = float(config.env["DISCORD_TYPING_DELAY_MS"]) / 1000.0  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     gateway._chunk_max = int(config.env["DISCORD_CHUNK_MAX_CHARS"])  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     gateway._status = GatewayStatus.RUNNING  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    # _swap_reaction needs self._client.user to identify which reaction to
+    # remove; supply a minimal stub so reaction-swap tests can run.
+    gateway._client = cast("discord.Client", _StubBotClient())  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     return gateway
+
+
+@dataclass
+class _StubBotClient:
+    user: object = field(default_factory=object)
 
 
 # --- DiscordGateway behaviour tests -----------------------------------------
@@ -188,6 +213,36 @@ async def test_owner_dm_creates_session_and_replies() -> None:
     assert fake.sessions_created == [("agent-1", "discord:dm:111")]
     assert fake.sent_messages == [("sess-1", "hi there")]
     assert channel.sent == ["hello back"]
+    # On success the EYES is removed and replaced with the CHECK MARK.
+    assert msg.removed_reactions == ["\N{EYES}"]
+    assert msg.reactions == ["\N{WHITE HEAVY CHECK MARK}"]
+    assert gateway.status is GatewayStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_reaction_failure_does_not_abort_reply() -> None:
+    """Verify add_reaction failures don't abort the turn.
+
+    If add_reaction raises (e.g. missing permission), the turn must still
+    complete and the user must still receive the assistant reply.
+    """
+    fake = FakeClient(reply="ok")
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi",
+        channel=channel,
+        add_reaction_error=RuntimeError("missing Add Reactions permission"),
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert fake.sent_messages == [("sess-1", "hi")]
+    assert channel.sent == ["ok"]
+    # No reaction ever stuck because add_reaction kept raising; gateway is
+    # still healthy.
+    assert msg.reactions == []
     assert gateway.status is GatewayStatus.RUNNING
 
 
