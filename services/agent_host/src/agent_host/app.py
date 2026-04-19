@@ -6,8 +6,6 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
-ENV_PREFIX = "AGENT_HOST_"
-
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -16,6 +14,11 @@ from fastapi.responses import StreamingResponse
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
+from agent_host.gateways import (
+    GatewayAlreadyExistsError,
+    GatewayHost,
+    GatewayNotFoundError,
+)
 from agent_host.service import AgentHost, SessionNotFoundError
 from agent_host.skills import (
     BuiltinSkillReadOnlyError,
@@ -33,8 +36,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+ENV_PREFIX = "AGENT_HOST_"
+
 host = AgentHost()
 skills = SkillsService()
+gateways = GatewayHost()
 
 
 @asynccontextmanager
@@ -42,6 +48,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     skills.sync_builtin_skills()
     yield
     await host.destroy_all_sessions()
+    await gateways.destroy_all_gateways()
 
 
 app = FastAPI(title="Agent Host", version="0.1.0", lifespan=lifespan)
@@ -227,3 +234,56 @@ async def delete_skill(skill_id: str) -> None:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidSkillIdError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# --- Gateways ---
+
+
+class CreateGatewayRequest(BaseModel):
+    gateway_id: str = Field(pattern=r"^[a-z]+(?:-[a-z]+)*$")
+    gateway_type: str
+    agent_id: str
+    env: dict[str, str] = Field(default_factory=dict[str, str])
+
+
+@app.post("/gateways")
+async def create_gateway(payload: CreateGatewayRequest) -> dict[str, Any]:
+    try:
+        return await gateways.create_gateway(
+            gateway_id=payload.gateway_id,
+            gateway_type=payload.gateway_type,
+            agent_id=payload.agent_id,
+            env=payload.env,
+        )
+    except GatewayAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/gateways")
+async def list_gateways() -> list[dict[str, Any]]:
+    return await gateways.list_gateways()
+
+
+@app.get("/gateways/{gateway_id}")
+async def get_gateway(gateway_id: str) -> dict[str, Any]:
+    try:
+        return await gateways.get_gateway(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/gateways/{gateway_id}/logs")
+async def gateway_logs(gateway_id: str) -> dict[str, Any]:
+    try:
+        lines = await gateways.gateway_logs(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"lines": lines}
+
+
+@app.delete("/gateways/{gateway_id}", status_code=204)
+async def destroy_gateway(gateway_id: str) -> None:
+    try:
+        await gateways.destroy_gateway(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

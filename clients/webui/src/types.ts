@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "info" | "config-kernels";
+export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "gateways" | "info" | "config-kernels";
 
 export type Harness = string;
 
@@ -112,4 +112,23 @@ export type KernelConfig = {
   harness: string;
   env_vars: string;
   updated_at: string | null;
+};
+
+export type GatewayType = string;
+
+export type GatewayStatus = "stopped" | "starting" | "running" | "error";
+
+export type Gateway = {
+  gateway_id: string;
+  name: string;
+  gateway_type: GatewayType;
+  agent_id: string;
+  enabled: boolean;
+  env_vars: string;
+  status: GatewayStatus;
+  last_error: string | null;
+  container_name: string | null;
+  created_at: string;
+  updated_at: string;
+  secret_keys: string[];
 };

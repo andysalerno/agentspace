@@ -16,6 +16,7 @@ from client_service.agent_host_client import AgentHostClient, HttpAgentHostClien
 from client_service.models import (
     AgentRecord,
     ClientType,
+    GatewayRecord,
     MessageRecord,
     MessageRole,
     SessionRecord,
@@ -28,6 +29,11 @@ from client_service.storage.agents import (
     AgentStore,
     InMemoryAgentStore,
 )
+from client_service.storage.gateways import (
+    GatewayExistsError,
+    GatewayStore,
+    InMemoryGatewayStore,
+)
 from client_service.storage.kernel_configs import (
     InMemoryKernelConfigStore,
     KernelConfigStore,
@@ -36,10 +42,13 @@ from client_service.storage.kernel_configs import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
+    from gateway.protocol import GatewayType
+
     type AcloseFn = Callable[[], Awaitable[object]]
 
 logger = logging.getLogger(__name__)
 AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
+GATEWAY_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
 CLIENT_SERVICE_ENV_PREFIX = "CLIENT_SERVICE_"
 
 
@@ -63,6 +72,18 @@ class KernelNotFoundError(KeyError):
     pass
 
 
+class GatewayNotFoundError(KeyError):
+    pass
+
+
+class GatewayAlreadyExistsError(ValueError):
+    pass
+
+
+class InvalidGatewayIdError(ValueError):
+    pass
+
+
 VISIBLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
         EventType.TEXT_DELTA,
@@ -80,14 +101,19 @@ class ClientService:
         agent_host_client: AgentHostClient | None = None,
         agent_store: AgentStore | None = None,
         kernel_config_store: KernelConfigStore | None = None,
+        gateway_store: GatewayStore | None = None,
     ) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
         self._agent_store: AgentStore = agent_store or InMemoryAgentStore()
         self._kernel_config_store: KernelConfigStore = (
             kernel_config_store or InMemoryKernelConfigStore()
         )
+        self._gateway_store: GatewayStore = (
+            gateway_store or InMemoryGatewayStore()
+        )
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
+        self._gateway_lock = asyncio.Lock()
 
     async def create_agent(
         self,
@@ -478,6 +504,204 @@ class ClientService:
         except KeyError as exc:
             raise SessionNotFoundError(session_id) from exc
 
+    async def list_gateways(
+        self,
+        *,
+        include_secrets: bool = False,
+    ) -> list[dict[str, object]]:
+        records = await self._gateway_store.list()
+        return [r.summary(include_secrets=include_secrets) for r in records]
+
+    async def get_gateway(
+        self,
+        gateway_id: str,
+        *,
+        include_secrets: bool = False,
+    ) -> dict[str, object]:
+        record = await self._require_gateway(gateway_id)
+        return record.summary(include_secrets=include_secrets)
+
+    async def create_gateway(
+        self,
+        *,
+        gateway_id: str,
+        name: str,
+        gateway_type: GatewayType,
+        agent_id: str,
+        enabled: bool = False,
+        env_vars: str = "",
+        secrets: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        _validate_gateway_id(gateway_id)
+        await self._require_agent(agent_id)
+        record = GatewayRecord(
+            gateway_id=gateway_id,
+            name=name,
+            gateway_type=gateway_type,
+            agent_id=agent_id,
+            enabled=enabled,
+            env_vars=env_vars,
+            secrets=dict(secrets or {}),
+        )
+        async with self._gateway_lock:
+            try:
+                await self._gateway_store.insert(record)
+            except GatewayExistsError as exc:
+                raise GatewayAlreadyExistsError(gateway_id) from exc
+        if enabled:
+            await self.start_gateway(gateway_id)
+        logger.info("created gateway %s (%s)", gateway_id, gateway_type.value)
+        return (await self.get_gateway(gateway_id))
+
+    async def update_gateway(
+        self,
+        gateway_id: str,
+        *,
+        name: str | None = None,
+        agent_id: str | None = None,
+        enabled: bool | None = None,
+        env_vars: str | None = None,
+        secrets: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        async with self._gateway_lock:
+            record = await self._require_gateway(gateway_id)
+            previously_enabled = record.enabled
+            if name is not None:
+                record.name = name
+            if agent_id is not None:
+                await self._require_agent(agent_id)
+                record.agent_id = agent_id
+            if enabled is not None:
+                record.enabled = enabled
+            if env_vars is not None:
+                record.env_vars = env_vars
+            if secrets is not None:
+                record.secrets = dict(secrets)
+            record.updated_at = utc_now()
+            await self._gateway_store.update(record)
+        if enabled is True and not previously_enabled:
+            await self.start_gateway(gateway_id)
+        elif enabled is False and previously_enabled:
+            await self.stop_gateway(gateway_id)
+        return await self.get_gateway(gateway_id)
+
+    async def delete_gateway(self, gateway_id: str) -> None:
+        async with self._gateway_lock:
+            record = await self._gateway_store.get(gateway_id)
+            if record is None:
+                raise GatewayNotFoundError(gateway_id)
+            if record.status not in {"stopped", "error"}:
+                try:
+                    await self._agent_host.destroy_gateway(gateway_id)
+                except Exception:
+                    logger.exception(
+                        "failed to destroy gateway container %s during "
+                        "delete; the DB row will still be removed and the "
+                        "container may be orphaned (manual cleanup required)",
+                        gateway_id,
+                    )
+            await self._gateway_store.delete(gateway_id)
+        logger.info("deleted gateway %s", gateway_id)
+
+    async def start_gateway(self, gateway_id: str) -> dict[str, object]:
+        async with self._gateway_lock:
+            return await self._start_gateway_locked(gateway_id)
+
+    async def _start_gateway_locked(self, gateway_id: str) -> dict[str, object]:
+        record = await self._require_gateway(gateway_id)
+        env = parse_env_vars(record.env_vars)
+        env.update(record.secrets)
+        record.status = "starting"
+        record.last_error = None
+        record.updated_at = utc_now()
+        await self._gateway_store.update(record)
+        try:
+            response = await self._agent_host.create_gateway(
+                gateway_id=gateway_id,
+                gateway_type=record.gateway_type.value,
+                agent_id=record.agent_id,
+                env=env,
+            )
+        except Exception as exc:
+            record.status = "error"
+            record.last_error = str(exc)
+            record.updated_at = utc_now()
+            await self._gateway_store.update(record)
+            logger.exception("failed to start gateway %s", gateway_id)
+            raise
+        record.status = "running"
+        record.container_name = (
+            str(response.get("container_name"))
+            if response.get("container_name")
+            else None
+        )
+        record.updated_at = utc_now()
+        await self._gateway_store.update(record)
+        logger.info("started gateway %s", gateway_id)
+        return record.summary()
+
+    async def stop_gateway(self, gateway_id: str) -> dict[str, object]:
+        async with self._gateway_lock:
+            return await self._stop_gateway_locked(gateway_id)
+
+    async def _stop_gateway_locked(self, gateway_id: str) -> dict[str, object]:
+        record = await self._require_gateway(gateway_id)
+        try:
+            await self._agent_host.destroy_gateway(gateway_id)
+        except Exception as exc:
+            record.last_error = str(exc)
+            logger.exception("error while stopping gateway %s", gateway_id)
+        record.status = "stopped"
+        record.container_name = None
+        record.updated_at = utc_now()
+        await self._gateway_store.update(record)
+        return record.summary()
+
+    async def gateway_logs(self, gateway_id: str) -> list[str]:
+        await self._require_gateway(gateway_id)
+        return await self._agent_host.gateway_logs(gateway_id)
+
+    async def autostart_enabled_gateways(
+        self,
+        *,
+        max_attempts: int = 5,
+        initial_backoff: float = 1.0,
+        max_backoff: float = 30.0,
+    ) -> None:
+        """Start every gateway flagged ``enabled``, with bounded retry.
+
+        Intended to be scheduled as a background task during application
+        startup so it does not block ``lifespan`` from yielding.  Each
+        gateway is retried independently; failures are logged but do not
+        abort the loop.
+        """
+        for record in await self._gateway_store.list():
+            if not record.enabled:
+                continue
+            backoff = initial_backoff
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    await self.start_gateway(record.gateway_id)
+                except Exception:
+                    logger.exception(
+                        "autostart attempt %d/%d for gateway %s failed",
+                        attempt,
+                        max_attempts,
+                        record.gateway_id,
+                    )
+                    if attempt >= max_attempts:
+                        break
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * 2, max_backoff)
+                else:
+                    break
+
+    async def _require_gateway(self, gateway_id: str) -> GatewayRecord:
+        record = await self._gateway_store.get(gateway_id)
+        if record is None:
+            raise GatewayNotFoundError(gateway_id)
+        return record
+
 
 def _flatten_text(events: list[KernelEvent]) -> str:
     return "".join(
@@ -536,6 +760,12 @@ def _validate_agent_id(agent_id: str) -> None:
     if not AGENT_ID_PATTERN.fullmatch(agent_id):
         msg = "agent_id must use lowercase letters and single dashes only"
         raise InvalidAgentIdError(msg)
+
+
+def _validate_gateway_id(gateway_id: str) -> None:
+    if not GATEWAY_ID_PATTERN.fullmatch(gateway_id):
+        msg = "gateway_id must use lowercase letters and single dashes only"
+        raise InvalidGatewayIdError(msg)
 
 
 def parse_env_vars(raw: str) -> dict[str, str]:

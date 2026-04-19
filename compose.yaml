@@ -7,6 +7,14 @@ services:
     command: ["python", "-c", "print('kernel image ready')"]
     restart: "no"
 
+  gateway-host-image:
+    image: agentspace-gateway-gateway:latest
+    build:
+      context: .
+      dockerfile: gateways/gateway_host/Dockerfile
+    command: ["python", "-c", "print('gateway image ready')"]
+    restart: "no"
+
   agent-host:
     image: agentspace-agent-host-agent-host:latest
     build:
@@ -14,6 +22,8 @@ services:
       dockerfile: services/agent_host/Dockerfile
     depends_on:
       kernel-host-image:
+        condition: service_completed_successfully
+      gateway-host-image:
         condition: service_completed_successfully
     security_opt:
       - label:disable
@@ -25,6 +35,8 @@ services:
       - AGENT_HOST_DOCKER_NETWORK=agentspace-stack
       - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
       - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
+      - AGENT_HOST_GATEWAY_IMAGE=agentspace-gateway-gateway:latest
+      - AGENT_HOST_GATEWAY_CLIENT_SERVICE_URL=http://client-service:8002
       - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     ports:
       - "8001:8001"

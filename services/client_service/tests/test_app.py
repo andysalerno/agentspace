@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from client_service.service import GatewayNotFoundError as _GatewayNotFound
 from client_service.service import KernelNotFoundError
 from fastapi.testclient import TestClient
 from kernel.events import (
@@ -31,6 +32,8 @@ class StubClientService:
         self.killed_kernels: list[str] = []
         self.skills: dict[str, dict[str, object]] = {}
         self.kernel_configs: dict[str, dict[str, object]] = {}
+        self.gateways: dict[str, dict[str, object]] = {}
+        self.autostart_called = False
 
     async def create_agent(
         self,
@@ -281,6 +284,96 @@ class StubClientService:
             },
         }
 
+    async def list_gateways(
+        self,
+        *,
+        include_secrets: bool = False,
+    ) -> list[dict[str, object]]:
+        del include_secrets
+        return list(self.gateways.values())
+
+    async def get_gateway(
+        self,
+        gateway_id: str,
+        *,
+        include_secrets: bool = False,
+    ) -> dict[str, object]:
+        del include_secrets
+        if gateway_id not in self.gateways:
+            raise _GatewayNotFound(gateway_id)
+        return dict(self.gateways[gateway_id])
+
+    async def create_gateway(
+        self,
+        *,
+        gateway_id: str,
+        name: str,
+        gateway_type: object,
+        agent_id: str,
+        enabled: bool = False,
+        env_vars: str = "",
+        secrets: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        del env_vars, secrets
+        record: dict[str, object] = {
+            "gateway_id": gateway_id,
+            "name": name,
+            "gateway_type": str(getattr(gateway_type, "value", gateway_type)),
+            "agent_id": agent_id,
+            "enabled": enabled,
+            "status": "running" if enabled else "stopped",
+            "secret_keys": [],
+        }
+        self.gateways[gateway_id] = record
+        return dict(record)
+
+    async def update_gateway(
+        self,
+        gateway_id: str,
+        *,
+        name: str | None = None,
+        agent_id: str | None = None,
+        enabled: bool | None = None,
+        env_vars: str | None = None,
+        secrets: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        del env_vars, secrets
+        record = dict(self.gateways[gateway_id])
+        if name is not None:
+            record["name"] = name
+        if agent_id is not None:
+            record["agent_id"] = agent_id
+        if enabled is not None:
+            record["enabled"] = enabled
+            record["status"] = "running" if enabled else "stopped"
+        self.gateways[gateway_id] = record
+        return dict(record)
+
+    async def delete_gateway(self, gateway_id: str) -> None:
+        if gateway_id not in self.gateways:
+            raise _GatewayNotFound(gateway_id)
+        del self.gateways[gateway_id]
+
+    async def start_gateway(self, gateway_id: str) -> dict[str, object]:
+        record = dict(self.gateways[gateway_id])
+        record["status"] = "running"
+        self.gateways[gateway_id] = record
+        return dict(record)
+
+    async def stop_gateway(self, gateway_id: str) -> dict[str, object]:
+        record = dict(self.gateways[gateway_id])
+        record["status"] = "stopped"
+        self.gateways[gateway_id] = record
+        return dict(record)
+
+    async def gateway_logs(self, gateway_id: str) -> list[str]:
+        if gateway_id not in self.gateways:
+            raise _GatewayNotFound(gateway_id)
+        return ["line1", "line2"]
+
+    async def autostart_enabled_gateways(self) -> None:
+        self.autostart_called = True
+
     def _events(self) -> list[KernelEvent]:
         return [
             session_start("host-1", "copilot-cli"),
@@ -506,3 +599,60 @@ def test_kernel_config_invalid_harness_returns_422(client: TestClient) -> None:
     response = client.get("/kernel-configs/not-a-harness")
 
     assert response.status_code == 422
+
+
+def test_list_gateway_types(client: TestClient) -> None:
+    response = client.get("/gateway-types")
+    assert response.status_code == 200
+    assert "echo" in response.json()
+
+
+def test_gateway_routes_lifecycle(client: TestClient) -> None:
+    client.post("/agents", json={"agent_id": "agent-one", "name": "Agent One"})
+
+    created = client.post(
+        "/gateways",
+        json={
+            "gateway_id": "echo-bridge",
+            "name": "Echo Bridge",
+            "gateway_type": "echo",
+            "agent_id": "agent-one",
+            "enabled": True,
+        },
+    )
+    listed = client.get("/gateways")
+    fetched = client.get("/gateways/echo-bridge")
+    logs = client.get("/gateways/echo-bridge/logs")
+    stopped = client.post("/gateways/echo-bridge/stop")
+    started = client.post("/gateways/echo-bridge/start")
+    deleted = client.delete("/gateways/echo-bridge")
+
+    assert created.status_code == 200
+    assert created.json()["status"] == "running"
+    assert listed.status_code == 200
+    assert len(listed.json()) == 1
+    assert fetched.status_code == 200
+    assert logs.status_code == 200
+    assert logs.json() == {"lines": ["line1", "line2"]}
+    assert stopped.json()["status"] == "stopped"
+    assert started.json()["status"] == "running"
+    assert deleted.status_code == 204
+
+
+def test_gateway_invalid_id_returns_422(client: TestClient) -> None:
+    response = client.post(
+        "/gateways",
+        json={
+            "gateway_id": "Bad Id",
+            "name": "Bad",
+            "gateway_type": "echo",
+            "agent_id": "agent-one",
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_gateway_unknown_returns_404(client: TestClient) -> None:
+    assert client.get("/gateways/missing").status_code == 404
+    assert client.delete("/gateways/missing").status_code == 404
+    assert client.get("/gateways/missing/logs").status_code == 404

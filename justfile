@@ -37,6 +37,7 @@ stack-up:
 stack-down:
   podman compose -f compose.yaml down --remove-orphans
   -podman rm -f $(podman ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
+  -podman rm -f $(podman ps -q --filter "label=agentspace.role=gateway") 2>/dev/null || true
 
 stack-logs:
   podman compose -f compose.yaml logs -f

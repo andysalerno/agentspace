@@ -9,7 +9,7 @@ dependencies = []
 dev = ["ruff", "pytest", "pytest-asyncio", "pyright", "httpx", "fastapi", "jinja2", "uvicorn"]
 
 [tool.uv.workspace]
-members = ["kernels/*", "services/*", "channels/*", "clients/cli_ui"]
+members = ["kernels/*", "gateways/*", "services/*", "channels/*", "clients/cli_ui"]
 
 [tool.uv.sources]
 kernel = { workspace = true }
@@ -19,6 +19,9 @@ kernel-codex = { workspace = true }
 kernel-copilot = { workspace = true }
 kernel-opencode = { workspace = true }
 kernel-host = { workspace = true }
+gateway = { workspace = true }
+gateway-echo = { workspace = true }
+gateway-host = { workspace = true }
 agent-host = { workspace = true }
 client-service = { workspace = true }
 cli-channel = { workspace = true }
@@ -62,6 +65,9 @@ extraPaths = [
     "kernels/kernel_copilot/src",
     "kernels/kernel_opencode/src",
     "kernels/kernel_host/src",
+    "gateways/gateway/src",
+    "gateways/gateway_echo/src",
+    "gateways/gateway_host/src",
     "services/agent_host/src",
     "services/client_service/src",
     "channels/cli_channel/src",

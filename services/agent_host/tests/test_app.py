@@ -119,6 +119,11 @@ def client(monkeypatch: pytest.MonkeyPatch, tmp_path: object) -> TestClient:
     monkeypatch.setattr(agent_host_app, "host", host)
     skills_svc = SkillsService(skills_dir=str(tmp_path))
     monkeypatch.setattr(agent_host_app, "skills", skills_svc)
+    from agent_host.gateways import GatewayHost  # noqa: PLC0415
+    from test_gateways import FakeGatewayRuntime  # noqa: PLC0415
+
+    gateways_host = GatewayHost(runtime=FakeGatewayRuntime())
+    monkeypatch.setattr(agent_host_app, "gateways", gateways_host)
     return TestClient(agent_host_app.app)
 
 
@@ -251,6 +256,61 @@ def test_invalid_skill_id_returns_422(client: TestClient) -> None:
     response = client.post(
         "/skills",
         json={"skill_id": "Bad Skill", "files": {"SKILL.md": "# Bad"}},
+    )
+
+    assert response.status_code == 422
+
+
+def test_gateway_lifecycle(client: TestClient) -> None:
+    created = client.post(
+        "/gateways",
+        json={
+            "gateway_id": "echo-one",
+            "gateway_type": "echo",
+            "agent_id": "agent-x",
+            "env": {"FOO": "bar"},
+        },
+    )
+    listed = client.get("/gateways")
+    fetched = client.get("/gateways/echo-one")
+    logs = client.get("/gateways/echo-one/logs")
+    deleted = client.delete("/gateways/echo-one")
+    after = client.get("/gateways/echo-one")
+
+    assert created.status_code == 200
+    assert created.json()["gateway_id"] == "echo-one"
+    assert created.json()["status"] == "running"
+    assert listed.status_code == 200
+    assert [g["gateway_id"] for g in listed.json()] == ["echo-one"]
+    assert fetched.status_code == 200
+    assert logs.status_code == 200
+    assert logs.json()["lines"] == ["line-1", "line-2"]
+    assert deleted.status_code == 204
+    assert after.status_code == 404
+
+
+def test_duplicate_gateway_returns_409(client: TestClient) -> None:
+    payload = {
+        "gateway_id": "dup-gw",
+        "gateway_type": "echo",
+        "agent_id": "agent",
+        "env": {},
+    }
+    client.post("/gateways", json=payload)
+    response = client.post("/gateways", json=payload)
+
+    assert response.status_code == 409
+
+
+def test_invalid_gateway_id_returns_422(client: TestClient) -> None:
+    response = client.post(
+        "/gateways",
+        json={
+            "gateway_id": "Bad Gateway",
+            "gateway_type": "echo",
+            "agent_id": "agent",
+            "env": {},
+        },
     )
 
     assert response.status_code == 422

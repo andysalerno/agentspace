@@ -3,6 +3,7 @@ import { api } from "./api";
 import type {
   Agent,
   ChatMessage,
+  Gateway,
   KernelEvent,
   KernelSummary,
   SessionDetail,
@@ -17,6 +18,7 @@ import AgentsView from "./AgentsView";
 import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
 import SkillsView from "./SkillsView";
+import GatewaysView from "./GatewaysView";
 import InfoView from "./InfoView";
 import ConfigKernelsView from "./ConfigKernelsView";
 
@@ -83,6 +85,8 @@ export default function App() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [kernels, setKernels] = useState<KernelSummary[]>([]);
   const [skills, setSkills] = useState<Skill[]>([]);
+  const [gateways, setGateways] = useState<Gateway[]>([]);
+  const [gatewayTypes, setGatewayTypes] = useState<string[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSession, setSelectedSession] = useState<SessionDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -109,18 +113,30 @@ export default function App() {
   }, [sidebarCollapsed]);
 
   async function refreshOverview() {
-    const [harnessData, agentData, sessionData, kernelData, skillData] = await Promise.all([
+    const [
+      harnessData,
+      agentData,
+      sessionData,
+      kernelData,
+      skillData,
+      gatewayData,
+      gatewayTypeData,
+    ] = await Promise.all([
       api.listHarnesses(),
       api.listAgents(),
       api.listSessions(),
       api.listKernels(),
       api.listSkills(),
+      api.listGateways(),
+      api.listGatewayTypes(),
     ]);
     setHarnesses(harnessData);
     setAgents(agentData);
     setSessions(sessionData);
     setKernels(kernelData);
     setSkills(skillData);
+    setGateways(gatewayData);
+    setGatewayTypes(gatewayTypeData);
   }
 
   async function refreshSelectedSession(sessionId: string) {
@@ -357,6 +373,88 @@ export default function App() {
     }
   }
 
+  async function handleCreateGateway(payload: {
+    gateway_id: string;
+    name: string;
+    gateway_type: string;
+    agent_id: string;
+    enabled: boolean;
+    env_vars: string;
+    secrets: Record<string, string>;
+  }) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.createGateway(payload);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleUpdateGateway(
+    gatewayId: string,
+    payload: {
+      name?: string;
+      agent_id?: string;
+      enabled?: boolean;
+      env_vars?: string;
+      secrets?: Record<string, string>;
+    },
+  ) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.updateGateway(gatewayId, payload);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleDeleteGateway(gatewayId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteGateway(gatewayId);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleStartGateway(gatewayId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.startGateway(gatewayId);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleStopGateway(gatewayId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.stopGateway(gatewayId);
+      await refreshOverview();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleNavigateToChat(sessionId: string) {
     setSelectedSessionId(sessionId);
     setViewId("chat");
@@ -412,6 +510,20 @@ export default function App() {
             onCreateSkill={handleCreateSkill}
             onUpdateSkill={handleUpdateSkill}
             onDeleteSkill={handleDeleteSkill}
+            busy={busy}
+          />
+        );
+      case "gateways":
+        return (
+          <GatewaysView
+            gateways={gateways}
+            agents={agents}
+            gatewayTypes={gatewayTypes}
+            onCreateGateway={handleCreateGateway}
+            onUpdateGateway={handleUpdateGateway}
+            onDeleteGateway={handleDeleteGateway}
+            onStartGateway={handleStartGateway}
+            onStopGateway={handleStopGateway}
             busy={busy}
           />
         );

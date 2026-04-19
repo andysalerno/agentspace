@@ -13,6 +13,7 @@ from client_service.service import (
     SessionNotFoundError,
     parse_env_vars,
 )
+from gateway.protocol import GatewayType
 from kernel.events import (
     KernelEvent,
     KernelStatus,
@@ -38,6 +39,7 @@ class StubAgentHostClient:
         self.destroyed: list[str] = []
         self._sessions: dict[str, dict[str, str]] = {}
         self._skills: dict[str, dict[str, object]] = {}
+        self.gateways: dict[str, dict[str, object]] = {}
 
     async def create_session(
         self,
@@ -153,6 +155,38 @@ class StubAgentHostClient:
             "env_prefix": "AGENT_HOST_",
             "env": {"AGENT_HOST_STUB": "1"},
         }
+
+    async def create_gateway(
+        self,
+        *,
+        gateway_id: str,
+        gateway_type: str,
+        agent_id: str,
+        env: dict[str, str],
+    ) -> dict[str, object]:
+        record: dict[str, object] = {
+            "gateway_id": gateway_id,
+            "gateway_type": gateway_type,
+            "agent_id": agent_id,
+            "container_name": f"agentspace-gateway-{gateway_id}",
+            "base_url": f"http://agentspace-gateway-{gateway_id}:8000",
+            "env": env,
+        }
+        self.gateways[gateway_id] = record
+        return record
+
+    async def list_gateways(self) -> list[dict[str, object]]:
+        return list(self.gateways.values())
+
+    async def get_gateway(self, gateway_id: str) -> dict[str, object]:
+        return dict(self.gateways[gateway_id])
+
+    async def gateway_logs(self, gateway_id: str) -> list[str]:
+        del gateway_id
+        return ["startup", "ok"]
+
+    async def destroy_gateway(self, gateway_id: str) -> None:
+        self.gateways.pop(gateway_id, None)
 
 
 @pytest.mark.asyncio
@@ -589,3 +623,79 @@ def test_parse_env_vars_empty_string() -> None:
 def test_parse_env_vars_value_with_equals() -> None:
     result = parse_env_vars("URL=https://example.com?foo=bar&baz=qux")
     assert result == {"URL": "https://example.com?foo=bar&baz=qux"}
+
+
+@pytest.mark.asyncio
+async def test_gateway_lifecycle() -> None:
+    runtime = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", runtime))
+    await service.create_agent(agent_id="agent-one", name="Agent One")
+
+    created = await service.create_gateway(
+        gateway_id="echo-bridge",
+        name="Echo Bridge",
+        gateway_type=GatewayType.ECHO,
+        agent_id="agent-one",
+        enabled=True,
+        env_vars="ECHO_TOKEN=abc",
+        secrets={"DISCORD_TOKEN": "secret"},
+    )
+
+    assert created["status"] == "running"
+    assert created["secret_keys"] == ["DISCORD_TOKEN"]
+    assert "secrets" not in created
+    assert "echo-bridge" in runtime.gateways
+    assert runtime.gateways["echo-bridge"]["env"] == {
+        "ECHO_TOKEN": "abc",
+        "DISCORD_TOKEN": "secret",
+    }
+
+    listed = await service.list_gateways()
+    assert len(listed) == 1
+    assert listed[0]["gateway_id"] == "echo-bridge"
+
+    logs = await service.gateway_logs("echo-bridge")
+    assert logs == ["startup", "ok"]
+
+    await service.delete_gateway("echo-bridge")
+    assert "echo-bridge" not in runtime.gateways
+    assert await service.list_gateways() == []
+
+
+@pytest.mark.asyncio
+async def test_gateway_autostart_starts_enabled_only() -> None:
+    runtime = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", runtime))
+    await service.create_agent(agent_id="agent-one", name="Agent One")
+    await service.create_gateway(
+        gateway_id="enabled-one",
+        name="Enabled",
+        gateway_type=GatewayType.ECHO,
+        agent_id="agent-one",
+        enabled=False,
+    )
+    record = await service.update_gateway("enabled-one", enabled=False)
+    assert record["status"] == "stopped"
+    runtime.gateways.clear()
+
+    # Manually flip the persisted record to enabled (skipping start_gateway)
+    # then run autostart and verify the runtime container is recreated.
+    inner_record = await service._require_gateway("enabled-one")  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+    inner_record.enabled = True
+    await service._gateway_store.update(inner_record)  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+
+    await service.autostart_enabled_gateways()
+    assert "enabled-one" in runtime.gateways
+
+
+@pytest.mark.asyncio
+async def test_gateway_create_unknown_agent_raises() -> None:
+    runtime = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", runtime))
+    with pytest.raises(AgentNotFoundError):
+        await service.create_gateway(
+            gateway_id="echo-bridge",
+            name="Echo Bridge",
+            gateway_type=GatewayType.ECHO,
+            agent_id="missing",
+        )

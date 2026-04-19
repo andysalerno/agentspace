@@ -74,6 +74,23 @@ class AgentHostClient(Protocol):
 
     async def info(self) -> JsonDict: ...
 
+    async def create_gateway(
+        self,
+        *,
+        gateway_id: str,
+        gateway_type: str,
+        agent_id: str,
+        env: dict[str, str],
+    ) -> JsonDict: ...
+
+    async def list_gateways(self) -> JsonList: ...
+
+    async def get_gateway(self, gateway_id: str) -> JsonDict: ...
+
+    async def gateway_logs(self, gateway_id: str) -> list[str]: ...
+
+    async def destroy_gateway(self, gateway_id: str) -> None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class HttpAgentHostClient:
@@ -208,6 +225,50 @@ class HttpAgentHostClient:
 
     async def info(self) -> JsonDict:
         return cast("JsonDict", await self._request_json("GET", "/info"))
+
+    async def create_gateway(
+        self,
+        *,
+        gateway_id: str,
+        gateway_type: str,
+        agent_id: str,
+        env: dict[str, str],
+    ) -> JsonDict:
+        payload: dict[str, object] = {
+            "gateway_id": gateway_id,
+            "gateway_type": gateway_type,
+            "agent_id": agent_id,
+            "env": env,
+        }
+        return cast(
+            "JsonDict",
+            await self._request_json("POST", "/gateways", json=payload),
+        )
+
+    async def list_gateways(self) -> JsonList:
+        return cast("JsonList", await self._request_json("GET", "/gateways"))
+
+    async def get_gateway(self, gateway_id: str) -> JsonDict:
+        return cast(
+            "JsonDict",
+            await self._request_json("GET", f"/gateways/{gateway_id}"),
+        )
+
+    async def gateway_logs(self, gateway_id: str) -> list[str]:
+        response = await self._request_json(
+            "GET",
+            f"/gateways/{gateway_id}/logs",
+        )
+        return cast("list[str]", cast("JsonDict", response)["lines"])
+
+    async def destroy_gateway(self, gateway_id: str) -> None:
+        async with httpx.AsyncClient(
+            base_url=self.base_url,
+            timeout=self.timeout,
+        ) as client:
+            response = await client.delete(f"/gateways/{gateway_id}")
+        if response.status_code not in (200, 204, 404):
+            response.raise_for_status()
 
     async def _request_json(
         self,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -10,6 +12,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from gateway.protocol import GatewayType
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
@@ -18,11 +21,19 @@ from client_service.service import (
     AgentAlreadyExistsError,
     AgentNotFoundError,
     ClientService,
+    GatewayAlreadyExistsError,
+    GatewayNotFoundError,
     InvalidAgentIdError,
+    InvalidGatewayIdError,
     KernelNotFoundError,
     SessionNotFoundError,
 )
-from client_service.storage import Database, SqliteAgentStore, SqliteKernelConfigStore
+from client_service.storage import (
+    Database,
+    SqliteAgentStore,
+    SqliteGatewayStore,
+    SqliteKernelConfigStore,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -40,10 +51,12 @@ def _build_service() -> tuple[ClientService, Database | None]:
     database = Database(db_path)
     agent_store = SqliteAgentStore(database)
     kernel_config_store = SqliteKernelConfigStore(database)
+    gateway_store = SqliteGatewayStore(database)
     return (
         ClientService(
             agent_store=agent_store,
             kernel_config_store=kernel_config_store,
+            gateway_store=gateway_store,
         ),
         database,
     )
@@ -58,9 +71,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await _database.connect()
         await SqliteAgentStore(_database).initialize()
         await SqliteKernelConfigStore(_database).initialize()
+        await SqliteGatewayStore(_database).initialize()
+    # Run autostart concurrently with serving so a slow agent_host or
+    # transient container failure does not block the API from coming up.
+    autostart_task = asyncio.create_task(
+        service.autostart_enabled_gateways(),
+        name="gateway-autostart",
+    )
     try:
         yield
     finally:
+        if not autostart_task.done():
+            autostart_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await autostart_task
         if _database is not None:
             await _database.close()
 
@@ -367,3 +391,116 @@ def _status_for_skill_error(exc: Exception) -> int:
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code
     return 500
+
+
+# --- Gateways ---
+
+
+class CreateGatewayRequest(BaseModel):
+    gateway_id: str = Field(pattern=r"^[a-z]+(?:-[a-z]+)*$")
+    name: str
+    gateway_type: GatewayType
+    agent_id: str
+    enabled: bool = False
+    env_vars: str = ""
+    secrets: dict[str, str] = Field(default_factory=dict[str, str])
+
+
+class UpdateGatewayRequest(BaseModel):
+    name: str | None = None
+    agent_id: str | None = None
+    enabled: bool | None = None
+    env_vars: str | None = None
+    secrets: dict[str, str] | None = None
+
+
+@app.get("/gateway-types")
+async def list_gateway_types() -> list[str]:
+    return [gateway_type.value for gateway_type in GatewayType]
+
+
+@app.get("/gateways")
+async def list_gateways() -> list[dict[str, Any]]:
+    return await service.list_gateways()
+
+
+@app.post("/gateways")
+async def create_gateway(payload: CreateGatewayRequest) -> dict[str, Any]:
+    try:
+        return await service.create_gateway(
+            gateway_id=payload.gateway_id,
+            name=payload.name,
+            gateway_type=payload.gateway_type,
+            agent_id=payload.agent_id,
+            enabled=payload.enabled,
+            env_vars=payload.env_vars,
+            secrets=payload.secrets,
+        )
+    except GatewayAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidGatewayIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/gateways/{gateway_id}")
+async def get_gateway(gateway_id: str) -> dict[str, Any]:
+    try:
+        return await service.get_gateway(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/gateways/{gateway_id}")
+async def update_gateway(
+    gateway_id: str,
+    payload: UpdateGatewayRequest,
+) -> dict[str, Any]:
+    try:
+        return await service.update_gateway(
+            gateway_id,
+            name=payload.name,
+            agent_id=payload.agent_id,
+            enabled=payload.enabled,
+            env_vars=payload.env_vars,
+            secrets=payload.secrets,
+        )
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/gateways/{gateway_id}", status_code=204)
+async def delete_gateway(gateway_id: str) -> None:
+    try:
+        await service.delete_gateway(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/gateways/{gateway_id}/start")
+async def start_gateway(gateway_id: str) -> dict[str, Any]:
+    try:
+        return await service.start_gateway(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/gateways/{gateway_id}/stop")
+async def stop_gateway(gateway_id: str) -> dict[str, Any]:
+    try:
+        return await service.stop_gateway(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/gateways/{gateway_id}/logs")
+async def gateway_logs(gateway_id: str) -> dict[str, list[str]]:
+    try:
+        lines = await service.gateway_logs(gateway_id)
+    except GatewayNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"lines": lines}
+

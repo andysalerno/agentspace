@@ -9,6 +9,9 @@ members = [
     "cli-channel",
     "cli-ui",
     "client-service",
+    "gateway",
+    "gateway-echo",
+    "gateway-host",
     "kernel",
     "kernel-claude-code",
     "kernel-codex",
@@ -210,6 +213,7 @@ version = "0.1.0"
 source = { editable = "services/client_service" }
 dependencies = [
     { name = "fastapi" },
+    { name = "gateway" },
     { name = "httpx" },
     { name = "kernel-host" },
     { name = "uvicorn" },
@@ -218,6 +222,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi" },
+    { name = "gateway", editable = "gateways/gateway" },
     { name = "httpx" },
     { name = "kernel-host", editable = "kernels/kernel_host" },
     { name = "uvicorn" },
@@ -260,6 +265,51 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c4/73/5903c4b13beae98618d64eb9870c3fac4f605523dd0312ca5c80dadbd5b9/fastapi-0.135.2.tar.gz", hash = "sha256:88a832095359755527b7f63bb4c6bc9edb8329a026189eed83d6c1afcf419d56", size = 395833, upload-time = "2026-03-23T14:12:41.697Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/8f/ea/18f6d0457f9efb2fc6fa594857f92810cadb03024975726db6546b3d6fcf/fastapi-0.135.2-py3-none-any.whl", hash = "sha256:0af0447d541867e8db2a6a25c23a8c4bd80e2394ac5529bd87501bbb9e240ca5", size = 117407, upload-time = "2026-03-23T14:12:43.284Z" },
+]
+
+[[package]]
+name = "gateway"
+version = "0.1.0"
+source = { editable = "gateways/gateway" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "httpx" }]
+
+[[package]]
+name = "gateway-echo"
+version = "0.1.0"
+source = { editable = "gateways/gateway_echo" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "gateway" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi" },
+    { name = "gateway", editable = "gateways/gateway" },
+]
+
+[[package]]
+name = "gateway-host"
+version = "0.1.0"
+source = { editable = "gateways/gateway_host" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "gateway" },
+    { name = "gateway-echo" },
+    { name = "uvicorn" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi" },
+    { name = "gateway", editable = "gateways/gateway" },
+    { name = "gateway-echo", editable = "gateways/gateway_echo" },
+    { name = "uvicorn" },
 ]
 
 [[package]]

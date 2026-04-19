@@ -1,5 +1,7 @@
 import type {
   Agent,
+  Gateway,
+  GatewayType,
   KernelConfig,
   KernelEvent,
   KernelSummary,
@@ -215,4 +217,44 @@ export const api = {
     }
     return (await response.json()) as ServiceInfoSection;
   },
+
+  // Gateways
+  listGatewayTypes: () => requestJson<GatewayType[]>("/gateway-types"),
+  listGateways: () => requestJson<Gateway[]>("/gateways"),
+  getGateway: (gatewayId: string) => requestJson<Gateway>(`/gateways/${gatewayId}`),
+  createGateway: (payload: {
+    gateway_id: string;
+    name: string;
+    gateway_type: string;
+    agent_id: string;
+    enabled: boolean;
+    env_vars: string;
+    secrets: Record<string, string>;
+  }) =>
+    requestJson<Gateway>("/gateways", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateGateway: (
+    gatewayId: string,
+    payload: {
+      name?: string;
+      agent_id?: string;
+      enabled?: boolean;
+      env_vars?: string;
+      secrets?: Record<string, string>;
+    },
+  ) =>
+    requestJson<Gateway>(`/gateways/${gatewayId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteGateway: (gatewayId: string) =>
+    requestJson<void>(`/gateways/${gatewayId}`, { method: "DELETE" }),
+  startGateway: (gatewayId: string) =>
+    requestJson<Gateway>(`/gateways/${gatewayId}/start`, { method: "POST" }),
+  stopGateway: (gatewayId: string) =>
+    requestJson<Gateway>(`/gateways/${gatewayId}/stop`, { method: "POST" }),
+  gatewayLogs: (gatewayId: string) =>
+    requestJson<{ lines: string[] }>(`/gateways/${gatewayId}/logs`),
 };

@@ -53,6 +53,15 @@ const navItems: NavItem[] = [
         ),
     },
     {
+        id: "gateways",
+        label: "Gateways",
+        icon: (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M2 6a2 2 0 012-2h4l2 2h6a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" />
+            </svg>
+        ),
+    },
+    {
         id: "skills",
         label: "Skills",
         icon: (

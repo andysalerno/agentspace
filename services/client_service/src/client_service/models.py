@@ -6,6 +6,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from gateway.protocol import GatewayType
     from kernel_host.registry import HarnessName
 
 
@@ -143,4 +144,43 @@ class SessionRecord:
     def detail(self) -> dict[str, object]:
         data = self.summary()
         data["messages"] = [message.summary() for message in self.messages]
+        return data
+
+
+def _empty_env_dict() -> dict[str, str]:
+    return {}
+
+
+@dataclass(slots=True)
+class GatewayRecord:
+    gateway_id: str
+    name: str
+    gateway_type: GatewayType
+    agent_id: str
+    enabled: bool
+    env_vars: str = ""
+    secrets: dict[str, str] = field(default_factory=_empty_env_dict)
+    status: str = "stopped"
+    last_error: str | None = None
+    container_name: str | None = None
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+    def summary(self, *, include_secrets: bool = False) -> dict[str, object]:
+        data: dict[str, object] = {
+            "gateway_id": self.gateway_id,
+            "name": self.name,
+            "gateway_type": self.gateway_type.value,
+            "agent_id": self.agent_id,
+            "enabled": self.enabled,
+            "env_vars": self.env_vars,
+            "status": self.status,
+            "last_error": self.last_error,
+            "container_name": self.container_name,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "secret_keys": sorted(self.secrets.keys()),
+        }
+        if include_secrets:
+            data["secrets"] = dict(self.secrets)
         return data
