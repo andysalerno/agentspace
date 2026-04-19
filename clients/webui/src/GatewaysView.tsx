@@ -49,6 +49,9 @@ function mergeEnvLines(
     extraEnv: string,
 ): string {
     const lines: string[] = [];
+    const schemaEnvKeys = new Set(
+        schemaFields.filter((f) => f.kind === "env").map((f) => f.key),
+    );
     for (const field of schemaFields) {
         if (field.kind !== "env") continue;
         const value = schemaValues[field.key]?.trim();
@@ -56,9 +59,19 @@ function mergeEnvLines(
             lines.push(`${field.key}=${value}`);
         }
     }
-    const trimmedExtra = extraEnv.trim();
-    if (trimmedExtra) {
-        lines.push(trimmedExtra);
+    // Strip any line in the free-form textarea whose key duplicates a
+    // schema-managed env field, so the labelled input always wins and we
+    // never emit two assignments for the same key.
+    const filteredExtra = extraEnv
+        .split("\n")
+        .filter((line) => {
+            const match = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(line);
+            return !match || !schemaEnvKeys.has(match[1]);
+        })
+        .join("\n")
+        .trim();
+    if (filteredExtra) {
+        lines.push(filteredExtra);
     }
     return lines.join("\n");
 }
