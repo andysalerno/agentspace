@@ -225,6 +225,15 @@ class OpenCodeKernel:
                     },
                 },
             },
+            "permission": {
+                "*": "allow",
+                "webfetch": "deny",
+                "doom_loop": "deny",
+                "external_directory": "deny",
+                "websearch": "deny",
+                "question": "deny",
+                "lsp": "deny",
+            },
         }
 
         config_path = Path.home() / ".config" / "opencode" / "opencode.json"

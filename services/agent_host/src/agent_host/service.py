@@ -27,7 +27,7 @@ SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
     HarnessName.COPILOT_CLI: "/root/.copilot/skills",
     HarnessName.CODEX: "/skills",
     HarnessName.ECHO: "/skills",
-    HarnessName.OPENCODE: "/skills",
+    HarnessName.OPENCODE: "/root/.config/opencode/skills",
 }
 
 

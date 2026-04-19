@@ -261,6 +261,10 @@ def test_copilot_skills_mount_path() -> None:
     assert SKILLS_MOUNT_PATHS[HarnessName.COPILOT_CLI] == "/root/.copilot/skills"
 
 
+def test_opencode_skills_mount_path() -> None:
+    assert SKILLS_MOUNT_PATHS[HarnessName.OPENCODE] == "/root/.config/opencode/skills"
+
+
 def test_summarize_docker_stats_computes_percentages() -> None:
     raw: dict[str, Any] = {
         "cpu_stats": {
