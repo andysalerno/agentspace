@@ -84,6 +84,9 @@ class FakeChannel:
     typing_calls: int = 0
     typing_entered: int = 0
     typing_exited: int = 0
+    # Snapshot of typing_active at the moment each send() was made.  Lets
+    # tests assert "typing was no longer active when the reply was sent".
+    typing_active_at_send: list[int] = field(default_factory=list[int])
 
     @property
     def typing_active(self) -> int:
@@ -91,6 +94,7 @@ class FakeChannel:
         return self.typing_entered - self.typing_exited
 
     async def send(self, content: str) -> object:
+        self.typing_active_at_send.append(self.typing_active)
         self.sent.append(content)
         return None
 
@@ -228,6 +232,10 @@ async def test_owner_dm_creates_session_and_replies() -> None:
     # Typing indicator was active during the turn and is fully closed now.
     assert channel.typing_entered >= 1
     assert channel.typing_active == 0
+    # Crucially, typing was already CLOSED before the reply was delivered.
+    # Otherwise discord.py's background refresh task could re-assert typing
+    # right after the reply lands, making the indicator briefly reappear.
+    assert channel.typing_active_at_send == [0]
     assert gateway.status is GatewayStatus.RUNNING
 
 
@@ -406,10 +414,13 @@ async def test_long_reply_is_chunked() -> None:
     )
     await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
     assert len(channel.sent) >= 2
-    # Exactly one outer typing context wraps the whole turn; chunks are sent
-    # under that single context (no per-chunk typing call).
+    # Exactly one typing context wraps the agent call; chunked sends happen
+    # afterwards with typing already closed.
     assert channel.typing_calls == 1
     assert channel.typing_active == 0
+    # Every chunk was sent with typing already closed (no overlap that could
+    # cause the indicator to briefly reappear after the reply).
+    assert channel.typing_active_at_send == [0] * len(channel.sent)
 
 
 @pytest.mark.asyncio

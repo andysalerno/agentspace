@@ -323,90 +323,93 @@ class DiscordGateway:
 
         async with self._send_lock:
             channel = cast("_ChannelLike", message.channel)
-            # _typing_indicator wraps discord.py's channel.typing() in a
-            # best-effort context manager: it auto-refreshes the typing
-            # indicator (~every 9s) for the whole turn, and any failure /
-            # timeout / early return inside the body unwinds it cleanly.
-            # If typing() itself fails (transient REST blip, missing
-            # permission, etc.), we still execute the body without the
-            # indicator — typing is purely cosmetic and must not drop a turn.
-            async with self._typing_indicator(channel):
-                # Tell the user we've started working on their message.
-                # Failure to react (missing permission, deleted message, etc.)
-                # must not abort the turn.
-                await self._react(message, _PROCESSING_REACTION)
+            # Drop the EYES reaction up front so the user sees we've picked
+            # the message up before the (potentially slow) agent call begins.
+            await self._react(message, _PROCESSING_REACTION)
 
-                try:
-                    session_id = await self._ensure_session()
-                except Exception as exc:  # noqa: BLE001 - any failure should ERROR the gateway
-                    await self._handle_send_failure(
-                        message.channel,
-                        sender=str(author.id),
-                        session_id=None,
-                        exc=exc,
-                    )
-                    return
+            try:
+                session_id = await self._ensure_session()
+            except Exception as exc:  # noqa: BLE001 - any failure should ERROR the gateway
+                await self._handle_send_failure(
+                    message.channel,
+                    sender=str(author.id),
+                    session_id=None,
+                    exc=exc,
+                )
+                return
 
-                try:
+            # Wrap *only* the agent call in the typing indicator.  This is
+            # the part of the turn the user is genuinely waiting on; the
+            # reaction swap and message send afterwards are sub-second
+            # operations and don't deserve a typing indicator.
+            #
+            # Keeping typing() narrow also avoids a real artefact: discord.py
+            # auto-refreshes typing on a timer, and Discord clears typing on
+            # the next message we send.  If we held typing() open across
+            # _send_chunked, the background refresh task could re-assert
+            # typing right after the reply landed, so the user would see the
+            # indicator briefly reappear after the response.
+            try:
+                async with self._typing_indicator(channel):
                     response = await self._config.client.send_message(
                         session_id=session_id,
                         message=text,
                     )
-                except Exception as exc:  # noqa: BLE001 - any failure should ERROR the gateway
-                    await self._handle_send_failure(
-                        message.channel,
-                        sender=str(author.id),
-                        session_id=session_id,
-                        exc=exc,
-                    )
-                    return
-
-                reply = _extract_assistant_text(response)
-                if not reply:
-                    # Agent produced no assistant text — don't ghost the user.
-                    self._record_event(
-                        GatewayEvent(
-                            type=GatewayEventType.STATUS,
-                            sender=str(author.id),
-                            message="agent returned empty assistant reply",
-                            session_id=session_id,
-                        ),
-                    )
-                    with contextlib.suppress(Exception):
-                        await channel.send("(agent produced no reply)")
-                    return
-
-                try:
-                    await self._send_chunked(channel, reply)
-                except Exception as exc:  # noqa: BLE001 - keep gateway alive
-                    logger.warning("discord send failed: %s", exc)
-                    self._record_event(
-                        GatewayEvent(
-                            type=GatewayEventType.ERROR,
-                            sender=str(author.id),
-                            message=f"discord send failed: {exc}",
-                            session_id=session_id,
-                        ),
-                    )
-                    return
-
-                # Reply delivered: swap the in-flight EYES for a CHECK MARK
-                # so the user can see at a glance which past messages have
-                # been answered (and which are still pending behind the lock).
-                await self._swap_reaction(
-                    message,
-                    from_emoji=_PROCESSING_REACTION,
-                    to_emoji=_DONE_REACTION,
+            except Exception as exc:  # noqa: BLE001 - any failure should ERROR the gateway
+                await self._handle_send_failure(
+                    message.channel,
+                    sender=str(author.id),
+                    session_id=session_id,
+                    exc=exc,
                 )
+                return
 
+            reply = _extract_assistant_text(response)
+            if not reply:
+                # Agent produced no assistant text — don't ghost the user.
                 self._record_event(
                     GatewayEvent(
-                        type=GatewayEventType.OUTBOUND,
+                        type=GatewayEventType.STATUS,
                         sender=str(author.id),
-                        content=reply,
+                        message="agent returned empty assistant reply",
                         session_id=session_id,
                     ),
                 )
+                with contextlib.suppress(Exception):
+                    await channel.send("(agent produced no reply)")
+                return
+
+            try:
+                await self._send_chunked(channel, reply)
+            except Exception as exc:  # noqa: BLE001 - keep gateway alive
+                logger.warning("discord send failed: %s", exc)
+                self._record_event(
+                    GatewayEvent(
+                        type=GatewayEventType.ERROR,
+                        sender=str(author.id),
+                        message=f"discord send failed: {exc}",
+                        session_id=session_id,
+                    ),
+                )
+                return
+
+            # Reply delivered: swap the in-flight EYES for a CHECK MARK so
+            # the user can see at a glance which past messages have been
+            # answered (and which are still pending behind the lock).
+            await self._swap_reaction(
+                message,
+                from_emoji=_PROCESSING_REACTION,
+                to_emoji=_DONE_REACTION,
+            )
+
+            self._record_event(
+                GatewayEvent(
+                    type=GatewayEventType.OUTBOUND,
+                    sender=str(author.id),
+                    content=reply,
+                    session_id=session_id,
+                ),
+            )
 
     @contextlib.asynccontextmanager
     async def _typing_indicator(
