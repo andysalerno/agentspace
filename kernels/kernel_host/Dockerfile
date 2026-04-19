@@ -2,13 +2,17 @@ FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-# Install Copilot CLI and Claude Code (needed for harness kernels)
+# Install Copilot CLI, Claude Code, opencode (needed for harness kernels),
+# plus Node.js (for npm-distributed CLIs like firecrawl-cli).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg && \
+    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
     curl -fsSL https://gh.io/copilot-install | bash && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     curl -fsSL https://opencode.ai/install | bash && \
-    apt-get purge -y curl && \
+    npm install -g firecrawl-cli && \
+    apt-get purge -y curl gnupg && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /root/.local/bin/claude /usr/local/bin/claude
