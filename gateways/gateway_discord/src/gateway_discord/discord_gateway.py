@@ -15,17 +15,19 @@ import asyncio
 import contextlib
 import logging
 from collections import deque
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import discord
 from fastapi import APIRouter
 from gateway.events import GatewayEvent, GatewayEventType
 from gateway.protocol import GatewayConfig, GatewayStatus, GatewayType
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 logger = logging.getLogger(__name__)
 
 EVENTS_LIMIT = 200
-DEFAULT_TYPING_DELAY_MS = 600
 DEFAULT_CHUNK_MAX_CHARS = 1900
 DISCORD_MAX_MESSAGE_CHARS = 2000
 LOGIN_TIMEOUT_S = 30.0
@@ -134,7 +136,6 @@ class DiscordGateway:
         self._client_task: asyncio.Task[None] | None = None
         self._session_id: str | None = None
         self._owner_id: int | None = None
-        self._typing_delay_s: float = DEFAULT_TYPING_DELAY_MS / 1000.0
         self._chunk_max: int = DEFAULT_CHUNK_MAX_CHARS
         self._send_lock = asyncio.Lock()
         self._events: deque[GatewayEvent] = deque(maxlen=EVENTS_LIMIT)
@@ -176,13 +177,6 @@ class DiscordGateway:
             return
 
         try:
-            delay_ms = float(
-                config.env.get(
-                    "DISCORD_TYPING_DELAY_MS",
-                    DEFAULT_TYPING_DELAY_MS,
-                ),
-            )
-            self._typing_delay_s = delay_ms / 1000.0
             self._chunk_max = int(
                 config.env.get("DISCORD_CHUNK_MAX_CHARS", DEFAULT_CHUNK_MAX_CHARS),
             )
@@ -329,12 +323,14 @@ class DiscordGateway:
 
         async with self._send_lock:
             channel = cast("_ChannelLike", message.channel)
-            # discord.py's channel.typing() is an async context manager that
-            # fires the typing indicator and auto-refreshes it (~every 5s)
-            # until the context exits.  By wrapping the entire turn we get an
-            # accurate "agent is working" signal for free: any failure /
-            # timeout / early return unwinds the context and stops typing.
-            async with channel.typing():
+            # _typing_indicator wraps discord.py's channel.typing() in a
+            # best-effort context manager: it auto-refreshes the typing
+            # indicator (~every 9s) for the whole turn, and any failure /
+            # timeout / early return inside the body unwinds it cleanly.
+            # If typing() itself fails (transient REST blip, missing
+            # permission, etc.), we still execute the body without the
+            # indicator — typing is purely cosmetic and must not drop a turn.
+            async with self._typing_indicator(channel):
                 # Tell the user we've started working on their message.
                 # Failure to react (missing permission, deleted message, etc.)
                 # must not abort the turn.
@@ -412,6 +408,38 @@ class DiscordGateway:
                     ),
                 )
 
+    @contextlib.asynccontextmanager
+    async def _typing_indicator(
+        self,
+        channel: _ChannelLike,
+    ) -> AsyncIterator[None]:
+        """Wrap channel.typing() so its own failures cannot drop the turn.
+
+        discord.py's channel.typing() opens a REST call on enter; that call
+        can fail (transient 5xx, missing Send Messages permission, deleted
+        channel, etc.).  Typing is purely cosmetic, so on entry failure we
+        log at debug and execute the body without the indicator.
+
+        Body exceptions are NOT swallowed \u2014 the caller's own try/except
+        blocks must continue to see them.  Exit failures from typing are
+        swallowed because they only affect the indicator, not the work.
+        """
+        try:
+            cm = channel.typing()
+            await cm.__aenter__()
+        except Exception as exc:  # noqa: BLE001 - cosmetic, never drop a turn
+            logger.debug("discord typing() enter failed: %s", exc)
+            yield
+            return
+
+        try:
+            yield
+        finally:
+            try:
+                await cm.__aexit__(None, None, None)
+            except Exception as exc:  # noqa: BLE001 - cosmetic, never drop a turn
+                logger.debug("discord typing() exit failed: %s", exc)
+
     async def _react(self, message: object, emoji: str) -> None:
         """Add a reaction; log and swallow failures (cosmetic UX only)."""
         try:
@@ -451,11 +479,10 @@ class DiscordGateway:
         return self._session_id
 
     async def _send_chunked(self, channel: _ChannelLike, text: str) -> None:
-        chunks = _chunk(text, self._chunk_max)
-        for index, chunk in enumerate(chunks):
-            if index > 0 and self._typing_delay_s > 0:
-                async with channel.typing():
-                    await asyncio.sleep(self._typing_delay_s)
+        # The outer turn already holds an open channel.typing() context, so
+        # the indicator stays on between chunks for free; no inter-chunk
+        # sleep is needed.
+        for chunk in _chunk(text, self._chunk_max):
             await channel.send(chunk)
 
     async def _handle_send_failure(

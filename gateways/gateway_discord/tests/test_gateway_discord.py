@@ -172,7 +172,6 @@ def _make_config(client: FakeClient, **env_overrides: str) -> GatewayConfig:
     env = {
         "DISCORD_BOT_TOKEN": "fake-token",
         "DISCORD_OWNER_USER_ID": "111",
-        "DISCORD_TYPING_DELAY_MS": "0",
         "DISCORD_CHUNK_MAX_CHARS": "20",
     }
     env.update(env_overrides)
@@ -191,7 +190,6 @@ def _ready_gateway(client: FakeClient, **env_overrides: str) -> DiscordGateway:
     # Manually wire what start() would have produced after on_ready fires.
     gateway._config = config  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     gateway._owner_id = int(config.env["DISCORD_OWNER_USER_ID"])  # type: ignore[reportPrivateUsage]  # noqa: SLF001
-    gateway._typing_delay_s = float(config.env["DISCORD_TYPING_DELAY_MS"]) / 1000.0  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     gateway._chunk_max = int(config.env["DISCORD_CHUNK_MAX_CHARS"])  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     gateway._status = GatewayStatus.RUNNING  # type: ignore[reportPrivateUsage]  # noqa: SLF001
     # _swap_reaction needs self._client.user to identify which reaction to
@@ -257,6 +255,41 @@ async def test_typing_indicator_stops_on_agent_failure() -> None:
     assert channel.typing_active == 0
     # Failure path drives the gateway to ERROR (per existing contract).
     assert gateway.status is GatewayStatus.ERROR
+
+
+@pytest.mark.asyncio
+async def test_typing_enter_failure_does_not_drop_turn() -> None:
+    """If channel.typing() itself raises on enter, the turn must still run.
+
+    Typing is purely cosmetic; a transient REST blip or missing Send
+    Messages permission must not prevent the agent reply from being
+    delivered.
+    """
+    fake = FakeClient(reply="ok")
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+
+    # Replace channel.typing() with one that raises on __aenter__.
+    @asynccontextmanager
+    async def _broken_typing() -> AsyncIterator[None]:
+        msg = "typing not allowed"
+        raise RuntimeError(msg)
+        yield  # pragma: no cover - unreachable, satisfies asynccontextmanager
+
+    channel.typing = _broken_typing  # type: ignore[method-assign]
+
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="hi",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    # Reply was still delivered despite typing failing on enter.
+    assert fake.sent_messages == [("sess-1", "hi")]
+    assert channel.sent == ["ok"]
+    assert gateway.status is GatewayStatus.RUNNING
 
 
 @pytest.mark.asyncio
@@ -364,7 +397,7 @@ async def test_empty_content_is_ignored() -> None:
 @pytest.mark.asyncio
 async def test_long_reply_is_chunked() -> None:
     fake = FakeClient(reply="aaaaaaaaaa\n\nbbbbbbbbbb\n\ncccccccccc")
-    gateway = _ready_gateway(fake, DISCORD_TYPING_DELAY_MS="1")
+    gateway = _ready_gateway(fake)
     channel = FakeChannel()
     msg = FakeMessage(
         author=FakeAuthor(id=111),
@@ -373,10 +406,9 @@ async def test_long_reply_is_chunked() -> None:
     )
     await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
     assert len(channel.sent) >= 2
-    # One outer typing context wraps the whole turn, plus one inter-chunk
-    # typing context per gap between chunks (n-1).  So total = 1 + (n-1) = n.
-    assert channel.typing_calls == len(channel.sent)
-    # All typing contexts closed cleanly.
+    # Exactly one outer typing context wraps the whole turn; chunks are sent
+    # under that single context (no per-chunk typing call).
+    assert channel.typing_calls == 1
     assert channel.typing_active == 0
 
 

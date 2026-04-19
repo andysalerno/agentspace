@@ -71,17 +71,6 @@ _DISCORD_SCHEMA = GatewaySchema(
             placeholder="123456789012345678",
         ),
         GatewayConfigField(
-            key="DISCORD_TYPING_DELAY_MS",
-            label="Typing delay (ms)",
-            kind="env",
-            required=False,
-            description=(
-                "Delay between outbound message chunks; the typing indicator "
-                "is shown during this delay."
-            ),
-            default="600",
-        ),
-        GatewayConfigField(
             key="DISCORD_CHUNK_MAX_CHARS",
             label="Max chunk size (chars)",
             kind="env",
