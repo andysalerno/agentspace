@@ -54,7 +54,7 @@ class ClientServiceClient:
     async def delete_session(self, *, session_id: str) -> None:
         async with httpx.AsyncClient(
             base_url=self.base_url,
-            timeout=self.timeout,
+            timeout=self._httpx_timeout(),
         ) as client:
             response = await client.delete(f"/sessions/{session_id}")
         if response.status_code not in (200, 204, 404):
@@ -62,6 +62,14 @@ class ClientServiceClient:
 
     async def get_agent(self, agent_id: str) -> dict[str, object]:
         return await self._request_json("GET", f"/agents/{agent_id}")
+
+    def _httpx_timeout(self) -> httpx.Timeout:
+        # Reads have no deadline because client_service.send_message proxies a
+        # streaming agent_host call that may take arbitrarily long while the
+        # underlying agent works (web fetches, multi-step tool calls, etc.).
+        # Connect/write timeouts still apply so we fail fast if the upstream
+        # service is unreachable.
+        return httpx.Timeout(self.timeout, read=None)
 
     async def _request_json(
         self,
@@ -74,7 +82,7 @@ class ClientServiceClient:
         try:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
-                timeout=self.timeout,
+                timeout=self._httpx_timeout(),
             ) as client:
                 response = await client.request(method, path, json=json)
             response.raise_for_status()
