@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
+import { withRequiredEnvKeys } from "./envPrefill";
 
 type ConfigKernelsViewProps = {
     harnesses: string[];
@@ -51,11 +52,16 @@ export default function ConfigKernelsView({ harnesses, onError }: ConfigKernelsV
         setLoadError(null);
         api.getKernelConfig(effectiveSelected)
             .then((config) => {
-                setEnvVars(config.env_vars);
+                setEnvVars(withRequiredEnvKeys(config.env_vars, effectiveSelected));
                 setUpdatedAt(config.updated_at);
                 setDirty(false);
             })
-            .catch((err: Error) => setLoadError(err.message))
+            .catch((err: Error) => {
+                setLoadError(err.message);
+                // Still surface required keys so the user knows what to fill
+                // in even when the stored config can't be loaded.
+                setEnvVars((prev) => withRequiredEnvKeys(prev, effectiveSelected));
+            })
             .finally(() => setLoading(false));
     }, [effectiveSelected]);
 
@@ -65,7 +71,7 @@ export default function ConfigKernelsView({ harnesses, onError }: ConfigKernelsV
         setSavedNotice(false);
         try {
             const config = await api.updateKernelConfig(effectiveSelected, envVars);
-            setEnvVars(config.env_vars);
+            setEnvVars(withRequiredEnvKeys(config.env_vars, effectiveSelected));
             setUpdatedAt(config.updated_at);
             setDirty(false);
             setSavedNotice(true);

@@ -3,52 +3,15 @@ import { useEffect, useState } from "react";
 import type { Agent, Skill } from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
+import { withRequiredEnvKeys } from "./envPrefill";
 
 const DEFAULT_HARNESS = "copilot-cli";
-
-// Required env var keys per harness. Pre-filled (with empty values) into the
-// agent creation form's Environment Variables editor as a presentation-level
-// hint so the user can see what they need to set. Not persisted as defaults
-// in the kernel configuration store.
-const REQUIRED_ENV_KEYS_BY_HARNESS: Record<string, string[]> = {
-    opencode: [
-        "KERNEL_OPENCODE_BASE_URL",
-        "KERNEL_OPENCODE_API_KEY",
-        "KERNEL_OPENCODE_MODEL_NAME",
-    ],
-};
 
 function getInitialHarness(harnesses: string[]): string {
     if (harnesses.includes(DEFAULT_HARNESS)) {
         return DEFAULT_HARNESS;
     }
     return harnesses[0] ?? DEFAULT_HARNESS;
-}
-
-/**
- * Merge any required keys for the harness into an env-vars text blob, adding
- * `KEY=` lines for keys that are not already present. Existing lines (and
- * their values) are preserved untouched.
- */
-function withRequiredEnvKeys(envVars: string, harness: string): string {
-    const required = REQUIRED_ENV_KEYS_BY_HARNESS[harness];
-    if (!required || required.length === 0) {
-        return envVars;
-    }
-    const present = new Set<string>();
-    for (const rawLine of envVars.split("\n")) {
-        const line = rawLine.trim();
-        if (line === "" || line.startsWith("#")) continue;
-        const eq = line.indexOf("=");
-        const key = (eq === -1 ? line : line.slice(0, eq)).trim();
-        if (key !== "") present.add(key);
-    }
-    const additions = required.filter((k) => !present.has(k)).map((k) => `${k}=`);
-    if (additions.length === 0) {
-        return envVars;
-    }
-    const prefix = envVars === "" || envVars.endsWith("\n") ? envVars : envVars + "\n";
-    return prefix + additions.join("\n") + "\n";
 }
 
 function formatHarnessLabel(harness: string): string {
