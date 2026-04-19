@@ -503,4 +503,3 @@ async def gateway_logs(gateway_id: str) -> dict[str, list[str]]:
     except GatewayNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"lines": lines}
-

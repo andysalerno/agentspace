@@ -108,9 +108,7 @@ class ClientService:
         self._kernel_config_store: KernelConfigStore = (
             kernel_config_store or InMemoryKernelConfigStore()
         )
-        self._gateway_store: GatewayStore = (
-            gateway_store or InMemoryGatewayStore()
-        )
+        self._gateway_store: GatewayStore = gateway_store or InMemoryGatewayStore()
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
         self._gateway_lock = asyncio.Lock()
@@ -551,7 +549,7 @@ class ClientService:
         if enabled:
             await self.start_gateway(gateway_id)
         logger.info("created gateway %s (%s)", gateway_id, gateway_type.value)
-        return (await self.get_gateway(gateway_id))
+        return await self.get_gateway(gateway_id)
 
     async def update_gateway(
         self,
