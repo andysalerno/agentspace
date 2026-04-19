@@ -202,7 +202,11 @@ class ClientService:
         client_type: ClientType | None = None,
     ) -> dict[str, object]:
         agent = await self._require_agent(agent_id)
-        env = parse_env_vars(agent.env_vars)
+        kernel_config = await self._kernel_config_store.get(agent.harness)
+        env: dict[str, str] = {}
+        if kernel_config is not None:
+            env.update(parse_env_vars(kernel_config.env_vars))
+        env.update(parse_env_vars(agent.env_vars))
         upstream = await self._agent_host.create_session(
             harness=agent.harness,
             skills=agent.skills,

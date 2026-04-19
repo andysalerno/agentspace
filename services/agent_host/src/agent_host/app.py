@@ -69,7 +69,9 @@ async def healthz() -> dict[str, str]:
 
 @app.get("/info")
 async def info() -> dict[str, Any]:
-    env = {key: value for key, value in os.environ.items() if key.startswith(ENV_PREFIX)}
+    env = {
+        key: value for key, value in os.environ.items() if key.startswith(ENV_PREFIX)
+    }
     return {"service": "agent_host", "env_prefix": ENV_PREFIX, "env": env}
 
 

@@ -1,7 +1,9 @@
 """Kernel config persistence: protocol and SQLite/in-memory implementations.
 
 A kernel config is a per-harness default ``env_vars`` blob used to prefill the
-agent creation form in clients.  It is not consulted at session-create time.
+agent creation form in clients.  It is also merged into the session env at
+session-create time, with per-agent ``env_vars`` taking precedence over the
+per-harness defaults.
 """
 
 from __future__ import annotations

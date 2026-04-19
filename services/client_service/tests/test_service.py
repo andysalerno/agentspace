@@ -23,12 +23,12 @@ from kernel.events import (
     tool_call,
     tool_result,
 )
+from kernel_host.registry import HarnessName
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from client_service.agent_host_client import AgentHostClient
-    from kernel_host.registry import HarnessName
 
 
 class StubAgentHostClient:
@@ -343,6 +343,38 @@ async def test_list_kernels_includes_client_session_and_channel_names() -> None:
     )
     assert kernel["agent_ids"] == ["kernel-agent"]
     assert kernel["channel_names"] == ["terminal-1"]
+
+
+@pytest.mark.asyncio
+async def test_create_session_merges_kernel_config_env_with_agent_env() -> None:
+    upstream = StubAgentHostClient()
+    runtime = cast("AgentHostClient", upstream)
+    service = ClientService(agent_host_client=runtime)
+
+    await service.update_kernel_config(
+        HarnessName.OPENCODE,
+        "KERNEL_OPENCODE_BASE_URL=https://example.test/v1\n"
+        "KERNEL_OPENCODE_API_KEY=from-kernel-config\n"
+        "KERNEL_OPENCODE_MODEL_NAME=base-model\n",
+    )
+    agent = await service.create_agent(
+        agent_id="opencode-agent",
+        name="OpenCode Agent",
+        harness=HarnessName.OPENCODE,
+        env_vars="KERNEL_OPENCODE_API_KEY=from-agent\nEXTRA=1\n",
+    )
+
+    await service.create_session(agent_id=str(agent["agent_id"]))
+
+    assert len(upstream.created) == 1
+    env = cast("dict[str, str]", upstream.created[0]["env"])
+    # per-harness defaults are present
+    assert env["KERNEL_OPENCODE_BASE_URL"] == "https://example.test/v1"
+    assert env["KERNEL_OPENCODE_MODEL_NAME"] == "base-model"
+    # per-agent overrides per-harness
+    assert env["KERNEL_OPENCODE_API_KEY"] == "from-agent"
+    # per-agent extras pass through
+    assert env["EXTRA"] == "1"
 
 
 @pytest.mark.asyncio
