@@ -672,9 +672,20 @@ class ClientService:
         startup so it does not block ``lifespan`` from yielding.  Each
         gateway is retried independently; failures are logged but do not
         abort the loop.
+
+        Before starting anything, persisted gateway statuses are
+        reconciled against the live state reported by ``agent_host``.
+        ``client_service`` may have been restarted while gateway records
+        in the DB still say ``running`` from a previous run; without this
+        reconcile the UI would show stale "Stop" buttons for gateways
+        whose containers no longer exist.
         """
+        await self._reconcile_gateway_statuses()
         for record in await self._gateway_store.list():
             if not record.enabled:
+                continue
+            if record.status == "running":
+                # Already running (per reconcile); nothing to autostart.
                 continue
             backoff = initial_backoff
             for attempt in range(1, max_attempts + 1):
@@ -693,6 +704,56 @@ class ClientService:
                     backoff = min(backoff * 2, max_backoff)
                 else:
                     break
+
+    async def _reconcile_gateway_statuses(self) -> None:
+        """Sync persisted gateway status with ``agent_host``'s in-memory view.
+
+        ``agent_host`` only knows about gateways it created in the
+        current process; it does not rehydrate from Docker on startup.
+        So this reconcile is authoritative only for the common case
+        where ``client_service`` restarts while ``agent_host`` was up
+        the whole time, or where both restarted together (in which case
+        no gateway containers from a prior run are still being managed).
+
+        If ``agent_host`` is unreachable we deliberately leave persisted
+        records untouched rather than guess; flipping live records to
+        ``stopped`` based on a transient network failure would be more
+        confusing than leaving stale state for the user to clear.
+        """
+        try:
+            live = await self._agent_host.list_gateways()
+        except Exception:
+            logger.exception(
+                "startup reconcile: failed to list gateways from agent_host; "
+                "leaving persisted gateway statuses untouched",
+            )
+            return
+        live_containers: dict[str, str | None] = {}
+        for item in live:
+            if not isinstance(item, dict):
+                continue
+            gid = item.get("gateway_id")
+            if not isinstance(gid, str):
+                continue
+            container = item.get("container_name")
+            live_containers[gid] = container if isinstance(container, str) else None
+        async with self._gateway_lock:
+            for record in await self._gateway_store.list():
+                if record.gateway_id in live_containers:
+                    new_status = "running"
+                    new_container = live_containers[record.gateway_id]
+                else:
+                    new_status = "stopped"
+                    new_container = None
+                if (
+                    record.status == new_status
+                    and record.container_name == new_container
+                ):
+                    continue
+                record.status = new_status
+                record.container_name = new_container
+                record.updated_at = utc_now()
+                await self._gateway_store.update(record)
 
     async def _require_gateway(self, gateway_id: str) -> GatewayRecord:
         record = await self._gateway_store.get(gateway_id)

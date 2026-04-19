@@ -999,15 +999,30 @@ button:disabled {
   color: var(--status-active-color);
 }
 
+.status-badge.running {
+  background: var(--status-active-bg);
+  color: var(--status-active-color);
+}
+
+.status-badge.starting,
 .status-badge.busy {
   background: var(--status-busy-bg);
   color: var(--status-busy-color);
+}
+
+.status-badge.stopped {
+  background: var(--tag-bg);
+  color: var(--text-secondary);
 }
 
 .status-badge.error,
 .status-badge.dead {
   background: var(--status-error-bg);
   color: var(--status-error-color);
+}
+
+.card-title-text {
+  margin-right: 8px;
 }
 
 .builtin-badge {

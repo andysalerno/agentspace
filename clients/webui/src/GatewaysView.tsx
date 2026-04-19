@@ -392,8 +392,8 @@ export default function GatewaysView() {
                     <div className="card" key={gateway.gateway_id}>
                         <div className="card-body">
                             <h3>
-                                {gateway.name}
-                                <span className={`badge status-${gateway.status}`}>
+                                <span className="card-title-text">{gateway.name}</span>
+                                <span className={`status-badge ${gateway.status}`}>
                                     {gateway.status}
                                 </span>
                             </h3>
