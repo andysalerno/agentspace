@@ -69,7 +69,7 @@ function applyEventToAssistant(
         return { ...message, tool_calls: nextToolCalls };
     }
 
-    if (event.type === "tool_result" && event.tool && event.output) {
+    if (event.type === "tool_result" && event.tool && event.output != null) {
         const toolCalls = [...(message.tool_calls ?? [])];
         const toolIndex = toolCalls.findIndex(
             (toolCall) => toolCall.tool === event.tool && toolCall.output === undefined,

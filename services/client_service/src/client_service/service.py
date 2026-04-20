@@ -827,23 +827,36 @@ def _flatten_reasoning(events: list[KernelEvent]) -> str:
 
 
 def _extract_tool_calls(events: list[KernelEvent]) -> list[ToolCallRecord]:
-    """Extract tool calls with their inputs and paired outputs."""
+    """Extract tool calls with their inputs and paired outputs.
+
+    Tool calls and tool results are paired in event order, per tool name.
+    The Nth ``tool_result`` for a given tool name is paired with the Nth
+    ``tool_call`` for that same tool name. This preserves correctness when
+    the same tool is invoked multiple times within a single assistant turn.
+    """
     calls: list[ToolCallRecord] = []
-    result_map: dict[str, str] = {}
-    for event in events:
-        if event.type == EventType.TOOL_RESULT and event.tool and event.output:
-            result_map[event.tool] = event.output
+    pending: dict[str, list[int]] = {}
     for event in events:
         if event.type == EventType.TOOL_CALL and event.tool:
             tool_input = json.dumps(event.input, indent=2) if event.input else None
-            tool_output = result_map.pop(event.tool, None)
             calls.append(
-                ToolCallRecord(
-                    tool=event.tool,
-                    input=tool_input,
-                    output=tool_output,
-                ),
+                ToolCallRecord(tool=event.tool, input=tool_input, output=None),
             )
+            pending.setdefault(event.tool, []).append(len(calls) - 1)
+        elif (
+            event.type == EventType.TOOL_RESULT
+            and event.tool
+            and event.output is not None
+        ):
+            indices = pending.get(event.tool)
+            if indices:
+                idx = indices.pop(0)
+                existing = calls[idx]
+                calls[idx] = ToolCallRecord(
+                    tool=existing.tool,
+                    input=existing.input,
+                    output=event.output,
+                )
     return calls
 
 

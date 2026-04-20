@@ -331,6 +331,62 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_repeated_tool_invocations_pair_outputs_in_order() -> None:
+    """Multiple invocations of the same tool should each retain their output."""
+
+    class RepeatedToolStub(StubAgentHostClient):
+        def stream_message(
+            self,
+            session_id: str,
+            message: str,
+        ) -> AsyncIterator[KernelEvent]:
+            self.sent.append((session_id, message))
+            events = [
+                session_start(session_id, "copilot-cli"),
+                status_event(KernelStatus.BUSY),
+                tool_call("read_file", {"path": "a.py"}),
+                tool_result("read_file", "contents-a"),
+                tool_call("read_file", {"path": "b.py"}),
+                tool_result("read_file", "contents-b"),
+                tool_call("read_file", {"path": "c.py"}),
+                tool_result("read_file", ""),
+                text_delta("done"),
+                status_event(KernelStatus.DONE),
+                session_end(),
+            ]
+
+            async def iterator() -> AsyncIterator[KernelEvent]:
+                for event in events:
+                    yield event
+                self._sessions[session_id]["status"] = "done"
+
+            return iterator()
+
+    upstream = RepeatedToolStub()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+    agent = await service.create_agent(agent_id="repeat-agent", name="Repeat Agent")
+    session = await service.create_session(agent_id=str(agent["agent_id"]))
+    session_id = str(session["session_id"])
+
+    reply = await service.send_message(session_id, "read several files")
+    assistant_message = cast("dict[str, object]", reply["assistant_message"])
+
+    assert assistant_message["tool_calls"] == [
+        {
+            "tool": "read_file",
+            "input": '{\n  "path": "a.py"\n}',
+            "output": "contents-a",
+        },
+        {
+            "tool": "read_file",
+            "input": '{\n  "path": "b.py"\n}',
+            "output": "contents-b",
+        },
+        {"tool": "read_file", "input": '{\n  "path": "c.py"\n}', "output": ""},
+    ]
+
+
+@pytest.mark.asyncio
 async def test_stream_message_yields_events_then_final_payload() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)
