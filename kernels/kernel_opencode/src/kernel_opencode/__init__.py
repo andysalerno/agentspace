@@ -238,6 +238,9 @@ class OpenCodeKernel:
             },
             "permission": {
                 "*": "allow",
+                "bash": {
+                    "*": "allow",
+                },
                 "webfetch": "deny",
                 "doom_loop": "deny",
                 "external_directory": "deny",
