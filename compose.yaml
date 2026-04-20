@@ -1,4 +1,5 @@
 services:
+
   kernel-host-image:
     image: agentspace-kernel-kernel:latest
     build:
@@ -83,6 +84,16 @@ services:
       - "8003:8003"
     networks:
       - agentspace
+  # phoenix:
+  #   image: arizephoenix/phoenix:latest
+  #   ports:
+  #     # UI + OTLP HTTP collector
+  #     - "6006:6006"
+  #     # OTLP gRPC collector
+  #     - "4317:4317"
+  #   networks:
+  #     - agentspace
+  #   restart: unless-stopped
 
 networks:
   agentspace:
