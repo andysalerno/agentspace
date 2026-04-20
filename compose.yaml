@@ -71,8 +71,8 @@ services:
   webui:
     image: agentspace-webui-webui:latest
     build:
-      context: .
-      dockerfile: clients/webui/Dockerfile
+      context: clients/webui
+      dockerfile: Dockerfile
     depends_on:
       client-service:
         condition: service_started

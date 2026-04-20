@@ -1,7 +1,46 @@
-.venv/
+# VCS / CI metadata
 .git/
-__pycache__/
-*.pyc
-*.egg-info/
+.github/
+
+# Editor / agent metadata
+.vscode/
+.claude/
+.idea/
+
+# Python virtual envs and caches
+.venv/
+**/.venv/
+.ruff_cache/
+**/.ruff_cache/
 .pytest_cache/
+**/.pytest_cache/
+.mypy_cache/
+**/.mypy_cache/
+**/__pycache__/
+*.pyc
+*.pyo
+**/*.egg-info/
+
+# Node / web build artifacts
+**/node_modules/
+**/dist/
+**/build/
+**/.next/
+**/*.tsbuildinfo
+
+# Local environment / secrets (compose loads these from disk separately)
 .env
+**/.env
+!**/.env.example
+
+# Runtime data mounts — not needed at image build time
+mounts/
+
+# Docs and project notes
+docs/
+TODO.md
+README.md
+
+# OS junk
+.DS_Store
+**/.DS_Store
