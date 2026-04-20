@@ -5,7 +5,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 # Install Copilot CLI, Claude Code, opencode (needed for harness kernels),
 # plus Node.js (for npm-distributed CLIs like firecrawl-cli).
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg ripgrep && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     curl -fsSL https://gh.io/copilot-install | bash && \
