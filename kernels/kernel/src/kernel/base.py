@@ -23,6 +23,13 @@ from kernel.events import (
     status_event,
 )
 
+# asyncio's default StreamReader limit is 64 KiB. Harness CLIs can emit
+# JSONL lines larger than that (e.g. tool results containing fetched web
+# pages or large file contents), which would cause readline() to raise
+# "Separator is found, but chunk is longer than limit" and abort the
+# stream mid-response. Bump generously.
+_STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -73,6 +80,7 @@ class BaseKernel(ABC):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=full_env,
+            limit=_STREAM_BUFFER_LIMIT,
         )
 
         await self._queue.put(session_start(self._session_id, self.name))

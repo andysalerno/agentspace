@@ -33,6 +33,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
+
+# asyncio's default StreamReader limit is 64 KiB; claude JSONL events can
+# easily exceed that when a tool result embeds a fetched web page or other
+# large payload. Bump generously to avoid mid-stream readline() failures.
+_STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
 DEFAULT_ALLOWED_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,TodoWrite,Skill,Task"
 
 
@@ -107,6 +112,7 @@ class ClaudeCodeKernel:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=cwd,
+                limit=_STREAM_BUFFER_LIMIT,
             )
         except FileNotFoundError:
             logger.exception("claude CLI not found; is it installed and on the PATH?")

@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
 
+# asyncio's default StreamReader limit is 64 KiB; opencode JSONL events can
+# easily exceed that when a tool result embeds a fetched web page or other
+# large payload. Bump generously to avoid mid-stream readline() failures.
+_STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
+
 
 class OpenCodeKernel:
     """Kernel that wraps OpenCode CLI (`opencode run`)."""
@@ -110,6 +115,12 @@ class OpenCodeKernel:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=cwd,
+                # opencode emits a single JSON object per line, and tool
+                # results (e.g. webfetch payloads) can easily exceed the
+                # asyncio StreamReader default of 64 KiB, which would cause
+                # readline() to raise "Separator is found, but chunk is
+                # longer than limit" and abort the stream mid-response.
+                limit=_STREAM_BUFFER_LIMIT,
             )
         except FileNotFoundError:
             await self._queue.put(error("opencode CLI not found; is it installed?"))

@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
 
+# asyncio's default StreamReader limit is 64 KiB; copilot JSONL events can
+# easily exceed that when a tool result embeds a fetched web page or other
+# large payload. Bump generously to avoid mid-stream readline() failures.
+_STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
+
 
 def _ensure_directory(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -109,6 +114,7 @@ class CopilotKernel:
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=cwd,
+                limit=_STREAM_BUFFER_LIMIT,
             )
         except FileNotFoundError:
             await self._queue.put(error("copilot CLI not found; is it installed?"))
