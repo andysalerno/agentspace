@@ -231,6 +231,8 @@ class ClientService:
         if kernel_config is not None:
             env.update(parse_env_vars(kernel_config.env_vars))
         env.update(parse_env_vars(agent.env_vars))
+        if agent.system_prompt:
+            env["KERNEL_SYSTEM_PROMPT"] = agent.system_prompt
         upstream = await self._agent_host.create_session(
             harness=agent.harness,
             skills=agent.skills,

@@ -32,6 +32,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
 
+CUSTOM_AGENT_NAME = "custom"
+CUSTOM_AGENT_PATH = (
+    Path.home() / ".config" / "opencode" / "agents" / f"{CUSTOM_AGENT_NAME}.md"
+)
+
 # asyncio's default StreamReader limit is 64 KiB; opencode JSONL events can
 # easily exceed that when a tool result embeds a fetched web page or other
 # large payload. Bump generously to avoid mid-stream readline() failures.
@@ -89,6 +94,7 @@ class OpenCodeKernel:
 
         try:
             self._write_provider_config()
+            self._write_custom_agent_prompt()
         except ValueError as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
@@ -172,6 +178,8 @@ class OpenCodeKernel:
             cmd.extend(["--variant", variant])
 
         agent = self._config.env.get("OPENCODE_AGENT")
+        if not agent and self._has_custom_agent_prompt():
+            agent = CUSTOM_AGENT_NAME
         if agent:
             cmd.extend(["--agent", agent])
 
@@ -254,6 +262,30 @@ class OpenCodeKernel:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(config, indent=2))
         logger.info("wrote opencode provider config to %s", config_path)
+
+    def _write_custom_agent_prompt(self) -> None:
+        """Write the agent's system prompt to opencode's custom agent file.
+
+        The system prompt is forwarded by the client_service via the
+        ``KERNEL_SYSTEM_PROMPT`` env var. The file is always written (even
+        when empty) so a stale prompt from a previous run cannot leak
+        into the current session.
+        """
+        prompt = self._config.env.get("KERNEL_SYSTEM_PROMPT", "")
+        CUSTOM_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CUSTOM_AGENT_PATH.write_text(prompt)
+        logger.info(
+            "wrote opencode custom agent prompt to %s (%d chars)",
+            CUSTOM_AGENT_PATH,
+            len(prompt),
+        )
+
+    def _has_custom_agent_prompt(self) -> bool:
+        """Return True if the custom agent prompt file has non-whitespace content."""
+        try:
+            return bool(CUSTOM_AGENT_PATH.read_text().strip())
+        except OSError:
+            return False
 
     def _build_env(self) -> dict[str, str]:
         env = {**os.environ}
