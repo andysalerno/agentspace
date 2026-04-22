@@ -1,0 +1,26 @@
+# Override for running the stack on rootless Podman.
+#
+# Usage:
+#   podman compose -f compose.yaml -f compose.podman.yaml up -d --build
+#
+# Replaces the Docker socket bind-mount with the user's rootless Podman socket
+# (which exposes the Docker-compatible API). Make sure the user socket is
+# running first:
+#   systemctl --user enable --now podman.socket
+
+services:
+  # `agent-host` declares depends_on the `*-image` builder services with
+  # `condition: service_completed_successfully`. Docker Compose treats that
+  # as "build/run, then start dependents". Podman's libpod, however,
+  # validates depends_on at container-start time and refuses to start a
+  # dependent whose dependencies are not currently "running" -- so it
+  # rejects agent-host because the builders have already exited(0).
+  #
+  # The build phase has already ensured the images exist, so it's safe to
+  # drop the runtime dependency under podman.
+  agent-host:
+    depends_on: !reset []
+    volumes:
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/podman/podman.sock:/var/run/docker.sock
+      - skills:/skills
+      - ./mounts/skills:/builtin-skills:ro

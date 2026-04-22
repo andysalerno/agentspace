@@ -34,6 +34,13 @@ stack-build:
 stack-up:
   podman compose -f compose.yaml up -d --build
 
+# Same as stack-up but with the rootless-Podman override (uses the user's
+# podman.sock instead of /var/run/docker.sock and works around libpod's
+# strict depends_on validation). Requires `systemctl --user enable --now
+# podman.socket` once.
+stack-up-podman:
+  podman compose -f compose.yaml -f compose.podman.yaml up -d --build
+
 stack-down:
   podman compose -f compose.yaml down --remove-orphans
   -podman rm -f $(podman ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
