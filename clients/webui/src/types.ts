@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "gateways" | "info" | "config-kernels";
+export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
 
 export type Harness = string;
 
@@ -9,6 +9,7 @@ export type Agent = {
   system_prompt: string;
   skills: string[];
   env_vars: string;
+  connection_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -121,6 +122,16 @@ export type KernelConfig = {
   harness: string;
   env_vars: string;
   updated_at: string | null;
+};
+
+export type Connection = {
+  connection_id: string;
+  name: string;
+  url: string;
+  has_api_key: boolean;
+  api_key?: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type GatewayType = string;

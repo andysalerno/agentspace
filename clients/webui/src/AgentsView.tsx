@@ -8,6 +8,7 @@ import { withRequiredEnvKeys } from "./envPrefill";
 import {
     queryKeys,
     useAgents,
+    useConnections,
     useHarnesses,
     useSkills,
 } from "./queries";
@@ -37,6 +38,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     const { data: agents = [] } = useAgents();
     const { data: skills = [] } = useSkills();
     const { data: harnesses = [] } = useHarnesses();
+    const { data: connections = [] } = useConnections();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
 
@@ -47,10 +49,13 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
         system_prompt: "",
         skills: [] as string[],
         env_vars: "",
+        connection_id: "" as string | null,
     });
     const [showForm, setShowForm] = useState(false);
     const [editingSkillsFor, setEditingSkillsFor] = useState<string | null>(null);
     const [editSkills, setEditSkills] = useState<string[]>([]);
+    const [editingConnectionFor, setEditingConnectionFor] = useState<string | null>(null);
+    const [editConnectionId, setEditConnectionId] = useState<string | null>(null);
     const [envDirty, setEnvDirty] = useState(false);
 
     const invalidateAgents = () =>
@@ -64,13 +69,17 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
             system_prompt: string;
             skills: string[];
             env_vars: string;
+            connection_id: string | null;
         }) => api.createAgent(payload),
         onSuccess: () => invalidateAgents(),
         onError: reportError,
     });
 
     const updateMutation = useMutation({
-        mutationFn: ({ agentId, patch }: { agentId: string; patch: { skills: string[] } }) =>
+        mutationFn: ({ agentId, patch }: {
+            agentId: string;
+            patch: { skills?: string[]; connection_id?: string | null };
+        }) =>
             api.updateAgent(agentId, patch),
         onSuccess: () => invalidateAgents(),
         onError: reportError,
@@ -148,6 +157,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
             system_prompt: "",
             skills: [],
             env_vars: "",
+            connection_id: null,
         });
         setEnvDirty(false);
         setShowForm(false);
@@ -178,6 +188,19 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     function startEditingSkills(agent: Agent) {
         setEditingSkillsFor(agent.agent_id);
         setEditSkills([...agent.skills]);
+    }
+
+    function startEditingConnection(agent: Agent) {
+        setEditingConnectionFor(agent.agent_id);
+        setEditConnectionId(agent.connection_id);
+    }
+
+    async function handleSaveConnection(agentId: string) {
+        await updateMutation.mutateAsync({
+            agentId,
+            patch: { connection_id: editConnectionId },
+        });
+        setEditingConnectionFor(null);
     }
 
     return (
@@ -219,6 +242,20 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             {harnesses.map((harness) => (
                                 <option key={harness} value={harness}>
                                     {formatHarnessLabel(harness)}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
+                    <label>
+                        Connection
+                        <select
+                            value={form.connection_id ?? ""}
+                            onChange={(e) => setForm({ ...form, connection_id: e.target.value || null })}
+                        >
+                            <option value="">None</option>
+                            {connections.map((conn) => (
+                                <option key={conn.connection_id} value={conn.connection_id}>
+                                    {conn.name} ({conn.connection_id})
                                 </option>
                             ))}
                         </select>
@@ -272,6 +309,12 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             <h3>{agent.name}</h3>
                             <div className="muted">{agent.agent_id}</div>
                             <div className="tag">{agent.harness}</div>
+                            {agent.connection_id && (
+                                <span className="tag">
+                                    {connections.find((c) => c.connection_id === agent.connection_id)?.name
+                                        ?? agent.connection_id}
+                                </span>
+                            )}
                             {agent.system_prompt && (
                                 <p className="system-prompt-preview">{agent.system_prompt}</p>
                             )}
@@ -283,6 +326,46 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                         </span>
                                     ))}
                                 </div>
+                            )}
+                            {editingConnectionFor === agent.agent_id && (
+                                <fieldset className="skills-fieldset">
+                                    <legend>Edit Connection</legend>
+                                    <select
+                                        value={editConnectionId ?? ""}
+                                        onChange={(e) =>
+                                            setEditConnectionId(e.target.value || null)
+                                        }
+                                    >
+                                        <option value="">None</option>
+                                        {connections.map((conn) => (
+                                            <option
+                                                key={conn.connection_id}
+                                                value={conn.connection_id}
+                                            >
+                                                {conn.name} ({conn.connection_id})
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <div className="skills-edit-actions">
+                                        <button
+                                            className="small"
+                                            disabled={busy}
+                                            onClick={() => {
+                                                void handleSaveConnection(agent.agent_id);
+                                            }}
+                                            type="button"
+                                        >
+                                            Save
+                                        </button>
+                                        <button
+                                            className="secondary-button small"
+                                            onClick={() => setEditingConnectionFor(null)}
+                                            type="button"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
+                                </fieldset>
                             )}
                             {editingSkillsFor === agent.agent_id && (
                                 <fieldset className="skills-fieldset">
@@ -340,6 +423,16 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                         type="button"
                                     >
                                         Skills
+                                    </button>
+                                )}
+                                {editingConnectionFor !== agent.agent_id && (
+                                    <button
+                                        className="secondary-button small"
+                                        disabled={busy}
+                                        onClick={() => startEditingConnection(agent)}
+                                        type="button"
+                                    >
+                                        Connection
                                     </button>
                                 )}
                                 <button

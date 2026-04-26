@@ -7,6 +7,7 @@ import AgentsView from "./AgentsView";
 import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
 import SkillsView from "./SkillsView";
+import ConnectionsView from "./ConnectionsView";
 import GatewaysView from "./GatewaysView";
 import InfoView from "./InfoView";
 import ConfigKernelsView from "./ConfigKernelsView";
@@ -62,6 +63,8 @@ export default function App() {
         return <KernelsView />;
       case "skills":
         return <SkillsView />;
+      case "connections":
+        return <ConnectionsView />;
       case "gateways":
         return <GatewaysView />;
       case "info":

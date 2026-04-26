@@ -22,6 +22,7 @@ export const queryKeys = {
     ["gateway-types", gatewayType, "schema"] as const,
   gatewayLogs: (gatewayId: string) => ["gateways", gatewayId, "logs"] as const,
   kernelConfig: (harness: string) => ["kernel-configs", harness] as const,
+  connections: ["connections"] as const,
   systemInfo: ["info"] as const,
   webuiInfo: ["webui-info"] as const,
 } as const;
@@ -119,4 +120,10 @@ export const useWebuiInfo = () =>
   useQuery({
     queryKey: queryKeys.webuiInfo,
     queryFn: api.getWebuiInfo,
+  });
+
+export const useConnections = () =>
+  useQuery({
+    queryKey: queryKeys.connections,
+    queryFn: api.listConnections,
   });

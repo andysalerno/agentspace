@@ -1,5 +1,6 @@
 import type {
   Agent,
+  Connection,
   Gateway,
   GatewaySchema,
   GatewayType,
@@ -53,6 +54,7 @@ export const api = {
     system_prompt: string;
     skills?: string[];
     env_vars?: string;
+    connection_id?: string | null;
   }) =>
     requestJson<Agent>("/agents", {
       method: "POST",
@@ -63,6 +65,7 @@ export const api = {
     system_prompt?: string;
     skills?: string[];
     env_vars?: string;
+    connection_id?: string | null;
   }) =>
     requestJson<Agent>(`/agents/${agentId}`, {
       method: "PATCH",
@@ -227,6 +230,34 @@ export const api = {
     }
     return (await response.json()) as ServiceInfoSection;
   },
+
+  // Connections
+  listConnections: () => requestJson<Connection[]>("/connections"),
+  getConnection: (connectionId: string) => requestJson<Connection>(`/connections/${connectionId}`),
+  createConnection: (payload: {
+    connection_id: string;
+    name: string;
+    url: string;
+    api_key?: string;
+  }) =>
+    requestJson<Connection>("/connections", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateConnection: (
+    connectionId: string,
+    payload: {
+      name?: string;
+      url?: string;
+      api_key?: string;
+    },
+  ) =>
+    requestJson<Connection>(`/connections/${connectionId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteConnection: (connectionId: string) =>
+    requestJson<void>(`/connections/${connectionId}`, { method: "DELETE" }),
 
   // Gateways
   listGatewayTypes: () => requestJson<GatewayType[]>("/gateway-types"),
