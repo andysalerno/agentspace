@@ -60,7 +60,7 @@ async def _start_vscode_server() -> asyncio.subprocess.Process | None:
         return None
 
     bind_addr = os.environ.get("KERNEL_VSCODE_BIND_ADDR", "0.0.0.0:8080")
-    workspace = os.environ.get("KERNEL_WORKDIR", "/workspace")
+    workspace = os.environ.get("KERNEL_VSCODE_WORKDIR", "/workspace")
     auth = os.environ.get("KERNEL_VSCODE_AUTH", "none")
     args = [
         executable,
