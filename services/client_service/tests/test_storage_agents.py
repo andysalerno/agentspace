@@ -181,3 +181,34 @@ async def test_sqlite_persists_across_connections(tmp_path: Path) -> None:
     assert fetched is not None
     assert fetched.agent_id == "durable"
     assert fetched.skills == ["alpha", "beta"]
+
+
+async def test_sqlite_initialize_migrates_missing_connection_id(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "old-schema.sqlite")
+    await db.connect()
+    await db.executescript(
+        """
+        CREATE TABLE agents (
+            agent_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            harness TEXT NOT NULL,
+            system_prompt TEXT NOT NULL DEFAULT '',
+            skills_json TEXT NOT NULL DEFAULT '[]',
+            env_vars TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """
+    )
+
+    store = SqliteAgentStore(db)
+    await store.initialize()
+    agent = _make_agent("migrated")
+    await store.insert(agent)
+    fetched = await store.get("migrated")
+    await db.close()
+
+    assert fetched is not None
+    assert fetched.connection_id is None

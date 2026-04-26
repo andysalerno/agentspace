@@ -74,6 +74,7 @@ class SqliteAgentStore:
 
     async def initialize(self) -> None:
         await self._db.executescript(AGENTS_SCHEMA)
+        await self._ensure_connection_id_column()
 
     async def list(self) -> list[AgentRecord]:
         rows = await self._db.fetch_all(
@@ -151,6 +152,12 @@ class SqliteAgentStore:
             (agent_id,),
         )
         return True
+
+    async def _ensure_connection_id_column(self) -> None:
+        rows = await self._db.fetch_all("PRAGMA table_info(agents)")
+        columns = {str(row["name"]) for row in rows}
+        if "connection_id" not in columns:
+            await self._db.execute("ALTER TABLE agents ADD COLUMN connection_id TEXT")
 
 
 def _row_to_agent(row: object) -> AgentRecord:
