@@ -490,6 +490,33 @@ async def test_create_session_merges_kernel_config_env_with_agent_env() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_session_adds_agent_connection_env() -> None:
+    upstream = StubAgentHostClient()
+    runtime = cast("AgentHostClient", upstream)
+    service = ClientService(agent_host_client=runtime)
+
+    await service.create_connection(
+        connection_id="test-connection",
+        name="Test Connection",
+        url="https://connection.test/v1",
+        api_key="connection-secret",
+    )
+    agent = await service.create_agent(
+        agent_id="connected-agent",
+        name="Connected Agent",
+        harness=HarnessName.OPENCODE,
+        connection_id="test-connection",
+    )
+
+    await service.create_session(agent_id=str(agent["agent_id"]))
+
+    assert len(upstream.created) == 1
+    env = cast("dict[str, str]", upstream.created[0]["env"])
+    assert env["CONNECTION_URL"] == "https://connection.test/v1"
+    assert env["CONNECTION_API_KEY"] == "connection-secret"
+
+
+@pytest.mark.asyncio
 async def test_missing_records_raise() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)

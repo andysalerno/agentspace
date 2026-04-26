@@ -3,11 +3,7 @@
 // see what they need to set. The kernel itself enforces these at runtime;
 // this map only drives UI affordances.
 const REQUIRED_ENV_KEYS_BY_HARNESS: Record<string, string[]> = {
-    opencode: [
-        "KERNEL_OPENCODE_BASE_URL",
-        "KERNEL_OPENCODE_API_KEY",
-        "KERNEL_OPENCODE_MODEL_NAME",
-    ],
+    opencode: ["KERNEL_OPENCODE_MODEL_NAME"],
 };
 
 /**

@@ -6,6 +6,7 @@ Uses the real OpenCode CLI JSON output format to verify that
 # pyright: reportPrivateUsage=false
 
 import json
+from pathlib import Path
 
 import pytest
 from kernel.events import EventType, KernelEvent, KernelStatus
@@ -226,3 +227,64 @@ class TestOpenCodeMapping:
         assert "--variant" in cmd
         idx = cmd.index("--variant")
         assert cmd[idx + 1] == "high"
+
+    def test_write_provider_config_uses_connection_env(
+        self,
+        kernel: OpenCodeKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        kernel._config = KernelConfig(
+            env={
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_API_KEY": "from-connection",
+                "KERNEL_OPENCODE_BASE_URL": "https://legacy.test/v1",
+                "KERNEL_OPENCODE_API_KEY": "from-legacy",
+                "KERNEL_OPENCODE_MODEL_NAME": "model-a",
+            }
+        )
+
+        kernel._write_provider_config()
+
+        config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        config = json.loads(config_path.read_text())
+        options = config["provider"]["customprovider"]["options"]
+        assert options["baseURL"] == "https://connection.test/v1"
+        assert options["apiKey"] == "from-connection"
+
+    def test_write_provider_config_accepts_legacy_opencode_env(
+        self,
+        kernel: OpenCodeKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_OPENCODE_BASE_URL": "https://legacy.test/v1",
+                "KERNEL_OPENCODE_API_KEY": "from-legacy",
+                "KERNEL_OPENCODE_MODEL_NAME": "model-a",
+            }
+        )
+
+        kernel._write_provider_config()
+
+        config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        config = json.loads(config_path.read_text())
+        options = config["provider"]["customprovider"]["options"]
+        assert options["baseURL"] == "https://legacy.test/v1"
+        assert options["apiKey"] == "from-legacy"
+
+    def test_write_provider_config_reports_missing_connection_env(
+        self,
+        kernel: OpenCodeKernel,
+    ) -> None:
+        kernel._config = KernelConfig(env={"KERNEL_OPENCODE_MODEL_NAME": "model-a"})
+
+        with pytest.raises(ValueError) as exc_info:
+            kernel._write_provider_config()
+
+        message = str(exc_info.value)
+        assert "CONNECTION_URL" in message
+        assert "CONNECTION_API_KEY" in message

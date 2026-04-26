@@ -203,29 +203,33 @@ class OpenCodeKernel:
         """Write the opencode provider config to ~/.config/opencode/opencode.json.
 
         Pulls the base URL, API key, and model name from environment
-        variables forwarded via the kernel template. Raises ``ValueError``
+        variables forwarded via the agent's assigned Connection and kernel
+        template. Raises ``ValueError``
         if any of the required variables is missing or empty so the failure
         is surfaced to the client instead of producing a confusing
         downstream auth error.
         """
         env_get = self._config.env.get
+        base_url = env_get("CONNECTION_URL") or env_get("KERNEL_OPENCODE_BASE_URL")
+        api_key = env_get("CONNECTION_API_KEY") or env_get("KERNEL_OPENCODE_API_KEY")
+        model_name = env_get("KERNEL_OPENCODE_MODEL_NAME")
         required = {
-            "KERNEL_OPENCODE_BASE_URL": env_get("KERNEL_OPENCODE_BASE_URL"),
-            "KERNEL_OPENCODE_API_KEY": env_get("KERNEL_OPENCODE_API_KEY"),
-            "KERNEL_OPENCODE_MODEL_NAME": env_get("KERNEL_OPENCODE_MODEL_NAME"),
+            "CONNECTION_URL": base_url,
+            "CONNECTION_API_KEY": api_key,
+            "KERNEL_OPENCODE_MODEL_NAME": model_name,
         }
         missing = [name for name, value in required.items() if not value]
         if missing:
             msg = (
                 "opencode kernel is missing required environment "
-                f"variable(s): {', '.join(missing)}. Set them on the agent's "
-                "Environment Variables field."
+                f"variable(s): {', '.join(missing)}. Assign a Connection with "
+                "a URL and API key, and set KERNEL_OPENCODE_MODEL_NAME on the "
+                "agent or kernel configuration."
             )
             raise ValueError(msg)
-
-        base_url = required["KERNEL_OPENCODE_BASE_URL"]
-        api_key = required["KERNEL_OPENCODE_API_KEY"]
-        model_name = required["KERNEL_OPENCODE_MODEL_NAME"]
+        assert base_url is not None
+        assert api_key is not None
+        assert model_name is not None
 
         config = {
             "$schema": "https://opencode.ai/config.json",
