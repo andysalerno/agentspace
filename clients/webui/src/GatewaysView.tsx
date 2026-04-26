@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type { Gateway, GatewayConfigField } from "./types";
@@ -135,10 +135,14 @@ function splitEnvForEdit(
 
 export default function GatewaysView() {
     const { data: gateways = [] } = useGateways();
-    const { data: agents = [] } = useAgents();
+    const { data: agents = [], isLoading: agentsLoading } = useAgents();
     const { data: gatewayTypes = [] } = useGatewayTypes();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
+    const validAgentIds = useMemo(
+        () => new Set(agents.map((agent) => agent.agent_id)),
+        [agents],
+    );
 
     const [showForm, setShowForm] = useState(false);
     const [gatewayId, setGatewayId] = useState("");
@@ -368,6 +372,7 @@ export default function GatewaysView() {
     async function handleEditSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         if (!editingGateway || !editSchema) return;
+        if (!validAgentIds.has(editAgentId)) return;
         const fields = editSchema.fields;
         // `secrets` is sent as an OVERLAY (see service.update_gateway):
         // only keys with a non-empty value are included, so existing
@@ -540,11 +545,23 @@ export default function GatewaysView() {
             )}
 
             <div className="card-grid">
-                {gateways.map((gateway) => (
+                {gateways.map((gateway) => {
+                    const gatewayAgent = agents.find(
+                        (agent) => agent.agent_id === gateway.agent_id,
+                    );
+                    const hasValidAgent = validAgentIds.has(gateway.agent_id);
+                    const showMissingAgent = !agentsLoading && !hasValidAgent;
+                    const editHasValidAgent = validAgentIds.has(editAgentId);
+                    const editShowsMissingAgent =
+                        Boolean(editAgentId) && !agentsLoading && !editHasValidAgent;
+                    return (
                     <div className="card" key={gateway.gateway_id}>
                         <div className="card-body">
                             <h3>
                                 <span className="card-title-text">{gateway.name}</span>
+                                {showMissingAgent && (
+                                    <span className="status-badge invalid">invalid</span>
+                                )}
                                 <span className={`status-badge ${gateway.status}`}>
                                     {gateway.status}
                                 </span>
@@ -556,8 +573,11 @@ export default function GatewaysView() {
                                 <div>
                                     <strong>Type:</strong> {gateway.gateway_type}
                                 </div>
-                                <div>
-                                    <strong>Agent:</strong> {gateway.agent_id}
+                                <div className={showMissingAgent ? "error-text" : undefined}>
+                                    <strong>Agent:</strong>{" "}
+                                    {gatewayAgent
+                                        ? `${gatewayAgent.name} (${gatewayAgent.agent_id})`
+                                        : `${gateway.agent_id}${showMissingAgent ? " (missing)" : ""}`}
                                 </div>
                                 <div>
                                     <strong>Enabled:</strong>{" "}
@@ -580,6 +600,12 @@ export default function GatewaysView() {
                                     </div>
                                 )}
                             </div>
+                            {showMissingAgent && (
+                                <div className="warning-box">
+                                    This gateway points to a deleted agent. Edit it and select an
+                                    existing agent before starting or enabling it.
+                                </div>
+                            )}
                             {expandedGatewayId === gateway.gateway_id && logsQuery.data && (
                                 <pre className="skill-file-content">{logsQuery.data.lines.join("\n")}</pre>
                             )}
@@ -612,12 +638,23 @@ export default function GatewaysView() {
                                             <option disabled value="">
                                                 Select an agent
                                             </option>
+                                            {editShowsMissingAgent && (
+                                                <option disabled value={editAgentId}>
+                                                    Missing agent ({editAgentId})
+                                                </option>
+                                            )}
                                             {agents.map((agent) => (
                                                 <option key={agent.agent_id} value={agent.agent_id}>
                                                     {agent.name} ({agent.agent_id})
                                                 </option>
                                             ))}
                                         </select>
+                                        {editShowsMissingAgent && (
+                                            <small className="field-help error-text">
+                                                The currently assigned agent no longer exists. Select
+                                                an existing agent to repair this gateway.
+                                            </small>
+                                        )}
                                     </label>
                                     <label className="checkbox-label">
                                         <input
@@ -716,7 +753,13 @@ export default function GatewaysView() {
                                     </div>
                                     <div className="card-footer-actions">
                                         <button
-                                            disabled={busy || !editAgentId || !editSchema}
+                                            disabled={
+                                                busy
+                                                || !editAgentId
+                                                || !editSchema
+                                                || agentsLoading
+                                                || !editHasValidAgent
+                                            }
                                             type="submit"
                                         >
                                             Save Changes
@@ -756,7 +799,7 @@ export default function GatewaysView() {
                                 ) : (
                                     <button
                                         className="small"
-                                        disabled={busy}
+                                        disabled={busy || agentsLoading || !hasValidAgent}
                                         onClick={() => startMutation.mutate(gateway.gateway_id)}
                                         type="button"
                                     >
@@ -765,7 +808,11 @@ export default function GatewaysView() {
                                 )}
                                 <button
                                     className="secondary-button small"
-                                    disabled={busy}
+                                    disabled={
+                                        busy
+                                        || agentsLoading
+                                        || (!hasValidAgent && !gateway.enabled)
+                                    }
                                     onClick={() =>
                                         updateMutation.mutate({
                                             gatewayId: gateway.gateway_id,
@@ -796,7 +843,8 @@ export default function GatewaysView() {
                             </div>
                         </div>
                     </div>
-                ))}
+                    );
+                })}
                 {gateways.length === 0 && (
                     <div className="empty-state">
                         No gateways yet. Create one to bridge an external system to an agent.

@@ -398,6 +398,16 @@ textarea {
   opacity: 0.85;
 }
 
+.warning-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--status-busy-color);
+  border-radius: var(--radius-sm);
+  background: var(--status-busy-bg);
+  color: var(--status-busy-color);
+  font-size: 0.85rem;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -1153,7 +1163,8 @@ button:disabled {
 }
 
 .status-badge.error,
-.status-badge.dead {
+.status-badge.dead,
+.status-badge.invalid {
   background: var(--status-error-bg);
   color: var(--status-error-color);
 }
