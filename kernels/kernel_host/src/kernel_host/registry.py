@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from kernel.protocol import Kernel
 
+from kernel_acp import AcpKernel
 from kernel_claude_code import ClaudeCodeKernel
 from kernel_codex import CodexKernel
 from kernel_copilot import CopilotKernel
@@ -21,6 +22,7 @@ class HarnessName(StrEnum):
     COPILOT_CLI = "copilot-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
+    ACP = "acp"
 
 
 KERNEL_REGISTRY: dict[HarnessName, type] = {
@@ -29,6 +31,7 @@ KERNEL_REGISTRY: dict[HarnessName, type] = {
     HarnessName.COPILOT_CLI: CopilotKernel,
     HarnessName.CODEX: CodexKernel,
     HarnessName.OPENCODE: OpenCodeKernel,
+    HarnessName.ACP: AcpKernel,
 }
 
 

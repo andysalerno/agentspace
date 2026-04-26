@@ -11,6 +11,7 @@ COPY kernels/kernel_echo kernels/kernel_echo
 COPY kernels/kernel_codex kernels/kernel_codex
 COPY kernels/kernel_copilot kernels/kernel_copilot
 COPY kernels/kernel_opencode kernels/kernel_opencode
+COPY kernels/kernel_acp kernels/kernel_acp
 COPY kernels/kernel_host kernels/kernel_host
 COPY gateways/gateway gateways/gateway
 COPY gateways/gateway_echo gateways/gateway_echo

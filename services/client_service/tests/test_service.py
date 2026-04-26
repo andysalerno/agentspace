@@ -249,6 +249,7 @@ async def test_list_harnesses_returns_registered_harnesses() -> None:
         "copilot-cli",
         "codex",
         "opencode",
+        "acp",
     ]
 
 

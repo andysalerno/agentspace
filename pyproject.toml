@@ -18,6 +18,7 @@ kernel-echo = { workspace = true }
 kernel-codex = { workspace = true }
 kernel-copilot = { workspace = true }
 kernel-opencode = { workspace = true }
+kernel-acp = { workspace = true }
 kernel-host = { workspace = true }
 gateway = { workspace = true }
 gateway-echo = { workspace = true }
@@ -52,6 +53,7 @@ ignore = [
 "kernels/kernel_copilot/tests/test_copilot.py" = ["E501", "SLF001"]
 "kernels/kernel_codex/tests/test_codex.py" = ["E501", "SLF001"]
 "kernels/kernel_opencode/tests/test_opencode.py" = ["E501", "SLF001"]
+"kernels/kernel_acp/tests/test_acp.py" = ["SLF001"]
 
 [tool.pyright]
 pythonVersion = "3.13"
@@ -65,6 +67,7 @@ extraPaths = [
     "kernels/kernel_codex/src",
     "kernels/kernel_copilot/src",
     "kernels/kernel_opencode/src",
+    "kernels/kernel_acp/src",
     "kernels/kernel_host/src",
     "gateways/gateway/src",
     "gateways/gateway_echo/src",
