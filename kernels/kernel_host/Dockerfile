@@ -12,7 +12,8 @@ RUN apt-get update && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     curl -fsSL https://opencode.ai/install | bash && \
     npm install -g firecrawl-cli && \
-    npm install -g --unsafe-perm code-server && \
+    curl -fsSL https://code-server.dev/install.sh | \
+        sh -s -- --method=standalone --prefix=/usr/local && \
     apt-get purge -y curl gnupg && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
