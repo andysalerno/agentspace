@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pytest
+from client_service.service import ConnectionNotFoundError as _ConnNotFound
 from client_service.service import GatewayNotFoundError as _GatewayNotFound
 from client_service.service import KernelNotFoundError
 from fastapi.testclient import TestClient
@@ -25,6 +26,9 @@ if TYPE_CHECKING:
     from kernel_host.registry import HarnessName
 
 
+_UNSPECIFIED_SENTINEL = object()
+
+
 class StubClientService:
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, object]] = {}
@@ -33,6 +37,7 @@ class StubClientService:
         self.skills: dict[str, dict[str, object]] = {}
         self.kernel_configs: dict[str, dict[str, object]] = {}
         self.gateways: dict[str, dict[str, object]] = {}
+        self.connections: dict[str, dict[str, object]] = {}
         self.autostart_called = False
 
     async def create_agent(
@@ -44,6 +49,7 @@ class StubClientService:
         system_prompt: str = "",
         skills: list[str] | None = None,
         env_vars: str = "",
+        connection_id: str | None = None,
     ) -> dict[str, object]:
         agent: dict[str, object] = {
             "agent_id": agent_id,
@@ -52,6 +58,7 @@ class StubClientService:
             "system_prompt": system_prompt,
             "skills": skills or [],
             "env_vars": env_vars,
+            "connection_id": connection_id,
             "created_at": "now",
             "updated_at": "now",
         }
@@ -71,23 +78,26 @@ class StubClientService:
         self,
         agent_id: str,
         *,
-        name: str | None,
-        harness: HarnessName | None,
-        system_prompt: str | None,
-        skills: list[str] | None,
-        env_vars: str | None,
+        name: str | object,
+        harness: HarnessName | object,
+        system_prompt: str | object,
+        skills: list[str] | object,
+        env_vars: str | object,
+        connection_id: str | None | object = None,
     ) -> dict[str, object]:
         agent = self.agents[agent_id]
-        if name is not None:
+        if name is not None and name is not _UNSPECIFIED_SENTINEL:
             agent["name"] = name
-        if harness is not None:
+        if harness is not None and harness is not _UNSPECIFIED_SENTINEL:
             agent["harness"] = harness.value
-        if system_prompt is not None:
+        if system_prompt is not None and system_prompt is not _UNSPECIFIED_SENTINEL:
             agent["system_prompt"] = system_prompt
-        if skills is not None:
+        if skills is not None and skills is not _UNSPECIFIED_SENTINEL:
             agent["skills"] = list(skills)
-        if env_vars is not None:
+        if env_vars is not None and env_vars is not _UNSPECIFIED_SENTINEL:
             agent["env_vars"] = env_vars
+        if connection_id is not _UNSPECIFIED_SENTINEL:
+            agent["connection_id"] = connection_id
         return agent
 
     async def delete_agent(self, agent_id: str) -> None:
@@ -393,6 +403,73 @@ class StubClientService:
 
     async def autostart_enabled_gateways(self) -> None:
         self.autostart_called = True
+
+    async def list_connections(self) -> list[dict[str, object]]:
+        return [
+            {**record, "has_api_key": bool(record.get("api_key", ""))}
+            for record in self.connections.values()
+        ]
+
+    async def get_connection(
+        self,
+        connection_id: str,
+        *,
+        include_api_key: bool = False,
+    ) -> dict[str, object]:
+        if connection_id not in self.connections:
+            raise _ConnNotFound(connection_id)
+        record = dict(self.connections[connection_id])
+        record["has_api_key"] = bool(record.get("api_key", ""))
+        if include_api_key:
+            pass
+        else:
+            record.pop("api_key", None)
+        return record
+
+    async def create_connection(
+        self,
+        *,
+        connection_id: str,
+        name: str,
+        url: str,
+        api_key: str = "",
+    ) -> dict[str, object]:
+        record: dict[str, object] = {
+            "connection_id": connection_id,
+            "name": name,
+            "url": url,
+            "api_key": api_key,
+            "has_api_key": bool(api_key),
+            "created_at": "now",
+            "updated_at": "now",
+        }
+        self.connections[connection_id] = record
+        return dict(record)
+
+    async def update_connection(
+        self,
+        connection_id: str,
+        *,
+        name: str | None = None,
+        url: str | None = None,
+        api_key: str | None = None,
+    ) -> dict[str, object]:
+        if connection_id not in self.connections:
+            raise _ConnNotFound(connection_id)
+        record = self.connections[connection_id]
+        if name is not None:
+            record["name"] = name
+        if url is not None:
+            record["url"] = url
+        if api_key is not None:
+            record["api_key"] = api_key
+            record["has_api_key"] = bool(api_key)
+        return {**record, "has_api_key": bool(record.get("api_key", ""))}
+
+    async def delete_connection(self, connection_id: str) -> None:
+        if connection_id not in self.connections:
+            raise _ConnNotFound(connection_id)
+        del self.connections[connection_id]
 
     def _events(self) -> list[KernelEvent]:
         return [

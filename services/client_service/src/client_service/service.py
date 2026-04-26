@@ -16,6 +16,7 @@ from client_service.agent_host_client import AgentHostClient, HttpAgentHostClien
 from client_service.models import (
     AgentRecord,
     ClientType,
+    ConnectionRecord,
     GatewayRecord,
     MessageRecord,
     MessageRole,
@@ -28,6 +29,12 @@ from client_service.storage.agents import (
     AgentMissingError,
     AgentStore,
     InMemoryAgentStore,
+)
+from client_service.storage.connections import (
+    ConnectionExistsError,
+    ConnectionMissingError,
+    ConnectionStore,
+    InMemoryConnectionStore,
 )
 from client_service.storage.gateways import (
     GatewayExistsError,
@@ -48,7 +55,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
+CONNECTION_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
 GATEWAY_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
+_UNSPECIFIED: object = object()
 CLIENT_SERVICE_ENV_PREFIX = "CLIENT_SERVICE_"
 
 
@@ -84,6 +93,18 @@ class InvalidGatewayIdError(ValueError):
     pass
 
 
+class ConnectionNotFoundError(KeyError):
+    pass
+
+
+class ConnectionAlreadyExistsError(ValueError):
+    pass
+
+
+class InvalidConnectionIdError(ValueError):
+    pass
+
+
 VISIBLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
         EventType.TEXT_DELTA,
@@ -102,6 +123,7 @@ class ClientService:
         agent_store: AgentStore | None = None,
         kernel_config_store: KernelConfigStore | None = None,
         gateway_store: GatewayStore | None = None,
+        connection_store: ConnectionStore | None = None,
     ) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
         self._agent_store: AgentStore = agent_store or InMemoryAgentStore()
@@ -109,6 +131,9 @@ class ClientService:
             kernel_config_store or InMemoryKernelConfigStore()
         )
         self._gateway_store: GatewayStore = gateway_store or InMemoryGatewayStore()
+        self._connection_store: ConnectionStore = (
+            connection_store or InMemoryConnectionStore()
+        )
         self._sessions: dict[str, SessionRecord] = {}
         self._lock = asyncio.Lock()
         self._gateway_lock = asyncio.Lock()
@@ -122,8 +147,11 @@ class ClientService:
         system_prompt: str = "",
         skills: list[str] | None = None,
         env_vars: str = "",
+        connection_id: str | None = None,
     ) -> dict[str, object]:
         _validate_agent_id(agent_id)
+        if connection_id is not None:
+            await self._require_connection(connection_id)
         agent = AgentRecord(
             agent_id=agent_id,
             name=name,
@@ -131,6 +159,7 @@ class ClientService:
             system_prompt=system_prompt,
             skills=skills or [],
             env_vars=env_vars,
+            connection_id=connection_id,
         )
         async with self._lock:
             try:
@@ -179,24 +208,30 @@ class ClientService:
         self,
         agent_id: str,
         *,
-        name: str | None,
-        harness: HarnessName | None,
-        system_prompt: str | None,
-        skills: list[str] | None,
-        env_vars: str | None,
+        name: str | None | object = _UNSPECIFIED,
+        harness: HarnessName | None | object = _UNSPECIFIED,
+        system_prompt: str | None | object = _UNSPECIFIED,
+        skills: list[str] | None | object = _UNSPECIFIED,
+        env_vars: str | None | object = _UNSPECIFIED,
+        connection_id: str | None | object = _UNSPECIFIED,
     ) -> dict[str, object]:
         async with self._lock:
             agent = await self._require_agent(agent_id)
-            if name is not None:
-                agent.name = name
-            if harness is not None:
-                agent.harness = harness
-            if system_prompt is not None:
-                agent.system_prompt = system_prompt
-            if skills is not None:
-                agent.skills = list(skills)
-            if env_vars is not None:
-                agent.env_vars = env_vars
+            if name is not _UNSPECIFIED and name is not None:
+                agent.name = str(name)
+            if harness is not _UNSPECIFIED and harness is not None:
+                agent.harness = harness  # type: ignore[assignment]
+            if system_prompt is not _UNSPECIFIED and system_prompt is not None:
+                agent.system_prompt = str(system_prompt)
+            if skills is not _UNSPECIFIED and skills is not None:
+                agent.skills = list(skills)  # type: ignore[arg-type]
+            if env_vars is not _UNSPECIFIED and env_vars is not None:
+                agent.env_vars = str(env_vars)
+            if connection_id is not _UNSPECIFIED:
+                cid = connection_id  # str | None
+                if isinstance(cid, str):
+                    await self._require_connection(cid)
+                agent.connection_id = cid  # type: ignore[assignment]
             agent.updated_at = utc_now()
             try:
                 await self._agent_store.update(agent)
@@ -230,6 +265,11 @@ class ClientService:
         env: dict[str, str] = {}
         if kernel_config is not None:
             env.update(parse_env_vars(kernel_config.env_vars))
+        if agent.connection_id is not None:
+            connection = await self._require_connection(agent.connection_id)
+            env["CONNECTION_URL"] = connection.url
+            if connection.api_key:
+                env["CONNECTION_API_KEY"] = connection.api_key
         env.update(parse_env_vars(agent.env_vars))
         if agent.system_prompt:
             env["KERNEL_SYSTEM_PROMPT"] = agent.system_prompt
@@ -813,6 +853,78 @@ class ClientService:
             raise GatewayNotFoundError(gateway_id)
         return record
 
+    async def list_connections(self) -> list[dict[str, object]]:
+        records = await self._connection_store.list()
+        return [r.summary() for r in records]
+
+    async def get_connection(
+        self,
+        connection_id: str,
+        *,
+        include_api_key: bool = False,
+    ) -> dict[str, object]:
+        record = await self._require_connection(connection_id)
+        return record.summary(include_api_key=include_api_key)
+
+    async def create_connection(
+        self,
+        *,
+        connection_id: str,
+        name: str,
+        url: str,
+        api_key: str = "",
+    ) -> dict[str, object]:
+        _validate_connection_id(connection_id)
+        record = ConnectionRecord(
+            connection_id=connection_id,
+            name=name,
+            url=url,
+            api_key=api_key,
+        )
+        try:
+            await self._connection_store.insert(record)
+        except ConnectionExistsError as exc:
+            raise ConnectionAlreadyExistsError(connection_id) from exc
+        logger.info("created connection %s", connection_id)
+        return await self.get_connection(connection_id, include_api_key=True)
+
+    async def update_connection(
+        self,
+        connection_id: str,
+        *,
+        name: str | None = None,
+        url: str | None = None,
+        api_key: str | None = None,
+    ) -> dict[str, object]:
+        record = await self._require_connection(connection_id)
+        if name is not None:
+            record.name = name
+        if url is not None:
+            record.url = url
+        if api_key is not None:
+            record.api_key = api_key
+        record.updated_at = utc_now()
+        try:
+            await self._connection_store.update(record)
+        except ConnectionMissingError as exc:
+            raise ConnectionNotFoundError(connection_id) from exc
+        logger.info("updated connection %s", connection_id)
+        return await self.get_connection(connection_id, include_api_key=True)
+
+    async def delete_connection(self, connection_id: str) -> None:
+        removed = await self._connection_store.delete(connection_id)
+        if not removed:
+            raise ConnectionNotFoundError(connection_id)
+        logger.info("deleted connection %s", connection_id)
+
+    async def _require_connection(
+        self, connection_id: str,
+    ) -> ConnectionRecord:
+        record = await self._connection_store.get(connection_id)
+        if record is None:
+            raise ConnectionNotFoundError(connection_id)
+        return record
+
 
 def _flatten_text(events: list[KernelEvent]) -> str:
     return "".join(
@@ -884,6 +996,12 @@ def _validate_agent_id(agent_id: str) -> None:
     if not AGENT_ID_PATTERN.fullmatch(agent_id):
         msg = "agent_id must use lowercase letters and single dashes only"
         raise InvalidAgentIdError(msg)
+
+
+def _validate_connection_id(connection_id: str) -> None:
+    if not CONNECTION_ID_PATTERN.fullmatch(connection_id):
+        msg = "connection_id must use lowercase letters and single dashes only"
+        raise InvalidConnectionIdError(msg)
 
 
 def _validate_gateway_id(gateway_id: str) -> None:

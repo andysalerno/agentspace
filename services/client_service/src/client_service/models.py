@@ -56,6 +56,7 @@ class AgentRecord:
     system_prompt: str
     skills: list[str] = field(default_factory=_empty_skills)
     env_vars: str = ""
+    connection_id: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -67,6 +68,7 @@ class AgentRecord:
             "system_prompt": self.system_prompt,
             "skills": list(self.skills),
             "env_vars": self.env_vars,
+            "connection_id": self.connection_id,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -149,6 +151,29 @@ class SessionRecord:
 
 def _empty_env_dict() -> dict[str, str]:
     return {}
+
+
+@dataclass(slots=True)
+class ConnectionRecord:
+    connection_id: str
+    name: str
+    url: str
+    api_key: str = ""
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+    def summary(self, *, include_api_key: bool = False) -> dict[str, object]:
+        data: dict[str, object] = {
+            "connection_id": self.connection_id,
+            "name": self.name,
+            "url": self.url,
+            "has_api_key": bool(self.api_key),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+        if include_api_key:
+            data["api_key"] = self.api_key
+        return data
 
 
 @dataclass(slots=True)

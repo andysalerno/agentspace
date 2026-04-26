@@ -22,9 +22,12 @@ from client_service.service import (
     AgentAlreadyExistsError,
     AgentNotFoundError,
     ClientService,
+    ConnectionAlreadyExistsError,
+    ConnectionNotFoundError,
     GatewayAlreadyExistsError,
     GatewayNotFoundError,
     InvalidAgentIdError,
+    InvalidConnectionIdError,
     InvalidGatewayIdError,
     KernelNotFoundError,
     SessionNotFoundError,
@@ -32,6 +35,7 @@ from client_service.service import (
 from client_service.storage import (
     Database,
     SqliteAgentStore,
+    SqliteConnectionStore,
     SqliteGatewayStore,
     SqliteKernelConfigStore,
 )
@@ -53,11 +57,13 @@ def _build_service() -> tuple[ClientService, Database | None]:
     agent_store = SqliteAgentStore(database)
     kernel_config_store = SqliteKernelConfigStore(database)
     gateway_store = SqliteGatewayStore(database)
+    connection_store = SqliteConnectionStore(database)
     return (
         ClientService(
             agent_store=agent_store,
             kernel_config_store=kernel_config_store,
             gateway_store=gateway_store,
+            connection_store=connection_store,
         ),
         database,
     )
@@ -73,6 +79,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await SqliteAgentStore(_database).initialize()
         await SqliteKernelConfigStore(_database).initialize()
         await SqliteGatewayStore(_database).initialize()
+        await SqliteConnectionStore(_database).initialize()
     # Run autostart concurrently with serving so a slow agent_host or
     # transient container failure does not block the API from coming up.
     autostart_task = asyncio.create_task(
@@ -107,6 +114,7 @@ class CreateAgentRequest(BaseModel):
     system_prompt: str = ""
     skills: list[str] = Field(default_factory=list)
     env_vars: str = ""
+    connection_id: str | None = None
 
 
 class UpdateAgentRequest(BaseModel):
@@ -115,6 +123,7 @@ class UpdateAgentRequest(BaseModel):
     system_prompt: str | None = None
     skills: list[str] | None = None
     env_vars: str | None = None
+    connection_id: str | None = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -164,6 +173,74 @@ async def update_kernel_config(
     return await service.update_kernel_config(harness, payload.env_vars)
 
 
+# --- Connections ---
+
+
+class CreateConnectionRequest(BaseModel):
+    connection_id: str = Field(pattern=r"^[a-z]+(?:-[a-z]+)*$")
+    name: str
+    url: str
+    api_key: str = ""
+
+
+class UpdateConnectionRequest(BaseModel):
+    name: str | None = None
+    url: str | None = None
+    api_key: str | None = None
+
+
+@app.get("/connections")
+async def list_connections() -> list[dict[str, object]]:
+    return await service.list_connections()
+
+
+@app.get("/connections/{connection_id}")
+async def get_connection(connection_id: str) -> dict[str, object]:
+    try:
+        return await service.get_connection(connection_id)
+    except ConnectionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/connections")
+async def create_connection(payload: CreateConnectionRequest) -> dict[str, object]:
+    try:
+        return await service.create_connection(
+            connection_id=payload.connection_id,
+            name=payload.name,
+            url=payload.url,
+            api_key=payload.api_key,
+        )
+    except ConnectionAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidConnectionIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.patch("/connections/{connection_id}")
+async def update_connection(
+    connection_id: str,
+    payload: UpdateConnectionRequest,
+) -> dict[str, object]:
+    try:
+        return await service.update_connection(
+            connection_id,
+            name=payload.name,
+            url=payload.url,
+            api_key=payload.api_key,
+        )
+    except ConnectionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/connections/{connection_id}", status_code=204)
+async def delete_connection(connection_id: str) -> None:
+    try:
+        await service.delete_connection(connection_id)
+    except ConnectionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.post("/agents")
 async def create_agent(payload: CreateAgentRequest) -> dict[str, object]:
     try:
@@ -174,11 +251,14 @@ async def create_agent(payload: CreateAgentRequest) -> dict[str, object]:
             system_prompt=payload.system_prompt,
             skills=payload.skills,
             env_vars=payload.env_vars,
+            connection_id=payload.connection_id,
         )
     except AgentAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except InvalidAgentIdError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ConnectionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/agents")
@@ -207,8 +287,11 @@ async def update_agent(
             system_prompt=payload.system_prompt,
             skills=payload.skills,
             env_vars=payload.env_vars,
+            connection_id=payload.connection_id,
         )
     except AgentNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConnectionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 

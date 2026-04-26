@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS agents (
     system_prompt TEXT NOT NULL DEFAULT '',
     skills_json TEXT NOT NULL DEFAULT '[]',
     env_vars TEXT NOT NULL DEFAULT '',
+    connection_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -93,8 +94,8 @@ class SqliteAgentStore:
                 """
                 INSERT INTO agents (
                     agent_id, name, harness, system_prompt,
-                    skills_json, env_vars, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    skills_json, env_vars, connection_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent.agent_id,
@@ -103,6 +104,7 @@ class SqliteAgentStore:
                     agent.system_prompt,
                     json.dumps(agent.skills),
                     agent.env_vars,
+                    agent.connection_id,
                     agent.created_at,
                     agent.updated_at,
                 ),
@@ -124,6 +126,7 @@ class SqliteAgentStore:
                    system_prompt = ?,
                    skills_json = ?,
                    env_vars = ?,
+                   connection_id = ?,
                    updated_at = ?
              WHERE agent_id = ?
             """,
@@ -133,6 +136,7 @@ class SqliteAgentStore:
                 agent.system_prompt,
                 json.dumps(agent.skills),
                 agent.env_vars,
+                agent.connection_id,
                 agent.updated_at,
                 agent.agent_id,
             ),
@@ -157,6 +161,8 @@ def _row_to_agent(row: object) -> AgentRecord:
     decoded: object = json.loads(str(skills_raw)) if skills_raw else []
     items = cast("list[object]", decoded) if isinstance(decoded, list) else []
     skills: list[str] = [str(item) for item in items]
+    raw_connection = mapping["connection_id"]
+    connection_id = None if raw_connection is None else str(raw_connection)
     return AgentRecord(
         agent_id=str(mapping["agent_id"]),
         name=str(mapping["name"]),
@@ -164,6 +170,7 @@ def _row_to_agent(row: object) -> AgentRecord:
         system_prompt=str(mapping["system_prompt"]),
         skills=skills,
         env_vars=str(mapping["env_vars"]),
+        connection_id=connection_id,
         created_at=str(mapping["created_at"]),
         updated_at=str(mapping["updated_at"]),
     )
