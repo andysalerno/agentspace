@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
+import shutil
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +19,25 @@ if TYPE_CHECKING:
 
     from kernel.events import KernelEvent
 
-app = FastAPI(title="Kernel Host", version="0.1.0")
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    vscode_process = await _start_vscode_server()
+    try:
+        yield
+    finally:
+        if vscode_process is not None and vscode_process.returncode is None:
+            vscode_process.terminate()
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(vscode_process.wait(), timeout=5.0)
+            if vscode_process.returncode is None:
+                vscode_process.kill()
+                await vscode_process.wait()
+
+
+app = FastAPI(title="Kernel Host", version="0.1.0", lifespan=lifespan)
 service = service_from_env()
 
 
@@ -24,6 +47,32 @@ class SendMessageRequest(BaseModel):
 
 def _serialize_events(events: list[KernelEvent]) -> list[dict[str, Any]]:
     return [asdict(event) for event in events]
+
+
+async def _start_vscode_server() -> asyncio.subprocess.Process | None:
+    enabled = os.environ.get("KERNEL_VSCODE_ENABLED", "1").lower()
+    if enabled in {"0", "false", "no", "off"}:
+        return None
+
+    executable = shutil.which(os.environ.get("KERNEL_VSCODE_COMMAND", "code-server"))
+    if executable is None:
+        logger.warning("code-server executable not found; VS Code server disabled")
+        return None
+
+    bind_addr = os.environ.get("KERNEL_VSCODE_BIND_ADDR", "0.0.0.0:8080")
+    workspace = os.environ.get("KERNEL_WORKDIR", "/workspace")
+    auth = os.environ.get("KERNEL_VSCODE_AUTH", "none")
+    args = [
+        executable,
+        "--bind-addr",
+        bind_addr,
+        "--auth",
+        auth,
+        "--disable-telemetry",
+        workspace,
+    ]
+    logger.info("starting VS Code server: %s", " ".join(args))
+    return await asyncio.create_subprocess_exec(*args)
 
 
 @app.get("/healthz")

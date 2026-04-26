@@ -70,6 +70,7 @@ export type KernelSummary = {
   channel_names: string[];
   agent_ids: string[];
   container_name: string | null;
+  vscode_url: string | null;
   stats: KernelStats | null;
 };
 

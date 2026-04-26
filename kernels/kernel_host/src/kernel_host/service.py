@@ -80,6 +80,7 @@ class KernelSessionService:
             "turns": len(self._history),
             "resume_token": self._session_id,
             "additional_paths": list(self._additional_paths),
+            "vscode_url": os.environ.get("KERNEL_VSCODE_URL") or None,
         }
 
     async def history(self) -> list[list[KernelEvent]]:

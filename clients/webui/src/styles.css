@@ -1015,9 +1015,11 @@ button:disabled {
   border: none;
   color: var(--text-primary);
   cursor: pointer;
+  display: block;
   font-size: 0.85rem;
   padding: 8px 14px;
   text-align: left;
+  text-decoration: none;
   width: 100%;
 }
 

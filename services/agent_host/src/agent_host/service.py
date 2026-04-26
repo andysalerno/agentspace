@@ -95,6 +95,8 @@ class KernelRuntime(Protocol):
 
     def container_name(self, *, session: KernelRuntimeSession) -> str | None: ...
 
+    def vscode_url(self, *, session: KernelRuntimeSession) -> str | None: ...
+
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None: ...
 
 
@@ -114,6 +116,7 @@ class SessionRecord:
     status: KernelStatus = KernelStatus.IDLE
     resume_token: str | None = None
     container_name: str | None = None
+    vscode_url: str | None = None
     stats: dict[str, Any] | None = None
 
     def summary(self) -> dict[str, Any]:
@@ -125,6 +128,7 @@ class SessionRecord:
             "resume_token": self.resume_token,
             "additional_paths": list(self.additional_paths),
             "container_name": self.container_name,
+            "vscode_url": self.vscode_url,
             "stats": self.stats,
         }
 
@@ -143,6 +147,17 @@ class DockerKernelRuntime:
         self._base_url_template = os.environ.get(
             "AGENT_HOST_KERNEL_BASE_URL_TEMPLATE",
             "http://{container_name}:8000",
+        )
+        self._vscode_container_port = int(
+            os.environ.get("AGENT_HOST_KERNEL_VSCODE_CONTAINER_PORT", "8080"),
+        )
+        self._vscode_host_ip = os.environ.get(
+            "AGENT_HOST_KERNEL_VSCODE_HOST_IP",
+            "127.0.0.1",
+        )
+        self._vscode_url_template = os.environ.get(
+            "AGENT_HOST_KERNEL_VSCODE_URL_TEMPLATE",
+            "http://127.0.0.1:{host_port}",
         )
         self._startup_timeout = float(
             os.environ.get("AGENT_HOST_KERNEL_STARTUP_TIMEOUT", "60"),
@@ -197,9 +212,17 @@ class DockerKernelRuntime:
             additional_paths,
             skills,
         )
+        vscode_url = await asyncio.to_thread(
+            self._vscode_url_for_container,
+            container_name,
+        )
         await self._wait_until_ready(base_url)
         return KernelRuntimeSession(
-            value=DockerKernelSession(container_name=container_name, base_url=base_url),
+            value=DockerKernelSession(
+                container_name=container_name,
+                base_url=base_url,
+                vscode_url=vscode_url,
+            ),
         )
 
     async def send_message(
@@ -303,6 +326,9 @@ class DockerKernelRuntime:
     def container_name(self, *, session: KernelRuntimeSession) -> str | None:
         return self._docker_session(session).container_name
 
+    def vscode_url(self, *, session: KernelRuntimeSession) -> str | None:
+        return self._docker_session(session).vscode_url
+
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         handle = self._docker_session(session)
         await asyncio.to_thread(self._remove_container, handle.container_name)
@@ -325,6 +351,21 @@ class DockerKernelRuntime:
         environment["KERNEL_SKILLS_DIR"] = skills_mount
         environment["KERNEL_SKILLS_STAGING_DIR"] = skills_staging
         environment["KERNEL_ENABLED_SKILLS"] = ",".join(skills)
+        environment["KERNEL_VSCODE_ENABLED"] = environment.get(
+            "KERNEL_VSCODE_ENABLED",
+            "1",
+        )
+        vscode_enabled = environment["KERNEL_VSCODE_ENABLED"].lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        ports: dict[str, tuple[str, int]] | None = (
+            {f"{self._vscode_container_port}/tcp": (self._vscode_host_ip, 0)}
+            if vscode_enabled
+            else None
+        )
 
         logger.info(
             "container %s final env: %s",
@@ -349,6 +390,7 @@ class DockerKernelRuntime:
             labels={"agentspace.role": "kernel"},
             name=container_name,
             network=self._kernel_network,
+            ports=ports,
             volumes={
                 self._copilot_volume: {
                     "bind": "/root/.copilot",
@@ -366,6 +408,45 @@ class DockerKernelRuntime:
             msg = f"unsupported runtime session handle: {type(session.value)!r}"
             raise TypeError(msg)
         return session.value
+
+    def _vscode_url_for_container(self, container_name: str) -> str | None:
+        host_port = self._container_host_port(
+            container_name,
+            self._vscode_container_port,
+        )
+        if host_port is None:
+            return None
+        return self._vscode_url_template.format(
+            container_name=container_name,
+            host_ip=self._vscode_host_ip,
+            host_port=host_port,
+            container_port=self._vscode_container_port,
+        )
+
+    def _container_host_port(
+        self,
+        container_name: str,
+        container_port: int,
+    ) -> str | None:
+        try:
+            container = self._client.containers.get(container_name)
+            container.reload()
+        except (DockerException, NotFound) as exc:
+            logger.warning("failed to inspect container %s: %s", container_name, exc)
+            return None
+        attrs = container.attrs
+        network_settings = _as_dict(attrs.get("NetworkSettings"))
+        ports = _as_dict(network_settings.get("Ports"))
+        raw_bindings = ports.get(f"{container_port}/tcp")
+        if not isinstance(raw_bindings, list) or not raw_bindings:
+            return None
+        bindings = cast("list[object]", raw_bindings)
+        first = bindings[0]
+        if not isinstance(first, dict):
+            return None
+        binding = cast("dict[str, object]", first)
+        host_port = binding.get("HostPort")
+        return host_port if isinstance(host_port, str) and host_port else None
 
     def _remove_container(self, container_name: str) -> None:
         try:
@@ -484,10 +565,15 @@ class AgentHost:
             additional_paths=additional_paths,
             skills=skills,
             container_name=self._runtime.container_name(session=runtime_session),
+            vscode_url=self._runtime.vscode_url(session=runtime_session),
         )
         session_summary = await self._runtime.summary(session=runtime_session)
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
         record.status = _as_status(session_summary.get("status"), KernelStatus.IDLE)
+        record.vscode_url = _as_optional_str(
+            session_summary.get("vscode_url"),
+            record.vscode_url,
+        )
         async with self._lock:
             self._sessions[session_id] = record
         return record.summary()
@@ -526,6 +612,10 @@ class AgentHost:
                     session_summary.get("resume_token"),
                 )
                 record.status = _as_status(session_summary.get("status"), record.status)
+                record.vscode_url = _as_optional_str(
+                    session_summary.get("vscode_url"),
+                    record.vscode_url,
+                )
 
         return iterator()
 
@@ -586,6 +676,10 @@ class AgentHost:
             )
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
         record.status = _as_status(session_summary.get("status"), record.status)
+        record.vscode_url = _as_optional_str(
+            session_summary.get("vscode_url"),
+            record.vscode_url,
+        )
         return record.summary()
 
     async def list_sessions(
@@ -670,10 +764,17 @@ def _as_resume_token(value: object) -> str | None:
     return None
 
 
+def _as_optional_str(value: object, fallback: str | None = None) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return fallback
+
+
 @dataclass(frozen=True, slots=True)
 class DockerKernelSession:
     container_name: str
     base_url: str
+    vscode_url: str | None = None
 
 
 def _summarize_docker_stats(raw: dict[str, Any]) -> dict[str, Any] | None:

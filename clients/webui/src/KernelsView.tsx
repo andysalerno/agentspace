@@ -405,6 +405,27 @@ function KernelRow({
                             >
                                 View logs
                             </button>
+                            {kernel.vscode_url ? (
+                                <a
+                                    role="menuitem"
+                                    className="kebab-menu-item"
+                                    href={kernel.vscode_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    onClick={onToggleMenu}
+                                >
+                                    Open VS Code
+                                </a>
+                            ) : (
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    className="kebab-menu-item"
+                                    disabled
+                                >
+                                    VS Code unavailable
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 role="menuitem"

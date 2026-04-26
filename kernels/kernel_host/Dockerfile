@@ -12,6 +12,7 @@ RUN apt-get update && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     curl -fsSL https://opencode.ai/install | bash && \
     npm install -g firecrawl-cli && \
+    npm install -g --unsafe-perm code-server && \
     apt-get purge -y curl gnupg && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
@@ -41,5 +42,6 @@ RUN uv sync --no-dev --package kernel-host
 
 # Create clean kernel workspace directory
 RUN mkdir -p /workspace
+EXPOSE 8000 8080
 
 ENTRYPOINT ["uv", "run", "--no-dev", "--package", "kernel-host", "-m", "kernel_host.runner"]

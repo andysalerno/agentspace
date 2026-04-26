@@ -149,6 +149,9 @@ class StubRuntime:
     def container_name(self, *, session: KernelRuntimeSession) -> str | None:
         return self._session_key(session)
 
+    def vscode_url(self, *, session: KernelRuntimeSession) -> str | None:
+        return f"http://127.0.0.1/vscode/{self._session_key(session)}"
+
     def _session_key(self, session: KernelRuntimeSession) -> str:
         assert isinstance(session.value, str)
         return session.value
