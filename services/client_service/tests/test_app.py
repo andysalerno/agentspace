@@ -426,6 +426,14 @@ class StubClientService:
             record.pop("api_key", None)
         return record
 
+    async def list_connection_models(self, connection_id: str) -> dict[str, object]:
+        if connection_id not in self.connections:
+            raise _ConnNotFound(connection_id)
+        return {
+            "object": "list",
+            "data": [{"id": "model-a", "object": "model"}],
+        }
+
     async def create_connection(
         self,
         *,
@@ -570,6 +578,32 @@ def test_patch_agent_can_clear_connection(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["connection_id"] is None
+
+
+def test_connection_models_route(client: TestClient) -> None:
+    client.post(
+        "/connections",
+        json={
+            "connection_id": "connection-one",
+            "name": "Connection One",
+            "url": "https://connection.test/v1",
+            "api_key": "secret",
+        },
+    )
+
+    response = client.get("/connections/connection-one/models")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "object": "list",
+        "data": [{"id": "model-a", "object": "model"}],
+    }
+
+
+def test_connection_models_missing_connection_returns_404(client: TestClient) -> None:
+    response = client.get("/connections/missing/models")
+
+    assert response.status_code == 404
 
 
 def test_list_harnesses_route(client: TestClient) -> None:

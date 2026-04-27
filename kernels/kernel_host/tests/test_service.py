@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -62,6 +63,53 @@ class StubKernel:
         return
 
 
+class PersistentStubKernel:
+    supports_persistent_process = True
+
+    def __init__(self) -> None:
+        self.start_configs: list[KernelConfig] = []
+        self.messages: list[str] = []
+        self.stop_count = 0
+        self.resume_token_value: str | None = "persistent-session"  # noqa: S105
+        self.raw_logs: list[str] = []
+        self._queue: asyncio.Queue[KernelEvent | None] = asyncio.Queue()
+
+    @property
+    def name(self) -> str:
+        return "persistent-stub"
+
+    @property
+    def status(self) -> KernelStatus:
+        return KernelStatus.DONE
+
+    @property
+    def resume_token(self) -> str | None:
+        return self.resume_token_value
+
+    async def start(self, config: KernelConfig) -> None:
+        self.start_configs.append(config)
+        await self._queue.put(session_start("session-1", "persistent-stub"))
+
+    async def send(self, message: str) -> None:
+        self.messages.append(message)
+        self.raw_logs.append(f"log:{message}")
+        await self._queue.put(status_event(KernelStatus.BUSY))
+        await self._queue.put(text_delta(message))
+        await self._queue.put(status_event(KernelStatus.IDLE))
+        await self._queue.put(session_end())
+        await self._queue.put(None)
+
+    async def recv(self) -> AsyncIterator[KernelEvent]:
+        while True:
+            event = await self._queue.get()
+            if event is None:
+                return
+            yield event
+
+    async def stop(self) -> None:
+        self.stop_count += 1
+
+
 @pytest.mark.asyncio
 async def test_service_reuses_resume_token(
     monkeypatch: pytest.MonkeyPatch,
@@ -98,6 +146,53 @@ async def test_service_reuses_resume_token(
     assert len(second_events) == 5
     assert summary["resume_token"] == "resume-kernel-host"  # noqa: S105
     assert summary["turns"] == 2
+
+
+@pytest.mark.asyncio
+async def test_service_reuses_persistent_kernel_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernels: list[PersistentStubKernel] = []
+
+    def fake_get_kernel(_harness_name: HarnessName) -> PersistentStubKernel:
+        kernel = PersistentStubKernel()
+        kernels.append(kernel)
+        return kernel
+
+    monkeypatch.setattr("kernel_host.service.get_kernel", fake_get_kernel)
+
+    service = KernelSessionService(
+        harness=HarnessName.ACP,
+        env={},
+        additional_paths=(),
+    )
+
+    first_events = await service.send_message("hello")
+    second_events = await service.send_message("again")
+    logs = await service.logs()
+
+    assert len(kernels) == 1
+    assert len(kernels[0].start_configs) == 1
+    assert kernels[0].messages == ["hello", "again"]
+    assert kernels[0].stop_count == 0
+    assert [event.type for event in first_events] == [
+        "session_start",
+        "status",
+        "text_delta",
+        "status",
+        "session_end",
+    ]
+    assert [event.type for event in second_events] == [
+        "status",
+        "text_delta",
+        "status",
+        "session_end",
+    ]
+    assert logs == ["log:hello", "log:again"]
+
+    await service.stop()
+
+    assert kernels[0].stop_count == 1
 
 
 @pytest.mark.asyncio

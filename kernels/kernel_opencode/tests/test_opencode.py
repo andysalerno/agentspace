@@ -252,6 +252,7 @@ class TestOpenCodeMapping:
         options = config["provider"]["customprovider"]["options"]
         assert options["baseURL"] == "https://connection.test/v1"
         assert options["apiKey"] == "from-connection"
+        assert config["model"] == "customprovider/model-a"
 
     def test_write_provider_config_accepts_legacy_opencode_env(
         self,
@@ -275,6 +276,7 @@ class TestOpenCodeMapping:
         options = config["provider"]["customprovider"]["options"]
         assert options["baseURL"] == "https://legacy.test/v1"
         assert options["apiKey"] == "from-legacy"
+        assert config["model"] == "customprovider/model-a"
 
     def test_write_provider_config_reports_missing_connection_env(
         self,

@@ -9,7 +9,7 @@ import sys
 from typing import TYPE_CHECKING
 
 import pytest
-from kernel.events import EventType, KernelEvent
+from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel.protocol import KernelConfig
 from kernel_acp import AcpKernel
 
@@ -156,30 +156,76 @@ class TestAcpMapping:
             "--model=test",
         ]
 
-    def test_write_opencode_permissions_config_creates_file(
+    def test_write_opencode_config_uses_connection_env(
         self,
         kernel: AcpKernel,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        kernel._config = KernelConfig(
+            env={
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_API_KEY": "from-connection",
+                "KERNEL_ACP_BASE_URL": "https://legacy.test/v1",
+                "KERNEL_ACP_API_KEY": "from-legacy",
+                "KERNEL_ACP_MODEL_NAME": "model-a",
+            },
+        )
 
-        kernel._write_opencode_permissions_config()
+        kernel._write_opencode_config()
 
         config_path = tmp_path / ".config" / "opencode" / "opencode.json"
         config = json.loads(config_path.read_text())
+        options = config["provider"]["customprovider"]["options"]
         assert config["$schema"] == "https://opencode.ai/config.json"
+        assert options["baseURL"] == "https://connection.test/v1"
+        assert options["apiKey"] == "from-connection"
+        assert config["model"] == "customprovider/model-a"
+        assert config["provider"]["customprovider"]["models"] == {
+            "model-a": {"name": "model-a"},
+        }
         assert config["permission"]["bash"] == {"*": "allow"}
         assert config["permission"]["webfetch"] == "deny"
-        assert "provider" not in config
 
-    def test_write_opencode_permissions_config_preserves_existing_config(
+    def test_write_opencode_config_accepts_legacy_opencode_model_name(
         self,
         kernel: AcpKernel,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
+        kernel._config = KernelConfig(
+            env={
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_API_KEY": "from-connection",
+                "KERNEL_OPENCODE_MODEL_NAME": "model-a",
+            },
+        )
+
+        kernel._write_opencode_config()
+
+        config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        config = json.loads(config_path.read_text())
+        assert config["model"] == "customprovider/model-a"
+        assert config["provider"]["customprovider"]["models"] == {
+            "model-a": {"name": "model-a"},
+        }
+
+    def test_write_opencode_config_preserves_unrelated_existing_config(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        kernel._config = KernelConfig(
+            env={
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_API_KEY": "from-connection",
+                "KERNEL_ACP_MODEL_NAME": "model-a",
+            },
+        )
         config_path = tmp_path / ".config" / "opencode" / "opencode.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(
@@ -192,17 +238,35 @@ class TestAcpMapping:
                         },
                     },
                     "permission": {"old": "value"},
+                    "theme": "dark",
                 },
             ),
         )
 
-        kernel._write_opencode_permissions_config()
+        kernel._write_opencode_config()
 
         config = json.loads(config_path.read_text())
         assert config["$schema"] == "https://example.test/schema.json"
-        assert config["provider"]["existing"]["options"]["apiKey"] == "secret"
+        options = config["provider"]["customprovider"]["options"]
+        assert options["baseURL"] == "https://connection.test/v1"
+        assert options["apiKey"] == "from-connection"
+        assert config["model"] == "customprovider/model-a"
         assert config["permission"]["bash"] == {"*": "allow"}
         assert config["permission"]["question"] == "deny"
+        assert config["theme"] == "dark"
+
+    def test_write_opencode_config_reports_missing_required_env(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(env={"KERNEL_ACP_MODEL_NAME": "model-a"})
+
+        with pytest.raises(ValueError, match="CONNECTION_URL") as exc_info:
+            kernel._write_opencode_config()
+
+        message = str(exc_info.value)
+        assert "CONNECTION_URL" in message
+        assert "CONNECTION_API_KEY" in message
 
     def test_permission_response_prefers_allow_once(self, kernel: AcpKernel) -> None:
         result = kernel._permission_response(
@@ -257,6 +321,45 @@ class TestAcpMapping:
             "fs": {"readTextFile": True, "writeTextFile": True},
             "terminal": True,
         }
+
+    @pytest.mark.asyncio
+    async def test_send_finishes_turn_without_stopping_acp_server(
+        self,
+        kernel: AcpKernel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FakeProcess:
+            returncode: int | None = None
+
+        stopped = False
+        kernel._process = FakeProcess()  # type: ignore[assignment]
+        kernel._session_id = "sess_123"
+
+        async def request(method: str, params: dict[str, object]) -> object:
+            assert method == "session/prompt"
+            assert params["sessionId"] == "sess_123"
+            return {}
+
+        async def stop_process() -> None:
+            nonlocal stopped
+            stopped = True
+
+        monkeypatch.setattr(kernel, "_request", request)
+        monkeypatch.setattr(kernel, "_stop_process", stop_process)
+
+        await kernel.send("hello")
+
+        events = await _drain(kernel)
+        assert stopped is False
+        assert [event.type for event in events] == [
+            "status",
+            "status",
+            "status",
+            "session_end",
+        ]
+        assert events[0].status == KernelStatus.BUSY
+        assert events[1].status == KernelStatus.IDLE
+        assert events[2].status == KernelStatus.DONE
 
     def test_read_text_file_with_line_limit(
         self,

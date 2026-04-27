@@ -16,6 +16,8 @@ from kernel_host.registry import HarnessName, get_kernel
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from kernel.protocol import Kernel
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,43 +37,88 @@ class KernelSessionService:
         self._log_path = Path(tempfile.mkdtemp()) / "kernel.log"
         self._log_path.touch()
         self._status = KernelStatus.IDLE
+        self._kernel: Kernel | None = None
+        self._kernel_started = False
+        self._stream_lock = asyncio.Lock()
+        self._raw_log_offset = 0
 
     async def send_message(self, message: str) -> list[KernelEvent]:
         return [event async for event in self.stream_message(message)]
 
     def stream_message(self, message: str) -> AsyncIterator[KernelEvent]:
-        kernel = get_kernel(self._harness)
-        config = KernelConfig(
-            env=dict(self._base_env),
-            session_id=self._session_id,
-            additional_paths=self._additional_paths,
-        )
         events: list[KernelEvent] = []
 
         async def iterator() -> AsyncIterator[KernelEvent]:
             send_task: asyncio.Task[None] | None = None
-            try:
-                await kernel.start(config)
-                send_task = asyncio.create_task(kernel.send(message))
-                async for event in kernel.recv():
-                    events.append(event)
-                    yield event
-                await send_task
-            finally:
-                if send_task is not None:
-                    with suppress(asyncio.CancelledError):
-                        await send_task
-                await kernel.stop()
-                if kernel.resume_token is not None:
-                    self._session_id = kernel.resume_token
-                self._history.append(list(events))
-                raw_logs: list[str] = getattr(kernel, "raw_logs", [])
-                if raw_logs:
-                    with self._log_path.open("a", encoding="utf-8") as f:
-                        f.writelines(line + "\n" for line in raw_logs)
-                self._status = self._derive_status(events, kernel.status)
+            kernel: Kernel | None = None
+            stream_completed = False
+            async with self._stream_lock:
+                try:
+                    kernel = await self._kernel_for_message()
+                    send_task = asyncio.create_task(kernel.send(message))
+                    async for event in kernel.recv():
+                        events.append(event)
+                        yield event
+                    stream_completed = True
+                    await send_task
+                finally:
+                    if send_task is not None:
+                        with suppress(asyncio.CancelledError):
+                            await send_task
+                    if kernel is not None:
+                        if (
+                            not stream_completed
+                            and not self._should_stop_after_message(kernel)
+                        ):
+                            events.extend([event async for event in kernel.recv()])
+                        if kernel.resume_token is not None:
+                            self._session_id = kernel.resume_token
+                        self._history.append(list(events))
+                        self._append_raw_logs(kernel)
+                        self._status = self._derive_status(events, kernel.status)
+                        if (
+                            self._should_stop_after_message(kernel)
+                            or kernel.status == KernelStatus.ERROR
+                        ):
+                            await self._stop_kernel()
 
         return iterator()
+
+    async def _kernel_for_message(self) -> Kernel:
+        if self._kernel is None:
+            self._kernel = get_kernel(self._harness)
+            self._kernel_started = False
+            self._raw_log_offset = 0
+        if not self._kernel_started:
+            config = KernelConfig(
+                env=dict(self._base_env),
+                session_id=self._session_id,
+                additional_paths=self._additional_paths,
+            )
+            await self._kernel.start(config)
+            self._kernel_started = True
+        return self._kernel
+
+    def _should_stop_after_message(self, kernel: Kernel) -> bool:
+        return not bool(getattr(kernel, "supports_persistent_process", False))
+
+    def _append_raw_logs(self, kernel: Kernel) -> None:
+        raw_logs: list[str] = getattr(kernel, "raw_logs", [])
+        if not raw_logs:
+            return
+        new_logs = raw_logs[self._raw_log_offset :]
+        self._raw_log_offset = len(raw_logs)
+        if new_logs:
+            with self._log_path.open("a", encoding="utf-8") as f:
+                f.writelines(line + "\n" for line in new_logs)
+
+    async def _stop_kernel(self) -> None:
+        kernel = self._kernel
+        self._kernel = None
+        self._kernel_started = False
+        self._raw_log_offset = 0
+        if kernel is not None:
+            await kernel.stop()
 
     async def summary(self) -> dict[str, Any]:
         return {
@@ -93,6 +140,7 @@ class KernelSessionService:
             return []
 
     async def reset(self) -> dict[str, Any]:
+        await self._stop_kernel()
         self._session_id = None
         self._history.clear()
         self._log_path.write_text("", encoding="utf-8")
@@ -100,6 +148,7 @@ class KernelSessionService:
         return await self.summary()
 
     async def stop(self) -> None:
+        await self._stop_kernel()
         self._status = KernelStatus.DONE
 
     def _derive_status(

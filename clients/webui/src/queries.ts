@@ -23,6 +23,8 @@ export const queryKeys = {
   gatewayLogs: (gatewayId: string) => ["gateways", gatewayId, "logs"] as const,
   kernelConfig: (harness: string) => ["kernel-configs", harness] as const,
   connections: ["connections"] as const,
+  connectionModels: (connectionId: string) =>
+    ["connections", connectionId, "models"] as const,
   systemInfo: ["info"] as const,
   webuiInfo: ["webui-info"] as const,
 } as const;
@@ -126,4 +128,15 @@ export const useConnections = () =>
   useQuery({
     queryKey: queryKeys.connections,
     queryFn: api.listConnections,
+  });
+
+export const useConnectionModels = (connectionId: string | null) =>
+  useQuery({
+    queryKey: connectionId
+      ? queryKeys.connectionModels(connectionId)
+      : (["connections", "__none__", "models"] as const),
+    queryFn: () => api.listConnectionModels(connectionId as string),
+    enabled: connectionId !== null,
+    staleTime: 60_000,
+    retry: false,
   });

@@ -135,6 +135,16 @@ export type Connection = {
   updated_at: string;
 };
 
+export type ConnectionModels = {
+  object?: string;
+  data?: Array<{
+    id?: string;
+    object?: string;
+    [key: string]: unknown;
+  }>;
+  [key: string]: unknown;
+};
+
 export type GatewayType = string;
 
 export type GatewayConfigFieldKind = "env" | "secret";

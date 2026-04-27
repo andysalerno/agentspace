@@ -4,10 +4,16 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Agent } from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
-import { withRequiredEnvKeys } from "./envPrefill";
+import {
+    getEnvValue,
+    modelEnvKeyForHarness,
+    setEnvValue,
+    withRequiredEnvKeys,
+} from "./envPrefill";
 import {
     queryKeys,
     useAgents,
+    useConnectionModels,
     useConnections,
     useHarnesses,
     useSessions,
@@ -67,6 +73,64 @@ function formatHarnessLabel(harness: string): string {
         .split("-")
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
         .join(" ");
+}
+
+type ModelNameFieldProps = {
+    connectionId: string | null;
+    envVars: string;
+    harness: string;
+    onEnvVarsChange: (envVars: string) => void;
+};
+
+function modelIdsFromResponse(response: { data?: Array<{ id?: string }> } | undefined): string[] {
+    if (!response?.data) {
+        return [];
+    }
+    return response.data
+        .map((model) => model.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+function ModelNameField({
+    connectionId,
+    envVars,
+    harness,
+    onEnvVarsChange,
+}: ModelNameFieldProps) {
+    const modelKey = modelEnvKeyForHarness(harness);
+    const modelsQuery = useConnectionModels(modelKey === null ? null : connectionId);
+    if (modelKey === null) {
+        return null;
+    }
+
+    const modelIds = modelIdsFromResponse(modelsQuery.data);
+    const datalistId = `models-${harness}-${connectionId ?? "none"}`;
+    const value = getEnvValue(envVars, modelKey);
+    const placeholder = connectionId === null
+        ? "Select a connection or type a model name"
+        : modelsQuery.isError
+            ? "Model list unavailable; type a model name"
+            : "Select or type a model name";
+
+    return (
+        <label>
+            Model
+            <input
+                list={modelIds.length > 0 ? datalistId : undefined}
+                placeholder={placeholder}
+                value={value}
+                onChange={(e) => onEnvVarsChange(setEnvValue(envVars, modelKey, e.target.value))}
+            />
+            {modelIds.length > 0 && (
+                <datalist id={datalistId}>
+                    {modelIds.map((modelId) => (
+                        <option key={modelId} value={modelId} />
+                    ))}
+                </datalist>
+            )}
+            <span className="muted">{modelKey}</span>
+        </label>
+    );
 }
 
 export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
@@ -305,6 +369,15 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             ))}
                         </select>
                     </label>
+                    <ModelNameField
+                        connectionId={form.connection_id}
+                        envVars={form.env_vars}
+                        harness={form.harness}
+                        onEnvVarsChange={(envVars) => {
+                            setForm({ ...form, env_vars: envVars });
+                            setEnvDirty(true);
+                        }}
+                    />
                     <div>
                         <label>System Prompt</label>
                         <CodeEditor
@@ -426,6 +499,13 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                             ))}
                                         </select>
                                     </label>
+                                    <ModelNameField
+                                        connectionId={editForm.connection_id}
+                                        envVars={editForm.env_vars}
+                                        harness={editForm.harness}
+                                        onEnvVarsChange={(envVars) =>
+                                            setEditForm({ ...editForm, env_vars: envVars })}
+                                    />
                                     <div>
                                         <label>System Prompt</label>
                                         <CodeEditor

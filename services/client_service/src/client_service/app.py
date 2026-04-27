@@ -23,6 +23,7 @@ from client_service.service import (
     AgentNotFoundError,
     ClientService,
     ConnectionAlreadyExistsError,
+    ConnectionModelsError,
     ConnectionNotFoundError,
     GatewayAlreadyExistsError,
     GatewayNotFoundError,
@@ -200,6 +201,16 @@ async def get_connection(connection_id: str) -> dict[str, object]:
         return await service.get_connection(connection_id)
     except ConnectionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/connections/{connection_id}/models")
+async def list_connection_models(connection_id: str) -> dict[str, object]:
+    try:
+        return await service.list_connection_models(connection_id)
+    except ConnectionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ConnectionModelsError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/connections")

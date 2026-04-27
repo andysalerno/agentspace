@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
+import client_service.service as service_module
 import pytest
 from client_service.models import ClientType
 from client_service.service import (
@@ -514,6 +515,102 @@ async def test_create_session_adds_agent_connection_env() -> None:
     env = cast("dict[str, str]", upstream.created[0]["env"])
     assert env["CONNECTION_URL"] == "https://connection.test/v1"
     assert env["CONNECTION_API_KEY"] == "connection-secret"
+
+
+@pytest.mark.asyncio
+async def test_create_acp_session_adds_connection_and_model_env() -> None:
+    upstream = StubAgentHostClient()
+    runtime = cast("AgentHostClient", upstream)
+    service = ClientService(agent_host_client=runtime)
+
+    await service.update_kernel_config(
+        HarnessName.ACP,
+        "KERNEL_ACP_MODEL_NAME=base-model\n",
+    )
+    await service.create_connection(
+        connection_id="test-connection",
+        name="Test Connection",
+        url="https://connection.test/v1",
+        api_key="connection-secret",
+    )
+    agent = await service.create_agent(
+        agent_id="connected-acp-agent",
+        name="Connected ACP Agent",
+        harness=HarnessName.ACP,
+        connection_id="test-connection",
+    )
+
+    await service.create_session(agent_id=str(agent["agent_id"]))
+
+    assert len(upstream.created) == 1
+    created = upstream.created[0]
+    assert created["harness"] == HarnessName.ACP
+    env = cast("dict[str, str]", created["env"])
+    assert env["CONNECTION_URL"] == "https://connection.test/v1"
+    assert env["CONNECTION_API_KEY"] == "connection-secret"
+    assert env["KERNEL_ACP_MODEL_NAME"] == "base-model"
+
+
+@pytest.mark.asyncio
+async def test_list_connection_models_fetches_models_with_connection_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested: dict[str, object] = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "object": "list",
+                "data": [{"id": "model-a", "object": "model"}],
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            requested["timeout"] = timeout
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(
+            self,
+            exc_type: object,
+            exc: object,
+            traceback: object,
+        ) -> None:
+            return None
+
+        async def get(
+            self,
+            url: str,
+            *,
+            headers: dict[str, str],
+        ) -> FakeResponse:
+            requested["url"] = url
+            requested["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(service_module.httpx, "AsyncClient", FakeAsyncClient)
+    service = ClientService(
+        agent_host_client=cast("AgentHostClient", StubAgentHostClient()),
+    )
+    await service.create_connection(
+        connection_id="test-connection",
+        name="Test Connection",
+        url="https://connection.test/v1/",
+        api_key="connection-secret",
+    )
+
+    models = await service.list_connection_models("test-connection")
+
+    assert models == {
+        "object": "list",
+        "data": [{"id": "model-a", "object": "model"}],
+    }
+    assert requested["url"] == "https://connection.test/v1/models"
+    assert requested["headers"] == {"Authorization": "Bearer connection-secret"}
 
 
 @pytest.mark.asyncio

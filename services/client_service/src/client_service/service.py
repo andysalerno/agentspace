@@ -9,6 +9,7 @@ import uuid
 from dataclasses import asdict
 from typing import TYPE_CHECKING, cast
 
+import httpx
 from kernel.events import EventType, KernelEvent
 from kernel_host.registry import HarnessName
 
@@ -102,6 +103,10 @@ class ConnectionAlreadyExistsError(ValueError):
 
 
 class InvalidConnectionIdError(ValueError):
+    pass
+
+
+class ConnectionModelsError(RuntimeError):
     pass
 
 
@@ -865,6 +870,31 @@ class ClientService:
     ) -> dict[str, object]:
         record = await self._require_connection(connection_id)
         return record.summary(include_api_key=include_api_key)
+
+    async def list_connection_models(self, connection_id: str) -> dict[str, object]:
+        record = await self._require_connection(connection_id)
+        url = record.url.rstrip("/") + "/models"
+        headers: dict[str, str] = {}
+        if record.api_key:
+            headers["Authorization"] = f"Bearer {record.api_key}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            msg = f"failed to fetch models for connection {connection_id}: {exc}"
+            raise ConnectionModelsError(msg) from exc
+        except ValueError as exc:
+            msg = f"models response for connection {connection_id} was not valid JSON"
+            raise ConnectionModelsError(msg) from exc
+        if not isinstance(payload, dict):
+            msg = (
+                f"models response for connection {connection_id} "
+                "was not a JSON object"
+            )
+            raise ConnectionModelsError(msg)
+        return cast("dict[str, object]", payload)
 
     async def create_connection(
         self,

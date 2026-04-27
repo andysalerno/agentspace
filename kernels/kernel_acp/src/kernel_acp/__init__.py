@@ -70,6 +70,8 @@ class TerminalSession:
 class AcpKernel:
     """Kernel that speaks ACP JSON-RPC over stdio to a compliant agent server."""
 
+    supports_persistent_process = True
+
     def __init__(self) -> None:
         self._status = KernelStatus.IDLE
         self._session_id = ""
@@ -115,17 +117,17 @@ class AcpKernel:
         self._terminals = {}
 
         try:
-            self._write_opencode_permissions_config()
+            self._write_opencode_config()
             cmd = self._build_command()
         except ValueError as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
             return
         except OSError as exc:
-            logger.exception("failed to write opencode permissions config")
+            logger.exception("failed to write opencode config")
             detail = exc.strerror or type(exc).__name__
             await self._queue.put(
-                error(f"failed to write opencode permissions config: {detail}"),
+                error(f"failed to write opencode config: {detail}"),
             )
             await self._finish(KernelStatus.ERROR)
             return
@@ -190,7 +192,7 @@ class AcpKernel:
 
         self._status = KernelStatus.IDLE
         await self._queue.put(status_event(KernelStatus.IDLE))
-        await self._finish(KernelStatus.DONE)
+        await self._finish_turn(KernelStatus.DONE)
 
     async def recv(self) -> AsyncIterator[KernelEvent]:
         while True:
@@ -221,8 +223,40 @@ class AcpKernel:
         env.update({key: value for key, value in self._config.env.items() if value})
         return env
 
-    def _write_opencode_permissions_config(self) -> None:
-        """Write opencode permission defaults while preserving existing config."""
+    def _write_opencode_config(self) -> None:
+        """Write opencode provider and permission config for opencode ACP servers."""
+        env_get = self._config.env.get
+        base_url = (
+            env_get("CONNECTION_URL")
+            or env_get("KERNEL_ACP_BASE_URL")
+            or env_get("KERNEL_OPENCODE_BASE_URL")
+        )
+        api_key = (
+            env_get("CONNECTION_API_KEY")
+            or env_get("KERNEL_ACP_API_KEY")
+            or env_get("KERNEL_OPENCODE_API_KEY")
+        )
+        model_name = env_get("KERNEL_ACP_MODEL_NAME") or env_get(
+            "KERNEL_OPENCODE_MODEL_NAME",
+        )
+        required = {
+            "CONNECTION_URL": base_url,
+            "CONNECTION_API_KEY": api_key,
+            "KERNEL_ACP_MODEL_NAME": model_name,
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            msg = (
+                "ACP kernel is missing required environment "
+                f"variable(s): {', '.join(missing)}. Assign a Connection with "
+                "a URL and API key, and set KERNEL_ACP_MODEL_NAME on the agent "
+                "or kernel configuration."
+            )
+            raise ValueError(msg)
+        base_url = cast("str", base_url)
+        api_key = cast("str", api_key)
+        model_name = cast("str", model_name)
+
         config_path = Path.home() / ".config" / "opencode" / "opencode.json"
         config: dict[str, object] = {
             "$schema": "https://opencode.ai/config.json",
@@ -234,11 +268,27 @@ class AcpKernel:
                 raise ValueError(msg)
             config = cast("dict[str, object]", loaded)
             config.setdefault("$schema", "https://opencode.ai/config.json")
+        config["model"] = f"customprovider/{model_name}"
+        config["provider"] = {
+            "customprovider": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "customprovider",
+                "options": {
+                    "baseURL": base_url,
+                    "apiKey": api_key,
+                },
+                "models": {
+                    model_name: {
+                        "name": model_name,
+                    },
+                },
+            },
+        }
         config["permission"] = _OPENCODE_PERMISSION_CONFIG
 
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(config, indent=2))
-        logger.info("wrote opencode permissions config to %s", config_path)
+        logger.info("wrote opencode config to %s", config_path)
 
     async def _initialize(self) -> None:
         result = await self._request(
@@ -836,6 +886,10 @@ class AcpKernel:
         return {}
 
     async def _finish(self, status: KernelStatus) -> None:
+        await self._finish_turn(status)
+        await self._stop_process()
+
+    async def _finish_turn(self, status: KernelStatus) -> None:
         self._status = status
         if status != KernelStatus.ERROR:
             await self._queue.put(status_event(KernelStatus.DONE))
@@ -844,7 +898,6 @@ class AcpKernel:
             await self._queue.put(status_event(KernelStatus.DONE))
         await self._queue.put(session_end())
         await self._queue.put(None)
-        await self._stop_process()
 
     async def _stop_process(self) -> None:
         for future in self._pending.values():

@@ -233,6 +233,7 @@ class OpenCodeKernel:
 
         config = {
             "$schema": "https://opencode.ai/config.json",
+            "model": f"customprovider/{model_name}",
             "provider": {
                 "customprovider": {
                     "npm": "@ai-sdk/openai-compatible",

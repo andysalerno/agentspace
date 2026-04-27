@@ -1,6 +1,7 @@
 import type {
   Agent,
   Connection,
+  ConnectionModels,
   Gateway,
   GatewaySchema,
   GatewayType,
@@ -235,6 +236,8 @@ export const api = {
   // Connections
   listConnections: () => requestJson<Connection[]>("/connections"),
   getConnection: (connectionId: string) => requestJson<Connection>(`/connections/${connectionId}`),
+  listConnectionModels: (connectionId: string) =>
+    requestJson<ConnectionModels>(`/connections/${connectionId}/models`),
   createConnection: (payload: {
     connection_id: string;
     name: string;
