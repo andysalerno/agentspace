@@ -8,7 +8,8 @@ import logging
 import os
 import shlex
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from kernel.events import (
@@ -34,6 +35,24 @@ DEFAULT_WORKSPACE_DIR = "/workspace"
 DEFAULT_ACP_COMMAND = "opencode acp"
 PROTOCOL_VERSION = 1
 _STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
+_DEFAULT_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
+_UNHANDLED: object = object()
+
+
+class AcpRequestError(ValueError):
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+@dataclass(slots=True)
+class TerminalSession:
+    process: asyncio.subprocess.Process
+    output_limit: int
+    output: str = ""
+    truncated: bool = False
+    reader_task: asyncio.Task[None] | None = None
 
 
 class AcpKernel:
@@ -52,6 +71,7 @@ class AcpKernel:
         self._pending: dict[int, asyncio.Future[object]] = {}
         self._agent_capabilities: dict[str, object] = {}
         self._tool_names: dict[str, str] = {}
+        self._terminals: dict[str, TerminalSession] = {}
 
     @property
     def name(self) -> str:
@@ -80,6 +100,7 @@ class AcpKernel:
         self._raw_lines = []
         self._agent_capabilities = {}
         self._tool_names = {}
+        self._terminals = {}
 
         try:
             cmd = self._build_command()
@@ -184,7 +205,13 @@ class AcpKernel:
             "initialize",
             {
                 "protocolVersion": PROTOCOL_VERSION,
-                "clientCapabilities": {},
+                "clientCapabilities": {
+                    "fs": {
+                        "readTextFile": True,
+                        "writeTextFile": True,
+                    },
+                    "terminal": True,
+                },
                 "clientInfo": {
                     "name": "agentspace",
                     "title": "AgentSpace",
@@ -322,7 +349,7 @@ class AcpKernel:
                 self._raw_lines.append(f"[stderr] {line}")
                 await self._queue.put(error(line))
 
-    async def _handle_message(self, obj: dict[str, object]) -> None:
+    async def _handle_message(self, obj: dict[str, object]) -> None:  # noqa: PLR0911
         request_id = obj.get("id")
         if "result" in obj or "error" in obj:
             await self._handle_response(obj)
@@ -344,11 +371,44 @@ class AcpKernel:
             await self._respond(request_id, self._permission_response(params))
             return
 
+        try:
+            result = await self._handle_client_request(method, params)
+        except AcpRequestError as exc:
+            await self._respond_error(request_id, exc.code, exc.message)
+            return
+        if result is not _UNHANDLED:
+            await self._respond(request_id, result)
+            return
+
         await self._respond_error(
             request_id,
             -32601,
             f"unsupported ACP method: {method}",
         )
+
+    async def _handle_client_request(  # noqa: PLR0911
+        self,
+        method: str,
+        params: dict[str, object],
+    ) -> object | None:
+        if method == "fs/read_text_file":
+            return self._read_text_file(params)
+        if method == "fs/write_text_file":
+            self._write_text_file(params)
+            return None
+        if method == "terminal/create":
+            return await self._terminal_create(params)
+        if method == "terminal/output":
+            return self._terminal_output(params)
+        if method == "terminal/wait_for_exit":
+            return await self._terminal_wait_for_exit(params)
+        if method == "terminal/kill":
+            await self._terminal_kill(params)
+            return None
+        if method == "terminal/release":
+            await self._terminal_release(params)
+            return None
+        return _UNHANDLED
 
     async def _handle_response(self, obj: dict[str, object]) -> None:
         request_id = obj.get("id")
@@ -487,6 +547,226 @@ class AcpKernel:
             self._session_id = session_id
             self._config = replace(self._config, session_id=session_id)
 
+    def _read_text_file(self, params: dict[str, object]) -> dict[str, object]:
+        path = self._workspace_path(params.get("path"))
+        line = self._optional_int(params.get("line"), "line")
+        limit = self._optional_int(params.get("limit"), "limit")
+        if line is not None and line < 1:
+            raise AcpRequestError(-32602, "line must be 1 or greater")
+        if limit is not None and limit < 0:
+            raise AcpRequestError(-32602, "limit must be 0 or greater")
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise AcpRequestError(-32000, f"file not found: {path}") from exc
+        except UnicodeDecodeError as exc:
+            raise AcpRequestError(-32000, f"file is not valid UTF-8: {path}") from exc
+        except OSError as exc:
+            raise AcpRequestError(-32000, f"failed to read file: {exc}") from exc
+
+        if line is not None or limit is not None:
+            lines = content.splitlines(keepends=True)
+            start = 0 if line is None else line - 1
+            end = None if limit is None else start + limit
+            content = "".join(lines[start:end])
+        return {"content": content}
+
+    def _write_text_file(self, params: dict[str, object]) -> None:
+        path = self._workspace_path(params.get("path"))
+        content = params.get("content")
+        if not isinstance(content, str):
+            raise AcpRequestError(-32602, "content must be a string")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        except OSError as exc:
+            raise AcpRequestError(-32000, f"failed to write file: {exc}") from exc
+
+    async def _terminal_create(self, params: dict[str, object]) -> dict[str, object]:
+        command = params.get("command")
+        if not isinstance(command, str) or not command:
+            raise AcpRequestError(-32602, "command must be a non-empty string")
+        args = self._string_list(params.get("args"), "args")
+        cwd_value = params.get("cwd")
+        cwd = (
+            self._workspace_path(cwd_value)
+            if isinstance(cwd_value, str) and cwd_value
+            else self._workspace_root()
+        )
+        output_limit = self._optional_int(
+            params.get("outputByteLimit"),
+            "outputByteLimit",
+        )
+        if output_limit is None:
+            output_limit = _DEFAULT_TERMINAL_OUTPUT_LIMIT
+        if output_limit < 0:
+            raise AcpRequestError(-32602, "outputByteLimit must be 0 or greater")
+        env = self._terminal_env(params.get("env"))
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                command,
+                *args,
+                cwd=str(cwd),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                limit=_STREAM_BUFFER_LIMIT,
+            )
+        except FileNotFoundError as exc:
+            raise AcpRequestError(
+                -32000,
+                f"terminal command not found: {command}",
+            ) from exc
+        except OSError as exc:
+            raise AcpRequestError(-32000, f"failed to start terminal: {exc}") from exc
+
+        terminal_id = f"term_{uuid.uuid4().hex}"
+        session = TerminalSession(process=process, output_limit=output_limit)
+        session.reader_task = asyncio.create_task(self._read_terminal_output(session))
+        self._terminals[terminal_id] = session
+        return {"terminalId": terminal_id}
+
+    async def _read_terminal_output(self, session: TerminalSession) -> None:
+        if session.process.stdout is None:
+            return
+        async for chunk in session.process.stdout:
+            text = chunk.decode("utf-8", errors="replace")
+            session.output += text
+            self._truncate_terminal_output(session)
+
+    def _terminal_output(self, params: dict[str, object]) -> dict[str, object]:
+        terminal = self._terminal(params)
+        result: dict[str, object] = {
+            "output": terminal.output,
+            "truncated": terminal.truncated,
+        }
+        if terminal.process.returncode is not None:
+            result["exitStatus"] = self._exit_status(terminal.process.returncode)
+        return result
+
+    async def _terminal_wait_for_exit(
+        self,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        terminal = self._terminal(params)
+        returncode = await terminal.process.wait()
+        if terminal.reader_task is not None:
+            await terminal.reader_task
+        return self._exit_status(returncode)
+
+    async def _terminal_kill(self, params: dict[str, object]) -> None:
+        terminal = self._terminal(params)
+        await self._terminate_terminal(terminal)
+
+    async def _terminal_release(self, params: dict[str, object]) -> None:
+        terminal_id = self._terminal_id(params)
+        terminal = self._terminals.pop(terminal_id, None)
+        if terminal is None:
+            raise AcpRequestError(-32602, f"unknown terminalId: {terminal_id}")
+        await self._terminate_terminal(terminal)
+
+    async def _terminate_terminal(self, terminal: TerminalSession) -> None:
+        if terminal.process.returncode is None:
+            terminal.process.terminate()
+            try:
+                await asyncio.wait_for(terminal.process.wait(), timeout=5.0)
+            except TimeoutError:
+                terminal.process.kill()
+                await terminal.process.wait()
+        if terminal.reader_task is not None:
+            await terminal.reader_task
+
+    def _workspace_root(self) -> Path:
+        return Path(self._workspace_dir).resolve(strict=False)
+
+    def _workspace_path(self, value: object) -> Path:
+        if not isinstance(value, str) or not value:
+            raise AcpRequestError(-32602, "path must be a non-empty string")
+        path = Path(value)
+        if not path.is_absolute():
+            raise AcpRequestError(-32602, "path must be absolute")
+        root = self._workspace_root()
+        resolved = path.resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise AcpRequestError(
+                -32602,
+                f"path is outside workspace: {resolved}",
+            ) from exc
+        return resolved
+
+    def _optional_int(self, value: object, name: str) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AcpRequestError(-32602, f"{name} must be a number")
+        return value
+
+    def _string_list(self, value: object, name: str) -> list[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise AcpRequestError(-32602, f"{name} must be an array")
+        result: list[str] = []
+        for item in cast("list[object]", value):
+            if not isinstance(item, str):
+                raise AcpRequestError(-32602, f"{name} entries must be strings")
+            result.append(item)
+        return result
+
+    def _terminal_env(self, value: object) -> dict[str, str]:
+        env = self._build_env()
+        if value is None:
+            return env
+        if not isinstance(value, list):
+            raise AcpRequestError(-32602, "env must be an array")
+        for item in cast("list[object]", value):
+            item_dict = self._as_dict(item)
+            name = item_dict.get("name")
+            item_value = item_dict.get("value")
+            if not isinstance(name, str) or not isinstance(item_value, str):
+                raise AcpRequestError(
+                    -32602,
+                    "env entries must contain string name and value",
+                )
+            env[name] = item_value
+        return env
+
+    def _terminal_id(self, params: dict[str, object]) -> str:
+        terminal_id = params.get("terminalId")
+        if not isinstance(terminal_id, str) or not terminal_id:
+            raise AcpRequestError(-32602, "terminalId must be a non-empty string")
+        return terminal_id
+
+    def _terminal(self, params: dict[str, object]) -> TerminalSession:
+        terminal_id = self._terminal_id(params)
+        terminal = self._terminals.get(terminal_id)
+        if terminal is None:
+            raise AcpRequestError(-32602, f"unknown terminalId: {terminal_id}")
+        return terminal
+
+    def _exit_status(self, returncode: int) -> dict[str, object]:
+        if returncode < 0:
+            return {"exitCode": None, "signal": str(-returncode)}
+        return {"exitCode": returncode, "signal": None}
+
+    def _truncate_terminal_output(self, terminal: TerminalSession) -> None:
+        if terminal.output_limit == 0:
+            if terminal.output:
+                terminal.truncated = True
+            terminal.output = ""
+            return
+        data = terminal.output.encode("utf-8")
+        if len(data) <= terminal.output_limit:
+            return
+        terminal.truncated = True
+        terminal.output = data[-terminal.output_limit:].decode(
+            "utf-8",
+            errors="ignore",
+        )
+
     def _content_text(self, content: object) -> str:
         content_dict = self._as_dict(content)
         content_type = content_dict.get("type")
@@ -531,6 +811,10 @@ class AcpKernel:
             if not future.done():
                 future.set_exception(RuntimeError("ACP server stopped"))
         self._pending = {}
+
+        for terminal in list(self._terminals.values()):
+            await self._terminate_terminal(terminal)
+        self._terminals = {}
 
         if self._process is not None and self._process.returncode is None:
             self._process.terminate()

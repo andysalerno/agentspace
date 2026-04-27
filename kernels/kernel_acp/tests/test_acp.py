@@ -3,10 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
+from typing import TYPE_CHECKING
+
 import pytest
 from kernel.events import EventType, KernelEvent
 from kernel.protocol import KernelConfig
 from kernel_acp import AcpKernel
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 async def _drain(kernel: AcpKernel) -> list[KernelEvent]:
@@ -179,3 +186,131 @@ class TestAcpMapping:
         kernel._agent_capabilities = {"sessionCapabilities": {"resume": {}}}
 
         assert kernel._supports_resume() is True
+
+    @pytest.mark.asyncio
+    async def test_initialize_advertises_fs_and_terminal(
+        self,
+        kernel: AcpKernel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        requests: list[tuple[str, dict[str, object]]] = []
+
+        async def request(method: str, params: dict[str, object]) -> object:
+            requests.append((method, params))
+            return {"protocolVersion": 1, "agentCapabilities": {}}
+
+        monkeypatch.setattr(kernel, "_request", request)
+
+        await kernel._initialize()
+
+        assert requests[0][0] == "initialize"
+        assert requests[0][1]["clientCapabilities"] == {
+            "fs": {"readTextFile": True, "writeTextFile": True},
+            "terminal": True,
+        }
+
+    def test_read_text_file_with_line_limit(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path
+        kernel._config = KernelConfig(env={"KERNEL_ACP_WORKSPACE_DIR": str(workspace)})
+        path = workspace / "src" / "example.txt"
+        path.parent.mkdir()
+        path.write_text("one\ntwo\nthree\n", encoding="utf-8")
+
+        result = kernel._read_text_file(
+            {
+                "path": str(path),
+                "line": 2,
+                "limit": 1,
+            },
+        )
+
+        assert result == {"content": "two\n"}
+
+    def test_write_text_file_creates_parent_dirs(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path
+        kernel._config = KernelConfig(env={"KERNEL_ACP_WORKSPACE_DIR": str(workspace)})
+        path = workspace / "nested" / "example.txt"
+
+        kernel._write_text_file({"path": str(path), "content": "hello"})
+
+        assert path.read_text(encoding="utf-8") == "hello"
+
+    def test_filesystem_rejects_paths_outside_workspace(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path
+        kernel._config = KernelConfig(env={"KERNEL_ACP_WORKSPACE_DIR": str(workspace)})
+        outside = workspace.parent / "outside.txt"
+
+        with pytest.raises(ValueError, match="outside workspace"):
+            kernel._write_text_file({"path": str(outside), "content": "nope"})
+
+    @pytest.mark.asyncio
+    async def test_terminal_create_output_wait_and_release(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path
+        kernel._config = KernelConfig(env={"KERNEL_ACP_WORKSPACE_DIR": str(workspace)})
+
+        created = await kernel._terminal_create(
+            {
+                "command": sys.executable,
+                "args": ["-c", "print('hello from terminal')"],
+                "cwd": str(workspace),
+            },
+        )
+        terminal_id = created["terminalId"]
+        assert isinstance(terminal_id, str)
+
+        exit_status = await kernel._terminal_wait_for_exit(
+            {"terminalId": terminal_id},
+        )
+        output = kernel._terminal_output({"terminalId": terminal_id})
+        await kernel._terminal_release({"terminalId": terminal_id})
+
+        assert exit_status == {"exitCode": 0, "signal": None}
+        assert output["truncated"] is False
+        assert output["exitStatus"] == {"exitCode": 0, "signal": None}
+        assert "hello from terminal" in str(output["output"])
+
+    @pytest.mark.asyncio
+    async def test_terminal_kill(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+    ) -> None:
+        workspace = tmp_path
+        kernel._config = KernelConfig(env={"KERNEL_ACP_WORKSPACE_DIR": str(workspace)})
+
+        created = await kernel._terminal_create(
+            {
+                "command": sys.executable,
+                "args": ["-c", "import time; time.sleep(30)"],
+                "cwd": str(workspace),
+            },
+        )
+        terminal_id = str(created["terminalId"])
+        await asyncio.sleep(0.05)
+
+        await kernel._terminal_kill({"terminalId": terminal_id})
+        output = kernel._terminal_output({"terminalId": terminal_id})
+        await kernel._terminal_release({"terminalId": terminal_id})
+
+        exit_status = output["exitStatus"]
+        assert isinstance(exit_status, dict)
+        assert exit_status["exitCode"] is None or isinstance(
+            exit_status["exitCode"],
+            int,
+        )

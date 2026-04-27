@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Where each harness expects to find skill directories inside the container.
 SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
-    HarnessName.ACP: "/skills",
+    HarnessName.ACP: "/workspace/.agents/skills",
     HarnessName.CLAUDE_CODE: "/skills",
     HarnessName.COPILOT_CLI: "/root/.copilot/skills",
     HarnessName.CODEX: "/skills",
