@@ -19,6 +19,7 @@ services:
   # The build phase has already ensured the images exist, so it's safe to
   # drop the runtime dependency under podman.
   agent-host:
+    restart: unless-stopped
     depends_on: !reset []
     volumes:
       - ${XDG_RUNTIME_DIR:-/run/user/1000}/podman/podman.sock:/var/run/docker.sock
