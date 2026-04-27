@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
@@ -78,22 +78,22 @@ class StubClientService:
         self,
         agent_id: str,
         *,
-        name: str | object,
-        harness: HarnessName | object,
-        system_prompt: str | object,
-        skills: list[str] | object,
-        env_vars: str | object,
-        connection_id: str | None | object = None,
+        name: str | object = _UNSPECIFIED_SENTINEL,
+        harness: HarnessName | object = _UNSPECIFIED_SENTINEL,
+        system_prompt: str | object = _UNSPECIFIED_SENTINEL,
+        skills: list[str] | object = _UNSPECIFIED_SENTINEL,
+        env_vars: str | object = _UNSPECIFIED_SENTINEL,
+        connection_id: str | None | object = _UNSPECIFIED_SENTINEL,
     ) -> dict[str, object]:
         agent = self.agents[agent_id]
         if name is not None and name is not _UNSPECIFIED_SENTINEL:
             agent["name"] = name
         if harness is not None and harness is not _UNSPECIFIED_SENTINEL:
-            agent["harness"] = harness.value
+            agent["harness"] = cast("HarnessName", harness).value
         if system_prompt is not None and system_prompt is not _UNSPECIFIED_SENTINEL:
             agent["system_prompt"] = system_prompt
         if skills is not None and skills is not _UNSPECIFIED_SENTINEL:
-            agent["skills"] = list(skills)
+            agent["skills"] = list(cast("list[str]", skills))
         if env_vars is not None and env_vars is not _UNSPECIFIED_SENTINEL:
             agent["env_vars"] = env_vars
         if connection_id is not _UNSPECIFIED_SENTINEL:
@@ -537,6 +537,39 @@ def test_create_agent_accepts_explicit_harness(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["harness"] == "codex"
+
+
+def test_patch_agent_preserves_omitted_connection(client: TestClient) -> None:
+    client.post(
+        "/agents",
+        json={
+            "agent_id": "agent-one",
+            "name": "Agent One",
+            "connection_id": "connection-one",
+        },
+    )
+
+    response = client.patch("/agents/agent-one", json={"name": "Agent Renamed"})
+
+    assert response.status_code == 200
+    assert response.json()["name"] == "Agent Renamed"
+    assert response.json()["connection_id"] == "connection-one"
+
+
+def test_patch_agent_can_clear_connection(client: TestClient) -> None:
+    client.post(
+        "/agents",
+        json={
+            "agent_id": "agent-one",
+            "name": "Agent One",
+            "connection_id": "connection-one",
+        },
+    )
+
+    response = client.patch("/agents/agent-one", json={"connection_id": None})
+
+    assert response.status_code == 200
+    assert response.json()["connection_id"] is None
 
 
 def test_list_harnesses_route(client: TestClient) -> None:

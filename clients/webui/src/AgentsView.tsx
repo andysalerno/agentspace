@@ -10,6 +10,7 @@ import {
     useAgents,
     useConnections,
     useHarnesses,
+    useSessions,
     useSkills,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
@@ -19,6 +20,40 @@ type AgentsViewProps = {
 };
 
 const DEFAULT_HARNESS = "copilot-cli";
+
+type AgentFormState = {
+    agent_id: string;
+    name: string;
+    harness: string;
+    system_prompt: string;
+    skills: string[];
+    env_vars: string;
+    connection_id: string | null;
+};
+
+function emptyAgentForm(harnesses: string[]): AgentFormState {
+    return {
+        agent_id: "",
+        name: "",
+        harness: getInitialHarness(harnesses),
+        system_prompt: "",
+        skills: [],
+        env_vars: "",
+        connection_id: null,
+    };
+}
+
+function agentToForm(agent: Agent): AgentFormState {
+    return {
+        agent_id: agent.agent_id,
+        name: agent.name,
+        harness: agent.harness,
+        system_prompt: agent.system_prompt,
+        skills: [...agent.skills],
+        env_vars: agent.env_vars,
+        connection_id: agent.connection_id,
+    };
+}
 
 function getInitialHarness(harnesses: string[]): string {
     if (harnesses.includes(DEFAULT_HARNESS)) {
@@ -39,23 +74,14 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     const { data: skills = [] } = useSkills();
     const { data: harnesses = [] } = useHarnesses();
     const { data: connections = [] } = useConnections();
+    const { data: sessions = [] } = useSessions();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
 
-    const [form, setForm] = useState({
-        agent_id: "",
-        name: "",
-        harness: getInitialHarness(harnesses),
-        system_prompt: "",
-        skills: [] as string[],
-        env_vars: "",
-        connection_id: "" as string | null,
-    });
+    const [form, setForm] = useState<AgentFormState>(() => emptyAgentForm(harnesses));
     const [showForm, setShowForm] = useState(false);
-    const [editingSkillsFor, setEditingSkillsFor] = useState<string | null>(null);
-    const [editSkills, setEditSkills] = useState<string[]>([]);
-    const [editingConnectionFor, setEditingConnectionFor] = useState<string | null>(null);
-    const [editConnectionId, setEditConnectionId] = useState<string | null>(null);
+    const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
+    const [editForm, setEditForm] = useState<AgentFormState | null>(null);
     const [envDirty, setEnvDirty] = useState(false);
 
     const invalidateAgents = () =>
@@ -78,7 +104,14 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     const updateMutation = useMutation({
         mutationFn: ({ agentId, patch }: {
             agentId: string;
-            patch: { skills?: string[]; connection_id?: string | null };
+            patch: {
+                name?: string;
+                harness?: string;
+                system_prompt?: string;
+                skills?: string[];
+                env_vars?: string;
+                connection_id?: string | null;
+            };
         }) =>
             api.updateAgent(agentId, patch),
         onSuccess: () => invalidateAgents(),
@@ -150,15 +183,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
         await createMutation.mutateAsync(form);
-        setForm({
-            agent_id: "",
-            name: "",
-            harness: getInitialHarness(harnesses),
-            system_prompt: "",
-            skills: [],
-            env_vars: "",
-            connection_id: null,
-        });
+        setForm(emptyAgentForm(harnesses));
         setEnvDirty(false);
         setShowForm(false);
     }
@@ -173,34 +198,54 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     }
 
     function toggleEditSkill(skillId: string) {
-        setEditSkills((prev) =>
-            prev.includes(skillId)
-                ? prev.filter((s) => s !== skillId)
-                : [...prev, skillId],
-        );
+        setEditForm((prev) => {
+            if (prev === null) return prev;
+            return {
+                ...prev,
+                skills: prev.skills.includes(skillId)
+                    ? prev.skills.filter((s) => s !== skillId)
+                    : [...prev.skills, skillId],
+            };
+        });
     }
 
-    async function handleSaveSkills(agentId: string) {
-        await updateMutation.mutateAsync({ agentId, patch: { skills: editSkills } });
-        setEditingSkillsFor(null);
+    function startEditingAgent(agent: Agent) {
+        setEditingAgentId(agent.agent_id);
+        setEditForm(agentToForm(agent));
     }
 
-    function startEditingSkills(agent: Agent) {
-        setEditingSkillsFor(agent.agent_id);
-        setEditSkills([...agent.skills]);
+    function stopEditingAgent() {
+        setEditingAgentId(null);
+        setEditForm(null);
     }
 
-    function startEditingConnection(agent: Agent) {
-        setEditingConnectionFor(agent.agent_id);
-        setEditConnectionId(agent.connection_id);
+    function activeSessionCount(agentId: string) {
+        return sessions.filter((session) => session.agent_id === agentId).length;
     }
 
-    async function handleSaveConnection(agentId: string) {
+    async function handleSaveAgent(agentId: string) {
+        if (editForm === null) return;
+        const activeCount = activeSessionCount(agentId);
+        if (
+            activeCount > 0
+            && !window.confirm(
+                `${activeCount} existing session${activeCount === 1 ? "" : "s"} use this agent. Save changes anyway? Those kernels need to be restarted before they pick up the new configuration.`,
+            )
+        ) {
+            return;
+        }
         await updateMutation.mutateAsync({
             agentId,
-            patch: { connection_id: editConnectionId },
+            patch: {
+                name: editForm.name,
+                harness: editForm.harness,
+                system_prompt: editForm.system_prompt,
+                skills: editForm.skills,
+                env_vars: editForm.env_vars,
+                connection_id: editForm.connection_id,
+            },
         });
-        setEditingConnectionFor(null);
+        stopEditingAgent();
     }
 
     return (
@@ -327,79 +372,112 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     ))}
                                 </div>
                             )}
-                            {editingConnectionFor === agent.agent_id && (
-                                <fieldset className="skills-fieldset">
-                                    <legend>Edit Connection</legend>
-                                    <select
-                                        value={editConnectionId ?? ""}
-                                        onChange={(e) =>
-                                            setEditConnectionId(e.target.value || null)
-                                        }
-                                    >
-                                        <option value="">None</option>
-                                        {connections.map((conn) => (
-                                            <option
-                                                key={conn.connection_id}
-                                                value={conn.connection_id}
-                                            >
-                                                {conn.name} ({conn.connection_id})
-                                            </option>
-                                        ))}
-                                    </select>
-                                    <div className="skills-edit-actions">
-                                        <button
-                                            className="small"
-                                            disabled={busy}
-                                            onClick={() => {
-                                                void handleSaveConnection(agent.agent_id);
+                            {editingAgentId === agent.agent_id && editForm !== null && (
+                                <form
+                                    className="create-form agent-edit-form"
+                                    onSubmit={(e) => {
+                                        e.preventDefault();
+                                        void handleSaveAgent(agent.agent_id);
+                                    }}
+                                >
+                                    {activeSessionCount(agent.agent_id) > 0 && (
+                                        <div className="warning-box">
+                                            {activeSessionCount(agent.agent_id)} existing session{activeSessionCount(agent.agent_id) === 1 ? "" : "s"} use this agent. Save changes only after planning to restart those kernels.
+                                        </div>
+                                    )}
+                                    <label>
+                                        Display Name
+                                        <input
+                                            required
+                                            value={editForm.name}
+                                            onChange={(e) =>
+                                                setEditForm({ ...editForm, name: e.target.value })}
+                                        />
+                                    </label>
+                                    <label>
+                                        Kernel
+                                        <select
+                                            value={editForm.harness}
+                                            onChange={(e) =>
+                                                setEditForm({ ...editForm, harness: e.target.value })}
+                                        >
+                                            {harnesses.map((harness) => (
+                                                <option key={harness} value={harness}>
+                                                    {formatHarnessLabel(harness)}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                    <label>
+                                        Connection
+                                        <select
+                                            value={editForm.connection_id ?? ""}
+                                            onChange={(e) =>
+                                                setEditForm({
+                                                    ...editForm,
+                                                    connection_id: e.target.value || null,
+                                                })}
+                                        >
+                                            <option value="">None</option>
+                                            {connections.map((conn) => (
+                                                <option key={conn.connection_id} value={conn.connection_id}>
+                                                    {conn.name} ({conn.connection_id})
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                    <div>
+                                        <label>System Prompt</label>
+                                        <CodeEditor
+                                            value={editForm.system_prompt}
+                                            onChange={(v) =>
+                                                setEditForm({ ...editForm, system_prompt: v })}
+                                            language="markdown"
+                                            height="120px"
+                                        />
+                                    </div>
+                                    {skills.length > 0 && (
+                                        <fieldset className="skills-fieldset">
+                                            <legend>Skills</legend>
+                                            <div className="checkbox-grid">
+                                                {skills.map((skill) => (
+                                                    <label className="checkbox-label" key={skill.skill_id}>
+                                                        <input
+                                                            checked={editForm.skills.includes(skill.skill_id)}
+                                                            onChange={() => toggleEditSkill(skill.skill_id)}
+                                                            type="checkbox"
+                                                        />
+                                                        {skill.skill_id}
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </fieldset>
+                                    )}
+                                    <div>
+                                        <label>Environment Variables</label>
+                                        <CodeEditor
+                                            value={editForm.env_vars}
+                                            onChange={(v) => {
+                                                setEditForm({ ...editForm, env_vars: v });
                                             }}
-                                            type="button"
-                                        >
-                                            Save
-                                        </button>
-                                        <button
-                                            className="secondary-button small"
-                                            onClick={() => setEditingConnectionFor(null)}
-                                            type="button"
-                                        >
-                                            Cancel
-                                        </button>
-                                    </div>
-                                </fieldset>
-                            )}
-                            {editingSkillsFor === agent.agent_id && (
-                                <fieldset className="skills-fieldset">
-                                    <legend>Edit Skills</legend>
-                                    <div className="checkbox-grid">
-                                        {skills.map((skill) => (
-                                            <label className="checkbox-label" key={skill.skill_id}>
-                                                <input
-                                                    checked={editSkills.includes(skill.skill_id)}
-                                                    onChange={() => toggleEditSkill(skill.skill_id)}
-                                                    type="checkbox"
-                                                />
-                                                {skill.skill_id}
-                                            </label>
-                                        ))}
+                                            language="ini"
+                                            height="120px"
+                                        />
+                                        <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
                                     </div>
                                     <div className="skills-edit-actions">
-                                        <button
-                                            className="small"
-                                            disabled={busy}
-                                            onClick={() => { void handleSaveSkills(agent.agent_id); }}
-                                            type="button"
-                                        >
+                                        <button className="small" disabled={busy} type="submit">
                                             Save
                                         </button>
                                         <button
                                             className="secondary-button small"
-                                            onClick={() => setEditingSkillsFor(null)}
+                                            onClick={stopEditingAgent}
                                             type="button"
                                         >
                                             Cancel
                                         </button>
                                     </div>
-                                </fieldset>
+                                </form>
                             )}
                         </div>
                         <div className="card-footer">
@@ -415,24 +493,14 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                 >
                                     New Session
                                 </button>
-                                {editingSkillsFor !== agent.agent_id && skills.length > 0 && (
+                                {editingAgentId !== agent.agent_id && (
                                     <button
                                         className="secondary-button small"
                                         disabled={busy}
-                                        onClick={() => startEditingSkills(agent)}
+                                        onClick={() => startEditingAgent(agent)}
                                         type="button"
                                     >
-                                        Skills
-                                    </button>
-                                )}
-                                {editingConnectionFor !== agent.agent_id && (
-                                    <button
-                                        className="secondary-button small"
-                                        disabled={busy}
-                                        onClick={() => startEditingConnection(agent)}
-                                        type="button"
-                                    >
-                                        Connection
+                                        Edit
                                     </button>
                                 )}
                                 <button

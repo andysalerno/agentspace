@@ -62,6 +62,7 @@ export const api = {
     }),
   updateAgent: (agentId: string, payload: {
     name?: string;
+    harness?: string;
     system_prompt?: string;
     skills?: string[];
     env_vars?: string;

@@ -280,14 +280,10 @@ async def update_agent(
     payload: UpdateAgentRequest,
 ) -> dict[str, object]:
     try:
+        changes = payload.model_dump(exclude_unset=True)
         return await service.update_agent(
             agent_id,
-            name=payload.name,
-            harness=payload.harness,
-            system_prompt=payload.system_prompt,
-            skills=payload.skills,
-            env_vars=payload.env_vars,
-            connection_id=payload.connection_id,
+            **changes,
         )
     except AgentNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
