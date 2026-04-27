@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from typing import TYPE_CHECKING
 
@@ -154,6 +155,54 @@ class TestAcpMapping:
             "--debug",
             "--model=test",
         ]
+
+    def test_write_opencode_permissions_config_creates_file(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        kernel._write_opencode_permissions_config()
+
+        config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        config = json.loads(config_path.read_text())
+        assert config["$schema"] == "https://opencode.ai/config.json"
+        assert config["permission"]["bash"] == {"*": "allow"}
+        assert config["permission"]["webfetch"] == "deny"
+        assert "provider" not in config
+
+    def test_write_opencode_permissions_config_preserves_existing_config(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        config_path.parent.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps(
+                {
+                    "$schema": "https://example.test/schema.json",
+                    "provider": {
+                        "existing": {
+                            "options": {"apiKey": "secret"},
+                        },
+                    },
+                    "permission": {"old": "value"},
+                },
+            ),
+        )
+
+        kernel._write_opencode_permissions_config()
+
+        config = json.loads(config_path.read_text())
+        assert config["$schema"] == "https://example.test/schema.json"
+        assert config["provider"]["existing"]["options"]["apiKey"] == "secret"
+        assert config["permission"]["bash"] == {"*": "allow"}
+        assert config["permission"]["question"] == "deny"
 
     def test_permission_response_prefers_allow_once(self, kernel: AcpKernel) -> None:
         result = kernel._permission_response(

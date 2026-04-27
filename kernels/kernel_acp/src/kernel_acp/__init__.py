@@ -37,6 +37,18 @@ PROTOCOL_VERSION = 1
 _STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
 _DEFAULT_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
 _UNHANDLED: object = object()
+_OPENCODE_PERMISSION_CONFIG = {
+    "*": "allow",
+    "bash": {
+        "*": "allow",
+    },
+    "webfetch": "deny",
+    "doom_loop": "deny",
+    "external_directory": "deny",
+    "websearch": "deny",
+    "question": "deny",
+    "lsp": "deny",
+}
 
 
 class AcpRequestError(ValueError):
@@ -103,9 +115,18 @@ class AcpKernel:
         self._terminals = {}
 
         try:
+            self._write_opencode_permissions_config()
             cmd = self._build_command()
         except ValueError as exc:
             await self._queue.put(error(str(exc)))
+            await self._finish(KernelStatus.ERROR)
+            return
+        except OSError as exc:
+            logger.exception("failed to write opencode permissions config")
+            detail = exc.strerror or type(exc).__name__
+            await self._queue.put(
+                error(f"failed to write opencode permissions config: {detail}"),
+            )
             await self._finish(KernelStatus.ERROR)
             return
         env = self._build_env()
@@ -199,6 +220,25 @@ class AcpKernel:
         env = {**os.environ}
         env.update({key: value for key, value in self._config.env.items() if value})
         return env
+
+    def _write_opencode_permissions_config(self) -> None:
+        """Write opencode permission defaults while preserving existing config."""
+        config_path = Path.home() / ".config" / "opencode" / "opencode.json"
+        config: dict[str, object] = {
+            "$schema": "https://opencode.ai/config.json",
+        }
+        if config_path.exists():
+            loaded = json.loads(config_path.read_text())
+            if not isinstance(loaded, dict):
+                msg = f"opencode config must be a JSON object: {config_path}"
+                raise ValueError(msg)
+            config = cast("dict[str, object]", loaded)
+            config.setdefault("$schema", "https://opencode.ai/config.json")
+        config["permission"] = _OPENCODE_PERMISSION_CONFIG
+
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(json.dumps(config, indent=2))
+        logger.info("wrote opencode permissions config to %s", config_path)
 
     async def _initialize(self) -> None:
         result = await self._request(
