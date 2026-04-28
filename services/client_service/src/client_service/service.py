@@ -890,8 +890,7 @@ class ClientService:
             raise ConnectionModelsError(msg) from exc
         if not isinstance(payload, dict):
             msg = (
-                f"models response for connection {connection_id} "
-                "was not a JSON object"
+                f"models response for connection {connection_id} was not a JSON object"
             )
             raise ConnectionModelsError(msg)
         return cast("dict[str, object]", payload)
@@ -948,7 +947,8 @@ class ClientService:
         logger.info("deleted connection %s", connection_id)
 
     async def _require_connection(
-        self, connection_id: str,
+        self,
+        connection_id: str,
     ) -> ConnectionRecord:
         record = await self._connection_store.get(connection_id)
         if record is None:

@@ -66,9 +66,8 @@ class KernelSessionService:
                         with suppress(asyncio.CancelledError):
                             await send_task
                     if kernel is not None:
-                        if (
-                            not stream_completed
-                            and not self._should_stop_after_message(kernel)
+                        if not stream_completed and not self._should_stop_after_message(
+                            kernel
                         ):
                             events.extend([event async for event in kernel.recv()])
                         if kernel.resume_token is not None:
