@@ -7,6 +7,7 @@ import os
 import re
 import uuid
 from dataclasses import asdict
+from time import perf_counter
 from typing import TYPE_CHECKING, cast
 
 import httpx
@@ -465,6 +466,13 @@ class ClientService:
         session: SessionRecord,
         message: str,
     ) -> AsyncIterator[dict[str, object]]:
+        started_at = perf_counter()
+        logger.info(
+            "client stream start: client_session=%s upstream_session=%s chars=%d",
+            session.session_id,
+            session.agent_host_session_id,
+            len(message),
+        )
         user_message = MessageRecord(
             message_id=uuid.uuid4().hex,
             session_id=session.session_id,
@@ -481,6 +489,13 @@ class ClientService:
         )
         try:
             async for event in stream:
+                if not events:
+                    logger.info(
+                        "client first event: session=%s elapsed_ms=%.1f type=%s",
+                        session.session_id,
+                        (perf_counter() - started_at) * 1000,
+                        event.type,
+                    )
                 events.append(event)
                 yield {"type": "event", "event": asdict(event)}
             completed = True
@@ -503,6 +518,13 @@ class ClientService:
             "assistant_message": assistant_message.summary(),
             "events": [asdict(event) for event in events],
         }
+        logger.info(
+            "client stream final: session=%s elapsed_ms=%.1f events=%d completed=%s",
+            session.session_id,
+            (perf_counter() - started_at) * 1000,
+            len(events),
+            completed,
+        )
 
     async def _accumulate_stream(
         self,

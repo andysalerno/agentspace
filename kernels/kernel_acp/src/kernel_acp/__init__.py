@@ -10,6 +10,7 @@ import shlex
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, cast
 
 from kernel.events import (
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
-DEFAULT_ACP_COMMAND = "opencode acp"
+DEFAULT_ACP_COMMAND = "opencode acp --print-logs --log-level debug"
 CUSTOM_AGENT_NAME = "custom"
 CUSTOM_AGENT_PATH = (
     Path.home() / ".config" / "opencode" / "agents" / f"{CUSTOM_AGENT_NAME}.md"
@@ -112,6 +113,7 @@ class AcpKernel:
         return self._config.env.get("KERNEL_ACP_WORKSPACE_DIR", DEFAULT_WORKSPACE_DIR)
 
     async def start(self, config: KernelConfig) -> None:
+        started_at = perf_counter()
         self._config = config
         self._session_id = config.session_id or uuid.uuid4().hex[:12]
         self._status = KernelStatus.IDLE
@@ -151,6 +153,10 @@ class AcpKernel:
                 cwd=cwd,
                 limit=_STREAM_BUFFER_LIMIT,
             )
+            logger.info(
+                "ACP subprocess spawned: elapsed_ms=%.1f",
+                (perf_counter() - started_at) * 1000,
+            )
         except FileNotFoundError:
             await self._queue.put(error(f"ACP server command not found: {cmd[0]}"))
             await self._finish(KernelStatus.ERROR)
@@ -164,8 +170,21 @@ class AcpKernel:
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
         try:
+            initialize_started_at = perf_counter()
             await self._initialize()
+            logger.info(
+                "ACP initialize completed: elapsed_ms=%.1f total_ms=%.1f",
+                (perf_counter() - initialize_started_at) * 1000,
+                (perf_counter() - started_at) * 1000,
+            )
+            setup_started_at = perf_counter()
             await self._setup_session()
+            logger.info(
+                "ACP session setup completed: elapsed_ms=%.1f total_ms=%.1f session=%s",
+                (perf_counter() - setup_started_at) * 1000,
+                (perf_counter() - started_at) * 1000,
+                self._session_id,
+            )
         except RuntimeError as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
@@ -174,6 +193,7 @@ class AcpKernel:
         await self._queue.put(session_start(self._session_id, self.name))
 
     async def send(self, message: str) -> None:
+        started_at = perf_counter()
         if self._process is None or self._process.returncode is not None:
             await self._queue.put(error("ACP server is not running"))
             await self._finish(KernelStatus.ERROR)
@@ -183,12 +203,22 @@ class AcpKernel:
         await self._queue.put(status_event(KernelStatus.BUSY))
 
         try:
+            logger.info(
+                "ACP sending session/prompt: session=%s message_chars=%d",
+                self._session_id,
+                len(message),
+            )
             await self._request(
                 "session/prompt",
                 {
                     "sessionId": self._session_id,
                     "prompt": [{"type": "text", "text": message}],
                 },
+            )
+            logger.info(
+                "ACP session/prompt completed: session=%s elapsed_ms=%.1f",
+                self._session_id,
+                (perf_counter() - started_at) * 1000,
             )
         except RuntimeError as exc:
             await self._queue.put(error(str(exc)))
@@ -427,6 +457,7 @@ class AcpKernel:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
         self._pending[request_id] = future
+        write_started_at = perf_counter()
         await self._write_message(
             {
                 "jsonrpc": "2.0",
@@ -435,6 +466,12 @@ class AcpKernel:
                 "params": params,
             },
         )
+        if method == "session/prompt":
+            logger.info(
+                "ACP session/prompt stdin write: request_id=%d elapsed_ms=%.1f",
+                request_id,
+                (perf_counter() - write_started_at) * 1000,
+            )
         return await future
 
     async def _respond(self, request_id: object, result: object) -> None:

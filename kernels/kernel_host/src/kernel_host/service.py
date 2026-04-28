@@ -6,6 +6,7 @@ import os
 import tempfile
 from contextlib import suppress
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, Any
 
 from kernel.events import EventType, KernelEvent, KernelStatus
@@ -49,14 +50,34 @@ class KernelSessionService:
         events: list[KernelEvent] = []
 
         async def iterator() -> AsyncIterator[KernelEvent]:
+            started_at = perf_counter()
             send_task: asyncio.Task[None] | None = None
             kernel: Kernel | None = None
             stream_completed = False
+            logger.info(
+                "kernel_host waiting for lock: message_chars=%d",
+                len(message),
+            )
             async with self._stream_lock:
+                logger.info(
+                    "kernel_host stream lock acquired: wait_ms=%.1f",
+                    (perf_counter() - started_at) * 1000,
+                )
                 try:
                     kernel = await self._kernel_for_message()
+                    logger.info(
+                        "kernel_host kernel ready: elapsed_ms=%.1f kernel=%s",
+                        (perf_counter() - started_at) * 1000,
+                        kernel.name,
+                    )
                     send_task = asyncio.create_task(kernel.send(message))
                     async for event in kernel.recv():
+                        if not events:
+                            logger.info(
+                                "kernel_host first event: elapsed_ms=%.1f type=%s",
+                                (perf_counter() - started_at) * 1000,
+                                event.type,
+                            )
                         events.append(event)
                         yield event
                     stream_completed = True
@@ -67,7 +88,7 @@ class KernelSessionService:
                             await send_task
                     if kernel is not None:
                         if not stream_completed and not self._should_stop_after_message(
-                            kernel
+                            kernel,
                         ):
                             events.extend([event async for event in kernel.recv()])
                         if kernel.resume_token is not None:
@@ -80,15 +101,23 @@ class KernelSessionService:
                             or kernel.status == KernelStatus.ERROR
                         ):
                             await self._stop_kernel()
+                    logger.info(
+                        "kernel_host stream final: elapsed_ms=%.1f events=%d status=%s",
+                        (perf_counter() - started_at) * 1000,
+                        len(events),
+                        self._status,
+                    )
 
         return iterator()
 
     async def _kernel_for_message(self) -> Kernel:
         if self._kernel is None:
+            logger.info("kernel_host creating kernel: harness=%s", self._harness.value)
             self._kernel = get_kernel(self._harness)
             self._kernel_started = False
             self._raw_log_offset = 0
         if not self._kernel_started:
+            started_at = perf_counter()
             config = KernelConfig(
                 env=dict(self._base_env),
                 session_id=self._session_id,
@@ -96,6 +125,11 @@ class KernelSessionService:
             )
             await self._kernel.start(config)
             self._kernel_started = True
+            logger.info(
+                "kernel_host kernel started: harness=%s elapsed_ms=%.1f",
+                self._harness.value,
+                (perf_counter() - started_at) * 1000,
+            )
         return self._kernel
 
     def _should_stop_after_message(self, kernel: Kernel) -> bool:

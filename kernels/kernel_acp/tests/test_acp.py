@@ -140,7 +140,13 @@ class TestAcpMapping:
         assert events[0].output == '{"text":"content"}'
 
     def test_build_command_defaults_to_opencode_acp(self, kernel: AcpKernel) -> None:
-        assert kernel._build_command() == ["opencode", "acp"]
+        assert kernel._build_command() == [
+            "opencode",
+            "acp",
+            "--print-logs",
+            "--log-level",
+            "debug",
+        ]
 
     def test_build_command_from_env(self, kernel: AcpKernel) -> None:
         kernel._config = KernelConfig(
@@ -176,7 +182,13 @@ class TestAcpMapping:
         custom_agent = acp_module.CUSTOM_AGENT_PATH.read_text()
         assert "mode: primary" in custom_agent
         assert "be concise" in custom_agent
-        assert kernel._build_command() == ["opencode", "acp"]
+        assert kernel._build_command() == [
+            "opencode",
+            "acp",
+            "--print-logs",
+            "--log-level",
+            "debug",
+        ]
         opencode_config = json.loads(kernel._build_env()["OPENCODE_CONFIG_CONTENT"])
         assert opencode_config["default_agent"] == "custom"
 
@@ -218,7 +230,13 @@ class TestAcpMapping:
         kernel._write_custom_agent_prompt()
 
         assert custom_agent_path.read_text() == ""
-        assert kernel._build_command() == ["opencode", "acp"]
+        assert kernel._build_command() == [
+            "opencode",
+            "acp",
+            "--print-logs",
+            "--log-level",
+            "debug",
+        ]
         assert "OPENCODE_CONFIG_CONTENT" not in kernel._build_env()
 
     def test_write_opencode_config_uses_connection_env(
