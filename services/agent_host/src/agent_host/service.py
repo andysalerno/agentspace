@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import docker
@@ -249,7 +250,14 @@ class DockerKernelRuntime:
         payload = {"message": message}
 
         async def iterator() -> AsyncIterator[KernelEvent]:
+            started_at = perf_counter()
+            first_event_seen = False
             timeout = httpx.Timeout(self._startup_timeout, read=None)
+            logger.info(
+                "agent_host docker stream start: container=%s message_chars=%d",
+                handle.container_name,
+                len(message),
+            )
             async with (
                 httpx.AsyncClient(timeout=timeout) as client,
                 client.stream(
@@ -258,6 +266,12 @@ class DockerKernelRuntime:
                     json=payload,
                 ) as response,
             ):
+                logger.info(
+                    "docker response: container=%s elapsed_ms=%.1f status=%d",
+                    handle.container_name,
+                    (perf_counter() - started_at) * 1000,
+                    response.status_code,
+                )
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line:
@@ -265,6 +279,13 @@ class DockerKernelRuntime:
                     raw_event = json.loads(line)
                     if not isinstance(raw_event, dict):
                         continue
+                    if not first_event_seen:
+                        first_event_seen = True
+                        logger.info(
+                            "docker first event: container=%s elapsed_ms=%.1f",
+                            handle.container_name,
+                            (perf_counter() - started_at) * 1000,
+                        )
                     yield KernelEvent(**cast("dict[str, Any]", raw_event))
 
         return iterator()
@@ -588,6 +609,13 @@ class AgentHost:
     ) -> AsyncIterator[KernelEvent]:
         record = self._get_session(session_id)
         events: list[KernelEvent] = []
+        started_at = perf_counter()
+        logger.info(
+            "agent_host stream start: session=%s harness=%s message_chars=%d",
+            session_id,
+            record.harness.value,
+            len(message),
+        )
         stream = self._runtime.stream_message(
             session=record.runtime_session,
             message=message,
@@ -596,6 +624,13 @@ class AgentHost:
         async def iterator() -> AsyncIterator[KernelEvent]:
             try:
                 async for event in stream:
+                    if not events:
+                        logger.info(
+                            "agent_host first: session=%s elapsed_ms=%.1f type=%s",
+                            session_id,
+                            (perf_counter() - started_at) * 1000,
+                            event.type,
+                        )
                     events.append(event)
                     yield event
             finally:
@@ -615,6 +650,13 @@ class AgentHost:
                 record.vscode_url = _as_optional_str(
                     session_summary.get("vscode_url"),
                     record.vscode_url,
+                )
+                logger.info(
+                    "agent_host final: session=%s elapsed_ms=%.1f events=%d status=%s",
+                    session_id,
+                    (perf_counter() - started_at) * 1000,
+                    len(events),
+                    record.status,
                 )
 
         return iterator()

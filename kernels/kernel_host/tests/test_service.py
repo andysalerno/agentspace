@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from kernel.events import (
+    EventType,
     KernelEvent,
     KernelStatus,
     session_end,
@@ -110,6 +111,42 @@ class PersistentStubKernel:
         self.stop_count += 1
 
 
+class CancellableStartKernel:
+    supports_persistent_process = True
+
+    def __init__(self) -> None:
+        self.start_configs: list[KernelConfig] = []
+        self.start_started = asyncio.Event()
+        self.stop_count = 0
+
+    @property
+    def name(self) -> str:
+        return "cancellable-stub"
+
+    @property
+    def status(self) -> KernelStatus:
+        return KernelStatus.IDLE
+
+    @property
+    def resume_token(self) -> str | None:
+        return None
+
+    async def start(self, config: KernelConfig) -> None:
+        self.start_configs.append(config)
+        self.start_started.set()
+        await asyncio.Future[None]()
+
+    async def send(self, message: str) -> None:
+        raise AssertionError(message)
+
+    async def recv(self) -> AsyncIterator[KernelEvent]:
+        if False:
+            yield text_delta("")
+
+    async def stop(self) -> None:
+        self.stop_count += 1
+
+
 @pytest.mark.asyncio
 async def test_service_reuses_resume_token(
     monkeypatch: pytest.MonkeyPatch,
@@ -193,6 +230,47 @@ async def test_service_reuses_persistent_kernel_process(
     await service.stop()
 
     assert kernels[0].stop_count == 1
+
+
+@pytest.mark.asyncio
+async def test_service_stops_persistent_kernel_when_start_is_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellable_kernel = CancellableStartKernel()
+    persistent_kernel = PersistentStubKernel()
+    kernels = [cancellable_kernel, persistent_kernel]
+
+    def fake_get_kernel(_harness_name: HarnessName) -> object:
+        return kernels.pop(0)
+
+    monkeypatch.setattr("kernel_host.service.get_kernel", fake_get_kernel)
+
+    service = KernelSessionService(
+        harness=HarnessName.ACP,
+        env={},
+        additional_paths=(),
+    )
+
+    stream = service.stream_message("hello")
+    stream_iter = stream.__aiter__()
+
+    async def next_event() -> KernelEvent:
+        return await anext(stream_iter)
+
+    first_event_task = asyncio.create_task(next_event())
+    await cancellable_kernel.start_started.wait()
+
+    first_event_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_event_task
+
+    events = await service.send_message("again")
+
+    assert cancellable_kernel.stop_count == 1
+    assert len(cancellable_kernel.start_configs) == 1
+    assert len(persistent_kernel.start_configs) == 1
+    assert persistent_kernel.messages == ["again"]
+    assert events[0].type == EventType.SESSION_START
 
 
 @pytest.mark.asyncio

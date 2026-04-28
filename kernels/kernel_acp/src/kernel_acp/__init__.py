@@ -10,6 +10,7 @@ import shlex
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter
 from typing import TYPE_CHECKING, cast
 
 from kernel.events import (
@@ -32,7 +33,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
-DEFAULT_ACP_COMMAND = "opencode acp"
+DEFAULT_ACP_COMMAND = "opencode acp --print-logs --log-level debug"
+CUSTOM_AGENT_NAME = "custom"
+CUSTOM_AGENT_PATH = (
+    Path.home() / ".config" / "opencode" / "agents" / f"{CUSTOM_AGENT_NAME}.md"
+)
 PROTOCOL_VERSION = 1
 _STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
 _DEFAULT_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
@@ -108,6 +113,7 @@ class AcpKernel:
         return self._config.env.get("KERNEL_ACP_WORKSPACE_DIR", DEFAULT_WORKSPACE_DIR)
 
     async def start(self, config: KernelConfig) -> None:
+        started_at = perf_counter()
         self._config = config
         self._session_id = config.session_id or uuid.uuid4().hex[:12]
         self._status = KernelStatus.IDLE
@@ -118,7 +124,9 @@ class AcpKernel:
 
         try:
             self._write_opencode_config()
+            self._write_custom_agent_prompt()
             cmd = self._build_command()
+            env = self._build_env(cmd)
         except ValueError as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
@@ -131,7 +139,6 @@ class AcpKernel:
             )
             await self._finish(KernelStatus.ERROR)
             return
-        env = self._build_env()
         cwd = self._workspace_dir
 
         logger.info("spawning ACP subprocess: cmd=%s cwd=%s", cmd, cwd)
@@ -146,6 +153,10 @@ class AcpKernel:
                 cwd=cwd,
                 limit=_STREAM_BUFFER_LIMIT,
             )
+            logger.info(
+                "ACP subprocess spawned: elapsed_ms=%.1f",
+                (perf_counter() - started_at) * 1000,
+            )
         except FileNotFoundError:
             await self._queue.put(error(f"ACP server command not found: {cmd[0]}"))
             await self._finish(KernelStatus.ERROR)
@@ -159,8 +170,10 @@ class AcpKernel:
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
         try:
-            await self._initialize()
-            await self._setup_session()
+            await self._initialize_agent_session(started_at)
+        except asyncio.CancelledError:
+            await self._stop_process()
+            raise
         except RuntimeError as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
@@ -168,7 +181,25 @@ class AcpKernel:
 
         await self._queue.put(session_start(self._session_id, self.name))
 
+    async def _initialize_agent_session(self, started_at: float) -> None:
+        initialize_started_at = perf_counter()
+        await self._initialize()
+        logger.info(
+            "ACP initialize completed: elapsed_ms=%.1f total_ms=%.1f",
+            (perf_counter() - initialize_started_at) * 1000,
+            (perf_counter() - started_at) * 1000,
+        )
+        setup_started_at = perf_counter()
+        await self._setup_session()
+        logger.info(
+            "ACP session setup completed: elapsed_ms=%.1f total_ms=%.1f session=%s",
+            (perf_counter() - setup_started_at) * 1000,
+            (perf_counter() - started_at) * 1000,
+            self._session_id,
+        )
+
     async def send(self, message: str) -> None:
+        started_at = perf_counter()
         if self._process is None or self._process.returncode is not None:
             await self._queue.put(error("ACP server is not running"))
             await self._finish(KernelStatus.ERROR)
@@ -178,12 +209,22 @@ class AcpKernel:
         await self._queue.put(status_event(KernelStatus.BUSY))
 
         try:
+            logger.info(
+                "ACP sending session/prompt: session=%s message_chars=%d",
+                self._session_id,
+                len(message),
+            )
             await self._request(
                 "session/prompt",
                 {
                     "sessionId": self._session_id,
                     "prompt": [{"type": "text", "text": message}],
                 },
+            )
+            logger.info(
+                "ACP session/prompt completed: session=%s elapsed_ms=%.1f",
+                self._session_id,
+                (perf_counter() - started_at) * 1000,
             )
         except RuntimeError as exc:
             await self._queue.put(error(str(exc)))
@@ -216,12 +257,34 @@ class AcpKernel:
         for arg in extra_args.splitlines():
             if arg:
                 cmd.append(arg)
+
         return cmd
 
-    def _build_env(self) -> dict[str, str]:
+    def _should_use_custom_opencode_default_agent(self, cmd: list[str]) -> bool:
+        if not self._has_custom_agent_prompt():
+            return False
+        executable = Path(cmd[0]).name if cmd else ""
+        return executable == "opencode" and "acp" in cmd[1:]
+
+    def _build_env(self, cmd: list[str] | None = None) -> dict[str, str]:
         env = {**os.environ}
         env.update({key: value for key, value in self._config.env.items() if value})
+        if self._should_use_custom_opencode_default_agent(cmd or self._build_command()):
+            env["OPENCODE_CONFIG_CONTENT"] = self._opencode_config_content(
+                env.get("OPENCODE_CONFIG_CONTENT"),
+            )
         return env
+
+    def _opencode_config_content(self, raw: str | None) -> str:
+        config: dict[str, object] = {}
+        if raw:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                msg = "OPENCODE_CONFIG_CONTENT must be a JSON object"
+                raise ValueError(msg)
+            config = cast("dict[str, object]", parsed)
+        config["default_agent"] = CUSTOM_AGENT_NAME
+        return json.dumps(config, separators=(",", ":"))
 
     def _write_opencode_config(self) -> None:
         """Write opencode provider and permission config for opencode ACP servers."""
@@ -289,6 +352,31 @@ class AcpKernel:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(config, indent=2))
         logger.info("wrote opencode config to %s", config_path)
+
+    def _write_custom_agent_prompt(self) -> None:
+        prompt = self._config.env.get("KERNEL_SYSTEM_PROMPT", "")
+        CUSTOM_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        content = ""
+        if prompt.strip():
+            content = (
+                "---\n"
+                "description: AgentSpace custom system prompt\n"
+                "mode: primary\n"
+                "---\n"
+                f"{prompt}"
+            )
+        CUSTOM_AGENT_PATH.write_text(content)
+        logger.info(
+            "wrote opencode custom agent prompt to %s (%d chars)",
+            CUSTOM_AGENT_PATH,
+            len(prompt),
+        )
+
+    def _has_custom_agent_prompt(self) -> bool:
+        try:
+            return bool(CUSTOM_AGENT_PATH.read_text().strip())
+        except OSError:
+            return False
 
     async def _initialize(self) -> None:
         result = await self._request(
@@ -375,6 +463,7 @@ class AcpKernel:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[object] = loop.create_future()
         self._pending[request_id] = future
+        write_started_at = perf_counter()
         await self._write_message(
             {
                 "jsonrpc": "2.0",
@@ -383,6 +472,12 @@ class AcpKernel:
                 "params": params,
             },
         )
+        if method == "session/prompt":
+            logger.info(
+                "ACP session/prompt stdin write: request_id=%d elapsed_ms=%.1f",
+                request_id,
+                (perf_counter() - write_started_at) * 1000,
+            )
         return await future
 
     async def _respond(self, request_id: object, result: object) -> None:
@@ -437,7 +532,7 @@ class AcpKernel:
             line = raw_line.decode().rstrip("\n").rstrip("\r").strip()
             if line:
                 self._raw_lines.append(f"[stderr] {line}")
-                await self._queue.put(error(line))
+                logger.debug("ACP stderr: %s", line)
 
     async def _handle_message(self, obj: dict[str, object]) -> None:  # noqa: PLR0911
         request_id = obj.get("id")
@@ -852,7 +947,7 @@ class AcpKernel:
         if len(data) <= terminal.output_limit:
             return
         terminal.truncated = True
-        terminal.output = data[-terminal.output_limit:].decode(
+        terminal.output = data[-terminal.output_limit :].decode(
             "utf-8",
             errors="ignore",
         )
