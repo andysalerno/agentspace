@@ -819,6 +819,11 @@ button:disabled {
   border-color: var(--tool-tag-color);
 }
 
+.inline-tool-call {
+  margin: 0 2px;
+  vertical-align: baseline;
+}
+
 /* ─── Tool Detail Overlay ─── */
 .tool-detail-overlay {
   position: fixed;
