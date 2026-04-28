@@ -11,12 +11,32 @@ import type { KernelStats, KernelSummary } from "./types";
 const LOG_POLL_INTERVAL_MS = 1000;
 const DEFAULT_LOG_TAIL = 2000;
 
+const LOCAL_VSCODE_HOSTNAMES = new Set([
+    "0.0.0.0",
+    "127.0.0.1",
+    "::",
+    "::1",
+    "localhost",
+]);
+
 type LogSource = "harness" | "container";
 
 type LogsModalState = {
     sessionId: string;
     source: LogSource;
 };
+
+function browserReachableVscodeUrl(vscodeUrl: string): string {
+    try {
+        const url = new URL(vscodeUrl);
+        if (LOCAL_VSCODE_HOSTNAMES.has(url.hostname.toLowerCase())) {
+            url.hostname = window.location.hostname;
+        }
+        return url.toString();
+    } catch {
+        return vscodeUrl;
+    }
+}
 
 export default function KernelsView() {
     const { data: kernels = [] } = useKernels();
@@ -409,7 +429,7 @@ function KernelRow({
                                 <a
                                     role="menuitem"
                                     className="kebab-menu-item"
-                                    href={kernel.vscode_url}
+                                    href={browserReachableVscodeUrl(kernel.vscode_url)}
                                     target="_blank"
                                     rel="noreferrer"
                                     onClick={onToggleMenu}
