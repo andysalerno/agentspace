@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
-DEFAULT_ACP_COMMAND = "opencode acp --print-logs --log-level debug"
+DEFAULT_ACP_COMMAND = "opencode acp"
 CUSTOM_AGENT_NAME = "custom"
 CUSTOM_AGENT_PATH = (
     Path.home() / ".config" / "opencode" / "agents" / f"{CUSTOM_AGENT_NAME}.md"
