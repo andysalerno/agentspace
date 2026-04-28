@@ -154,7 +154,7 @@ class DockerKernelRuntime:
         )
         self._vscode_host_ip = os.environ.get(
             "AGENT_HOST_KERNEL_VSCODE_HOST_IP",
-            "127.0.0.1",
+            "0.0.0.0",  # noqa: S104 - code-server must be reachable off-host.
         )
         self._vscode_url_template = os.environ.get(
             "AGENT_HOST_KERNEL_VSCODE_URL_TEMPLATE",

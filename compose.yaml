@@ -37,7 +37,7 @@ services:
       - AGENT_HOST_DOCKER_NETWORK=agentspace-stack
       - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
       - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
-      - AGENT_HOST_KERNEL_VSCODE_HOST_IP=127.0.0.1
+      - AGENT_HOST_KERNEL_VSCODE_HOST_IP=0.0.0.0
       - AGENT_HOST_KERNEL_VSCODE_URL_TEMPLATE=http://127.0.0.1:{host_port}
       - AGENT_HOST_GATEWAY_IMAGE=agentspace-gateway-gateway:latest
       - AGENT_HOST_GATEWAY_CLIENT_SERVICE_URL=http://client-service:8002

@@ -149,6 +149,12 @@ It currently supports:
 - viewing the session source metadata attached at creation time
 - viewing active kernel sessions exposed through `client_service`
 
+Kernel VS Code links are opened against the web UI's current browser host when
+the kernel reports a loopback or wildcard host. For remote deployments, make sure
+`AGENT_HOST_KERNEL_VSCODE_HOST_IP` is `0.0.0.0` or another externally reachable
+interface, and allow the dynamically published kernel VS Code ports through the
+host firewall.
+
 ## CliChannel
 
 `cli_channel` is the first proof-of-concept CLI session client. It is separate from the future native CLI client and exists only to validate the client-service session contract.
