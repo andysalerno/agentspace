@@ -170,27 +170,33 @@ class AcpKernel:
         self._stderr_task = asyncio.create_task(self._read_stderr())
 
         try:
-            initialize_started_at = perf_counter()
-            await self._initialize()
-            logger.info(
-                "ACP initialize completed: elapsed_ms=%.1f total_ms=%.1f",
-                (perf_counter() - initialize_started_at) * 1000,
-                (perf_counter() - started_at) * 1000,
-            )
-            setup_started_at = perf_counter()
-            await self._setup_session()
-            logger.info(
-                "ACP session setup completed: elapsed_ms=%.1f total_ms=%.1f session=%s",
-                (perf_counter() - setup_started_at) * 1000,
-                (perf_counter() - started_at) * 1000,
-                self._session_id,
-            )
+            await self._initialize_agent_session(started_at)
+        except asyncio.CancelledError:
+            await self._stop_process()
+            raise
         except RuntimeError as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
             return
 
         await self._queue.put(session_start(self._session_id, self.name))
+
+    async def _initialize_agent_session(self, started_at: float) -> None:
+        initialize_started_at = perf_counter()
+        await self._initialize()
+        logger.info(
+            "ACP initialize completed: elapsed_ms=%.1f total_ms=%.1f",
+            (perf_counter() - initialize_started_at) * 1000,
+            (perf_counter() - started_at) * 1000,
+        )
+        setup_started_at = perf_counter()
+        await self._setup_session()
+        logger.info(
+            "ACP session setup completed: elapsed_ms=%.1f total_ms=%.1f session=%s",
+            (perf_counter() - setup_started_at) * 1000,
+            (perf_counter() - started_at) * 1000,
+            self._session_id,
+        )
 
     async def send(self, message: str) -> None:
         started_at = perf_counter()
@@ -526,7 +532,7 @@ class AcpKernel:
             line = raw_line.decode().rstrip("\n").rstrip("\r").strip()
             if line:
                 self._raw_lines.append(f"[stderr] {line}")
-                await self._queue.put(error(line))
+                logger.debug("ACP stderr: %s", line)
 
     async def _handle_message(self, obj: dict[str, object]) -> None:  # noqa: PLR0911
         request_id = obj.get("id")

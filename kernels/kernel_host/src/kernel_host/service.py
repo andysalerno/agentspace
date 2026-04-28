@@ -123,7 +123,14 @@ class KernelSessionService:
                 session_id=self._session_id,
                 additional_paths=self._additional_paths,
             )
-            await self._kernel.start(config)
+            try:
+                await self._kernel.start(config)
+            except asyncio.CancelledError:
+                await self._stop_kernel()
+                raise
+            except Exception:
+                await self._stop_kernel()
+                raise
             self._kernel_started = True
             logger.info(
                 "kernel_host kernel started: harness=%s elapsed_ms=%.1f",
