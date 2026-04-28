@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
 DEFAULT_ACP_COMMAND = "opencode acp"
+CUSTOM_AGENT_NAME = "custom"
+CUSTOM_AGENT_PATH = (
+    Path.home() / ".config" / "opencode" / "agents" / f"{CUSTOM_AGENT_NAME}.md"
+)
 PROTOCOL_VERSION = 1
 _STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
 _DEFAULT_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
@@ -118,7 +122,9 @@ class AcpKernel:
 
         try:
             self._write_opencode_config()
+            self._write_custom_agent_prompt()
             cmd = self._build_command()
+            env = self._build_env(cmd)
         except ValueError as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
@@ -131,7 +137,6 @@ class AcpKernel:
             )
             await self._finish(KernelStatus.ERROR)
             return
-        env = self._build_env()
         cwd = self._workspace_dir
 
         logger.info("spawning ACP subprocess: cmd=%s cwd=%s", cmd, cwd)
@@ -216,12 +221,34 @@ class AcpKernel:
         for arg in extra_args.splitlines():
             if arg:
                 cmd.append(arg)
+
         return cmd
 
-    def _build_env(self) -> dict[str, str]:
+    def _should_use_custom_opencode_default_agent(self, cmd: list[str]) -> bool:
+        if not self._has_custom_agent_prompt():
+            return False
+        executable = Path(cmd[0]).name if cmd else ""
+        return executable == "opencode" and "acp" in cmd[1:]
+
+    def _build_env(self, cmd: list[str] | None = None) -> dict[str, str]:
         env = {**os.environ}
         env.update({key: value for key, value in self._config.env.items() if value})
+        if self._should_use_custom_opencode_default_agent(cmd or self._build_command()):
+            env["OPENCODE_CONFIG_CONTENT"] = self._opencode_config_content(
+                env.get("OPENCODE_CONFIG_CONTENT"),
+            )
         return env
+
+    def _opencode_config_content(self, raw: str | None) -> str:
+        config: dict[str, object] = {}
+        if raw:
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                msg = "OPENCODE_CONFIG_CONTENT must be a JSON object"
+                raise ValueError(msg)
+            config = cast("dict[str, object]", parsed)
+        config["default_agent"] = CUSTOM_AGENT_NAME
+        return json.dumps(config, separators=(",", ":"))
 
     def _write_opencode_config(self) -> None:
         """Write opencode provider and permission config for opencode ACP servers."""
@@ -289,6 +316,31 @@ class AcpKernel:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(config, indent=2))
         logger.info("wrote opencode config to %s", config_path)
+
+    def _write_custom_agent_prompt(self) -> None:
+        prompt = self._config.env.get("KERNEL_SYSTEM_PROMPT", "")
+        CUSTOM_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        content = ""
+        if prompt.strip():
+            content = (
+                "---\n"
+                "description: AgentSpace custom system prompt\n"
+                "mode: primary\n"
+                "---\n"
+                f"{prompt}"
+            )
+        CUSTOM_AGENT_PATH.write_text(content)
+        logger.info(
+            "wrote opencode custom agent prompt to %s (%d chars)",
+            CUSTOM_AGENT_PATH,
+            len(prompt),
+        )
+
+    def _has_custom_agent_prompt(self) -> bool:
+        try:
+            return bool(CUSTOM_AGENT_PATH.read_text().strip())
+        except OSError:
+            return False
 
     async def _initialize(self) -> None:
         result = await self._request(
@@ -852,7 +904,7 @@ class AcpKernel:
         if len(data) <= terminal.output_limit:
             return
         terminal.truncated = True
-        terminal.output = data[-terminal.output_limit:].decode(
+        terminal.output = data[-terminal.output_limit :].decode(
             "utf-8",
             errors="ignore",
         )

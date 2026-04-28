@@ -8,6 +8,7 @@ import json
 import sys
 from typing import TYPE_CHECKING
 
+import kernel_acp as acp_module
 import pytest
 from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel.protocol import KernelConfig
@@ -155,6 +156,70 @@ class TestAcpMapping:
             "--debug",
             "--model=test",
         ]
+
+    def test_build_env_uses_custom_default_agent_for_system_prompt(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+        monkeypatch.setattr(
+            acp_module,
+            "CUSTOM_AGENT_PATH",
+            tmp_path / ".config" / "opencode" / "agents" / "custom.md",
+        )
+        kernel._config = KernelConfig(env={"KERNEL_SYSTEM_PROMPT": "be concise"})
+
+        kernel._write_custom_agent_prompt()
+
+        custom_agent = acp_module.CUSTOM_AGENT_PATH.read_text()
+        assert "mode: primary" in custom_agent
+        assert "be concise" in custom_agent
+        assert kernel._build_command() == ["opencode", "acp"]
+        opencode_config = json.loads(kernel._build_env()["OPENCODE_CONFIG_CONTENT"])
+        assert opencode_config["default_agent"] == "custom"
+
+    def test_build_env_preserves_existing_inline_config_for_system_prompt(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            acp_module,
+            "CUSTOM_AGENT_PATH",
+            tmp_path / ".config" / "opencode" / "agents" / "custom.md",
+        )
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_SYSTEM_PROMPT": "be concise",
+                "OPENCODE_CONFIG_CONTENT": json.dumps({"share": "disabled"}),
+            },
+        )
+
+        kernel._write_custom_agent_prompt()
+
+        opencode_config = json.loads(kernel._build_env()["OPENCODE_CONFIG_CONTENT"])
+        assert opencode_config == {"share": "disabled", "default_agent": "custom"}
+
+    def test_write_custom_agent_prompt_clears_stale_prompt(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+        custom_agent_path = tmp_path / ".config" / "opencode" / "agents" / "custom.md"
+        monkeypatch.setattr(acp_module, "CUSTOM_AGENT_PATH", custom_agent_path)
+        custom_agent_path.parent.mkdir(parents=True)
+        custom_agent_path.write_text("stale prompt")
+
+        kernel._write_custom_agent_prompt()
+
+        assert custom_agent_path.read_text() == ""
+        assert kernel._build_command() == ["opencode", "acp"]
+        assert "OPENCODE_CONFIG_CONTENT" not in kernel._build_env()
 
     def test_write_opencode_config_uses_connection_env(
         self,
