@@ -63,7 +63,7 @@ async def test_run_builds_config_from_environment(
     def get_kernel_stub(_harness_name: HarnessName) -> StubKernel:
         return kernel
 
-    monkeypatch.setenv("KERNEL_HARNESS", "copilot-cli")
+    monkeypatch.setenv("KERNEL_HARNESS", "acp")
     monkeypatch.setenv("KERNEL_SESSION_ID", "resume-123")
     monkeypatch.setenv("KERNEL_ADDITIONAL_PATHS", "/workspace:/workspace-extra")
     monkeypatch.setattr(runner, "get_kernel", get_kernel_stub)
@@ -81,7 +81,7 @@ async def test_run_builds_config_from_environment(
 
     stdout_lines = capsys.readouterr().out.strip().splitlines()
     assert [json.loads(line)["type"] for line in stdout_lines] == [
-        "session_start",
-        "status",
-        "session_end",
+        "session/start",
+        "session/status",
+        "session/end",
     ]

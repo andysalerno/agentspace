@@ -210,7 +210,7 @@ class TestOpenCodeMapping:
         kernel: OpenCodeKernel,
     ) -> None:
         kernel._config = KernelConfig(
-            env={"OPENCODE_MODEL": "anthropic/claude-sonnet-4-20250514"}
+            env={"OPENCODE_MODEL": "anthropic/claude-sonnet-4-20250514"},
         )
         cmd = kernel._build_command("test")
         assert "--model" in cmd
@@ -242,7 +242,7 @@ class TestOpenCodeMapping:
                 "KERNEL_OPENCODE_BASE_URL": "https://legacy.test/v1",
                 "KERNEL_OPENCODE_API_KEY": "from-legacy",
                 "KERNEL_OPENCODE_MODEL_NAME": "model-a",
-            }
+            },
         )
 
         kernel._write_provider_config()
@@ -266,7 +266,7 @@ class TestOpenCodeMapping:
                 "KERNEL_OPENCODE_BASE_URL": "https://legacy.test/v1",
                 "KERNEL_OPENCODE_API_KEY": "from-legacy",
                 "KERNEL_OPENCODE_MODEL_NAME": "model-a",
-            }
+            },
         )
 
         kernel._write_provider_config()
@@ -284,7 +284,10 @@ class TestOpenCodeMapping:
     ) -> None:
         kernel._config = KernelConfig(env={"KERNEL_OPENCODE_MODEL_NAME": "model-a"})
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(
+            ValueError,
+            match="missing required environment",
+        ) as exc_info:
             kernel._write_provider_config()
 
         message = str(exc_info.value)

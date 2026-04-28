@@ -111,7 +111,7 @@ app.add_middleware(
 class CreateAgentRequest(BaseModel):
     agent_id: str = Field(pattern=r"^[a-z]+(?:-[a-z]+)*$")
     name: str
-    harness: HarnessName = HarnessName.COPILOT_CLI
+    harness: HarnessName = HarnessName.ACP
     system_prompt: str = ""
     skills: list[str] = Field(default_factory=list)
     env_vars: str = ""

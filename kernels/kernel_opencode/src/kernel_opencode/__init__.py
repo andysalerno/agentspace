@@ -193,9 +193,7 @@ class OpenCodeKernel:
         cmd.extend(["--dir", cwd])
 
         extra_args = self._config.env.get("OPENCODE_EXTRA_ARGS", "")
-        for arg in extra_args.splitlines():
-            if arg:
-                cmd.append(arg)
+        cmd.extend(arg for arg in extra_args.splitlines() if arg)
 
         return cmd
 
@@ -227,9 +225,9 @@ class OpenCodeKernel:
                 "agent or kernel configuration."
             )
             raise ValueError(msg)
-        assert base_url is not None
-        assert api_key is not None
-        assert model_name is not None
+        base_url = cast("str", base_url)
+        api_key = cast("str", api_key)
+        model_name = cast("str", model_name)
 
         config = {
             "$schema": "https://opencode.ai/config.json",

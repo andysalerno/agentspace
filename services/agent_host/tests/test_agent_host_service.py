@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agent_host.service import (
@@ -21,7 +21,7 @@ from kernel.events import (
 from kernel_host.registry import HarnessName
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
 
 class StubRuntime:
@@ -179,11 +179,11 @@ async def test_create_send_history_and_destroy() -> None:
     assert len(runtime.sent) == 1
     assert runtime.sent[0][1] == "hello"
     assert [event.type for event in events] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert len(history) == 1
     assert fetched["resume_token"].startswith("resume-runtime-")
@@ -205,11 +205,11 @@ async def test_stream_message_updates_history_and_status() -> None:
     fetched = await host.get_session(session_id)
 
     assert [event.type for event in events] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert fetched["turns"] == 1
     assert fetched["status"] == "done"
@@ -223,12 +223,15 @@ async def test_stream_message_finalizes_when_consumer_closes_early() -> None:
     session = await host.create_session(harness=HarnessName.ECHO)
     session_id = str(session["session_id"])
 
-    stream = host.stream_message(session_id, "hello")
+    stream = cast(
+        "AsyncGenerator[KernelEvent]",
+        host.stream_message(session_id, "hello"),
+    )
     first = await anext(stream)
     await stream.aclose()
     fetched = await host.get_session(session_id)
 
-    assert first.type == "session_start"
+    assert first.type == "session/start"
     assert fetched["turns"] == 1
     assert fetched["status"] == "done"
 

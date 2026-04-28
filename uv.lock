@@ -15,12 +15,7 @@ members = [
     "gateway-host",
     "kernel",
     "kernel-acp",
-    "kernel-claude-code",
-    "kernel-codex",
-    "kernel-copilot",
-    "kernel-echo",
     "kernel-host",
-    "kernel-opencode",
 ]
 
 [[package]]
@@ -657,50 +652,6 @@ dependencies = [
 requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
 
 [[package]]
-name = "kernel-claude-code"
-version = "0.1.0"
-source = { editable = "kernels/kernel_claude_code" }
-dependencies = [
-    { name = "kernel" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
-
-[[package]]
-name = "kernel-codex"
-version = "0.1.0"
-source = { editable = "kernels/kernel_codex" }
-dependencies = [
-    { name = "kernel" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
-
-[[package]]
-name = "kernel-copilot"
-version = "0.1.0"
-source = { editable = "kernels/kernel_copilot" }
-dependencies = [
-    { name = "kernel" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
-
-[[package]]
-name = "kernel-echo"
-version = "0.1.0"
-source = { editable = "kernels/kernel_echo" }
-dependencies = [
-    { name = "kernel" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
-
-[[package]]
 name = "kernel-host"
 version = "0.1.0"
 source = { editable = "kernels/kernel_host" }
@@ -708,11 +659,6 @@ dependencies = [
     { name = "fastapi" },
     { name = "kernel" },
     { name = "kernel-acp" },
-    { name = "kernel-claude-code" },
-    { name = "kernel-codex" },
-    { name = "kernel-copilot" },
-    { name = "kernel-echo" },
-    { name = "kernel-opencode" },
     { name = "uvicorn" },
 ]
 
@@ -721,24 +667,8 @@ requires-dist = [
     { name = "fastapi" },
     { name = "kernel", editable = "kernels/kernel" },
     { name = "kernel-acp", editable = "kernels/kernel_acp" },
-    { name = "kernel-claude-code", editable = "kernels/kernel_claude_code" },
-    { name = "kernel-codex", editable = "kernels/kernel_codex" },
-    { name = "kernel-copilot", editable = "kernels/kernel_copilot" },
-    { name = "kernel-echo", editable = "kernels/kernel_echo" },
-    { name = "kernel-opencode", editable = "kernels/kernel_opencode" },
     { name = "uvicorn" },
 ]
-
-[[package]]
-name = "kernel-opencode"
-version = "0.1.0"
-source = { editable = "kernels/kernel_opencode" }
-dependencies = [
-    { name = "kernel" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "kernel", editable = "kernels/kernel" }]
 
 [[package]]
 name = "linkify-it-py"

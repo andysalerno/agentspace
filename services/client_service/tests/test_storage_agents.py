@@ -200,7 +200,7 @@ async def test_sqlite_initialize_migrates_missing_connection_id(
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
-        """
+        """,
     )
 
     store = SqliteAgentStore(db)

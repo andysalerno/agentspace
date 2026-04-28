@@ -9,11 +9,6 @@ if TYPE_CHECKING:
     from kernel.protocol import Kernel
 
 from kernel_acp import AcpKernel
-from kernel_claude_code import ClaudeCodeKernel
-from kernel_codex import CodexKernel
-from kernel_copilot import CopilotKernel
-from kernel_echo import EchoKernel
-from kernel_opencode import OpenCodeKernel
 
 
 class HarnessName(StrEnum):
@@ -26,13 +21,12 @@ class HarnessName(StrEnum):
 
 
 KERNEL_REGISTRY: dict[HarnessName, type] = {
-    HarnessName.CLAUDE_CODE: ClaudeCodeKernel,
-    HarnessName.ECHO: EchoKernel,
-    HarnessName.COPILOT_CLI: CopilotKernel,
-    HarnessName.CODEX: CodexKernel,
-    HarnessName.OPENCODE: OpenCodeKernel,
     HarnessName.ACP: AcpKernel,
 }
+
+
+def available_harnesses() -> list[HarnessName]:
+    return list(KERNEL_REGISTRY)
 
 
 def get_kernel(harness_name: HarnessName) -> Kernel:

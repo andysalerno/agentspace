@@ -228,7 +228,7 @@ async def test_agent_and_session_lifecycle() -> None:
     reset = await service.reset_session(session_id)
     assistant_message = cast("dict[str, object]", reply["assistant_message"])
 
-    assert agent["harness"] == "copilot-cli"
+    assert agent["harness"] == "acp"
     assert session["agent_id"] == agent["agent_id"]
     assert session["channel_name"] == "webui"
     assert session["client_type"] == "webui"
@@ -244,14 +244,7 @@ async def test_list_harnesses_returns_registered_harnesses() -> None:
     runtime = cast("AgentHostClient", StubAgentHostClient())
     service = ClientService(agent_host_client=runtime)
 
-    assert await service.list_harnesses() == [
-        "claude-code",
-        "echo",
-        "copilot-cli",
-        "codex",
-        "opencode",
-        "acp",
-    ]
+    assert await service.list_harnesses() == ["acp"]
 
 
 @pytest.mark.asyncio

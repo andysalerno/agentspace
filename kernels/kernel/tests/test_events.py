@@ -18,7 +18,7 @@ class TestKernelEventSerialization:
     def test_session_start(self) -> None:
         evt = session_start("abc123", "echo")
         data = json.loads(evt.to_jsonl())
-        assert data["type"] == "session_start"
+        assert data["type"] == "session/start"
         assert data["session_id"] == "abc123"
         assert data["kernel"] == "echo"
         assert "ts" in data
@@ -38,7 +38,7 @@ class TestKernelEventSerialization:
     def test_status_event(self) -> None:
         evt = status_event(KernelStatus.BUSY)
         data = json.loads(evt.to_jsonl())
-        assert data["type"] == "status"
+        assert data["type"] == "session/status"
         assert data["status"] == "busy"
 
     def test_tool_call(self) -> None:
@@ -58,13 +58,14 @@ class TestKernelEventSerialization:
     def test_error(self) -> None:
         evt = error("something went wrong")
         data = json.loads(evt.to_jsonl())
-        assert data["type"] == "error"
+        assert data["type"] == "session/error"
         assert data["message"] == "something went wrong"
+        assert data["error"] == {"message": "something went wrong"}
 
     def test_session_end(self) -> None:
         evt = session_end()
         data = json.loads(evt.to_jsonl())
-        assert data["type"] == "session_end"
+        assert data["type"] == "session/end"
         assert "ts" in data
 
     def test_none_fields_omitted(self) -> None:
@@ -78,11 +79,17 @@ class TestKernelEventSerialization:
         assert "message" not in data
 
     def test_event_type_enum_values(self) -> None:
-        assert EventType.SESSION_START == "session_start"
+        assert EventType.SESSION_START == "session/start"
+        assert EventType.SESSION_STATUS == "session/status"
+        assert EventType.SESSION_UPDATE == "session/update"
+        assert EventType.SESSION_PROMPT_RESULT == "session/prompt/result"
+        assert EventType.SESSION_ERROR == "session/error"
+        assert EventType.SESSION_END == "session/end"
         assert EventType.TEXT_DELTA == "text_delta"
         assert EventType.REASONING_DELTA == "reasoning_delta"
         assert EventType.TOOL_CALL == "tool_call"
         assert EventType.TOOL_RESULT == "tool_result"
         assert EventType.ERROR == "error"
-        assert EventType.SESSION_END == "session_end"
         assert EventType.STATUS == "status"
+        assert EventType.LEGACY_SESSION_START == "session_start"
+        assert EventType.LEGACY_SESSION_END == "session_end"

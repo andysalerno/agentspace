@@ -6,13 +6,13 @@ import logging
 import os
 import re
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from time import perf_counter
 from typing import TYPE_CHECKING, cast
 
 import httpx
 from kernel.events import EventType, KernelEvent
-from kernel_host.registry import HarnessName
+from kernel_host.registry import HarnessName, available_harnesses
 
 from client_service.agent_host_client import AgentHostClient, HttpAgentHostClient
 from client_service.models import (
@@ -113,6 +113,8 @@ class ConnectionModelsError(RuntimeError):
 
 VISIBLE_ASSISTANT_EVENT_TYPES = frozenset(
     {
+        EventType.SESSION_UPDATE,
+        EventType.SESSION_ERROR,
         EventType.TEXT_DELTA,
         EventType.REASONING_DELTA,
         EventType.TOOL_CALL,
@@ -144,12 +146,12 @@ class ClientService:
         self._lock = asyncio.Lock()
         self._gateway_lock = asyncio.Lock()
 
-    async def create_agent(
+    async def create_agent(  # noqa: PLR0913
         self,
         *,
         agent_id: str,
         name: str,
-        harness: HarnessName = HarnessName.COPILOT_CLI,
+        harness: HarnessName = HarnessName.ACP,
         system_prompt: str = "",
         skills: list[str] | None = None,
         env_vars: str = "",
@@ -181,7 +183,7 @@ class ClientService:
         return sorted(agents, key=lambda item: str(item["created_at"]))
 
     async def list_harnesses(self) -> list[str]:
-        return [harness.value for harness in HarnessName]
+        return [harness.value for harness in available_harnesses()]
 
     async def list_kernel_configs(self) -> list[dict[str, object]]:
         records = await self._kernel_config_store.list()
@@ -210,7 +212,7 @@ class ClientService:
         agent = await self._require_agent(agent_id)
         return agent.summary()
 
-    async def update_agent(
+    async def update_agent(  # noqa: PLR0913
         self,
         agent_id: str,
         *,
@@ -605,7 +607,7 @@ class ClientService:
         record = await self._require_gateway(gateway_id)
         return record.summary(include_secrets=include_secrets)
 
-    async def create_gateway(
+    async def create_gateway(  # noqa: PLR0913
         self,
         *,
         gateway_id: str,
@@ -637,7 +639,7 @@ class ClientService:
         logger.info("created gateway %s (%s)", gateway_id, gateway_type.value)
         return await self.get_gateway(gateway_id)
 
-    async def update_gateway(
+    async def update_gateway(  # noqa: PLR0913
         self,
         gateway_id: str,
         *,
@@ -979,60 +981,149 @@ class ClientService:
 
 
 def _flatten_text(events: list[KernelEvent]) -> str:
-    return "".join(
-        event.content or "" for event in events if event.type == EventType.TEXT_DELTA
-    ).strip()
+    chunks: list[str] = []
+    for event in events:
+        if event.type == EventType.TEXT_DELTA and event.content:
+            chunks.append(event.content)
+            continue
+        update = _session_update(event)
+        if update.get("sessionUpdate") == "agent_message_chunk":
+            chunks.append(_content_text(update.get("content")))
+    return "".join(chunks).strip()
 
 
 def _flatten_reasoning(events: list[KernelEvent]) -> str:
-    return "".join(
-        event.content or ""
-        for event in events
-        if event.type == EventType.REASONING_DELTA
-    ).strip()
+    chunks: list[str] = []
+    for event in events:
+        if event.type == EventType.REASONING_DELTA and event.content:
+            chunks.append(event.content)
+            continue
+        update = _session_update(event)
+        update_type = update.get("sessionUpdate")
+        if update_type == "agent_thought_chunk":
+            chunks.append(_content_text(update.get("content")))
+        elif update_type == "plan":
+            chunks.append(json.dumps({"plan": update.get("entries")}, indent=2))
+    return "".join(chunks).strip()
 
 
 def _extract_tool_calls(events: list[KernelEvent]) -> list[ToolCallRecord]:
-    """Extract tool calls with their inputs and paired outputs.
-
-    Tool calls and tool results are paired in event order, per tool name.
-    The Nth ``tool_result`` for a given tool name is paired with the Nth
-    ``tool_call`` for that same tool name. This preserves correctness when
-    the same tool is invoked multiple times within a single assistant turn.
-    """
     calls: list[ToolCallRecord] = []
-    pending: dict[str, list[int]] = {}
+    by_id: dict[str, int] = {}
     content = ""
     for event in events:
-        if event.type == EventType.TEXT_DELTA:
-            content = f"{content}{event.content or ''}"
-        elif event.type == EventType.TOOL_CALL and event.tool:
-            tool_input = json.dumps(event.input, indent=2) if event.input else None
+        if event.type == EventType.TEXT_DELTA and event.content:
+            content = f"{content}{event.content}"
+            continue
+        if event.type == EventType.TOOL_CALL and event.tool:
             calls.append(
                 ToolCallRecord(
                     tool=event.tool,
-                    input=tool_input,
-                    output=None,
+                    input=_json_string(event.input),
                     content_offset=len(content.strip()),
                 ),
             )
-            pending.setdefault(event.tool, []).append(len(calls) - 1)
-        elif (
-            event.type == EventType.TOOL_RESULT
-            and event.tool
-            and event.output is not None
-        ):
-            indices = pending.get(event.tool)
-            if indices:
-                idx = indices.pop(0)
-                existing = calls[idx]
-                calls[idx] = ToolCallRecord(
-                    tool=existing.tool,
-                    input=existing.input,
-                    output=event.output,
-                    content_offset=existing.content_offset,
-                )
+            continue
+        if event.type == EventType.TOOL_RESULT and event.tool:
+            _apply_legacy_tool_result(calls, event)
+            continue
+        update = _session_update(event)
+        update_type = update.get("sessionUpdate")
+        if update_type == "agent_message_chunk":
+            content = f"{content}{_content_text(update.get('content'))}"
+        elif update_type in {"tool_call", "tool_call_update"}:
+            _upsert_tool_call(calls, by_id, update, len(content.strip()))
     return calls
+
+
+def _apply_legacy_tool_result(
+    calls: list[ToolCallRecord],
+    event: KernelEvent,
+) -> None:
+    for idx, call in enumerate(calls):
+        if call.tool == event.tool and call.output is None:
+            calls[idx] = replace(call, output=event.output)
+            return
+
+
+def _session_update(event: KernelEvent) -> dict[str, object]:
+    if event.type != EventType.SESSION_UPDATE or event.update is None:
+        return {}
+    return event.update
+
+
+def _upsert_tool_call(
+    calls: list[ToolCallRecord],
+    by_id: dict[str, int],
+    update: dict[str, object],
+    content_offset: int,
+) -> None:
+    tool_call_id = _optional_str(update.get("toolCallId"))
+    index = by_id.get(tool_call_id) if tool_call_id is not None else None
+    if index is None:
+        title = _optional_str(update.get("title")) or tool_call_id or "tool"
+        index = len(calls)
+        calls.append(
+            ToolCallRecord(
+                tool=title,
+                tool_call_id=tool_call_id,
+                content_offset=content_offset,
+            ),
+        )
+        if tool_call_id is not None:
+            by_id[tool_call_id] = index
+
+    existing = calls[index]
+    title = _optional_str(update.get("title")) or existing.tool
+    status = _optional_str(update.get("status")) or existing.status
+    kind = _optional_str(update.get("kind")) or existing.kind
+    tool_input = existing.input
+    if "rawInput" in update:
+        tool_input = _json_string(update.get("rawInput"))
+    output = _tool_output(update) or existing.output
+    calls[index] = replace(
+        existing,
+        tool=title,
+        status=status,
+        kind=kind,
+        input=tool_input,
+        output=output,
+    )
+
+
+def _tool_output(update: dict[str, object]) -> str | None:
+    if "rawOutput" in update:
+        return _json_string(update.get("rawOutput"))
+    content = _content_text(update.get("content"))
+    return content or None
+
+
+def _json_string(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, indent=2)
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, list):
+        return "".join(_content_text(item) for item in cast("list[object]", content))
+    if not isinstance(content, dict):
+        return "" if content is None else str(content)
+
+    content_dict = cast("dict[str, object]", content)
+    content_type = content_dict.get("type")
+    if content_type == "text":
+        text = content_dict.get("text")
+        return text if isinstance(text, str) else ""
+    if content_type == "content":
+        return _content_text(content_dict.get("content"))
+    return json.dumps(content_dict, separators=(",", ":"))
+
+
+def _optional_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _build_assistant_message(

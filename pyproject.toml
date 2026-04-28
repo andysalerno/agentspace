@@ -9,15 +9,18 @@ dependencies = []
 dev = ["ruff", "pytest", "pytest-asyncio", "pyright", "httpx", "fastapi", "jinja2", "uvicorn"]
 
 [tool.uv.workspace]
-members = ["kernels/*", "gateways/*", "services/*", "channels/*", "clients/cli_ui"]
+members = [
+    "kernels/kernel",
+    "kernels/kernel_acp",
+    "kernels/kernel_host",
+    "gateways/*",
+    "services/*",
+    "channels/*",
+    "clients/cli_ui",
+]
 
 [tool.uv.sources]
 kernel = { workspace = true }
-kernel-claude-code = { workspace = true }
-kernel-echo = { workspace = true }
-kernel-codex = { workspace = true }
-kernel-copilot = { workspace = true }
-kernel-opencode = { workspace = true }
 kernel-acp = { workspace = true }
 kernel-host = { workspace = true }
 gateway = { workspace = true }
@@ -31,9 +34,23 @@ cli-ui = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+norecursedirs = [
+    "kernels/kernel_claude_code",
+    "kernels/kernel_codex",
+    "kernels/kernel_copilot",
+    "kernels/kernel_echo",
+    "kernels/kernel_opencode",
+]
 
 [tool.ruff]
 target-version = "py313"
+extend-exclude = [
+    "kernels/kernel_claude_code",
+    "kernels/kernel_codex",
+    "kernels/kernel_copilot",
+    "kernels/kernel_echo",
+    "kernels/kernel_opencode",
+]
 
 [tool.ruff.lint]
 select = ["ALL"]
@@ -49,10 +66,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["INP001", "S101"]
-"kernels/kernel_claude_code/tests/test_claude_code.py" = ["E501", "SLF001"]
-"kernels/kernel_copilot/tests/test_copilot.py" = ["E501", "SLF001"]
-"kernels/kernel_codex/tests/test_codex.py" = ["E501", "SLF001"]
-"kernels/kernel_opencode/tests/test_opencode.py" = ["E501", "SLF001"]
 "kernels/kernel_acp/tests/test_acp.py" = ["SLF001"]
 
 [tool.pyright]
@@ -62,11 +75,6 @@ venvPath = "."
 venv = ".venv"
 extraPaths = [
     "kernels/kernel/src",
-    "kernels/kernel_claude_code/src",
-    "kernels/kernel_echo/src",
-    "kernels/kernel_codex/src",
-    "kernels/kernel_copilot/src",
-    "kernels/kernel_opencode/src",
     "kernels/kernel_acp/src",
     "kernels/kernel_host/src",
     "gateways/gateway/src",
@@ -77,4 +85,13 @@ extraPaths = [
     "services/client_service/src",
     "channels/cli_channel/src",
     "clients/cli_ui/src",
+]
+exclude = [
+    ".venv",
+    "clients/webui/node_modules",
+    "kernels/kernel_claude_code",
+    "kernels/kernel_codex",
+    "kernels/kernel_copilot",
+    "kernels/kernel_echo",
+    "kernels/kernel_opencode",
 ]

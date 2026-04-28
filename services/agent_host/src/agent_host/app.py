@@ -55,7 +55,7 @@ app = FastAPI(title="Agent Host", version="0.1.0", lifespan=lifespan)
 
 
 class CreateSessionRequest(BaseModel):
-    harness: HarnessName = HarnessName.COPILOT_CLI
+    harness: HarnessName = HarnessName.ACP
     env: dict[str, str] = Field(default_factory=dict)
     additional_paths: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
