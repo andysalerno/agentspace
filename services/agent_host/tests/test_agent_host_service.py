@@ -179,11 +179,11 @@ async def test_create_send_history_and_destroy() -> None:
     assert len(runtime.sent) == 1
     assert runtime.sent[0][1] == "hello"
     assert [event.type for event in events] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert len(history) == 1
     assert fetched["resume_token"].startswith("resume-runtime-")
@@ -205,11 +205,11 @@ async def test_stream_message_updates_history_and_status() -> None:
     fetched = await host.get_session(session_id)
 
     assert [event.type for event in events] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert fetched["turns"] == 1
     assert fetched["status"] == "done"
@@ -231,7 +231,7 @@ async def test_stream_message_finalizes_when_consumer_closes_early() -> None:
     await stream.aclose()
     fetched = await host.get_session(session_id)
 
-    assert first.type == "session_start"
+    assert first.type == "session/start"
     assert fetched["turns"] == 1
     assert fetched["status"] == "done"
 

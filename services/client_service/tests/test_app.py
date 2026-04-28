@@ -66,7 +66,7 @@ class StubClientService:
         return agent
 
     async def list_harnesses(self) -> list[str]:
-        return ["claude-code", "echo", "copilot-cli", "codex"]
+        return ["acp"]
 
     async def list_agents(self) -> list[dict[str, object]]:
         return list(self.agents.values())
@@ -610,7 +610,7 @@ def test_list_harnesses_route(client: TestClient) -> None:
     response = client.get("/harnesses")
 
     assert response.status_code == 200
-    assert response.json() == ["claude-code", "echo", "copilot-cli", "codex"]
+    assert response.json() == ["acp"]
 
 
 def test_info_route_aggregates_sections(client: TestClient) -> None:

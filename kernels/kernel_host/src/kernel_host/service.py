@@ -197,7 +197,7 @@ class KernelSessionService:
         fallback_status: KernelStatus,
     ) -> KernelStatus:
         for event in reversed(events):
-            if event.type == EventType.STATUS and event.status is not None:
+            if event.type == EventType.SESSION_STATUS and event.status is not None:
                 return event.status
         return fallback_status
 
@@ -224,7 +224,7 @@ def service_from_env() -> KernelSessionService:
     skill_paths = discover_skill_dirs(skills_dir, enabled_skills) if skills_dir else ()
 
     return KernelSessionService(
-        harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO)),
+        harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ACP)),
         env=dict(os.environ),
         additional_paths=additional_paths + skill_paths,
     )

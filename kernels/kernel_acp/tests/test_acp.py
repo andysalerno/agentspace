@@ -35,7 +35,7 @@ class TestAcpMapping:
         return k
 
     @pytest.mark.asyncio
-    async def test_agent_message_chunk_produces_text_delta(
+    async def test_agent_message_chunk_produces_session_update(
         self,
         kernel: AcpKernel,
     ) -> None:
@@ -52,11 +52,16 @@ class TestAcpMapping:
         events = await _drain(kernel)
         assert kernel._session_id == "sess_123"
         assert len(events) == 1
-        assert events[0].type == EventType.TEXT_DELTA
-        assert events[0].content == "Hello"
+        assert events[0].type == EventType.SESSION_UPDATE
+        assert events[0].session_id == "sess_123"
+        assert events[0].method == "session/update"
+        assert events[0].update == {
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": "Hello"},
+        }
 
     @pytest.mark.asyncio
-    async def test_agent_thought_chunk_produces_reasoning_delta(
+    async def test_agent_thought_chunk_produces_session_update(
         self,
         kernel: AcpKernel,
     ) -> None:
@@ -71,11 +76,14 @@ class TestAcpMapping:
 
         events = await _drain(kernel)
         assert len(events) == 1
-        assert events[0].type == EventType.REASONING_DELTA
-        assert events[0].content == "thinking"
+        assert events[0].type == EventType.SESSION_UPDATE
+        assert events[0].update == {
+            "sessionUpdate": "agent_thought_chunk",
+            "content": {"type": "text", "text": "thinking"},
+        }
 
     @pytest.mark.asyncio
-    async def test_tool_call_and_completed_update_produce_tool_events(
+    async def test_tool_call_and_completed_update_pass_through(
         self,
         kernel: AcpKernel,
     ) -> None:
@@ -108,20 +116,32 @@ class TestAcpMapping:
 
         events = await _drain(kernel)
         assert len(events) == 2
-        assert events[0].type == EventType.TOOL_CALL
-        assert events[0].tool == "Run tests"
-        assert events[0].input == {"cmd": "pytest"}
-        assert events[1].type == EventType.TOOL_RESULT
-        assert events[1].tool == "Run tests"
-        assert events[1].output == "passed"
+        assert events[0].type == EventType.SESSION_UPDATE
+        assert events[0].update == {
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_1",
+            "title": "Run tests",
+            "status": "pending",
+            "rawInput": {"cmd": "pytest"},
+        }
+        assert events[1].type == EventType.SESSION_UPDATE
+        assert events[1].update == {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call_1",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "content",
+                    "content": {"type": "text", "text": "passed"},
+                },
+            ],
+        }
 
     @pytest.mark.asyncio
-    async def test_tool_call_update_with_raw_output_produces_result(
+    async def test_tool_call_update_with_raw_output_passes_through(
         self,
         kernel: AcpKernel,
     ) -> None:
-        kernel._tool_names["call_1"] = "Read file"
-
         await kernel._map_session_update(
             {
                 "update": {
@@ -135,18 +155,16 @@ class TestAcpMapping:
 
         events = await _drain(kernel)
         assert len(events) == 1
-        assert events[0].type == EventType.TOOL_RESULT
-        assert events[0].tool == "Read file"
-        assert events[0].output == '{"text":"content"}'
+        assert events[0].type == EventType.SESSION_UPDATE
+        assert events[0].update == {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call_1",
+            "status": "completed",
+            "rawOutput": {"text": "content"},
+        }
 
     def test_build_command_defaults_to_opencode_acp(self, kernel: AcpKernel) -> None:
-        assert kernel._build_command() == [
-            "opencode",
-            "acp",
-            "--print-logs",
-            "--log-level",
-            "debug",
-        ]
+        assert kernel._build_command() == ["opencode", "acp"]
 
     def test_build_command_from_env(self, kernel: AcpKernel) -> None:
         kernel._config = KernelConfig(
@@ -182,13 +200,7 @@ class TestAcpMapping:
         custom_agent = acp_module.CUSTOM_AGENT_PATH.read_text()
         assert "mode: primary" in custom_agent
         assert "be concise" in custom_agent
-        assert kernel._build_command() == [
-            "opencode",
-            "acp",
-            "--print-logs",
-            "--log-level",
-            "debug",
-        ]
+        assert kernel._build_command() == ["opencode", "acp"]
         opencode_config = json.loads(kernel._build_env()["OPENCODE_CONFIG_CONTENT"])
         assert opencode_config["default_agent"] == "custom"
 
@@ -230,13 +242,7 @@ class TestAcpMapping:
         kernel._write_custom_agent_prompt()
 
         assert custom_agent_path.read_text() == ""
-        assert kernel._build_command() == [
-            "opencode",
-            "acp",
-            "--print-logs",
-            "--log-level",
-            "debug",
-        ]
+        assert kernel._build_command() == ["opencode", "acp"]
         assert "OPENCODE_CONFIG_CONTENT" not in kernel._build_env()
 
     def test_write_opencode_config_uses_connection_env(
@@ -435,14 +441,16 @@ class TestAcpMapping:
         events = await _drain(kernel)
         assert stopped is False
         assert [event.type for event in events] == [
-            "status",
-            "status",
-            "status",
-            "session_end",
+            "session/status",
+            "session/prompt/result",
+            "session/status",
+            "session/status",
+            "session/end",
         ]
         assert events[0].status == KernelStatus.BUSY
-        assert events[1].status == KernelStatus.IDLE
-        assert events[2].status == KernelStatus.DONE
+        assert events[1].result == {}
+        assert events[2].status == KernelStatus.IDLE
+        assert events[3].status == KernelStatus.DONE
 
     def test_read_text_file_with_line_limit(
         self,

@@ -44,6 +44,12 @@ def _apply_stream_event(
     event: dict[str, Any],
 ) -> dict[str, Any]:
     event_type = str(event.get("type", ""))
+    if event_type == "session/update" and isinstance(event.get("update"), dict):
+        return _apply_acp_update(
+            assistant_message,
+            cast("dict[str, Any]", event["update"]),
+        )
+
     content = event.get("content")
     if event_type == "text_delta" and isinstance(content, str):
         assistant_message["content"] = (
@@ -80,6 +86,129 @@ def _apply_stream_event(
                 break
         assistant_message["tool_calls"] = tool_calls
     return assistant_message
+
+
+def _apply_acp_update(
+    assistant_message: dict[str, Any],
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    update_type = str(update.get("sessionUpdate", ""))
+    if update_type == "agent_message_chunk":
+        assistant_message["content"] = str(
+            assistant_message.get("content", ""),
+        ) + _content_text(update.get("content"))
+        return assistant_message
+    if update_type == "agent_thought_chunk":
+        assistant_message["reasoning"] = str(
+            assistant_message.get("reasoning", ""),
+        ) + _content_text(update.get("content"))
+        return assistant_message
+    if update_type == "plan":
+        assistant_message["reasoning"] = str(
+            assistant_message.get("reasoning", ""),
+        ) + json.dumps({"plan": update.get("entries")}, indent=2)
+        return assistant_message
+    if update_type in {"tool_call", "tool_call_update"}:
+        return _upsert_tool_call(assistant_message, update)
+    return assistant_message
+
+
+def _upsert_tool_call(
+    assistant_message: dict[str, Any],
+    update: dict[str, Any],
+) -> dict[str, Any]:
+    tool_calls = _tool_call_list(assistant_message)
+    tool_call_id = update.get("toolCallId")
+    index = _tool_call_index(
+        tool_calls,
+        tool_call_id if isinstance(tool_call_id, str) else None,
+    )
+    if index < 0:
+        tool_calls.append(_new_tool_call(update))
+        index = len(tool_calls) - 1
+
+    tool_call = dict(tool_calls[index])
+    title = update.get("title")
+    if isinstance(title, str) and title:
+        tool_call["tool"] = title
+    status = update.get("status")
+    if isinstance(status, str):
+        tool_call["status"] = status
+    kind = update.get("kind")
+    if isinstance(kind, str):
+        tool_call["kind"] = kind
+    if "rawInput" in update:
+        tool_call["input"] = _json_text(update.get("rawInput"))
+    output = _tool_output(update)
+    if output is not None:
+        tool_call["output"] = output
+    tool_calls[index] = tool_call
+    assistant_message["tool_calls"] = tool_calls
+    return assistant_message
+
+
+def _tool_call_list(assistant_message: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_tool_calls = assistant_message.get("tool_calls", [])
+    if not isinstance(raw_tool_calls, list):
+        raw_tool_calls = []
+    return [
+        cast("dict[str, Any]", tool_call)
+        for tool_call in raw_tool_calls
+        if isinstance(tool_call, dict)
+    ]
+
+
+def _tool_call_index(
+    tool_calls: list[dict[str, Any]],
+    tool_call_id: str | None,
+) -> int:
+    if tool_call_id is None:
+        return -1
+    for idx, tool_call in enumerate(tool_calls):
+        if tool_call.get("tool_call_id") == tool_call_id:
+            return idx
+    return -1
+
+
+def _new_tool_call(update: dict[str, Any]) -> dict[str, Any]:
+    tool_call_id = update.get("toolCallId")
+    title = update.get("title")
+    return {
+        "tool": title if isinstance(title, str) and title else tool_call_id or "tool",
+        "tool_call_id": tool_call_id if isinstance(tool_call_id, str) else None,
+    }
+
+
+def _tool_output(update: dict[str, Any]) -> str | None:
+    if "rawOutput" in update:
+        return _json_text(update.get("rawOutput"))
+    text = _content_text(update.get("content"))
+    return text or None
+
+
+def _json_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, indent=2)
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, list):
+        return "".join(_content_text(item) for item in cast("list[object]", content))
+    if content is None:
+        return ""
+    if not isinstance(content, dict):
+        return str(content)
+    content_dict = cast("dict[str, object]", content)
+    content_type = content_dict.get("type")
+    if content_type == "text":
+        text = content_dict.get("text")
+        return text if isinstance(text, str) else ""
+    if content_type == "content":
+        return _content_text(content_dict.get("content"))
+    return json.dumps(content_dict, separators=(",", ":"))
 
 
 # ──────────────────────────────────────────────────────────────────

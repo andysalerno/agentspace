@@ -1,7 +1,8 @@
-"""Standard kernel event types.
+"""Kernel stream event types.
 
-All kernels emit these events as JSONL on stdout. This is the contract
-that kernel_host (and eventually agent-host) consumes.
+ACP is the canonical stream format. Kernel implementations should emit ACP
+session notifications directly, with a small AgentSpace control envelope for
+kernel process lifecycle events that ACP does not define.
 """
 
 from __future__ import annotations
@@ -14,14 +15,23 @@ from typing import Any
 
 
 class EventType(StrEnum):
-    SESSION_START = "session_start"
+    SESSION_START = "session/start"
+    SESSION_STATUS = "session/status"
+    SESSION_UPDATE = "session/update"
+    SESSION_PROMPT_RESULT = "session/prompt/result"
+    SESSION_ERROR = "session/error"
+    SESSION_END = "session/end"
+
+    # Legacy event names retained so non-ACP packages can still import and run
+    # while ACP becomes the only active kernel path.
     STATUS = "status"
     TEXT_DELTA = "text_delta"
     REASONING_DELTA = "reasoning_delta"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"
     ERROR = "error"
-    SESSION_END = "session_end"
+    LEGACY_SESSION_START = "session_start"
+    LEGACY_SESSION_END = "session_end"
 
 
 class KernelStatus(StrEnum):
@@ -37,11 +47,16 @@ def _now() -> str:
 
 @dataclass(frozen=True, slots=True)
 class KernelEvent:
-    type: EventType
+    type: str
     ts: str = field(default_factory=_now)
     session_id: str | None = None
     kernel: str | None = None
     status: KernelStatus | None = None
+    method: str | None = None
+    params: dict[str, Any] | None = None
+    update: dict[str, Any] | None = None
+    result: dict[str, Any] | None = None
+    error: dict[str, Any] | None = None
     content: str | None = None
     tool: str | None = None
     input: dict[str, Any] | None = None
@@ -62,7 +77,32 @@ def session_start(session_id: str, kernel_name: str) -> KernelEvent:
 
 
 def status_event(status: KernelStatus) -> KernelEvent:
-    return KernelEvent(type=EventType.STATUS, status=status)
+    return KernelEvent(type=EventType.SESSION_STATUS, status=status)
+
+
+def session_update(session_id: str | None, update: dict[str, Any]) -> KernelEvent:
+    params: dict[str, Any] = {"update": update}
+    if session_id:
+        params["sessionId"] = session_id
+    return KernelEvent(
+        type=EventType.SESSION_UPDATE,
+        session_id=session_id,
+        method="session/update",
+        params=params,
+        update=update,
+    )
+
+
+def session_prompt_result(
+    session_id: str | None,
+    result: dict[str, Any],
+) -> KernelEvent:
+    return KernelEvent(
+        type=EventType.SESSION_PROMPT_RESULT,
+        session_id=session_id,
+        method="session/prompt",
+        result=result,
+    )
 
 
 def text_delta(content: str) -> KernelEvent:
@@ -82,7 +122,11 @@ def tool_result(tool: str, tool_output: str) -> KernelEvent:
 
 
 def error(message: str) -> KernelEvent:
-    return KernelEvent(type=EventType.ERROR, message=message)
+    return KernelEvent(
+        type=EventType.SESSION_ERROR,
+        error={"message": message},
+        message=message,
+    )
 
 
 def session_end() -> KernelEvent:

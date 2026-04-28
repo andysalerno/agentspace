@@ -555,7 +555,7 @@ class AgentHost:
     async def create_session(
         self,
         *,
-        harness: HarnessName = HarnessName.COPILOT_CLI,
+        harness: HarnessName = HarnessName.ACP,
         env: dict[str, str] | None = None,
         additional_paths: tuple[str, ...] = (),
         skills: tuple[str, ...] = (),
@@ -789,7 +789,7 @@ def _derive_status(
     fallback_status: KernelStatus,
 ) -> KernelStatus:
     for event in reversed(events):
-        if event.type == EventType.STATUS and event.status is not None:
+        if event.type == EventType.SESSION_STATUS and event.status is not None:
             return event.status
     return fallback_status
 

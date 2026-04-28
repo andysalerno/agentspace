@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import httpx
-from kernel.events import EventType, KernelEvent, KernelStatus
+from kernel.events import KernelEvent, KernelStatus
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -308,31 +308,36 @@ class HttpAgentHostClient:
 
 
 def _kernel_event_from_json(event: JsonDict) -> KernelEvent:
-    raw_input = event.get("input")
-    tool_input: dict[str, Any] | None
-    if isinstance(raw_input, dict):
-        tool_input = cast("dict[str, Any]", raw_input)
-    else:
-        tool_input = None
-
+    event_type = event.get("type")
+    if not isinstance(event_type, str):
+        event_type = str(event_type)
+    ts = event.get("ts")
     raw_status = event.get("status")
     status = KernelStatus(raw_status) if isinstance(raw_status, str) else None
-
     return KernelEvent(
-        type=EventType(str(event["type"])),
-        ts=str(event["ts"]),
+        type=event_type,
+        ts=ts if isinstance(ts, str) else KernelEvent(type=event_type).ts,
         session_id=_optional_str(event.get("session_id")),
         kernel=_optional_str(event.get("kernel")),
         status=status,
+        method=_optional_str(event.get("method")),
+        params=_optional_dict(event.get("params")),
+        update=_optional_dict(event.get("update")),
+        result=_optional_dict(event.get("result")),
+        error=_optional_dict(event.get("error")),
         content=_optional_str(event.get("content")),
         tool=_optional_str(event.get("tool")),
-        input=tool_input,
+        input=_optional_dict(event.get("input")),
         output=_optional_str(event.get("output")),
         message=_optional_str(event.get("message")),
     )
 
 
 def _optional_str(value: object) -> str | None:
-    if isinstance(value, str):
-        return value
+    return value if isinstance(value, str) else None
+
+
+def _optional_dict(value: object) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return cast("dict[str, Any]", value)
     return None

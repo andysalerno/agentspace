@@ -17,13 +17,11 @@ from kernel.events import (
     KernelEvent,
     KernelStatus,
     error,
-    reasoning_delta,
     session_end,
+    session_prompt_result,
     session_start,
+    session_update,
     status_event,
-    text_delta,
-    tool_call,
-    tool_result,
 )
 from kernel.protocol import KernelConfig
 
@@ -89,7 +87,6 @@ class AcpKernel:
         self._next_request_id = 0
         self._pending: dict[int, asyncio.Future[object]] = {}
         self._agent_capabilities: dict[str, object] = {}
-        self._tool_names: dict[str, str] = {}
         self._terminals: dict[str, TerminalSession] = {}
 
     @property
@@ -119,7 +116,6 @@ class AcpKernel:
         self._status = KernelStatus.IDLE
         self._raw_lines = []
         self._agent_capabilities = {}
-        self._tool_names = {}
         self._terminals = {}
 
         try:
@@ -214,12 +210,16 @@ class AcpKernel:
                 self._session_id,
                 len(message),
             )
-            await self._request(
+            result = await self._request(
                 "session/prompt",
                 {
                     "sessionId": self._session_id,
                     "prompt": [{"type": "text", "text": message}],
                 },
+            )
+            result_dict = self._as_dict(result)
+            await self._queue.put(
+                session_prompt_result(self._session_id, result_dict),
             )
             logger.info(
                 "ACP session/prompt completed: session=%s elapsed_ms=%.1f",
@@ -617,81 +617,7 @@ class AcpKernel:
             self._config = replace(self._config, session_id=session_id)
 
         update = self._as_dict(params.get("update"))
-        update_type = update.get("sessionUpdate")
-
-        if update_type in {"agent_message_chunk", "user_message_chunk"}:
-            text = self._content_text(update.get("content"))
-            if text and update_type == "agent_message_chunk":
-                await self._queue.put(text_delta(text))
-            return
-
-        if update_type == "agent_thought_chunk":
-            text = self._content_text(update.get("content"))
-            if text:
-                await self._queue.put(reasoning_delta(text))
-            return
-
-        if update_type == "tool_call":
-            await self._map_tool_call(update)
-            return
-
-        if update_type == "tool_call_update":
-            await self._map_tool_call_update(update)
-            return
-
-        if update_type == "plan":
-            entries = update.get("entries")
-            await self._queue.put(
-                reasoning_delta(
-                    json.dumps({"plan": entries}, separators=(",", ":")),
-                ),
-            )
-
-    async def _map_tool_call(self, update: dict[str, object]) -> None:
-        tool_call_id = update.get("toolCallId")
-        title = update.get("title")
-        tool_name = title if isinstance(title, str) and title else "tool"
-        if isinstance(tool_call_id, str):
-            self._tool_names[tool_call_id] = tool_name
-        raw_input = self._as_dict(update.get("rawInput"))
-        await self._queue.put(tool_call(tool_name, raw_input))
-
-        status = update.get("status")
-        if status in {"completed", "failed"}:
-            await self._emit_tool_result(tool_name, update)
-
-    async def _map_tool_call_update(self, update: dict[str, object]) -> None:
-        tool_call_id = update.get("toolCallId")
-        tool_name = "tool"
-        if isinstance(tool_call_id, str):
-            tool_name = self._tool_names.get(tool_call_id, tool_name)
-        title = update.get("title")
-        if isinstance(title, str) and title:
-            tool_name = title
-            if isinstance(tool_call_id, str):
-                self._tool_names[tool_call_id] = tool_name
-
-        raw_input = self._as_dict(update.get("rawInput"))
-        if raw_input:
-            await self._queue.put(tool_call(tool_name, raw_input))
-
-        status = update.get("status")
-        if status in {"completed", "failed", "cancelled"}:
-            await self._emit_tool_result(tool_name, update)
-
-    async def _emit_tool_result(
-        self,
-        tool_name: str,
-        update: dict[str, object],
-    ) -> None:
-        raw_output = update.get("rawOutput")
-        output = self._stringify_output(raw_output)
-        if not output:
-            output = self._tool_content_text(update.get("content"))
-        status = update.get("status")
-        if isinstance(status, str) and status != "completed":
-            output = "\n".join(part for part in (output, f"[status: {status}]") if part)
-        await self._queue.put(tool_result(tool_name, output))
+        await self._queue.put(session_update(self._session_id or None, update))
 
     def _permission_response(self, params: dict[str, object]) -> dict[str, object]:
         preferred = self._config.env.get("KERNEL_ACP_PERMISSION_OPTION")

@@ -219,11 +219,11 @@ def test_message_stream_route(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert [line["type"] for line in lines] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert lines[2]["content"] == "hello"
 

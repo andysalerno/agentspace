@@ -6,6 +6,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { api } from "./api";
 import type {
+    AcpSessionUpdate,
     ChatMessage,
     KernelEvent,
     MessageStreamFinalChunk,
@@ -64,6 +65,10 @@ function applyEventToAssistant(
     message: ChatMessage,
     event: KernelEvent,
 ): ChatMessage {
+    if (event.type === "session/update" && event.update) {
+        return applyAcpUpdateToAssistant(message, event.update);
+    }
+
     if (event.type === "text_delta" && event.content) {
         return { ...message, content: `${message.content}${event.content}` };
     }
@@ -100,6 +105,109 @@ function applyEventToAssistant(
     }
 
     return message;
+}
+
+function applyAcpUpdateToAssistant(
+    message: ChatMessage,
+    update: AcpSessionUpdate,
+): ChatMessage {
+    if (update.sessionUpdate === "agent_message_chunk") {
+        return { ...message, content: `${message.content}${contentText(update.content)}` };
+    }
+
+    if (update.sessionUpdate === "agent_thought_chunk") {
+        return {
+            ...message,
+            reasoning: `${message.reasoning ?? ""}${contentText(update.content)}`,
+        };
+    }
+
+    if (update.sessionUpdate === "plan") {
+        return {
+            ...message,
+            reasoning: `${message.reasoning ?? ""}${JSON.stringify({ plan: update.entries }, null, 2)}`,
+        };
+    }
+
+    if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+        return upsertToolCall(message, update);
+    }
+
+    return message;
+}
+
+function upsertToolCall(message: ChatMessage, update: AcpSessionUpdate): ChatMessage {
+    const toolCallId = typeof update.toolCallId === "string" ? update.toolCallId : undefined;
+    const toolCalls = [...(message.tool_calls ?? [])];
+    let toolIndex = toolCallId
+        ? toolCalls.findIndex((toolCall) => toolCall.tool_call_id === toolCallId)
+        : -1;
+
+    if (toolIndex < 0) {
+        toolCalls.push({
+            tool: typeof update.title === "string" && update.title ? update.title : toolCallId ?? "tool",
+            tool_call_id: toolCallId,
+            content_offset: message.content.trim().length,
+        });
+        toolIndex = toolCalls.length - 1;
+    }
+
+    const current = toolCalls[toolIndex];
+    toolCalls[toolIndex] = {
+        ...current,
+        tool: typeof update.title === "string" && update.title ? update.title : current.tool,
+        status: typeof update.status === "string" ? update.status : current.status,
+        kind: typeof update.kind === "string" ? update.kind : current.kind,
+        input: Object.hasOwn(update, "rawInput") ? jsonText(update.rawInput) : current.input,
+        output: toolOutput(update) ?? current.output,
+    };
+    return { ...message, tool_calls: toolCalls };
+}
+
+function toolOutput(update: AcpSessionUpdate): string | undefined {
+    if (Object.hasOwn(update, "rawOutput")) {
+        return jsonText(update.rawOutput);
+    }
+    const text = contentText(update.content);
+    return text || undefined;
+}
+
+function jsonText(value: unknown): string | undefined {
+    if (value == null) {
+        return undefined;
+    }
+    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+function contentText(content: unknown): string {
+    if (Array.isArray(content)) {
+        return content.map(contentText).join("");
+    }
+    if (content == null) {
+        return "";
+    }
+    if (
+        typeof content === "string" ||
+        typeof content === "number" ||
+        typeof content === "boolean" ||
+        typeof content === "bigint"
+    ) {
+        return String(content);
+    }
+    if (typeof content === "symbol") {
+        return content.description ?? "";
+    }
+    if (typeof content !== "object") {
+        return "";
+    }
+    const block = content as Record<string, unknown>;
+    if (block.type === "text") {
+        return typeof block.text === "string" ? block.text : "";
+    }
+    if (block.type === "content") {
+        return contentText(block.content);
+    }
+    return JSON.stringify(block);
 }
 
 function escapeMarkdownLinkText(value: string): string {

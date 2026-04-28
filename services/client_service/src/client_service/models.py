@@ -32,12 +32,21 @@ def _empty_skills() -> list[str]:
 @dataclass(frozen=True, slots=True)
 class ToolCallRecord:
     tool: str
+    tool_call_id: str | None = None
+    status: str | None = None
+    kind: str | None = None
     input: str | None = None
     output: str | None = None
     content_offset: int | None = None
 
     def summary(self) -> dict[str, object]:
         data: dict[str, object] = {"tool": self.tool}
+        if self.tool_call_id is not None:
+            data["tool_call_id"] = self.tool_call_id
+        if self.status is not None:
+            data["status"] = self.status
+        if self.kind is not None:
+            data["kind"] = self.kind
         if self.input is not None:
             data["input"] = self.input
         if self.output is not None:

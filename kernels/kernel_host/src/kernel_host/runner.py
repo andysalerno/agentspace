@@ -2,7 +2,7 @@
 
 Usage: python -m kernel_host.runner "your message here"
 
-Reads KERNEL_HARNESS from env (default: echo), instantiates the kernel,
+Reads KERNEL_HARNESS from env (default: acp), instantiates the kernel,
 sends the message, and streams JSONL events to stdout.
 """
 
@@ -26,7 +26,7 @@ def _configure_logging() -> None:
 
 
 async def run(message: str) -> None:
-    harness_name = HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ECHO))
+    harness_name = HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ACP))
     kernel = get_kernel(harness_name)
 
     additional_paths = tuple(

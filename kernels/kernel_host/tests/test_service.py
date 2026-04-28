@@ -174,11 +174,11 @@ async def test_service_reuses_resume_token(
     assert kernels[0].start_configs[0].session_id is None
     assert kernels[1].start_configs[0].session_id == "resume-kernel-host"
     assert [event.type for event in first_events] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert len(second_events) == 5
     assert summary["resume_token"] == "resume-kernel-host"  # noqa: S105
@@ -213,17 +213,17 @@ async def test_service_reuses_persistent_kernel_process(
     assert kernels[0].messages == ["hello", "again"]
     assert kernels[0].stop_count == 0
     assert [event.type for event in first_events] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert [event.type for event in second_events] == [
-        "status",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert logs == ["log:hello", "log:again"]
 
@@ -292,11 +292,11 @@ async def test_stream_message_persists_history_after_iteration(
     history = await service.history()
 
     assert [event.type for event in events] == [
-        "session_start",
-        "status",
+        "session/start",
+        "session/status",
         "text_delta",
-        "status",
-        "session_end",
+        "session/status",
+        "session/end",
     ]
     assert len(history) == 1
     assert history[0][2].content == "hello"

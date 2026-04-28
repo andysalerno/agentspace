@@ -34,9 +34,24 @@ export type SessionSummary = {
 
 export type ToolCall = {
   tool: string;
+  tool_call_id?: string;
+  status?: string;
+  kind?: string;
   input?: string;
   output?: string;
   content_offset?: number;
+};
+
+export type AcpSessionUpdate = Record<string, unknown> & {
+  sessionUpdate?: string;
+  content?: unknown;
+  entries?: unknown;
+  toolCallId?: string;
+  title?: string;
+  kind?: string;
+  status?: string;
+  rawInput?: unknown;
+  rawOutput?: unknown;
 };
 
 export type ChatMessage = {
@@ -87,6 +102,11 @@ export type KernelEvent = {
   session_id?: string | null;
   kernel?: string | null;
   status?: string | null;
+  method?: string | null;
+  params?: Record<string, unknown> | null;
+  update?: AcpSessionUpdate | null;
+  result?: Record<string, unknown> | null;
+  error?: Record<string, unknown> | null;
   content?: string | null;
   tool?: string | null;
   input?: Record<string, unknown> | null;
