@@ -27,6 +27,7 @@ type ChatViewProps = {
 };
 
 const markdownPlugins = [remarkGfm, remarkBreaks];
+const toolCallHrefPrefix = "#tool-call-";
 
 function createLocalMessage(
     sessionId: string,
@@ -80,6 +81,7 @@ function applyEventToAssistant(
             {
                 tool: event.tool,
                 input: event.input ? JSON.stringify(event.input, null, 2) : undefined,
+                content_offset: message.content.trim().length,
             } satisfies ToolCall,
         ];
         return { ...message, tool_calls: nextToolCalls };
@@ -98,6 +100,49 @@ function applyEventToAssistant(
     }
 
     return message;
+}
+
+function escapeMarkdownLinkText(value: string): string {
+    return value.replace(/([\\[\]])/g, "\\$1");
+}
+
+function toolCallLink(toolCall: ToolCall, index: number): string {
+    return `[⚙ ${escapeMarkdownLinkText(toolCall.tool)}](${toolCallHrefPrefix}${index})`;
+}
+
+function toolCallOffset(toolCall: ToolCall, contentLength: number): number {
+    const offset = toolCall.content_offset;
+    if (offset === undefined || !Number.isFinite(offset)) {
+        return 0;
+    }
+    return Math.min(Math.max(Math.trunc(offset), 0), contentLength);
+}
+
+function addInlineToolCalls(content: string, toolCalls: ToolCall[]): string {
+    if (toolCalls.length === 0) {
+        return content;
+    }
+
+    const orderedToolCalls = toolCalls
+        .map((toolCall, index) => ({
+            index,
+            offset: toolCallOffset(toolCall, content.length),
+            toolCall,
+        }))
+        .sort((a, b) => a.offset - b.offset || a.index - b.index);
+    let cursor = 0;
+    let markdown = "";
+
+    for (const { index, offset, toolCall } of orderedToolCalls) {
+        markdown = `${markdown}${content.slice(cursor, offset)}`;
+        const needsLeadingSpace = markdown.length > 0 && !/\s$/.test(markdown);
+        const nextCharacter = content.slice(offset, offset + 1);
+        const needsTrailingSpace = nextCharacter !== "" && !/\s/.test(nextCharacter);
+        markdown = `${markdown}${needsLeadingSpace ? " " : ""}${toolCallLink(toolCall, index)}${needsTrailingSpace ? " " : ""}`;
+        cursor = offset;
+    }
+
+    return `${markdown}${content.slice(cursor)}`;
 }
 
 function hasMessageWithId(messages: ChatMessage[], message: ChatMessage): boolean {
@@ -119,29 +164,56 @@ function hasEquivalentServerMessage(
 
 function MessageMarkdown({
     content,
+    onSelectToolCall,
     streaming = false,
+    toolCalls = [],
 }: {
     content: string;
+    onSelectToolCall?: (toolCall: ToolCall) => void;
     streaming?: boolean;
+    toolCalls?: ToolCall[];
 }) {
+    const renderedContent = toolCalls.length > 0 ? content.trim() : content;
+    const markdownContent = addInlineToolCalls(renderedContent, toolCalls);
+
     return (
         <div className="message-content">
             <ReactMarkdown
                 remarkPlugins={markdownPlugins}
                 components={{
-                    a: ({ href, children, ...props }) => (
-                        <a
-                            {...props}
-                            href={href}
-                            rel={href ? "noreferrer noopener" : undefined}
-                            target={href ? "_blank" : undefined}
-                        >
-                            {children}
-                        </a>
-                    ),
+                    a: ({ href, children, ...props }) => {
+                        if (href?.startsWith(toolCallHrefPrefix)) {
+                            const toolCallIndex = Number.parseInt(
+                                href.slice(toolCallHrefPrefix.length),
+                                10,
+                            );
+                            const toolCall = toolCalls[toolCallIndex];
+                            if (toolCall) {
+                                return (
+                                    <button
+                                        className="tool-call-tag inline-tool-call"
+                                        type="button"
+                                        onClick={() => onSelectToolCall?.(toolCall)}
+                                    >
+                                        {children}
+                                    </button>
+                                );
+                            }
+                        }
+                        return (
+                            <a
+                                {...props}
+                                href={href}
+                                rel={href ? "noreferrer noopener" : undefined}
+                                target={href ? "_blank" : undefined}
+                            >
+                                {children}
+                            </a>
+                        );
+                    },
                 }}
             >
-                {content}
+                {markdownContent}
             </ReactMarkdown>
             {streaming ? <span className="cursor">▌</span> : null}
         </div>
@@ -435,21 +507,11 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                     <div className="reasoning-content">{msg.reasoning}</div>
                                                 </details>
                                             )}
-                                            {msg.tool_calls && msg.tool_calls.length > 0 && (
-                                                <div className="tool-calls">
-                                                    {msg.tool_calls.map((tc, i) => (
-                                                        <button
-                                                            className="tool-call-tag"
-                                                            key={i}
-                                                            type="button"
-                                                            onClick={() => setSelectedToolCall(tc)}
-                                                        >
-                                                            ⚙ {tc.tool}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            )}
-                                            <MessageMarkdown content={msg.content} />
+                                            <MessageMarkdown
+                                                content={msg.content}
+                                                toolCalls={msg.tool_calls}
+                                                onSelectToolCall={setSelectedToolCall}
+                                            />
                                         </article>
                                     ))}
                                     {streamingMessage && (
@@ -466,21 +528,12 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                     </div>
                                                 </details>
                                             )}
-                                            {streamingMessage.tool_calls && streamingMessage.tool_calls.length > 0 && (
-                                                <div className="tool-calls">
-                                                    {streamingMessage.tool_calls.map((tc, i) => (
-                                                        <button
-                                                            className="tool-call-tag"
-                                                            key={i}
-                                                            type="button"
-                                                            onClick={() => setSelectedToolCall(tc)}
-                                                        >
-                                                            ⚙ {tc.tool}
-                                                        </button>
-                                                    ))}
-                                                </div>
-                                            )}
-                                            <MessageMarkdown content={streamingMessage.content} streaming />
+                                            <MessageMarkdown
+                                                content={streamingMessage.content}
+                                                toolCalls={streamingMessage.tool_calls}
+                                                onSelectToolCall={setSelectedToolCall}
+                                                streaming
+                                            />
                                         </article>
                                     )}
                                 </>

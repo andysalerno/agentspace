@@ -275,8 +275,10 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
             events = [
                 session_start(session_id, "copilot-cli"),
                 status_event(KernelStatus.BUSY),
+                text_delta("Let me inspect that. "),
                 tool_call("read_file", {"path": "src/foo.py"}),
                 tool_result("read_file", "print('hello')"),
+                text_delta("Now I will write the fix. "),
                 tool_call("write_file", {"path": "src/bar.py", "content": "x = 1"}),
                 tool_result("write_file", "ok"),
                 text_delta("Done editing."),
@@ -301,17 +303,21 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
     reply = await service.send_message(session_id, "edit some files")
     assistant_message = cast("dict[str, object]", reply["assistant_message"])
 
-    assert assistant_message["content"] == "Done editing."
+    assert assistant_message["content"] == (
+        "Let me inspect that. Now I will write the fix. Done editing."
+    )
     assert assistant_message["tool_calls"] == [
         {
             "tool": "read_file",
             "input": '{\n  "path": "src/foo.py"\n}',
             "output": "print('hello')",
+            "content_offset": 20,
         },
         {
             "tool": "write_file",
             "input": '{\n  "path": "src/bar.py",\n  "content": "x = 1"\n}',
             "output": "ok",
+            "content_offset": 46,
         },
     ]
 
@@ -323,11 +329,13 @@ async def test_tool_calls_extracted_into_assistant_message() -> None:
             "tool": "read_file",
             "input": '{\n  "path": "src/foo.py"\n}',
             "output": "print('hello')",
+            "content_offset": 20,
         },
         {
             "tool": "write_file",
             "input": '{\n  "path": "src/bar.py",\n  "content": "x = 1"\n}',
             "output": "ok",
+            "content_offset": 46,
         },
     ]
 
@@ -378,13 +386,20 @@ async def test_repeated_tool_invocations_pair_outputs_in_order() -> None:
             "tool": "read_file",
             "input": '{\n  "path": "a.py"\n}',
             "output": "contents-a",
+            "content_offset": 0,
         },
         {
             "tool": "read_file",
             "input": '{\n  "path": "b.py"\n}',
             "output": "contents-b",
+            "content_offset": 0,
         },
-        {"tool": "read_file", "input": '{\n  "path": "c.py"\n}', "output": ""},
+        {
+            "tool": "read_file",
+            "input": '{\n  "path": "c.py"\n}',
+            "output": "",
+            "content_offset": 0,
+        },
     ]
 
 

@@ -36,6 +36,7 @@ export type ToolCall = {
   tool: string;
   input?: string;
   output?: string;
+  content_offset?: number;
 };
 
 export type ChatMessage = {

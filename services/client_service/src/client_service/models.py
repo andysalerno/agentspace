@@ -34,6 +34,7 @@ class ToolCallRecord:
     tool: str
     input: str | None = None
     output: str | None = None
+    content_offset: int | None = None
 
     def summary(self) -> dict[str, object]:
         data: dict[str, object] = {"tool": self.tool}
@@ -41,6 +42,8 @@ class ToolCallRecord:
             data["input"] = self.input
         if self.output is not None:
             data["output"] = self.output
+        if self.content_offset is not None:
+            data["content_offset"] = self.content_offset
         return data
 
 

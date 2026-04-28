@@ -1002,11 +1002,19 @@ def _extract_tool_calls(events: list[KernelEvent]) -> list[ToolCallRecord]:
     """
     calls: list[ToolCallRecord] = []
     pending: dict[str, list[int]] = {}
+    content = ""
     for event in events:
-        if event.type == EventType.TOOL_CALL and event.tool:
+        if event.type == EventType.TEXT_DELTA:
+            content = f"{content}{event.content or ''}"
+        elif event.type == EventType.TOOL_CALL and event.tool:
             tool_input = json.dumps(event.input, indent=2) if event.input else None
             calls.append(
-                ToolCallRecord(tool=event.tool, input=tool_input, output=None),
+                ToolCallRecord(
+                    tool=event.tool,
+                    input=tool_input,
+                    output=None,
+                    content_offset=len(content.strip()),
+                ),
             )
             pending.setdefault(event.tool, []).append(len(calls) - 1)
         elif (
@@ -1022,6 +1030,7 @@ def _extract_tool_calls(events: list[KernelEvent]) -> list[ToolCallRecord]:
                     tool=existing.tool,
                     input=existing.input,
                     output=event.output,
+                    content_offset=existing.content_offset,
                 )
     return calls
 
