@@ -144,7 +144,7 @@ class ClientService:
         self._lock = asyncio.Lock()
         self._gateway_lock = asyncio.Lock()
 
-    async def create_agent(
+    async def create_agent(  # noqa: PLR0913
         self,
         *,
         agent_id: str,
@@ -210,7 +210,7 @@ class ClientService:
         agent = await self._require_agent(agent_id)
         return agent.summary()
 
-    async def update_agent(
+    async def update_agent(  # noqa: PLR0913
         self,
         agent_id: str,
         *,
@@ -605,7 +605,7 @@ class ClientService:
         record = await self._require_gateway(gateway_id)
         return record.summary(include_secrets=include_secrets)
 
-    async def create_gateway(
+    async def create_gateway(  # noqa: PLR0913
         self,
         *,
         gateway_id: str,
@@ -637,7 +637,7 @@ class ClientService:
         logger.info("created gateway %s (%s)", gateway_id, gateway_type.value)
         return await self.get_gateway(gateway_id)
 
-    async def update_gateway(
+    async def update_gateway(  # noqa: PLR0913
         self,
         gateway_id: str,
         *,

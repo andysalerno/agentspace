@@ -6,6 +6,13 @@ any future Python package added to the `uv` workspace).
 
 ## Required checks before reporting a change complete
 
+After finishing any work in this repo, run the aggregate verification recipe
+from the repo root and confirm it passes:
+
+```
+just check
+```
+
 After making changes to any Python source, always run **all** of the
 following from the repo root and confirm they pass:
 
@@ -20,9 +27,10 @@ A change is not complete until every one of these exits cleanly. Do not
 report a Python change as done based on tests alone — formatting, lint,
 and type-check must also pass.
 
-The `just test` recipe runs the test suite (`uv run --all-packages pytest`).
-There is intentionally no `just python-lint` aggregate yet; run the four
-commands above directly.
+The `just check` recipe runs these Python checks plus the web checks. Use the
+individual commands above when you need to format or diagnose a Python-only
+failure; use `just test` when you only need the Python test suite
+(`uv run --all-packages pytest`).
 
 ### 1. `ruff format` — formatting
 

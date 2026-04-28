@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -292,8 +292,9 @@ class ChatScreen(Screen[None]):
                 message,
             ):
                 if item.get("type") == "event":
-                    event = item.get("event", {})
-                    if isinstance(event, dict):
+                    raw_event = item.get("event")
+                    if isinstance(raw_event, dict):
+                        event = cast("dict[str, Any]", raw_event)
                         _apply_stream_event(pending_assistant, event)
                         self._render_transcript()
                     continue

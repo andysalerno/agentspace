@@ -321,11 +321,11 @@ def test_gateway_lifecycle(client: TestClient) -> None:
 
 
 def test_duplicate_gateway_returns_409(client: TestClient) -> None:
-    payload = {
+    payload: dict[str, object] = {
         "gateway_id": "dup-gw",
         "gateway_type": "echo",
         "agent_id": "agent",
-        "env": {},
+        "env": dict[str, str](),
     }
     client.post("/gateways", json=payload)
     response = client.post("/gateways", json=payload)

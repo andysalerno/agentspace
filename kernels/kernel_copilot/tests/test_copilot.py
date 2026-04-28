@@ -291,8 +291,11 @@ class TestCopilotKernelLifecycle:
         kernel = CopilotKernel()
         await kernel.start(KernelConfig())
 
+        def ensure_directory(_path: str) -> None:
+            return None
+
         create_subprocess = AsyncMock(side_effect=PermissionError("Access is denied"))
-        monkeypatch.setattr("kernel_copilot._ensure_directory", lambda _path: None)
+        monkeypatch.setattr("kernel_copilot._ensure_directory", ensure_directory)
         monkeypatch.setattr(
             "kernel_copilot.asyncio.create_subprocess_exec",
             create_subprocess,
@@ -320,7 +323,8 @@ class TestCopilotKernelLifecycle:
         await kernel.start(KernelConfig())
 
         def fail_ensure_directory(_path: str) -> None:
-            raise OSError("workspace setup failed")
+            message = "workspace setup failed"
+            raise OSError(message)
 
         monkeypatch.setattr("kernel_copilot._ensure_directory", fail_ensure_directory)
 

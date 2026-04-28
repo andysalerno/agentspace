@@ -17,6 +17,15 @@ bootstrap:
   uv sync --all-packages --dev
   npm --prefix clients/webui install
 
+check:
+  uv run ruff format --check .
+  uv run ruff check .
+  uv run pyright
+  uv run --all-packages pytest
+  npm --prefix clients/webui run lint
+  npm --prefix clients/webui run test --if-present
+  npm --prefix clients/webui run build
+
 test:
   uv run --all-packages pytest
 

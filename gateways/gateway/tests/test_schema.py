@@ -5,7 +5,9 @@ from gateway.schema import GATEWAY_SCHEMAS
 
 
 def test_every_gateway_type_has_a_schema() -> None:
-    """Adding a GatewayType without a matching GATEWAY_SCHEMAS entry would
+    """Every gateway type has a schema.
+
+    Adding a GatewayType without a matching GATEWAY_SCHEMAS entry would
     silently produce an empty schema and a broken create form. Catch it
     here at unit-test time instead.
     """

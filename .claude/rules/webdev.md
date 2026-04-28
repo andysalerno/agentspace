@@ -4,6 +4,13 @@ These rules apply to any change under `clients/webui/` (the React/TypeScript das
 
 ## Static analysis
 
+After finishing any work in this repo, run the aggregate verification recipe
+from the repo root and confirm it passes:
+
+```
+just check
+```
+
 After making changes to anything under `clients/webui/`, always run:
 
 ```
@@ -38,7 +45,9 @@ Auto-fix what you can with `npx eslint . --fix` (run from `clients/webui/`).
 - **Unused files / exports** — dead code that can be deleted.
 - **Unresolved imports** — typos in import specifiers.
 
-`just webui-lint` must exit cleanly before committing.
+`just webui-lint` must exit cleanly before committing. The repo-wide
+`just check` recipe includes this webui lint pass, npm tests when present, and
+the production build.
 
 ## Adding a new runtime dependency
 
@@ -48,7 +57,7 @@ If your change introduces a new `import "some-package"` in webui source, you mus
    - `dependencies` for runtime imports.
    - `devDependencies` for build-time-only or type-only imports.
 2. Run `npm --prefix clients/webui install` so `package-lock.json` is updated.
-3. Re-run `just webui-lint` to confirm a clean pass.
+3. Re-run `just check` to confirm a clean pass.
 
 Never rely on a package being available transitively through another dependency. If you import it, declare it.
 

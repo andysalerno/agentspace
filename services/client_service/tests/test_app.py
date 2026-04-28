@@ -40,7 +40,7 @@ class StubClientService:
         self.connections: dict[str, dict[str, object]] = {}
         self.autostart_called = False
 
-    async def create_agent(
+    async def create_agent(  # noqa: PLR0913
         self,
         *,
         agent_id: str,
@@ -74,7 +74,7 @@ class StubClientService:
     async def get_agent(self, agent_id: str) -> dict[str, object]:
         return self.agents[agent_id]
 
-    async def update_agent(
+    async def update_agent(  # noqa: PLR0913
         self,
         agent_id: str,
         *,
@@ -333,7 +333,7 @@ class StubClientService:
             raise _GatewayNotFound(gateway_id)
         return dict(self.gateways[gateway_id])
 
-    async def create_gateway(
+    async def create_gateway(  # noqa: PLR0913
         self,
         *,
         gateway_id: str,
@@ -357,7 +357,7 @@ class StubClientService:
         self.gateways[gateway_id] = record
         return dict(record)
 
-    async def update_gateway(
+    async def update_gateway(  # noqa: PLR0913
         self,
         gateway_id: str,
         *,

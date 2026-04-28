@@ -24,10 +24,15 @@ The repository is a monorepo managed by `uv`.
 
 Use `just` for common tasks:
 - `just bootstrap`: Install all dependencies (`uv sync` and `npm install`).
+- `just check`: Run the full repo verification suite before finishing work.
 - `just test`: Run all Python tests via `uv run pytest`.
 - `just stack-up`: Start the full stack using Docker Compose.
 - `just stack-down`: Stop the full stack.
 - `just copilot-setup`: Run `kernels/kernel_host/spawn-kernel.sh setup` to authenticate Copilot.
+
+Run `just check` after completing any code or documentation change. It covers
+Python formatting, linting, type-checking, tests, web linting, npm tests when
+present, and the web build.
 
 ### Python Standards
 

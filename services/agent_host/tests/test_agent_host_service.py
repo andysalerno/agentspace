@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from agent_host.service import (
@@ -21,7 +21,7 @@ from kernel.events import (
 from kernel_host.registry import HarnessName
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
 
 class StubRuntime:
@@ -223,7 +223,10 @@ async def test_stream_message_finalizes_when_consumer_closes_early() -> None:
     session = await host.create_session(harness=HarnessName.ECHO)
     session_id = str(session["session_id"])
 
-    stream = host.stream_message(session_id, "hello")
+    stream = cast(
+        "AsyncGenerator[KernelEvent]",
+        host.stream_message(session_id, "hello"),
+    )
     first = await anext(stream)
     await stream.aclose()
     fetched = await host.get_session(session_id)
