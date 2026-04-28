@@ -34,13 +34,29 @@ function createLocalMessage(
     content: string,
 ): ChatMessage {
     return {
-        message_id: `${role}-${crypto.randomUUID()}`,
+        message_id: createClientMessageId(role),
         session_id: sessionId,
         role,
         content,
         created_at: new Date().toISOString(),
         tool_calls: [],
     };
+}
+
+function createClientMessageId(prefix: string): string {
+    const cryptoObj = globalThis.crypto;
+    if (typeof cryptoObj?.randomUUID === "function") {
+        return `${prefix}-${cryptoObj.randomUUID()}`;
+    }
+    if (typeof cryptoObj?.getRandomValues === "function") {
+        const bytes = new Uint8Array(16);
+        cryptoObj.getRandomValues(bytes);
+        const randomPart = Array.from(bytes, (byte) =>
+            byte.toString(16).padStart(2, "0"),
+        ).join("");
+        return `${prefix}-${randomPart}`;
+    }
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
 function applyEventToAssistant(
@@ -82,6 +98,23 @@ function applyEventToAssistant(
     }
 
     return message;
+}
+
+function hasMessageWithId(messages: ChatMessage[], message: ChatMessage): boolean {
+    return messages.some((existing) => existing.message_id === message.message_id);
+}
+
+function hasEquivalentServerMessage(
+    messages: ChatMessage[],
+    message: ChatMessage,
+): boolean {
+    return messages.some(
+        (existing) =>
+            existing.message_id !== message.message_id
+            && existing.session_id === message.session_id
+            && existing.role === message.role
+            && existing.content === message.content,
+    );
 }
 
 function MessageMarkdown({
@@ -128,6 +161,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     const [selectedToolCall, setSelectedToolCall] = useState<ToolCall | null>(null);
 
     // Streaming local state (true client state — not server-cached).
+    const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
     const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
     const [streaming, setStreaming] = useState(false);
     // Pause session polling while streaming so background refetches can't
@@ -177,6 +211,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
             streamControllerRef.current?.abort();
             streamControllerRef.current = null;
             streamingSessionIdRef.current = null;
+            setPendingUserMessage(null);
             setStreamingMessage(null);
             setStreaming(false);
         }
@@ -199,15 +234,27 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         );
     }
 
-    function applyFinalChunk(sessionId: string, chunk: MessageStreamFinalChunk) {
+    function applyFinalChunk(
+        sessionId: string,
+        chunk: MessageStreamFinalChunk,
+        userMessage: ChatMessage,
+    ) {
         queryClient.setQueryData<SessionDetail | undefined>(
             queryKeys.session(sessionId),
             (current) => {
-                if (!current || current.session_id !== sessionId) return current;
+                const messages = current?.session_id === sessionId
+                    ? [...current.messages]
+                    : [];
+                if (!hasMessageWithId(messages, userMessage)) {
+                    messages.push(userMessage);
+                }
+                if (!hasMessageWithId(messages, chunk.assistant_message)) {
+                    messages.push(chunk.assistant_message);
+                }
                 return {
                     ...current,
                     ...chunk.session,
-                    messages: [...current.messages, chunk.assistant_message],
+                    messages,
                 };
             },
         );
@@ -237,6 +284,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         const userMessage = createLocalMessage(activeSessionId, "user", message);
         const pendingAssistant = createLocalMessage(activeSessionId, "assistant", "");
 
+        setPendingUserMessage(userMessage);
         appendMessageToCache(activeSessionId, userMessage);
         setStreamingMessage(pendingAssistant);
         setStreaming(true);
@@ -251,7 +299,8 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 });
             },
             onFinal: (chunk) => {
-                applyFinalChunk(activeSessionId, chunk);
+                applyFinalChunk(activeSessionId, chunk, userMessage);
+                setPendingUserMessage(null);
                 setStreamingMessage(null);
                 setStreaming(false);
                 streamControllerRef.current = null;
@@ -273,12 +322,16 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         streamingSessionIdRef.current = activeSessionId;
     }
 
-    function handleSendMessage(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
-        if (!messageDraft.trim()) return;
+    function submitDraft() {
+        if (!messageDraft.trim() || busy) return;
         const msg = messageDraft.trim();
         setMessageDraft("");
         sendMessage(msg);
+    }
+
+    function handleSendMessage(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+        submitDraft();
     }
 
     function handleResetSession() {
@@ -286,12 +339,19 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         streamControllerRef.current?.abort();
         streamControllerRef.current = null;
         streamingSessionIdRef.current = null;
+        setPendingUserMessage(null);
         setStreamingMessage(null);
         setStreaming(false);
         resetMutation.mutate(selectedSessionId);
     }
 
     const busy = streaming || createSessionMutation.isPending || resetMutation.isPending;
+    const transcriptMessages = selectedSession && pendingUserMessage
+        && selectedSession.session_id === pendingUserMessage.session_id
+        && !hasMessageWithId(selectedSession.messages, pendingUserMessage)
+        && !hasEquivalentServerMessage(selectedSession.messages, pendingUserMessage)
+        ? [...selectedSession.messages, pendingUserMessage]
+        : (selectedSession?.messages ?? []);
 
     return (
         <div className="chat-layout">
@@ -364,9 +424,9 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                             </button>
                         </div>
                         <div className="transcript">
-                            {selectedSession.messages.length > 0 || streamingMessage ? (
+                            {transcriptMessages.length > 0 || streamingMessage ? (
                                 <>
-                                    {selectedSession.messages.map((msg) => (
+                                    {transcriptMessages.map((msg) => (
                                         <article className={`message ${msg.role}`} key={msg.message_id}>
                                             <header>{msg.role}</header>
                                             {msg.reasoning && (
@@ -439,9 +499,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
                                     if (e.key === "Enter" && !e.shiftKey) {
                                         e.preventDefault();
-                                        if (messageDraft.trim() && !busy) {
-                                            handleSendMessage(e as unknown as FormEvent<HTMLFormElement>);
-                                        }
+                                        submitDraft();
                                     }
                                 }}
                             />
