@@ -30,6 +30,14 @@ export type SessionSummary = {
   created_at: string;
   updated_at: string;
   message_count: number;
+  active_turn?: ActiveTurnSummary;
+};
+
+export type ActiveTurnSummary = {
+  turn_id: string;
+  user_message_id: string;
+  assistant_message_id: string;
+  status: string;
 };
 
 export type ToolCall = {
@@ -124,6 +132,9 @@ export type MessageStreamFinalChunk = {
   assistant_message: ChatMessage;
   events: Array<Record<string, unknown>>;
   session: SessionSummary;
+  turn_id?: string;
+  completed?: boolean;
+  error?: string;
 };
 
 export type MessageStreamChunk = MessageStreamEventChunk | MessageStreamFinalChunk;

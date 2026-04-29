@@ -39,6 +39,7 @@ from client_service.storage import (
     SqliteConnectionStore,
     SqliteGatewayStore,
     SqliteKernelConfigStore,
+    SqliteSessionStore,
 )
 
 if TYPE_CHECKING:
@@ -59,12 +60,14 @@ def _build_service() -> tuple[ClientService, Database | None]:
     kernel_config_store = SqliteKernelConfigStore(database)
     gateway_store = SqliteGatewayStore(database)
     connection_store = SqliteConnectionStore(database)
+    session_store = SqliteSessionStore(database)
     return (
         ClientService(
             agent_store=agent_store,
             kernel_config_store=kernel_config_store,
             gateway_store=gateway_store,
             connection_store=connection_store,
+            session_store=session_store,
         ),
         database,
     )
@@ -81,6 +84,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await SqliteKernelConfigStore(_database).initialize()
         await SqliteGatewayStore(_database).initialize()
         await SqliteConnectionStore(_database).initialize()
+        await SqliteSessionStore(_database).initialize()
     # Run autostart concurrently with serving so a slow agent_host or
     # transient container failure does not block the API from coming up.
     autostart_task = asyncio.create_task(
@@ -361,6 +365,30 @@ async def stream_message(
 ) -> StreamingResponse:
     try:
         stream = service.stream_message(session_id, payload.message)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    async def response_lines() -> AsyncIterator[str]:
+        async for item in stream:
+            yield json.dumps(item, separators=(",", ":")) + "\n"
+
+    return StreamingResponse(
+        response_lines(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/sessions/{session_id}/turns/{turn_id}/stream")
+async def stream_turn(
+    session_id: str,
+    turn_id: str,
+) -> StreamingResponse:
+    try:
+        stream = service.stream_turn(session_id, turn_id)
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

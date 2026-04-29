@@ -21,6 +21,11 @@ from client_service.storage.kernel_configs import (
     KernelConfigStore,
     SqliteKernelConfigStore,
 )
+from client_service.storage.sessions import (
+    InMemorySessionStore,
+    SessionStore,
+    SqliteSessionStore,
+)
 
 __all__ = [
     "AgentStore",
@@ -31,9 +36,12 @@ __all__ = [
     "InMemoryConnectionStore",
     "InMemoryGatewayStore",
     "InMemoryKernelConfigStore",
+    "InMemorySessionStore",
     "KernelConfigStore",
+    "SessionStore",
     "SqliteAgentStore",
     "SqliteConnectionStore",
     "SqliteGatewayStore",
     "SqliteKernelConfigStore",
+    "SqliteSessionStore",
 ]

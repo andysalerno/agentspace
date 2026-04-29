@@ -1,5 +1,5 @@
 import type { FormEvent, KeyboardEvent } from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -351,6 +351,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     });
     const streamControllerRef = useRef<AbortController | null>(null);
     const streamingSessionIdRef = useRef<string | null>(null);
+    const streamingTurnIdRef = useRef<string | null>(null);
 
     const createSessionMutation = useMutation({
         mutationFn: (payload: { agent_id: string; channel_name: string | null }) =>
@@ -391,6 +392,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
             streamControllerRef.current?.abort();
             streamControllerRef.current = null;
             streamingSessionIdRef.current = null;
+            streamingTurnIdRef.current = null;
             setPendingUserMessage(null);
             setStreamingMessage(null);
             setStreaming(false);
@@ -414,21 +416,45 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         );
     }
 
-    function applyFinalChunk(
+    const updateMessageInCache = useCallback((
+        sessionId: string,
+        messageId: string,
+        updater: (message: ChatMessage) => ChatMessage,
+    ) => {
+        queryClient.setQueryData<SessionDetail | undefined>(
+            queryKeys.session(sessionId),
+            (current) => {
+                if (!current || current.session_id !== sessionId) return current;
+                return {
+                    ...current,
+                    messages: current.messages.map((message) => (
+                        message.message_id === messageId ? updater(message) : message
+                    )),
+                };
+            },
+        );
+    }, [queryClient]);
+
+    const applyFinalChunk = useCallback((
         sessionId: string,
         chunk: MessageStreamFinalChunk,
-        userMessage: ChatMessage,
-    ) {
+        userMessage?: ChatMessage,
+    ) => {
         queryClient.setQueryData<SessionDetail | undefined>(
             queryKeys.session(sessionId),
             (current) => {
                 const messages = current?.session_id === sessionId
                     ? [...current.messages]
                     : [];
-                if (!hasMessageWithId(messages, userMessage)) {
+                if (userMessage && !hasMessageWithId(messages, userMessage)) {
                     messages.push(userMessage);
                 }
-                if (!hasMessageWithId(messages, chunk.assistant_message)) {
+                const assistantIndex = messages.findIndex(
+                    (message) => message.message_id === chunk.assistant_message.message_id,
+                );
+                if (assistantIndex >= 0) {
+                    messages[assistantIndex] = chunk.assistant_message;
+                } else {
                     messages.push(chunk.assistant_message);
                 }
                 return {
@@ -441,7 +467,63 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
         void queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) });
         void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
-    }
+    }, [queryClient]);
+
+    useEffect(() => {
+        const activeTurn = selectedSession?.active_turn;
+        if (!selectedSessionId || !activeTurn) return;
+        if (streamingTurnIdRef.current === activeTurn.turn_id) return;
+        if (
+            streamControllerRef.current !== null
+            && streamingSessionIdRef.current === selectedSessionId
+            && streamingTurnIdRef.current === null
+        ) {
+            return;
+        }
+
+        streamControllerRef.current?.abort();
+        setPendingUserMessage(null);
+        setStreamingMessage(null);
+        setStreaming(true);
+
+        const activeSessionId = selectedSessionId;
+        const assistantMessageId = activeTurn.assistant_message_id;
+        const controller = api.streamTurn(activeSessionId, activeTurn.turn_id, {
+            onEvent: (event) => {
+                updateMessageInCache(activeSessionId, assistantMessageId, (message) => (
+                    applyEventToAssistant(message, event)
+                ));
+            },
+            onFinal: (chunk) => {
+                applyFinalChunk(activeSessionId, chunk);
+                setStreaming(false);
+                streamControllerRef.current = null;
+                streamingSessionIdRef.current = null;
+                streamingTurnIdRef.current = null;
+            },
+            onError: (err) => {
+                setStreaming(false);
+                streamControllerRef.current = null;
+                streamingSessionIdRef.current = null;
+                streamingTurnIdRef.current = null;
+                void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+                void queryClient.invalidateQueries({
+                    queryKey: queryKeys.session(activeSessionId),
+                });
+                reportError(err);
+            },
+        });
+        streamControllerRef.current = controller;
+        streamingSessionIdRef.current = activeSessionId;
+        streamingTurnIdRef.current = activeTurn.turn_id;
+    }, [
+        applyFinalChunk,
+        queryClient,
+        reportError,
+        selectedSession?.active_turn,
+        selectedSessionId,
+        updateMessageInCache,
+    ]);
 
     async function handleCreateSession(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -459,6 +541,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         streamControllerRef.current?.abort();
         streamControllerRef.current = null;
         streamingSessionIdRef.current = null;
+        streamingTurnIdRef.current = null;
 
         const activeSessionId = selectedSessionId;
         const userMessage = createLocalMessage(activeSessionId, "user", message);
@@ -485,12 +568,14 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 setStreaming(false);
                 streamControllerRef.current = null;
                 streamingSessionIdRef.current = null;
+                streamingTurnIdRef.current = null;
             },
             onError: (err) => {
                 setStreamingMessage(null);
                 setStreaming(false);
                 streamControllerRef.current = null;
                 streamingSessionIdRef.current = null;
+                streamingTurnIdRef.current = null;
                 void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
                 void queryClient.invalidateQueries({
                     queryKey: queryKeys.session(activeSessionId),
@@ -519,13 +604,16 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         streamControllerRef.current?.abort();
         streamControllerRef.current = null;
         streamingSessionIdRef.current = null;
+        streamingTurnIdRef.current = null;
         setPendingUserMessage(null);
         setStreamingMessage(null);
         setStreaming(false);
         resetMutation.mutate(selectedSessionId);
     }
 
-    const busy = streaming || createSessionMutation.isPending || resetMutation.isPending;
+    const activeAssistantMessageId = selectedSession?.active_turn?.assistant_message_id ?? null;
+    const busy = streaming || Boolean(selectedSession?.active_turn)
+        || createSessionMutation.isPending || resetMutation.isPending;
     const transcriptMessages = selectedSession && pendingUserMessage
         && selectedSession.session_id === pendingUserMessage.session_id
         && !hasMessageWithId(selectedSession.messages, pendingUserMessage)
@@ -606,22 +694,29 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                         <div className="transcript">
                             {transcriptMessages.length > 0 || streamingMessage ? (
                                 <>
-                                    {transcriptMessages.map((msg) => (
-                                        <article className={`message ${msg.role}`} key={msg.message_id}>
-                                            <header>{msg.role}</header>
-                                            {msg.reasoning && (
-                                                <details className="reasoning-block">
-                                                    <summary>Reasoning</summary>
-                                                    <div className="reasoning-content">{msg.reasoning}</div>
-                                                </details>
-                                            )}
-                                            <MessageMarkdown
-                                                content={msg.content}
-                                                toolCalls={msg.tool_calls}
-                                                onSelectToolCall={setSelectedToolCall}
-                                            />
-                                        </article>
-                                    ))}
+                                    {transcriptMessages.map((msg) => {
+                                        const messageStreaming = msg.message_id === activeAssistantMessageId;
+                                        return (
+                                            <article
+                                                className={`message ${msg.role}${messageStreaming ? " streaming" : ""}`}
+                                                key={msg.message_id}
+                                            >
+                                                <header>{msg.role}</header>
+                                                {msg.reasoning && (
+                                                    <details className="reasoning-block">
+                                                        <summary>Reasoning</summary>
+                                                        <div className="reasoning-content">{msg.reasoning}</div>
+                                                    </details>
+                                                )}
+                                                <MessageMarkdown
+                                                    content={msg.content}
+                                                    toolCalls={msg.tool_calls}
+                                                    onSelectToolCall={setSelectedToolCall}
+                                                    streaming={messageStreaming}
+                                                />
+                                            </article>
+                                        );
+                                    })}
                                     {streamingMessage && (
                                         <article
                                             className={`message ${streamingMessage.role} streaming`}

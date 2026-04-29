@@ -45,6 +45,76 @@ function parseChunk(line: string): MessageStreamChunk {
   return JSON.parse(line) as MessageStreamChunk;
 }
 
+type MessageStreamHandlers = {
+  onEvent?: (event: KernelEvent) => void;
+  onFinal?: (chunk: MessageStreamFinalChunk) => void;
+  onError?: (error: Error) => void;
+};
+
+async function consumeMessageStream(
+  response: Response,
+  handlers?: MessageStreamHandlers,
+): Promise<void> {
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `${response.status} ${response.statusText}`);
+  }
+
+  if (!response.body) {
+    throw new Error("streaming response body was not available");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalChunk: MessageStreamFinalChunk | null = null;
+
+  const processBuffer = (flush: boolean) => {
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+      if (line) {
+        const chunk = parseChunk(line);
+        if (chunk.type === "event") {
+          handlers?.onEvent?.(chunk.event);
+        } else {
+          finalChunk = chunk;
+          handlers?.onFinal?.(chunk);
+        }
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+
+    if (flush) {
+      const line = buffer.trim();
+      if (line) {
+        const chunk = parseChunk(line);
+        if (chunk.type === "event") {
+          handlers?.onEvent?.(chunk.event);
+        } else {
+          finalChunk = chunk;
+          handlers?.onFinal?.(chunk);
+        }
+      }
+      buffer = "";
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done });
+    processBuffer(done);
+    if (done) {
+      break;
+    }
+  }
+
+  if (finalChunk === null) {
+    throw new Error("message stream ended without a final payload");
+  }
+}
+
 export const api = {
   listHarnesses: () => requestJson<string[]>("/harnesses"),
   listAgents: () => requestJson<Agent[]>("/agents"),
@@ -94,11 +164,7 @@ export const api = {
   streamMessage: (
     sessionId: string,
     message: string,
-    handlers?: {
-      onEvent?: (event: KernelEvent) => void;
-      onFinal?: (chunk: MessageStreamFinalChunk) => void;
-      onError?: (error: Error) => void;
-    },
+    handlers?: MessageStreamHandlers,
   ): AbortController => {
     const controller = new AbortController();
 
@@ -112,65 +178,30 @@ export const api = {
           body: JSON.stringify({ message }),
           signal: controller.signal,
         });
-
-        if (!response.ok) {
-          const text = await response.text();
-          throw new Error(text || `${response.status} ${response.statusText}`);
+        await consumeMessageStream(response, handlers);
+      } catch (error) {
+        if ((error as Error).name !== "AbortError") {
+          handlers?.onError?.(error as Error);
         }
+      }
+    })();
 
-        if (!response.body) {
-          throw new Error("streaming response body was not available");
-        }
+    return controller;
+  },
+  streamTurn: (
+    sessionId: string,
+    turnId: string,
+    handlers?: MessageStreamHandlers,
+  ): AbortController => {
+    const controller = new AbortController();
 
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        let finalChunk: MessageStreamFinalChunk | null = null;
-
-        const processBuffer = (flush: boolean) => {
-          let newlineIndex = buffer.indexOf("\n");
-          while (newlineIndex >= 0) {
-            const line = buffer.slice(0, newlineIndex).trim();
-            buffer = buffer.slice(newlineIndex + 1);
-            if (line) {
-              const chunk = parseChunk(line);
-              if (chunk.type === "event") {
-                handlers?.onEvent?.(chunk.event);
-              } else {
-                finalChunk = chunk;
-                handlers?.onFinal?.(chunk);
-              }
-            }
-            newlineIndex = buffer.indexOf("\n");
-          }
-
-          if (flush) {
-            const line = buffer.trim();
-            if (line) {
-              const chunk = parseChunk(line);
-              if (chunk.type === "event") {
-                handlers?.onEvent?.(chunk.event);
-              } else {
-                finalChunk = chunk;
-                handlers?.onFinal?.(chunk);
-              }
-            }
-            buffer = "";
-          }
-        };
-
-        while (true) {
-          const { done, value } = await reader.read();
-          buffer += decoder.decode(value, { stream: !done });
-          processBuffer(done);
-          if (done) {
-            break;
-          }
-        }
-
-        if (finalChunk === null) {
-          throw new Error("message stream ended without a final payload");
-        }
+    void (async () => {
+      try {
+        const response = await fetch(
+          `${apiBase}/sessions/${sessionId}/turns/${turnId}/stream`,
+          { signal: controller.signal },
+        );
+        await consumeMessageStream(response, handlers);
       } catch (error) {
         if ((error as Error).name !== "AbortError") {
           handlers?.onError?.(error as Error);
