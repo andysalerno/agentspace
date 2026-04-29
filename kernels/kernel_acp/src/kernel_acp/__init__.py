@@ -334,7 +334,7 @@ class AcpKernel:
         config["model"] = f"customprovider/{model_name}"
         config["provider"] = {
             "customprovider": {
-                "npm": "@ai-sdk/openai-compatible",
+                "npm": "@ai-sdk/openai",
                 "name": "customprovider",
                 "options": {
                     "baseURL": base_url,
