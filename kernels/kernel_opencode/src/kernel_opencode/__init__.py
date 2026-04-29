@@ -234,7 +234,7 @@ class OpenCodeKernel:
             "model": f"customprovider/{model_name}",
             "provider": {
                 "customprovider": {
-                    "npm": "@ai-sdk/openai",
+                    "npm": "@ai-sdk/openai-compatible",
                     "name": "customprovider",
                     "options": {
                         "baseURL": base_url,
