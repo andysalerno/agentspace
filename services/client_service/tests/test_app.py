@@ -191,6 +191,33 @@ class StubClientService:
 
         return iterator()
 
+    def stream_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+    ) -> AsyncIterator[dict[str, object]]:
+        del turn_id
+
+        async def iterator() -> AsyncIterator[dict[str, object]]:
+            for event in self._events():
+                yield {"type": "event", "event": asdict(event)}
+            yield {
+                "type": "final",
+                "session": self.sessions[session_id],
+                "assistant_message": {
+                    "message_id": "msg-2",
+                    "session_id": session_id,
+                    "role": "assistant",
+                    "content": "hello",
+                    "created_at": "now",
+                },
+                "events": [asdict(event) for event in self._events()],
+                "turn_id": "turn-1",
+                "completed": True,
+            }
+
+        return iterator()
+
     async def reset_session(self, session_id: str) -> dict[str, object]:
         return self.sessions[session_id]
 
@@ -649,6 +676,28 @@ def test_message_stream_route(client: TestClient) -> None:
         "event",
         "final",
     ]
+    assert chunks[-1]["assistant_message"]["content"] == "hello"
+
+
+def test_turn_stream_route(client: TestClient) -> None:
+    client.post("/agents", json={"agent_id": "agent-one", "name": "Agent One"})
+    created_session = client.post(
+        "/sessions",
+        json={
+            "agent_id": "agent-one",
+            "channel_name": "webui",
+            "client_type": "webui",
+        },
+    )
+
+    with client.stream(
+        "GET",
+        f"/sessions/{created_session.json()['session_id']}/turns/turn-1/stream",
+    ) as response:
+        chunks = [json.loads(line) for line in response.iter_lines() if line]
+
+    assert response.status_code == 200
+    assert chunks[-1]["turn_id"] == "turn-1"
     assert chunks[-1]["assistant_message"]["content"] == "hello"
 
 

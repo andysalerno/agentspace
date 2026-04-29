@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Self, cast
 
 import client_service.service as service_module
 import pytest
-from client_service.models import ClientType
+from client_service.models import (
+    ClientType,
+    MessageRecord,
+    MessageRole,
+    SessionRecord,
+)
 from client_service.service import (
     AgentAlreadyExistsError,
     AgentNotFoundError,
@@ -14,6 +20,7 @@ from client_service.service import (
     SessionNotFoundError,
     parse_env_vars,
 )
+from client_service.storage import Database, SqliteSessionStore
 from gateway.protocol import GatewayType
 from kernel.events import (
     KernelEvent,
@@ -28,7 +35,8 @@ from kernel.events import (
 from kernel_host.registry import HarnessName
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
+    from pathlib import Path
 
     from client_service.agent_host_client import AgentHostClient
 
@@ -209,6 +217,33 @@ class StubAgentHostClient:
     async def destroy_gateway(self, gateway_id: str) -> None:
         self.gateways.pop(gateway_id, None)
         self.gateway_destroyed.append(gateway_id)
+
+
+class SlowAgentHostClient(StubAgentHostClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+        self.done = asyncio.Event()
+
+    def stream_message(
+        self,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[KernelEvent]:
+        self.sent.append((session_id, message))
+
+        async def iterator() -> AsyncIterator[KernelEvent]:
+            yield session_start(session_id, "copilot-cli")
+            yield status_event(KernelStatus.BUSY)
+            yield text_delta("hel")
+            await self.release.wait()
+            yield text_delta("lo")
+            yield status_event(KernelStatus.DONE)
+            yield session_end()
+            self._sessions[session_id]["status"] = "done"
+            self.done.set()
+
+        return iterator()
 
 
 @pytest.mark.asyncio
@@ -420,6 +455,117 @@ async def test_stream_message_yields_events_then_final_payload() -> None:
     assert chunks[-1]["assistant_message"] == messages[1]
     assert messages[0]["content"] == "hello"
     assert messages[1]["content"] == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_stream_message_continues_after_client_closes() -> None:
+    upstream = SlowAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    agent = await service.create_agent(agent_id="slow-agent", name="Slow Agent")
+    session = await service.create_session(agent_id=str(agent["agent_id"]))
+    session_id = str(session["session_id"])
+
+    stream = cast(
+        "AsyncGenerator[dict[str, object]]",
+        service.stream_message(session_id, "hello"),
+    )
+    first_chunks: list[dict[str, object]] = []
+    while True:
+        chunk = await anext(stream)
+        first_chunks.append(chunk)
+        event = cast("dict[str, object]", chunk.get("event", {}))
+        if event.get("type") == "text_delta":
+            break
+
+    await stream.aclose()
+    upstream.release.set()
+    await asyncio.wait_for(upstream.done.wait(), timeout=1.0)
+
+    messages = await service.list_messages(session_id)
+
+    assert [chunk["type"] for chunk in first_chunks] == ["event", "event", "event"]
+    assert messages[0]["content"] == "hello"
+    assert messages[1]["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_stream_turn_attaches_to_running_turn_after_disconnect() -> None:
+    upstream = SlowAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+
+    agent = await service.create_agent(agent_id="reconnect-agent", name="Reconnect")
+    session = await service.create_session(agent_id=str(agent["agent_id"]))
+    session_id = str(session["session_id"])
+
+    stream = cast(
+        "AsyncGenerator[dict[str, object]]",
+        service.stream_message(session_id, "hello"),
+    )
+    while True:
+        chunk = await anext(stream)
+        event = cast("dict[str, object]", chunk.get("event", {}))
+        if event.get("type") == "text_delta":
+            break
+    await stream.aclose()
+
+    detail = await service.get_session(session_id)
+    active_turn = cast("dict[str, object]", detail["active_turn"])
+    messages = cast("list[dict[str, object]]", detail["messages"])
+
+    assert active_turn["assistant_message_id"] == messages[1]["message_id"]
+    assert messages[1]["content"] == "hel"
+
+    attached_stream = service.stream_turn(session_id, str(active_turn["turn_id"]))
+    upstream.release.set()
+    attached_chunks = [chunk async for chunk in attached_stream]
+
+    assert attached_chunks[-1]["type"] == "final"
+    assert (
+        cast("dict[str, object]", attached_chunks[-1]["assistant_message"])["content"]
+        == "hello"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_session_store_persists_messages(tmp_path: Path) -> None:
+    database = Database(str(tmp_path / "client.db"))
+    await database.connect()
+    store = SqliteSessionStore(database)
+    await store.initialize()
+
+    session = SessionRecord(
+        session_id="session-1",
+        agent_id="agent-one",
+        agent_host_session_id="host-1",
+        status="idle",
+        channel_name="webui",
+        client_type=ClientType.WEBUI,
+    )
+    await store.insert(session)
+    await store.append_message(
+        MessageRecord(
+            message_id="msg-1",
+            session_id="session-1",
+            role=MessageRole.USER,
+            content="hello",
+        ),
+    )
+    await store.append_message(
+        MessageRecord(
+            message_id="msg-2",
+            session_id="session-1",
+            role=MessageRole.ASSISTANT,
+            content="hi",
+        ),
+    )
+
+    loaded = await store.get("session-1")
+    await database.close()
+
+    assert loaded is not None
+    assert loaded.summary()["message_count"] == 2
+    assert [message.content for message in loaded.messages] == ["hello", "hi"]
 
 
 @pytest.mark.asyncio

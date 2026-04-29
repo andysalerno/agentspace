@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, field, replace
 from time import perf_counter
 from typing import TYPE_CHECKING, cast
 
@@ -47,6 +48,7 @@ from client_service.storage.kernel_configs import (
     InMemoryKernelConfigStore,
     KernelConfigStore,
 )
+from client_service.storage.sessions import InMemorySessionStore, SessionStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -54,6 +56,33 @@ if TYPE_CHECKING:
     from gateway.protocol import GatewayType
 
     type AcloseFn = Callable[[], Awaitable[object]]
+    type StreamChunk = dict[str, object]
+
+
+def _empty_events() -> list[KernelEvent]:
+    return []
+
+
+def _empty_subscribers() -> set[asyncio.Queue[StreamChunk | None]]:
+    return set()
+
+
+@dataclass(slots=True)
+class _ActiveTurn:
+    turn_id: str
+    session_id: str
+    agent_host_session_id: str
+    message: str
+    user_message: MessageRecord
+    assistant_message: MessageRecord
+    events: list[KernelEvent] = field(default_factory=_empty_events)
+    subscribers: set[asyncio.Queue[StreamChunk | None]] = field(
+        default_factory=_empty_subscribers,
+    )
+    task: asyncio.Task[None] | None = None
+    final_payload: StreamChunk | None = None
+    error: str | None = None
+
 
 logger = logging.getLogger(__name__)
 AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
@@ -125,13 +154,14 @@ VISIBLE_ASSISTANT_EVENT_TYPES = frozenset(
 
 
 class ClientService:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         agent_host_client: AgentHostClient | None = None,
         agent_store: AgentStore | None = None,
         kernel_config_store: KernelConfigStore | None = None,
         gateway_store: GatewayStore | None = None,
         connection_store: ConnectionStore | None = None,
+        session_store: SessionStore | None = None,
     ) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
         self._agent_store: AgentStore = agent_store or InMemoryAgentStore()
@@ -142,9 +172,12 @@ class ClientService:
         self._connection_store: ConnectionStore = (
             connection_store or InMemoryConnectionStore()
         )
-        self._sessions: dict[str, SessionRecord] = {}
+        self._session_store: SessionStore = session_store or InMemorySessionStore()
+        self._turns: dict[str, _ActiveTurn] = {}
+        self._session_turns: dict[str, str] = {}
         self._lock = asyncio.Lock()
         self._gateway_lock = asyncio.Lock()
+        self._turn_lock = asyncio.Lock()
 
     async def create_agent(  # noqa: PLR0913
         self,
@@ -251,15 +284,14 @@ class ClientService:
         async with self._lock:
             removed = await self._agent_store.delete(agent_id)
             session_ids = [
-                session_id
-                for session_id, session in self._sessions.items()
+                session.session_id
+                for session in await self._session_store.list()
                 if session.agent_id == agent_id
             ]
         if not removed:
             raise AgentNotFoundError(agent_id)
         for session_id in session_ids:
-            if session_id in self._sessions:
-                await self.delete_session(session_id)
+            await self.delete_session(session_id)
 
     async def create_session(
         self,
@@ -295,7 +327,7 @@ class ClientService:
             client_type=client_type,
         )
         async with self._lock:
-            self._sessions[session.session_id] = session
+            await self._session_store.insert(session)
         logger.info(
             "created client session %s -> agent_host %s",
             session.session_id,
@@ -304,40 +336,62 @@ class ClientService:
         return session.summary()
 
     async def list_sessions(self) -> list[dict[str, object]]:
-        async with self._lock:
-            sessions = [session.summary() for session in self._sessions.values()]
+        sessions = [
+            self._session_summary(session)
+            for session in await self._session_store.list()
+        ]
         return sorted(sessions, key=lambda item: str(item["created_at"]))
 
     async def get_session(self, session_id: str) -> dict[str, object]:
-        session = self._get_session(session_id)
+        session = await self._get_session(session_id)
         upstream = await self._agent_host.get_session(session.agent_host_session_id)
         session.status = str(upstream["status"])
         session.updated_at = utc_now()
-        return session.detail()
+        await self._session_store.update(session)
+        return self._session_detail(session)
 
     async def list_messages(self, session_id: str) -> list[dict[str, object]]:
-        session = self._get_session(session_id)
+        session = await self._get_session(session_id)
         return [message.summary() for message in session.messages]
 
     async def send_message(self, session_id: str, message: str) -> dict[str, object]:
-        return await self._accumulate_stream(self.stream_message(session_id, message))
+        turn = await self._create_turn(session_id, message)
+        self._ensure_turn_task(turn)
+        return await self._accumulate_stream(self._stream_existing_turn(turn))
 
     def stream_message(
         self,
         session_id: str,
         message: str,
     ) -> AsyncIterator[dict[str, object]]:
-        session = self._get_session(session_id)
-        return self._stream_to_session(session, message)
+        async def iterator() -> AsyncIterator[dict[str, object]]:
+            turn = await self._create_turn(session_id, message)
+            async for chunk in self._stream_existing_turn(turn, start=True):
+                yield chunk
+
+        return iterator()
+
+    def stream_turn(
+        self,
+        session_id: str,
+        turn_id: str,
+    ) -> AsyncIterator[dict[str, object]]:
+        async def iterator() -> AsyncIterator[dict[str, object]]:
+            turn = await self._get_turn(session_id, turn_id)
+            async for chunk in self._stream_existing_turn(turn, start=True):
+                yield chunk
+
+        return iterator()
 
     async def list_kernels(self) -> list[dict[str, object]]:
         upstream_sessions = await self._agent_host.list_sessions(with_stats=True)
+        sessions = await self._session_store.list()
         kernels: list[dict[str, object]] = []
         for upstream in upstream_sessions:
             agent_host_session_id = str(upstream["session_id"])
             client_sessions = [
                 session
-                for session in self._sessions.values()
+                for session in sessions
                 if session.agent_host_session_id == agent_host_session_id
             ]
             client_session_ids = [session.session_id for session in client_sessions]
@@ -369,12 +423,14 @@ class ClientService:
         await self._agent_host.destroy_session(kernel_session_id)
         async with self._lock:
             affected = [
-                sid
-                for sid, session in self._sessions.items()
+                session
+                for session in await self._session_store.list()
                 if session.agent_host_session_id == kernel_session_id
             ]
-            for sid in affected:
-                self._sessions[sid].status = "dead"
+            for session in affected:
+                session.status = "dead"
+                session.updated_at = utc_now()
+                await self._session_store.update(session)
         logger.info(
             "killed kernel %s, marked %d client sessions as dead",
             kernel_session_id,
@@ -456,77 +512,178 @@ class ClientService:
             "agent_host": agent_host_section,
         }
 
-    async def _send_to_session(
-        self,
-        session: SessionRecord,
-        message: str,
-    ) -> dict[str, object]:
-        return await self._accumulate_stream(self._stream_to_session(session, message))
+    async def _create_turn(self, session_id: str, message: str) -> _ActiveTurn:
+        session = await self._get_session(session_id)
+        async with self._turn_lock:
+            existing_turn_id = self._session_turns.get(session_id)
+            if existing_turn_id is not None:
+                return self._turns[existing_turn_id]
+            user_message = MessageRecord(
+                message_id=uuid.uuid4().hex,
+                session_id=session.session_id,
+                role=MessageRole.USER,
+                content=message,
+            )
+            assistant_message = MessageRecord(
+                message_id=uuid.uuid4().hex,
+                session_id=session.session_id,
+                role=MessageRole.ASSISTANT,
+                content="",
+            )
+            await self._session_store.append_message(user_message)
+            await self._session_store.append_message(assistant_message)
+            session.status = "busy"
+            session.updated_at = utc_now()
+            await self._session_store.update(session)
+            turn = _ActiveTurn(
+                turn_id=uuid.uuid4().hex,
+                session_id=session.session_id,
+                agent_host_session_id=session.agent_host_session_id,
+                message=message,
+                user_message=user_message,
+                assistant_message=assistant_message,
+            )
+            self._turns[turn.turn_id] = turn
+            self._session_turns[session.session_id] = turn.turn_id
+            return turn
 
-    async def _stream_to_session(
+    async def _get_turn(self, session_id: str, turn_id: str) -> _ActiveTurn:
+        async with self._turn_lock:
+            turn = self._turns.get(turn_id)
+            if turn is None or turn.session_id != session_id:
+                msg = f"turn not found: {turn_id}"
+                raise SessionNotFoundError(msg)
+            return turn
+
+    def _ensure_turn_task(self, turn: _ActiveTurn) -> None:
+        if turn.task is not None:
+            return
+        turn.task = asyncio.create_task(
+            self._run_turn(turn),
+            name=f"client-turn-{turn.turn_id[:12]}",
+        )
+
+    async def _stream_existing_turn(
         self,
-        session: SessionRecord,
-        message: str,
+        turn: _ActiveTurn,
+        *,
+        start: bool = False,
     ) -> AsyncIterator[dict[str, object]]:
+        queue: asyncio.Queue[dict[str, object] | None] = asyncio.Queue()
+        async with self._turn_lock:
+            if turn.final_payload is not None:
+                await queue.put(turn.final_payload)
+                await queue.put(None)
+            else:
+                turn.subscribers.add(queue)
+        if start:
+            self._ensure_turn_task(turn)
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                yield item
+        finally:
+            async with self._turn_lock:
+                turn.subscribers.discard(queue)
+
+    async def _run_turn(self, turn: _ActiveTurn) -> None:
         started_at = perf_counter()
         logger.info(
             "client stream start: client_session=%s upstream_session=%s chars=%d",
-            session.session_id,
-            session.agent_host_session_id,
-            len(message),
+            turn.session_id,
+            turn.agent_host_session_id,
+            len(turn.message),
         )
-        user_message = MessageRecord(
-            message_id=uuid.uuid4().hex,
-            session_id=session.session_id,
-            role=MessageRole.USER,
-            content=message,
-        )
-        session.messages.append(user_message)
-        events: list[KernelEvent] = []
-        assistant_message: MessageRecord | None = None
         completed = False
         stream = self._agent_host.stream_message(
-            session.agent_host_session_id,
-            message,
+            turn.agent_host_session_id,
+            turn.message,
         )
         try:
             async for event in stream:
-                if not events:
+                if not turn.events:
                     logger.info(
                         "client first event: session=%s elapsed_ms=%.1f type=%s",
-                        session.session_id,
+                        turn.session_id,
                         (perf_counter() - started_at) * 1000,
                         event.type,
                     )
-                events.append(event)
-                yield {"type": "event", "event": asdict(event)}
+                turn.events.append(event)
+                await self._persist_turn_assistant(turn)
+                await self._broadcast_turn(
+                    turn,
+                    {"type": "event", "event": asdict(event)},
+                )
             completed = True
+        except Exception as exc:
+            turn.error = str(exc)
+            logger.exception("client turn failed: session=%s", turn.session_id)
         finally:
             aclose = getattr(stream, "aclose", None)
             if callable(aclose):
                 await cast("AcloseFn", aclose)()
-            assistant_message = await self._finalize_stream_turn(
-                session=session,
-                events=events,
-                completed=completed,
-            )
+            await self._finalize_turn(turn, completed=completed)
 
-        if assistant_message is None:
-            assistant_message = _build_assistant_message(session.session_id, events)
-
-        yield {
-            "type": "final",
-            "session": session.summary(),
-            "assistant_message": assistant_message.summary(),
-            "events": [asdict(event) for event in events],
-        }
         logger.info(
             "client stream final: session=%s elapsed_ms=%.1f events=%d completed=%s",
-            session.session_id,
+            turn.session_id,
             (perf_counter() - started_at) * 1000,
-            len(events),
+            len(turn.events),
             completed,
         )
+
+    async def _persist_turn_assistant(self, turn: _ActiveTurn) -> None:
+        if not _has_visible_assistant_events(turn.events):
+            return
+        turn.assistant_message = _build_assistant_message(
+            turn.session_id,
+            turn.events,
+            message_id=turn.assistant_message.message_id,
+            created_at=turn.assistant_message.created_at,
+        )
+        await self._session_store.update_message(turn.assistant_message)
+
+    async def _finalize_turn(self, turn: _ActiveTurn, *, completed: bool) -> None:
+        await self._persist_turn_assistant(turn)
+        session = await self._get_session(turn.session_id)
+        try:
+            upstream = await self._agent_host.get_session(turn.agent_host_session_id)
+            session.status = str(upstream["status"])
+        except Exception:
+            logger.exception("failed to refresh upstream session %s", turn.session_id)
+            session.status = "error" if turn.error else session.status
+        session.updated_at = utc_now()
+        await self._session_store.update(session)
+        payload: dict[str, object] = {
+            "type": "final",
+            "session": self._session_summary(session),
+            "assistant_message": turn.assistant_message.summary(),
+            "events": [asdict(event) for event in turn.events],
+            "turn_id": turn.turn_id,
+            "completed": completed,
+        }
+        if turn.error is not None:
+            payload["error"] = turn.error
+        turn.final_payload = payload
+        await self._broadcast_turn(turn, payload, close=True)
+        async with self._turn_lock:
+            self._session_turns.pop(turn.session_id, None)
+            self._turns.pop(turn.turn_id, None)
+
+    async def _broadcast_turn(
+        self,
+        turn: _ActiveTurn,
+        item: dict[str, object],
+        *,
+        close: bool = False,
+    ) -> None:
+        subscribers = list(turn.subscribers)
+        for queue in subscribers:
+            await queue.put(item)
+            if close:
+                await queue.put(None)
 
     async def _accumulate_stream(
         self,
@@ -541,40 +698,23 @@ class ClientService:
             raise RuntimeError(msg)
         return {key: value for key, value in final_payload.items() if key != "type"}
 
-    async def _finalize_stream_turn(
-        self,
-        *,
-        session: SessionRecord,
-        events: list[KernelEvent],
-        completed: bool,
-    ) -> MessageRecord | None:
-        assistant_message: MessageRecord | None = None
-        if events and (completed or _has_visible_assistant_events(events)):
-            assistant_message = _build_assistant_message(session.session_id, events)
-            session.messages.append(assistant_message)
-            session.updated_at = assistant_message.created_at
-        else:
-            session.updated_at = utc_now()
-
-        upstream = await self._agent_host.get_session(session.agent_host_session_id)
-        session.status = str(upstream["status"])
-        logger.info("stored turn for client session %s", session.session_id)
-        return assistant_message
-
     async def reset_session(self, session_id: str) -> dict[str, object]:
-        session = self._get_session(session_id)
+        await self._cancel_active_turn(session_id)
+        session = await self._get_session(session_id)
         upstream = await self._agent_host.reset_session(session.agent_host_session_id)
         session.agent_host_session_id = str(upstream["session_id"])
         session.status = str(upstream["status"])
-        session.messages.clear()
+        await self._session_store.clear_messages(session_id)
         session.updated_at = utc_now()
+        await self._session_store.update(session)
         logger.info("reset client session %s", session_id)
-        return session.summary()
+        return self._session_summary(session)
 
     async def delete_session(self, session_id: str) -> None:
-        async with self._lock:
-            session = self._sessions.pop(session_id, None)
-        if session is None:
+        await self._cancel_active_turn(session_id)
+        session = await self._get_session(session_id)
+        removed = await self._session_store.delete(session_id)
+        if not removed:
             raise SessionNotFoundError(session_id)
         await self._agent_host.destroy_session(session.agent_host_session_id)
 
@@ -584,11 +724,49 @@ class ClientService:
             raise AgentNotFoundError(agent_id)
         return agent
 
-    def _get_session(self, session_id: str) -> SessionRecord:
-        try:
-            return self._sessions[session_id]
-        except KeyError as exc:
-            raise SessionNotFoundError(session_id) from exc
+    async def _get_session(self, session_id: str) -> SessionRecord:
+        session = await self._session_store.get(session_id)
+        if session is None:
+            raise SessionNotFoundError(session_id)
+        return session
+
+    async def _cancel_active_turn(self, session_id: str) -> None:
+        async with self._turn_lock:
+            turn_id = self._session_turns.pop(session_id, None)
+            turn = self._turns.pop(turn_id, None) if turn_id is not None else None
+        if turn is None or turn.task is None or turn.task.done():
+            return
+        turn.task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await turn.task
+
+    def _session_summary(self, session: SessionRecord) -> dict[str, object]:
+        data = session.summary()
+        active_turn = self._active_turn_summary(session.session_id)
+        if active_turn is not None:
+            data["active_turn"] = active_turn
+        return data
+
+    def _session_detail(self, session: SessionRecord) -> dict[str, object]:
+        data = session.detail()
+        active_turn = self._active_turn_summary(session.session_id)
+        if active_turn is not None:
+            data["active_turn"] = active_turn
+        return data
+
+    def _active_turn_summary(self, session_id: str) -> dict[str, object] | None:
+        turn_id = self._session_turns.get(session_id)
+        if turn_id is None:
+            return None
+        turn = self._turns.get(turn_id)
+        if turn is None:
+            return None
+        return {
+            "turn_id": turn.turn_id,
+            "user_message_id": turn.user_message.message_id,
+            "assistant_message_id": turn.assistant_message.message_id,
+            "status": "running",
+        }
 
     async def list_gateways(
         self,
@@ -1129,12 +1307,16 @@ def _optional_str(value: object) -> str | None:
 def _build_assistant_message(
     session_id: str,
     events: list[KernelEvent],
+    *,
+    message_id: str | None = None,
+    created_at: str | None = None,
 ) -> MessageRecord:
     return MessageRecord(
-        message_id=uuid.uuid4().hex,
+        message_id=message_id or uuid.uuid4().hex,
         session_id=session_id,
         role=MessageRole.ASSISTANT,
         content=_flatten_text(events),
+        created_at=created_at or utc_now(),
         tool_calls=_extract_tool_calls(events),
         reasoning=_flatten_reasoning(events),
     )
