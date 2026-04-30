@@ -43,6 +43,6 @@ RUN uv sync --no-dev --package kernel-host
 
 # Create clean kernel workspace directory
 RUN mkdir -p /workspace
-EXPOSE 8000 8080
+EXPOSE 8000 8080 8081
 
 ENTRYPOINT ["uv", "run", "--no-dev", "--package", "kernel-host", "-m", "kernel_host.runner"]

@@ -98,6 +98,8 @@ class KernelRuntime(Protocol):
 
     def vscode_url(self, *, session: KernelRuntimeSession) -> str | None: ...
 
+    def free_port_url(self, *, session: KernelRuntimeSession) -> str | None: ...
+
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None: ...
 
 
@@ -118,6 +120,7 @@ class SessionRecord:
     resume_token: str | None = None
     container_name: str | None = None
     vscode_url: str | None = None
+    free_port_url: str | None = None
     stats: dict[str, Any] | None = None
 
     def summary(self) -> dict[str, Any]:
@@ -130,6 +133,7 @@ class SessionRecord:
             "additional_paths": list(self.additional_paths),
             "container_name": self.container_name,
             "vscode_url": self.vscode_url,
+            "free_port_url": self.free_port_url,
             "stats": self.stats,
         }
 
@@ -158,6 +162,17 @@ class DockerKernelRuntime:
         )
         self._vscode_url_template = os.environ.get(
             "AGENT_HOST_KERNEL_VSCODE_URL_TEMPLATE",
+            "http://127.0.0.1:{host_port}",
+        )
+        self._free_port_container_port = int(
+            os.environ.get("AGENT_HOST_KERNEL_FREE_PORT_CONTAINER_PORT", "8081"),
+        )
+        self._free_port_host_ip = os.environ.get(
+            "AGENT_HOST_KERNEL_FREE_PORT_HOST_IP",
+            self._vscode_host_ip,
+        )
+        self._free_port_url_template = os.environ.get(
+            "AGENT_HOST_KERNEL_FREE_PORT_URL_TEMPLATE",
             "http://127.0.0.1:{host_port}",
         )
         self._startup_timeout = float(
@@ -217,12 +232,17 @@ class DockerKernelRuntime:
             self._vscode_url_for_container,
             container_name,
         )
+        free_port_url = await asyncio.to_thread(
+            self._free_port_url_for_container,
+            container_name,
+        )
         await self._wait_until_ready(base_url)
         return KernelRuntimeSession(
             value=DockerKernelSession(
                 container_name=container_name,
                 base_url=base_url,
                 vscode_url=vscode_url,
+                free_port_url=free_port_url,
             ),
         )
 
@@ -350,6 +370,9 @@ class DockerKernelRuntime:
     def vscode_url(self, *, session: KernelRuntimeSession) -> str | None:
         return self._docker_session(session).vscode_url
 
+    def free_port_url(self, *, session: KernelRuntimeSession) -> str | None:
+        return self._docker_session(session).free_port_url
+
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         handle = self._docker_session(session)
         await asyncio.to_thread(self._remove_container, handle.container_name)
@@ -376,17 +399,18 @@ class DockerKernelRuntime:
             "KERNEL_VSCODE_ENABLED",
             "1",
         )
+        environment["KERNEL_FREE_PORT"] = str(self._free_port_container_port)
         vscode_enabled = environment["KERNEL_VSCODE_ENABLED"].lower() not in {
             "0",
             "false",
             "no",
             "off",
         }
-        ports: dict[str, tuple[str, int]] | None = (
-            {f"{self._vscode_container_port}/tcp": (self._vscode_host_ip, 0)}
-            if vscode_enabled
-            else None
-        )
+        ports: dict[str, tuple[str, int]] = {
+            f"{self._free_port_container_port}/tcp": (self._free_port_host_ip, 0),
+        }
+        if vscode_enabled:
+            ports[f"{self._vscode_container_port}/tcp"] = (self._vscode_host_ip, 0)
 
         logger.info(
             "container %s final env: %s",
@@ -442,6 +466,20 @@ class DockerKernelRuntime:
             host_ip=self._vscode_host_ip,
             host_port=host_port,
             container_port=self._vscode_container_port,
+        )
+
+    def _free_port_url_for_container(self, container_name: str) -> str | None:
+        host_port = self._container_host_port(
+            container_name,
+            self._free_port_container_port,
+        )
+        if host_port is None:
+            return None
+        return self._free_port_url_template.format(
+            container_name=container_name,
+            host_ip=self._free_port_host_ip,
+            host_port=host_port,
+            container_port=self._free_port_container_port,
         )
 
     def _container_host_port(
@@ -587,6 +625,7 @@ class AgentHost:
             skills=skills,
             container_name=self._runtime.container_name(session=runtime_session),
             vscode_url=self._runtime.vscode_url(session=runtime_session),
+            free_port_url=self._runtime.free_port_url(session=runtime_session),
         )
         session_summary = await self._runtime.summary(session=runtime_session)
         record.resume_token = _as_resume_token(session_summary.get("resume_token"))
@@ -594,6 +633,10 @@ class AgentHost:
         record.vscode_url = _as_optional_str(
             session_summary.get("vscode_url"),
             record.vscode_url,
+        )
+        record.free_port_url = _as_optional_str(
+            session_summary.get("free_port_url"),
+            record.free_port_url,
         )
         async with self._lock:
             self._sessions[session_id] = record
@@ -650,6 +693,10 @@ class AgentHost:
                 record.vscode_url = _as_optional_str(
                     session_summary.get("vscode_url"),
                     record.vscode_url,
+                )
+                record.free_port_url = _as_optional_str(
+                    session_summary.get("free_port_url"),
+                    record.free_port_url,
                 )
                 logger.info(
                     "agent_host final: session=%s elapsed_ms=%.1f events=%d status=%s",
@@ -721,6 +768,10 @@ class AgentHost:
         record.vscode_url = _as_optional_str(
             session_summary.get("vscode_url"),
             record.vscode_url,
+        )
+        record.free_port_url = _as_optional_str(
+            session_summary.get("free_port_url"),
+            record.free_port_url,
         )
         return record.summary()
 
@@ -817,6 +868,7 @@ class DockerKernelSession:
     container_name: str
     base_url: str
     vscode_url: str | None = None
+    free_port_url: str | None = None
 
 
 def _summarize_docker_stats(raw: dict[str, Any]) -> dict[str, Any] | None:
