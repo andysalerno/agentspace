@@ -4,6 +4,7 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import type { editor } from "monaco-editor";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { browserReachableLocalUrl } from "./browserUrls";
 import { queryKeys, useKernels } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 import type { KernelStats, KernelSummary } from "./types";
@@ -11,32 +12,12 @@ import type { KernelStats, KernelSummary } from "./types";
 const LOG_POLL_INTERVAL_MS = 1000;
 const DEFAULT_LOG_TAIL = 2000;
 
-const LOCAL_VSCODE_HOSTNAMES = new Set([
-    "0.0.0.0",
-    "127.0.0.1",
-    "::",
-    "::1",
-    "localhost",
-]);
-
 type LogSource = "harness" | "container";
 
 type LogsModalState = {
     sessionId: string;
     source: LogSource;
 };
-
-function browserReachableLocalUrl(localUrl: string): string {
-    try {
-        const url = new URL(localUrl);
-        if (LOCAL_VSCODE_HOSTNAMES.has(url.hostname.toLowerCase())) {
-            url.hostname = window.location.hostname;
-        }
-        return url.toString();
-    } catch {
-        return localUrl;
-    }
-}
 
 export default function KernelsView() {
     const { data: kernels = [] } = useKernels();

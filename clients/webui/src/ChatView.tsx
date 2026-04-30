@@ -1,10 +1,11 @@
 import type { FormEvent, KeyboardEvent } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { api } from "./api";
+import { browserReachableLocalUrl } from "./browserUrls";
 import type {
     AcpSessionUpdate,
     ChatMessage,
@@ -17,6 +18,7 @@ import ToolDetailPane from "./ToolDetailPane";
 import {
     queryKeys,
     useAgents,
+    useKernels,
     useSession,
     useSessions,
 } from "./queries";
@@ -331,6 +333,7 @@ function MessageMarkdown({
 export default function ChatView({ selectedSessionId, onSelectSession }: ChatViewProps) {
     const { data: agents = [] } = useAgents();
     const { data: sessions = [] } = useSessions();
+    const { data: kernels = [] } = useKernels();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
 
@@ -620,6 +623,21 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         && !hasEquivalentServerMessage(selectedSession.messages, pendingUserMessage)
         ? [...selectedSession.messages, pendingUserMessage]
         : (selectedSession?.messages ?? []);
+    const selectedKernel = useMemo(() => {
+        if (!selectedSession) {
+            return null;
+        }
+        return kernels.find((kernel) => (
+            kernel.session_id === selectedSession.agent_host_session_id
+            || kernel.client_session_ids.includes(selectedSession.session_id)
+        )) ?? null;
+    }, [kernels, selectedSession]);
+    const vscodeUrl = selectedKernel?.vscode_url
+        ? browserReachableLocalUrl(selectedKernel.vscode_url)
+        : null;
+    const serviceUrl = selectedKernel?.free_port_url
+        ? browserReachableLocalUrl(selectedKernel.free_port_url)
+        : null;
 
     return (
         <div className="chat-layout">
@@ -678,18 +696,53 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 {selectedSession ? (
                     <>
                         <div className="chat-header">
-                            <div>
+                            <div className="chat-header-title">
                                 <h3>{selectedSession.agent_id}</h3>
                                 <span className="muted">{selectedSession.session_id}</span>
                             </div>
-                            <button
-                                className="secondary-button"
-                                disabled={busy}
-                                onClick={handleResetSession}
-                                type="button"
-                            >
-                                Reset
-                            </button>
+                            <div className="chat-header-actions">
+                                {selectedKernel ? (
+                                    <>
+                                        {vscodeUrl ? (
+                                            <a
+                                                className="secondary-button"
+                                                href={vscodeUrl}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                            >
+                                                Open VS Code
+                                            </a>
+                                        ) : (
+                                            <button
+                                                className="secondary-button"
+                                                disabled
+                                                title="VS Code unavailable"
+                                                type="button"
+                                            >
+                                                Open VS Code
+                                            </button>
+                                        )}
+                                        {serviceUrl ? (
+                                            <a
+                                                className="secondary-button"
+                                                href={serviceUrl}
+                                                target="_blank"
+                                                rel="noreferrer"
+                                            >
+                                                Open service
+                                            </a>
+                                        ) : null}
+                                    </>
+                                ) : null}
+                                <button
+                                    className="secondary-button"
+                                    disabled={busy}
+                                    onClick={handleResetSession}
+                                    type="button"
+                                >
+                                    Reset
+                                </button>
+                            </div>
                         </div>
                         <div className="transcript">
                             {transcriptMessages.length > 0 || streamingMessage ? (
