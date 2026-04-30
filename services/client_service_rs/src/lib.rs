@@ -8,9 +8,15 @@ use std::{
     time::Duration,
 };
 
-use axum::Router;
+use axum::{
+    Router,
+    body::Body,
+    extract::MatchedPath,
+    http::{Request, Response},
+};
 use chrono::{DateTime, Utc};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
+use tracing::Span;
 use uuid::Uuid;
 
 use crate::{
@@ -180,7 +186,64 @@ pub fn build_router(state: AppState) -> Router {
     api::router()
         .with_state(state)
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &Request<Body>| {
+                    let route = matched_route(request);
+                    tracing::info_span!(
+                        "http_request",
+                        method = %request.method(),
+                        route = %route,
+                        path = %request.uri().path(),
+                        status = tracing::field::Empty,
+                        latency_ms = tracing::field::Empty,
+                    )
+                })
+                .on_request(|request: &Request<Body>, span: &Span| {
+                    tracing::info!(
+                        parent: span,
+                        method = %request.method(),
+                        route = %matched_route(request),
+                        path = %request.uri().path(),
+                        "http request started"
+                    );
+                })
+                .on_response(
+                    |response: &Response<Body>, latency: Duration, span: &Span| {
+                        let latency_ms = duration_millis(latency);
+                        span.record("status", response.status().as_u16());
+                        span.record("latency_ms", latency_ms);
+                        tracing::info!(
+                            parent: span,
+                            status = response.status().as_u16(),
+                            latency_ms,
+                            "http request completed"
+                        );
+                    },
+                )
+                .on_failure(
+                    |failure_class: ServerErrorsFailureClass, latency: Duration, span: &Span| {
+                        let latency_ms = duration_millis(latency);
+                        tracing::warn!(
+                            parent: span,
+                            error_kind = ?failure_class,
+                            latency_ms,
+                            "http request failed"
+                        );
+                    },
+                ),
+        )
+}
+
+fn matched_route<B>(request: &Request<B>) -> &str {
+    request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or_else(|| request.uri().path(), MatchedPath::as_str)
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn parse_port() -> Result<u16, ConfigError> {

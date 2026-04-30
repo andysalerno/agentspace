@@ -17,6 +17,7 @@ use crate::{
         utc_now,
     },
 };
+use tracing::{debug, info, warn};
 
 const AGENTS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS agents (
@@ -127,18 +128,32 @@ pub struct SqliteDatabase {
 impl SqliteDatabase {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref().to_path_buf();
+        let in_memory = path == Path::new(":memory:");
+        info!(in_memory, "opening sqlite store database");
         if path != Path::new(":memory:")
             && let Some(parent) = path.parent()
         {
-            fs::create_dir_all(parent).map_err(|error| StoreError::Persistence {
-                store: "sqlite",
-                detail: format!("failed to create database directory: {error}"),
+            fs::create_dir_all(parent).map_err(|error| {
+                warn!(in_memory, "failed to create sqlite database directory");
+                StoreError::Persistence {
+                    store: "sqlite",
+                    detail: format!("failed to create database directory: {error}"),
+                }
             })?;
         }
-        let connection = Connection::open(&path)?;
-        connection.execute_batch(
-            "PRAGMA foreign_keys=ON;\nPRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;",
-        )?;
+        let connection = Connection::open(&path).map_err(|error| {
+            warn!(in_memory, "failed to open sqlite store database");
+            StoreError::from(error)
+        })?;
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys=ON;\nPRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;",
+            )
+            .map_err(|error| {
+                warn!(in_memory, "failed to configure sqlite store database");
+                StoreError::from(error)
+            })?;
+        info!(in_memory, "opened sqlite store database");
         Ok(Self {
             path: Arc::new(path),
             connection: Arc::new(Mutex::new(connection)),
@@ -155,11 +170,14 @@ impl SqliteDatabase {
         store: &'static str,
         action: impl FnOnce(&Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let guard = self
-            .connection
-            .lock()
-            .map_err(|_error| StoreError::LockPoisoned { store })?;
-        action(&guard)
+        let guard = self.connection.lock().map_err(|_error| {
+            warn!(store, "sqlite store lock poisoned");
+            StoreError::LockPoisoned { store }
+        })?;
+        let result = action(&guard);
+        drop(guard);
+        trace_store_result(store, &result);
+        result
     }
 
     fn with_mut_connection<T>(
@@ -167,11 +185,14 @@ impl SqliteDatabase {
         store: &'static str,
         action: impl FnOnce(&mut Connection) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let mut guard = self
-            .connection
-            .lock()
-            .map_err(|_error| StoreError::LockPoisoned { store })?;
-        action(&mut guard)
+        let mut guard = self.connection.lock().map_err(|_error| {
+            warn!(store, "sqlite store lock poisoned");
+            StoreError::LockPoisoned { store }
+        })?;
+        let result = action(&mut guard);
+        drop(guard);
+        trace_store_result(store, &result);
+        result
     }
 }
 
@@ -195,8 +216,10 @@ pub struct SqliteStoreSet {
 
 impl SqliteStoreSet {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        debug!("opening sqlite store set");
         let database = SqliteDatabase::open(path)?;
         initialize_schema(&database)?;
+        info!("sqlite store set ready");
         Ok(Self {
             agents: SqliteAgentStore::new(database.clone()),
             kernel_configs: SqliteKernelConfigStore::new(database.clone()),
@@ -223,7 +246,9 @@ impl SqliteAgentStore {
             let mut statement =
                 connection.prepare("SELECT * FROM agents ORDER BY created_at ASC, agent_id ASC")?;
             let rows = statement.query_and_then([], row_to_agent)?;
-            rows.collect()
+            let records = rows.collect::<Result<Vec<_>, StoreError>>()?;
+            debug!(store = "agents", count = records.len(), "listed agents");
+            Ok(records)
         })
     }
 
@@ -231,25 +256,58 @@ impl SqliteAgentStore {
         self.database.with_connection("agents", |connection| {
             let mut statement = connection.prepare("SELECT * FROM agents WHERE agent_id = ?")?;
             let mut rows = statement.query_and_then(params![agent_id], row_to_agent)?;
-            rows.next().transpose()
+            let record = rows.next().transpose()?;
+            debug!(
+                store = "agents",
+                agent_id,
+                found = record.is_some(),
+                "looked up agent"
+            );
+            Ok(record)
         })
     }
 
     pub fn insert(&self, agent: AgentRecord) -> Result<(), StoreError> {
         self.database.with_connection("agents", |connection| {
             match insert_agent(connection, &agent) {
-                Ok(()) => Ok(()),
-                Err(error) if is_constraint(&error) => Err(StoreError::AgentAlreadyExists {
-                    agent_id: agent.agent_id,
-                }),
+                Ok(()) => {
+                    debug!(
+                        store = "agents",
+                        agent_id = %agent.agent_id,
+                        harness = agent.harness.as_str(),
+                        skills_count = agent.skills.len(),
+                        connection_id_present = agent.connection_id.is_some(),
+                        "inserted agent"
+                    );
+                    Ok(())
+                }
+                Err(error) if is_constraint(&error) => {
+                    debug!(
+                        store = "agents",
+                        agent_id = %agent.agent_id,
+                        "agent insert hit existing record"
+                    );
+                    Err(StoreError::AgentAlreadyExists {
+                        agent_id: agent.agent_id,
+                    })
+                }
                 Err(error) => Err(error.into()),
             }
         })
     }
 
     pub fn update(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        let agent_id = agent.agent_id.clone();
+        let harness = agent.harness.as_str();
+        let skills_count = agent.skills.len();
+        let connection_id_present = agent.connection_id.is_some();
         self.database.with_connection("agents", |connection| {
             if !agent_exists(connection, &agent.agent_id)? {
+                debug!(
+                    store = "agents",
+                    agent_id = %agent.agent_id,
+                    "agent update missed existing record"
+                );
                 return Err(StoreError::AgentNotFound {
                     agent_id: agent.agent_id,
                 });
@@ -277,12 +335,24 @@ impl SqliteAgentStore {
                     agent.agent_id,
                 ],
             )?;
+            debug!(
+                store = "agents",
+                agent_id = %agent_id,
+                harness,
+                skills_count,
+                connection_id_present,
+                "updated agent"
+            );
             Ok(())
         })
     }
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        let agent_id = agent.agent_id.clone();
+        let harness = agent.harness.as_str();
+        let skills_count = agent.skills.len();
+        let connection_id_present = agent.connection_id.is_some();
         self.database.with_connection("agents", |connection| {
             connection.execute(
                 "
@@ -311,13 +381,24 @@ impl SqliteAgentStore {
                     agent.updated_at,
                 ],
             )?;
+            debug!(
+                store = "agents",
+                agent_id = %agent_id,
+                harness,
+                skills_count,
+                connection_id_present,
+                "upserted agent"
+            );
             Ok(())
         })
     }
 
     pub fn delete(&self, agent_id: &str) -> Result<bool, StoreError> {
         self.database.with_connection("agents", |connection| {
-            Ok(connection.execute("DELETE FROM agents WHERE agent_id = ?", params![agent_id])? > 0)
+            let deleted =
+                connection.execute("DELETE FROM agents WHERE agent_id = ?", params![agent_id])? > 0;
+            debug!(store = "agents", agent_id, deleted, "deleted agent");
+            Ok(deleted)
         })
     }
 }
@@ -339,7 +420,13 @@ impl SqliteKernelConfigStore {
                 let mut statement =
                     connection.prepare("SELECT * FROM kernel_configs ORDER BY harness ASC")?;
                 let rows = statement.query_and_then([], row_to_kernel_config)?;
-                rows.collect()
+                let records = rows.collect::<Result<Vec<_>, StoreError>>()?;
+                debug!(
+                    store = "kernel_configs",
+                    count = records.len(),
+                    "listed kernel configs"
+                );
+                Ok(records)
             })
     }
 
@@ -350,7 +437,14 @@ impl SqliteKernelConfigStore {
                     connection.prepare("SELECT * FROM kernel_configs WHERE harness = ?")?;
                 let mut rows =
                     statement.query_and_then(params![harness.as_str()], row_to_kernel_config)?;
-                rows.next().transpose()
+                let record = rows.next().transpose()?;
+                debug!(
+                    store = "kernel_configs",
+                    harness = harness.as_str(),
+                    found = record.is_some(),
+                    "looked up kernel config"
+                );
+                Ok(record)
             })
     }
 
@@ -377,6 +471,11 @@ impl SqliteKernelConfigStore {
                     ",
                     params![record.harness.as_str(), record.env_vars, record.updated_at],
                 )?;
+                debug!(
+                    store = "kernel_configs",
+                    harness = record.harness.as_str(),
+                    "upserted kernel config"
+                );
                 Ok(())
             })?;
         Ok(record)
@@ -385,10 +484,17 @@ impl SqliteKernelConfigStore {
     pub fn delete(&self, harness: HarnessName) -> Result<bool, StoreError> {
         self.database
             .with_connection("kernel_configs", |connection| {
-                Ok(connection.execute(
+                let deleted = connection.execute(
                     "DELETE FROM kernel_configs WHERE harness = ?",
                     params![harness.as_str()],
-                )? > 0)
+                )? > 0;
+                debug!(
+                    store = "kernel_configs",
+                    harness = harness.as_str(),
+                    deleted,
+                    "deleted kernel config"
+                );
+                Ok(deleted)
             })
     }
 }
@@ -409,7 +515,13 @@ impl SqliteConnectionStore {
             let mut statement = connection
                 .prepare("SELECT * FROM connections ORDER BY created_at ASC, connection_id ASC")?;
             let rows = statement.query_and_then([], row_to_connection)?;
-            rows.collect()
+            let records = rows.collect::<Result<Vec<_>, StoreError>>()?;
+            debug!(
+                store = "connections",
+                count = records.len(),
+                "listed connections"
+            );
+            Ok(records)
         })
     }
 
@@ -418,25 +530,54 @@ impl SqliteConnectionStore {
             let mut statement =
                 connection.prepare("SELECT * FROM connections WHERE connection_id = ?")?;
             let mut rows = statement.query_and_then(params![connection_id], row_to_connection)?;
-            rows.next().transpose()
+            let record = rows.next().transpose()?;
+            debug!(
+                store = "connections",
+                connection_id,
+                found = record.is_some(),
+                "looked up connection"
+            );
+            Ok(record)
         })
     }
 
     pub fn insert(&self, connection_record: ConnectionRecord) -> Result<(), StoreError> {
         self.database.with_connection("connections", |connection| {
             match insert_connection(connection, &connection_record) {
-                Ok(()) => Ok(()),
-                Err(error) if is_constraint(&error) => Err(StoreError::ConnectionAlreadyExists {
-                    connection_id: connection_record.connection_id,
-                }),
+                Ok(()) => {
+                    debug!(
+                        store = "connections",
+                        connection_id = %connection_record.connection_id,
+                        api_flavor = connection_record.api_flavor.as_str(),
+                        "inserted connection"
+                    );
+                    Ok(())
+                }
+                Err(error) if is_constraint(&error) => {
+                    debug!(
+                        store = "connections",
+                        connection_id = %connection_record.connection_id,
+                        "connection insert hit existing record"
+                    );
+                    Err(StoreError::ConnectionAlreadyExists {
+                        connection_id: connection_record.connection_id,
+                    })
+                }
                 Err(error) => Err(error.into()),
             }
         })
     }
 
     pub fn update(&self, connection_record: ConnectionRecord) -> Result<(), StoreError> {
+        let connection_id = connection_record.connection_id.clone();
+        let api_flavor = connection_record.api_flavor.as_str();
         self.database.with_connection("connections", |connection| {
             if !connection_exists(connection, &connection_record.connection_id)? {
+                debug!(
+                    store = "connections",
+                    connection_id = %connection_record.connection_id,
+                    "connection update missed existing record"
+                );
                 return Err(StoreError::ConnectionNotFound {
                     connection_id: connection_record.connection_id,
                 });
@@ -460,12 +601,20 @@ impl SqliteConnectionStore {
                     connection_record.connection_id,
                 ],
             )?;
+            debug!(
+                store = "connections",
+                connection_id = %connection_id,
+                api_flavor,
+                "updated connection"
+            );
             Ok(())
         })
     }
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn upsert(&self, connection_record: ConnectionRecord) -> Result<(), StoreError> {
+        let connection_id = connection_record.connection_id.clone();
+        let api_flavor = connection_record.api_flavor.as_str();
         self.database.with_connection("connections", |connection| {
             connection.execute(
                 "
@@ -489,16 +638,27 @@ impl SqliteConnectionStore {
                     connection_record.updated_at,
                 ],
             )?;
+            debug!(
+                store = "connections",
+                connection_id = %connection_id,
+                api_flavor,
+                "upserted connection"
+            );
             Ok(())
         })
     }
 
     pub fn delete(&self, connection_id: &str) -> Result<bool, StoreError> {
         self.database.with_connection("connections", |connection| {
-            Ok(connection.execute(
+            let deleted = connection.execute(
                 "DELETE FROM connections WHERE connection_id = ?",
                 params![connection_id],
-            )? > 0)
+            )? > 0;
+            debug!(
+                store = "connections",
+                connection_id, deleted, "deleted connection"
+            );
+            Ok(deleted)
         })
     }
 }
@@ -519,7 +679,9 @@ impl SqliteGatewayStore {
             let mut statement = connection
                 .prepare("SELECT * FROM gateways ORDER BY created_at ASC, gateway_id ASC")?;
             let rows = statement.query_and_then([], row_to_gateway)?;
-            rows.collect()
+            let records = rows.collect::<Result<Vec<_>, StoreError>>()?;
+            debug!(store = "gateways", count = records.len(), "listed gateways");
+            Ok(records)
         })
     }
 
@@ -528,25 +690,60 @@ impl SqliteGatewayStore {
             let mut statement =
                 connection.prepare("SELECT * FROM gateways WHERE gateway_id = ?")?;
             let mut rows = statement.query_and_then(params![gateway_id], row_to_gateway)?;
-            rows.next().transpose()
+            let record = rows.next().transpose()?;
+            debug!(
+                store = "gateways",
+                gateway_id,
+                found = record.is_some(),
+                "looked up gateway"
+            );
+            Ok(record)
         })
     }
 
     pub fn insert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
         self.database.with_connection("gateways", |connection| {
             match insert_gateway(connection, &gateway) {
-                Ok(()) => Ok(()),
-                Err(error) if is_constraint(&error) => Err(StoreError::GatewayAlreadyExists {
-                    gateway_id: gateway.gateway_id,
-                }),
+                Ok(()) => {
+                    debug!(
+                        store = "gateways",
+                        gateway_id = %gateway.gateway_id,
+                        agent_id = %gateway.agent_id,
+                        gateway_type = gateway.gateway_type.as_str(),
+                        enabled = gateway.enabled,
+                        status = %gateway.status,
+                        "inserted gateway"
+                    );
+                    Ok(())
+                }
+                Err(error) if is_constraint(&error) => {
+                    debug!(
+                        store = "gateways",
+                        gateway_id = %gateway.gateway_id,
+                        "gateway insert hit existing record"
+                    );
+                    Err(StoreError::GatewayAlreadyExists {
+                        gateway_id: gateway.gateway_id,
+                    })
+                }
                 Err(error) => Err(error.into()),
             }
         })
     }
 
     pub fn update(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        let gateway_id = gateway.gateway_id.clone();
+        let agent_id = gateway.agent_id.clone();
+        let gateway_type = gateway.gateway_type.as_str();
+        let enabled = gateway.enabled;
+        let status = gateway.status.clone();
         self.database.with_connection("gateways", |connection| {
             if !gateway_exists(connection, &gateway.gateway_id)? {
+                debug!(
+                    store = "gateways",
+                    gateway_id = %gateway.gateway_id,
+                    "gateway update missed existing record"
+                );
                 return Err(StoreError::GatewayNotFound {
                     gateway_id: gateway.gateway_id,
                 });
@@ -580,12 +777,26 @@ impl SqliteGatewayStore {
                     gateway.gateway_id,
                 ],
             )?;
+            debug!(
+                store = "gateways",
+                gateway_id = %gateway_id,
+                agent_id = %agent_id,
+                gateway_type,
+                enabled,
+                status = %status,
+                "updated gateway"
+            );
             Ok(())
         })
     }
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn upsert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        let gateway_id = gateway.gateway_id.clone();
+        let agent_id = gateway.agent_id.clone();
+        let gateway_type = gateway.gateway_type.as_str();
+        let enabled = gateway.enabled;
+        let status = gateway.status.clone();
         self.database.with_connection("gateways", |connection| {
             connection.execute(
                 "
@@ -621,16 +832,27 @@ impl SqliteGatewayStore {
                     gateway.updated_at,
                 ],
             )?;
+            debug!(
+                store = "gateways",
+                gateway_id = %gateway_id,
+                agent_id = %agent_id,
+                gateway_type,
+                enabled,
+                status = %status,
+                "upserted gateway"
+            );
             Ok(())
         })
     }
 
     pub fn delete(&self, gateway_id: &str) -> Result<bool, StoreError> {
         self.database.with_connection("gateways", |connection| {
-            Ok(connection.execute(
+            let deleted = connection.execute(
                 "DELETE FROM gateways WHERE gateway_id = ?",
                 params![gateway_id],
-            )? > 0)
+            )? > 0;
+            debug!(store = "gateways", gateway_id, deleted, "deleted gateway");
+            Ok(deleted)
         })
     }
 }
@@ -655,6 +877,22 @@ impl SqliteSessionStore {
             for session in &mut sessions {
                 session.messages = messages_for_session(connection, &session.session_id)?;
             }
+            let message_count = sessions
+                .iter()
+                .map(|session| session.messages.len())
+                .sum::<usize>();
+            let tool_call_count = sessions
+                .iter()
+                .flat_map(|session| &session.messages)
+                .map(|message| message.tool_calls.len())
+                .sum::<usize>();
+            debug!(
+                store = "sessions",
+                count = sessions.len(),
+                message_count,
+                tool_call_count,
+                "listed sessions"
+            );
             Ok(sessions)
         })
     }
@@ -669,6 +907,22 @@ impl SqliteSessionStore {
             if let Some(session) = &mut session {
                 session.messages = messages_for_session(connection, &session.session_id)?;
             }
+            let message_count = session.as_ref().map_or(0, |session| session.messages.len());
+            let tool_call_count = session.as_ref().map_or(0, |session| {
+                session
+                    .messages
+                    .iter()
+                    .map(|message| message.tool_calls.len())
+                    .sum::<usize>()
+            });
+            debug!(
+                store = "sessions",
+                session_id,
+                found = session.is_some(),
+                message_count,
+                tool_call_count,
+                "looked up session"
+            );
             Ok(session)
         })
     }
@@ -676,18 +930,46 @@ impl SqliteSessionStore {
     pub fn insert(&self, session: SessionRecord) -> Result<(), StoreError> {
         self.database.with_connection("sessions", |connection| {
             match insert_session(connection, &session) {
-                Ok(()) => Ok(()),
-                Err(error) if is_constraint(&error) => Err(StoreError::SessionAlreadyExists {
-                    session_id: session.session_id,
-                }),
+                Ok(()) => {
+                    debug!(
+                        store = "sessions",
+                        session_id = %session.session_id,
+                        agent_id = %session.agent_id,
+                        status = %session.status,
+                        client_type = session.client_type.map(ClientType::as_str),
+                        channel_present = session.channel_name.is_some(),
+                        "inserted session"
+                    );
+                    Ok(())
+                }
+                Err(error) if is_constraint(&error) => {
+                    debug!(
+                        store = "sessions",
+                        session_id = %session.session_id,
+                        "session insert hit existing record"
+                    );
+                    Err(StoreError::SessionAlreadyExists {
+                        session_id: session.session_id,
+                    })
+                }
                 Err(error) => Err(error.into()),
             }
         })
     }
 
     pub fn update(&self, session: SessionRecord) -> Result<(), StoreError> {
+        let session_id = session.session_id.clone();
+        let agent_id = session.agent_id.clone();
+        let status = session.status.clone();
+        let client_type = session.client_type.map(ClientType::as_str);
+        let channel_present = session.channel_name.is_some();
         self.database.with_connection("sessions", |connection| {
             if !session_exists(connection, &session.session_id)? {
+                debug!(
+                    store = "sessions",
+                    session_id = %session.session_id,
+                    "session update missed existing record"
+                );
                 return Err(StoreError::SessionNotFound {
                     session_id: session.session_id,
                 });
@@ -713,12 +995,26 @@ impl SqliteSessionStore {
                     session.session_id,
                 ],
             )?;
+            debug!(
+                store = "sessions",
+                session_id = %session_id,
+                agent_id = %agent_id,
+                status = %status,
+                client_type,
+                channel_present,
+                "updated session"
+            );
             Ok(())
         })
     }
 
     #[allow(clippy::needless_pass_by_value)]
     pub fn upsert(&self, session: SessionRecord) -> Result<(), StoreError> {
+        let session_id = session.session_id.clone();
+        let agent_id = session.agent_id.clone();
+        let status = session.status.clone();
+        let client_type = session.client_type.map(ClientType::as_str);
+        let channel_present = session.channel_name.is_some();
         self.database.with_connection("sessions", |connection| {
             connection.execute(
                 "
@@ -745,47 +1041,82 @@ impl SqliteSessionStore {
                     session.updated_at,
                 ],
             )?;
+            debug!(
+                store = "sessions",
+                session_id = %session_id,
+                agent_id = %agent_id,
+                status = %status,
+                client_type,
+                channel_present,
+                "upserted session"
+            );
             Ok(())
         })
     }
 
     pub fn delete(&self, session_id: &str) -> Result<bool, StoreError> {
         self.database.with_connection("sessions", |connection| {
-            Ok(connection.execute(
+            let deleted = connection.execute(
                 "DELETE FROM client_sessions WHERE session_id = ?",
                 params![session_id],
-            )? > 0)
+            )? > 0;
+            debug!(store = "sessions", session_id, deleted, "deleted session");
+            Ok(deleted)
         })
     }
 
-    pub fn append_message(&self, message: MessageRecord) -> Result<(), StoreError> {
-        self.upsert_message(message)
+    pub fn append_message(&self, message: &MessageRecord) -> Result<(), StoreError> {
+        self.upsert_message("append_message", message)
     }
 
-    pub fn update_message(&self, message: MessageRecord) -> Result<(), StoreError> {
-        self.upsert_message(message)
+    pub fn update_message(&self, message: &MessageRecord) -> Result<(), StoreError> {
+        self.upsert_message("update_message", message)
     }
 
     pub fn clear_messages(&self, session_id: &str) -> Result<(), StoreError> {
         self.database.with_connection("sessions", |connection| {
             if !session_exists(connection, session_id)? {
+                debug!(
+                    store = "sessions",
+                    session_id, "clear messages missed existing session"
+                );
                 return Err(StoreError::SessionNotFound {
                     session_id: session_id.to_owned(),
                 });
             }
-            connection.execute(
+            let deleted_message_count = connection.execute(
                 "DELETE FROM client_messages WHERE session_id = ?",
                 params![session_id],
             )?;
+            debug!(
+                store = "sessions",
+                session_id, deleted_message_count, "cleared session messages"
+            );
             Ok(())
         })
     }
 
-    fn upsert_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+    fn upsert_message(
+        &self,
+        operation: &'static str,
+        message: &MessageRecord,
+    ) -> Result<(), StoreError> {
+        let message_id = message.message_id.clone();
+        let session_id = message.session_id.clone();
+        let role = message.role.as_str();
+        let reasoning_present = !message.reasoning.is_empty();
+        let tool_call_count = message.tool_calls.len();
         self.database.with_mut_connection("sessions", |connection| {
             if !session_exists(connection, &message.session_id)? {
+                debug!(
+                    store = "sessions",
+                    operation,
+                    session_id = %message.session_id,
+                    message_id = %message.message_id,
+                    "message persistence missed existing session"
+                );
                 return Err(StoreError::SessionNotFound {
-                    session_id: message.session_id,
+                    session_id: message.session_id.clone(),
                 });
             }
             let transaction = connection.transaction()?;
@@ -808,7 +1139,7 @@ impl SqliteSessionStore {
                     message.created_at,
                 ],
             )?;
-            transaction.execute(
+            let replaced_tool_call_count = transaction.execute(
                 "DELETE FROM client_message_tool_calls WHERE message_id = ?",
                 params![message.message_id],
             )?;
@@ -834,6 +1165,17 @@ impl SqliteSessionStore {
                 )?;
             }
             transaction.commit()?;
+            debug!(
+                store = "sessions",
+                operation,
+                session_id = %session_id,
+                message_id = %message_id,
+                role,
+                reasoning_present,
+                tool_call_count,
+                replaced_tool_call_count,
+                "persisted session message"
+            );
             Ok(())
         })
     }
@@ -841,11 +1183,17 @@ impl SqliteSessionStore {
 
 fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
     database.with_connection("sqlite", |connection| {
-        connection.execute_batch(AGENTS_SCHEMA)?;
-        connection.execute_batch(KERNEL_CONFIGS_SCHEMA)?;
-        connection.execute_batch(CONNECTIONS_SCHEMA)?;
-        connection.execute_batch(GATEWAYS_SCHEMA)?;
-        connection.execute_batch(SESSIONS_SCHEMA)?;
+        debug!("initializing sqlite store schema");
+        for (schema, sql) in [
+            ("agents", AGENTS_SCHEMA),
+            ("kernel_configs", KERNEL_CONFIGS_SCHEMA),
+            ("connections", CONNECTIONS_SCHEMA),
+            ("gateways", GATEWAYS_SCHEMA),
+            ("sessions", SESSIONS_SCHEMA),
+        ] {
+            connection.execute_batch(sql)?;
+            debug!(schema, "ensured sqlite store schema");
+        }
         ensure_column(connection, "agents", "connection_id", "connection_id TEXT")?;
         ensure_column(
             connection,
@@ -853,6 +1201,7 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
             "api_flavor",
             "api_flavor TEXT NOT NULL DEFAULT 'chat_completions'",
         )?;
+        info!("initialized sqlite store schema");
         Ok(())
     })
 }
@@ -864,8 +1213,12 @@ fn ensure_column(
     definition: &'static str,
 ) -> Result<(), StoreError> {
     let columns = table_columns(connection, table)?;
-    if !columns.contains(column) {
+    if columns.contains(column) {
+        debug!(table, column, "sqlite store column already present");
+    } else {
+        debug!(table, column, "adding sqlite store column");
         connection.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])?;
+        info!(table, column, "added sqlite store column");
     }
     Ok(())
 }
@@ -874,6 +1227,31 @@ fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String
     let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
     let rows = statement.query_map([], |row| row.get::<_, String>("name"))?;
     rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+}
+
+fn trace_store_result<T>(store: &'static str, result: &Result<T, StoreError>) {
+    if let Err(error) = result {
+        match error {
+            StoreError::LockPoisoned { .. } => {
+                warn!(
+                    store,
+                    error_kind = "lock_poisoned",
+                    "sqlite store operation failed"
+                );
+            }
+            StoreError::Persistence {
+                store: error_store, ..
+            } => {
+                warn!(
+                    store,
+                    error_store,
+                    error_kind = "persistence",
+                    "sqlite store operation failed"
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 fn row_to_agent(row: &Row<'_>) -> Result<AgentRecord, StoreError> {
@@ -1005,7 +1383,19 @@ fn messages_for_session(
     )?;
     let rows =
         statement.query_and_then(params![session_id], |row| row_to_message(row, connection))?;
-    rows.collect()
+    let messages = rows.collect::<Result<Vec<_>, StoreError>>()?;
+    let tool_call_count = messages
+        .iter()
+        .map(|message| message.tool_calls.len())
+        .sum::<usize>();
+    debug!(
+        store = "sessions",
+        session_id,
+        message_count = messages.len(),
+        tool_call_count,
+        "loaded session messages"
+    );
+    Ok(messages)
 }
 
 fn tool_calls_for_message(
@@ -1020,7 +1410,14 @@ fn tool_calls_for_message(
         ",
     )?;
     let rows = statement.query_and_then(params![message_id], row_to_tool_call)?;
-    rows.collect()
+    let tool_calls = rows.collect::<Result<Vec<_>, StoreError>>()?;
+    debug!(
+        store = "sessions",
+        message_id,
+        tool_call_count = tool_calls.len(),
+        "loaded message tool calls"
+    );
+    Ok(tool_calls)
 }
 
 fn insert_agent(connection: &Connection, agent: &AgentRecord) -> Result<(), RusqliteError> {

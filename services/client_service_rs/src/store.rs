@@ -327,19 +327,19 @@ impl InMemorySessionStore {
         })
     }
 
-    pub fn append_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+    pub fn append_message(&self, message: &MessageRecord) -> Result<(), StoreError> {
         with_write(&self.sessions, "sessions", |sessions| {
             let session = sessions.get_mut(&message.session_id).ok_or_else(|| {
                 StoreError::SessionNotFound {
                     session_id: message.session_id.clone(),
                 }
             })?;
-            session.messages.push(message);
+            session.messages.push(message.clone());
             Ok(())
         })?
     }
 
-    pub fn update_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+    pub fn update_message(&self, message: &MessageRecord) -> Result<(), StoreError> {
         with_write(&self.sessions, "sessions", |sessions| {
             let session = sessions.get_mut(&message.session_id).ok_or_else(|| {
                 StoreError::SessionNotFound {
@@ -351,9 +351,9 @@ impl InMemorySessionStore {
                 .iter_mut()
                 .find(|existing| existing.message_id == message.message_id)
             {
-                *existing = message;
+                *existing = message.clone();
             } else {
-                session.messages.push(message);
+                session.messages.push(message.clone());
             }
             Ok(())
         })?
@@ -395,7 +395,11 @@ impl StoreSet {
     }
 
     pub fn sqlite(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let in_memory = path == Path::new(":memory:");
+        tracing::info!(in_memory, "creating sqlite-backed store set");
         let stores = sqlite::SqliteStoreSet::open(path)?;
+        tracing::info!(in_memory, "created sqlite-backed store set");
         Ok(Self {
             agents: AgentStore::Sqlite(stores.agents),
             kernel_configs: KernelConfigStore::Sqlite(stores.kernel_configs),
@@ -677,14 +681,14 @@ impl SessionStore {
         }
     }
 
-    pub fn append_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+    pub fn append_message(&self, message: &MessageRecord) -> Result<(), StoreError> {
         match self {
             Self::InMemory(store) => store.append_message(message),
             Self::Sqlite(store) => store.append_message(message),
         }
     }
 
-    pub fn update_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+    pub fn update_message(&self, message: &MessageRecord) -> Result<(), StoreError> {
         match self {
             Self::InMemory(store) => store.update_message(message),
             Self::Sqlite(store) => store.update_message(message),
@@ -703,16 +707,20 @@ fn read_lock<'a, T>(
     lock: &'a RwLock<T>,
     store: &'static str,
 ) -> Result<RwLockReadGuard<'a, T>, StoreError> {
-    lock.read()
-        .map_err(|_error| StoreError::LockPoisoned { store })
+    lock.read().map_err(|_error| {
+        tracing::warn!(store, lock = "read", "store lock poisoned");
+        StoreError::LockPoisoned { store }
+    })
 }
 
 fn write_lock<'a, T>(
     lock: &'a RwLock<T>,
     store: &'static str,
 ) -> Result<RwLockWriteGuard<'a, T>, StoreError> {
-    lock.write()
-        .map_err(|_error| StoreError::LockPoisoned { store })
+    lock.write().map_err(|_error| {
+        tracing::warn!(store, lock = "write", "store lock poisoned");
+        StoreError::LockPoisoned { store }
+    })
 }
 
 fn with_read<T, R>(
@@ -920,21 +928,21 @@ mod tests {
         assert_eq!(ids, vec!["session", "later"]);
 
         let message = MessageRecord::new("msg", "session", MessageRole::User, "hello");
-        store.append_message(message)?;
+        store.append_message(&message)?;
         assert!(matches!(
             store.get("session")?,
             Some(record) if record.messages.len() == 1 && record.messages[0].content == "hello"
         ));
 
         let replacement = MessageRecord::new("msg", "session", MessageRole::Assistant, "updated");
-        store.update_message(replacement)?;
+        store.update_message(&replacement)?;
         assert!(matches!(
             store.get("session")?,
             Some(record) if record.messages.len() == 1 && record.messages[0].content == "updated"
         ));
 
         let appended = MessageRecord::new("new", "session", MessageRole::Assistant, "new");
-        store.update_message(appended)?;
+        store.update_message(&appended)?;
         assert!(matches!(
             store.get("session")?,
             Some(record) if record.messages.len() == 2
@@ -946,7 +954,7 @@ mod tests {
             Some(record) if record.messages.is_empty()
         ));
         assert!(matches!(
-            store.append_message(MessageRecord::new("missing", "missing", MessageRole::User, "nope")),
+            store.append_message(&MessageRecord::new("missing", "missing", MessageRole::User, "nope")),
             Err(StoreError::SessionNotFound { session_id }) if session_id == "missing"
         ));
         Ok(())
@@ -1016,7 +1024,7 @@ mod tests {
             tool_call.output = Some("hi".to_owned());
             tool_call.content_offset = Some(3);
             message.tool_calls.push(tool_call);
-            stores.sessions.append_message(message)?;
+            stores.sessions.append_message(&message)?;
         }
 
         {

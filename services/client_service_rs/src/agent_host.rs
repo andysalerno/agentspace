@@ -4,7 +4,7 @@ use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     str::Utf8Error,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use reqwest::{Method, StatusCode, Url};
@@ -128,17 +128,58 @@ impl AgentHostClient {
         session_id: &str,
         message: &str,
     ) -> AgentHostResult<AgentHostEventStream> {
-        let payload = json!({ "message": message });
-        let response = self
+        let mut payload = JsonObject::new();
+        payload.insert("message".to_owned(), json!(message));
+        let method = Method::POST;
+        let url = self.endpoint(&["sessions", session_id, "messages", "stream"])?;
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, Some(&payload));
+        let payload_trace = JsonPayloadTrace::from_payload(Some(&payload));
+        let started_at = Instant::now();
+        log_agent_host_request_start(&method, &trace_context, &payload_trace);
+        let response = match self
             .client
-            .post(self.endpoint(&["sessions", session_id, "messages", "stream"])?)
+            .request(method.clone(), url)
             .json(&payload)
             .send()
             .await
-            .map_err(|source| AgentHostError::Http { source })?;
-        let response = ensure_success(response).await?;
+        {
+            Ok(response) => response,
+            Err(source) => {
+                log_agent_host_request_send_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    &source,
+                    started_at.elapsed(),
+                );
+                return Err(AgentHostError::Http { source });
+            }
+        };
+        let status = response.status();
+        let response = match ensure_success(response).await {
+            Ok(response) => response,
+            Err(error) => {
+                log_agent_host_request_failure(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        log_agent_host_request_success(
+            &method,
+            &trace_context,
+            &payload_trace,
+            status,
+            started_at.elapsed(),
+            JsonResponseTrace::stream(),
+        );
 
-        Ok(AgentHostEventStream::new(response))
+        Ok(AgentHostEventStream::new(response, trace_context, status))
     }
 
     pub async fn history(&self, session_id: &str) -> AgentHostResult<Vec<Vec<KernelEvent>>> {
@@ -292,17 +333,48 @@ impl AgentHostClient {
     }
 
     pub async fn destroy_gateway(&self, gateway_id: &str) -> AgentHostResult<()> {
-        let response = self
-            .client
-            .delete(self.endpoint(&["gateways", gateway_id])?)
-            .send()
-            .await
-            .map_err(|source| AgentHostError::Http { source })?;
+        let method = Method::DELETE;
+        let url = self.endpoint(&["gateways", gateway_id])?;
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, None);
+        let payload_trace = JsonPayloadTrace::from_payload(None);
+        let started_at = Instant::now();
+        log_agent_host_request_start(&method, &trace_context, &payload_trace);
+        let response = match self.client.request(method.clone(), url).send().await {
+            Ok(response) => response,
+            Err(source) => {
+                log_agent_host_request_send_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    &source,
+                    started_at.elapsed(),
+                );
+                return Err(AgentHostError::Http { source });
+            }
+        };
+        let status = response.status();
         if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            log_agent_host_request_success(
+                &method,
+                &trace_context,
+                &payload_trace,
+                status,
+                started_at.elapsed(),
+                JsonResponseTrace::empty(),
+            );
             return Ok(());
         }
 
-        Err(http_status_error(response).await)
+        let error = http_status_error(response).await;
+        log_agent_host_request_failure(
+            &method,
+            &trace_context,
+            &payload_trace,
+            status,
+            started_at.elapsed(),
+            &error,
+        );
+        Err(error)
     }
 
     fn endpoint(&self, segments: &[&str]) -> AgentHostResult<Url> {
@@ -326,9 +398,16 @@ impl AgentHostClient {
         url: Url,
         json_payload: Option<JsonObject>,
     ) -> AgentHostResult<JsonObject> {
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, json_payload.as_ref());
         let value = self.request_json(method, url, json_payload).await?;
 
-        object_from_value(value)
+        match object_from_value(value) {
+            Ok(object) => Ok(object),
+            Err(error) => {
+                log_agent_host_response_shape_error(&trace_context, "object", &error);
+                Err(error)
+            }
+        }
     }
 
     async fn request_array(
@@ -337,25 +416,64 @@ impl AgentHostClient {
         url: Url,
         json_payload: Option<JsonObject>,
     ) -> AgentHostResult<JsonArray> {
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, json_payload.as_ref());
         let value = self.request_json(method, url, json_payload).await?;
 
         match value {
             Value::Array(items) => items.into_iter().map(object_from_value).collect(),
-            other => Err(AgentHostError::UnexpectedJson {
-                expected: "array of objects",
-                value: other,
-            }),
+            other => {
+                let error = AgentHostError::UnexpectedJson {
+                    expected: "array of objects",
+                    value: other,
+                };
+                log_agent_host_response_shape_error(&trace_context, "array of objects", &error);
+                Err(error)
+            }
         }
     }
 
     async fn request_empty(&self, method: Method, url: Url) -> AgentHostResult<()> {
-        let response = self
-            .client
-            .request(method, url)
-            .send()
-            .await
-            .map_err(|source| AgentHostError::Http { source })?;
-        ensure_success(response).await?;
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, None);
+        let payload_trace = JsonPayloadTrace::from_payload(None);
+        let started_at = Instant::now();
+        log_agent_host_request_start(&method, &trace_context, &payload_trace);
+        let response = match self.client.request(method.clone(), url).send().await {
+            Ok(response) => response,
+            Err(source) => {
+                log_agent_host_request_send_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    &source,
+                    started_at.elapsed(),
+                );
+                return Err(AgentHostError::Http { source });
+            }
+        };
+        let status = response.status();
+        match ensure_success(response).await {
+            Ok(_response) => {
+                log_agent_host_request_success(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    JsonResponseTrace::empty(),
+                );
+            }
+            Err(error) => {
+                log_agent_host_request_failure(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    &error,
+                );
+                return Err(error);
+            }
+        }
 
         Ok(())
     }
@@ -366,20 +484,448 @@ impl AgentHostClient {
         url: Url,
         json_payload: Option<JsonObject>,
     ) -> AgentHostResult<Value> {
-        let mut request = self.client.request(method, url);
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, json_payload.as_ref());
+        let payload_trace = JsonPayloadTrace::from_payload(json_payload.as_ref());
+        let started_at = Instant::now();
+        log_agent_host_request_start(&method, &trace_context, &payload_trace);
+        let mut request = self.client.request(method.clone(), url);
         if let Some(json_payload) = json_payload {
             request = request.json(&json_payload);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|source| AgentHostError::Http { source })?;
-        let response = ensure_success(response).await?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(source) => {
+                log_agent_host_request_send_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    &source,
+                    started_at.elapsed(),
+                );
+                return Err(AgentHostError::Http { source });
+            }
+        };
+        let status = response.status();
+        let response = match ensure_success(response).await {
+            Ok(response) => response,
+            Err(error) => {
+                log_agent_host_request_failure(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    &error,
+                );
+                return Err(error);
+            }
+        };
 
-        response
-            .json::<Value>()
-            .await
-            .map_err(|source| AgentHostError::Http { source })
+        match response.json::<Value>().await {
+            Ok(value) => {
+                log_agent_host_request_success(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    JsonResponseTrace::from_value(&value),
+                );
+                Ok(value)
+            }
+            Err(source) => {
+                log_agent_host_response_read_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    &source,
+                );
+                Err(AgentHostError::Http { source })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RequestTraceContext {
+    target: String,
+    session_id: Option<String>,
+    gateway_id: Option<String>,
+    skill_id: Option<String>,
+}
+
+impl RequestTraceContext {
+    fn from_url_and_payload(url: &Url, payload: Option<&JsonObject>) -> Self {
+        let mut context = Self {
+            target: request_target(url),
+            ..Self::default()
+        };
+        let segments = url
+            .path_segments()
+            .map_or_else(Vec::new, Iterator::collect::<Vec<_>>);
+        match segments.as_slice() {
+            ["sessions", session_id, ..] => context.session_id = Some((*session_id).to_owned()),
+            ["gateways", gateway_id, ..] => context.gateway_id = Some((*gateway_id).to_owned()),
+            ["skills", skill_id, ..] => context.skill_id = Some((*skill_id).to_owned()),
+            _other => {}
+        }
+        if let Some(payload) = payload {
+            context.add_payload_ids(payload);
+        }
+
+        context
+    }
+
+    fn add_payload_ids(&mut self, payload: &JsonObject) {
+        if self.session_id.is_none() {
+            self.session_id = payload
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        if self.gateway_id.is_none() {
+            self.gateway_id = payload
+                .get("gateway_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+        if self.skill_id.is_none() {
+            self.skill_id = payload
+                .get("skill_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+
+    fn session_id(&self) -> &str {
+        self.session_id.as_deref().unwrap_or("")
+    }
+
+    fn gateway_id(&self) -> &str {
+        self.gateway_id.as_deref().unwrap_or("")
+    }
+
+    fn skill_id(&self) -> &str {
+        self.skill_id.as_deref().unwrap_or("")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct JsonPayloadTrace {
+    present: bool,
+    fields: usize,
+    skills: usize,
+    env: usize,
+    files: usize,
+}
+
+impl JsonPayloadTrace {
+    fn from_payload(payload: Option<&JsonObject>) -> Self {
+        let Some(payload) = payload else {
+            return Self::default();
+        };
+
+        Self {
+            present: true,
+            fields: payload.len(),
+            skills: object_array_len(payload, "skills"),
+            env: object_object_len(payload, "env"),
+            files: object_object_len(payload, "files"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct JsonResponseTrace {
+    kind: &'static str,
+    fields: usize,
+    items: usize,
+}
+
+impl JsonResponseTrace {
+    const fn empty() -> Self {
+        Self {
+            kind: "empty",
+            fields: 0,
+            items: 0,
+        }
+    }
+
+    const fn stream() -> Self {
+        Self {
+            kind: "stream",
+            fields: 0,
+            items: 0,
+        }
+    }
+
+    fn from_value(value: &Value) -> Self {
+        match value {
+            Value::Object(object) => Self {
+                kind: "object",
+                fields: object.len(),
+                items: 0,
+            },
+            Value::Array(items) => Self {
+                kind: "array",
+                fields: 0,
+                items: items.len(),
+            },
+            Value::Null => Self {
+                kind: "null",
+                fields: 0,
+                items: 0,
+            },
+            Value::Bool(_value) => Self {
+                kind: "bool",
+                fields: 0,
+                items: 0,
+            },
+            Value::Number(_value) => Self {
+                kind: "number",
+                fields: 0,
+                items: 0,
+            },
+            Value::String(_value) => Self {
+                kind: "string",
+                fields: 0,
+                items: 0,
+            },
+        }
+    }
+}
+
+fn request_target(url: &Url) -> String {
+    let mut target = url.path().to_owned();
+    let mut first_query_pair = true;
+    for (key, _value) in url.query_pairs() {
+        if first_query_pair {
+            target.push('?');
+            first_query_pair = false;
+        } else {
+            target.push('&');
+        }
+        target.push_str(&key);
+        target.push_str("=<redacted>");
+    }
+
+    target
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn object_array_len(object: &JsonObject, field: &str) -> usize {
+    object
+        .get(field)
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len)
+}
+
+fn object_object_len(object: &JsonObject, field: &str) -> usize {
+    object
+        .get(field)
+        .and_then(Value::as_object)
+        .map_or(0, Map::len)
+}
+
+fn log_agent_host_request_start(
+    method: &Method,
+    context: &RequestTraceContext,
+    payload: &JsonPayloadTrace,
+) {
+    tracing::debug!(
+        method = %method,
+        target = %context.target,
+        session_id = context.session_id(),
+        gateway_id = context.gateway_id(),
+        skill_id = context.skill_id(),
+        payload_present = payload.present,
+        payload_fields = payload.fields,
+        payload_skills = payload.skills,
+        payload_env = payload.env,
+        payload_files = payload.files,
+        "agent_host request started"
+    );
+}
+
+fn log_agent_host_request_send_error(
+    method: &Method,
+    context: &RequestTraceContext,
+    payload: &JsonPayloadTrace,
+    source: &reqwest::Error,
+    elapsed: Duration,
+) {
+    tracing::warn!(
+        method = %method,
+        target = %context.target,
+        session_id = context.session_id(),
+        gateway_id = context.gateway_id(),
+        skill_id = context.skill_id(),
+        elapsed_ms = duration_ms(elapsed),
+        payload_present = payload.present,
+        payload_fields = payload.fields,
+        payload_skills = payload.skills,
+        payload_env = payload.env,
+        payload_files = payload.files,
+        error_kind = reqwest_error_kind(source),
+        error_status = reqwest_error_status(source),
+        "agent_host request send failed"
+    );
+}
+
+fn log_agent_host_request_failure(
+    method: &Method,
+    context: &RequestTraceContext,
+    payload: &JsonPayloadTrace,
+    status: StatusCode,
+    elapsed: Duration,
+    error: &AgentHostError,
+) {
+    tracing::warn!(
+        method = %method,
+        target = %context.target,
+        session_id = context.session_id(),
+        gateway_id = context.gateway_id(),
+        skill_id = context.skill_id(),
+        status = status.as_u16(),
+        elapsed_ms = duration_ms(elapsed),
+        payload_present = payload.present,
+        payload_fields = payload.fields,
+        payload_skills = payload.skills,
+        payload_env = payload.env,
+        payload_files = payload.files,
+        error_kind = agent_host_error_kind(error),
+        error_status = agent_host_error_status(error),
+        "agent_host request failed"
+    );
+}
+
+fn log_agent_host_request_success(
+    method: &Method,
+    context: &RequestTraceContext,
+    payload: &JsonPayloadTrace,
+    status: StatusCode,
+    elapsed: Duration,
+    response: JsonResponseTrace,
+) {
+    tracing::info!(
+        method = %method,
+        target = %context.target,
+        session_id = context.session_id(),
+        gateway_id = context.gateway_id(),
+        skill_id = context.skill_id(),
+        status = status.as_u16(),
+        elapsed_ms = duration_ms(elapsed),
+        payload_present = payload.present,
+        payload_fields = payload.fields,
+        payload_skills = payload.skills,
+        payload_env = payload.env,
+        payload_files = payload.files,
+        response_kind = response.kind,
+        response_fields = response.fields,
+        response_items = response.items,
+        "agent_host request completed"
+    );
+}
+
+fn log_agent_host_response_read_error(
+    method: &Method,
+    context: &RequestTraceContext,
+    payload: &JsonPayloadTrace,
+    status: StatusCode,
+    elapsed: Duration,
+    source: &reqwest::Error,
+) {
+    tracing::warn!(
+        method = %method,
+        target = %context.target,
+        session_id = context.session_id(),
+        gateway_id = context.gateway_id(),
+        skill_id = context.skill_id(),
+        status = status.as_u16(),
+        elapsed_ms = duration_ms(elapsed),
+        payload_present = payload.present,
+        payload_fields = payload.fields,
+        payload_skills = payload.skills,
+        payload_env = payload.env,
+        payload_files = payload.files,
+        error_kind = "response_json_read",
+        source_kind = reqwest_error_kind(source),
+        error_status = reqwest_error_status(source),
+        "agent_host response read failed"
+    );
+}
+
+fn log_agent_host_response_shape_error(
+    context: &RequestTraceContext,
+    expected: &'static str,
+    error: &AgentHostError,
+) {
+    tracing::warn!(
+        target = %context.target,
+        session_id = context.session_id(),
+        gateway_id = context.gateway_id(),
+        skill_id = context.skill_id(),
+        expected = expected,
+        error_kind = agent_host_error_kind(error),
+        error_status = agent_host_error_status(error),
+        "agent_host response shape mismatch"
+    );
+}
+
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_decode() {
+        "decode"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_request() {
+        "request"
+    } else {
+        "http"
+    }
+}
+
+fn reqwest_error_status(error: &reqwest::Error) -> u16 {
+    error.status().map_or(0, |status| status.as_u16())
+}
+
+fn agent_host_error_kind(error: &AgentHostError) -> &'static str {
+    match error {
+        AgentHostError::InvalidBaseUrl { .. } => "invalid_base_url",
+        AgentHostError::InvalidTimeout { .. } => "invalid_timeout",
+        AgentHostError::UrlCannotBeBase { .. } => "url_cannot_be_base",
+        AgentHostError::BuildClient { .. } => "build_client",
+        AgentHostError::Http { source } => reqwest_error_kind(source),
+        AgentHostError::HttpStatus { .. } => "http_status",
+        AgentHostError::Json { .. } => "json",
+        AgentHostError::Utf8 { .. } => "utf8",
+        AgentHostError::UnexpectedJson { .. } => "unexpected_json",
+        AgentHostError::MissingField { .. } => "missing_field",
+        AgentHostError::InvalidField { .. } => "invalid_field",
+    }
+}
+
+fn agent_host_error_status(error: &AgentHostError) -> u16 {
+    match error {
+        AgentHostError::Http { source } => reqwest_error_status(source),
+        AgentHostError::HttpStatus { status, .. } => status.as_u16(),
+        AgentHostError::InvalidBaseUrl { .. }
+        | AgentHostError::InvalidTimeout { .. }
+        | AgentHostError::UrlCannotBeBase { .. }
+        | AgentHostError::BuildClient { .. }
+        | AgentHostError::Json { .. }
+        | AgentHostError::Utf8 { .. }
+        | AgentHostError::UnexpectedJson { .. }
+        | AgentHostError::MissingField { .. }
+        | AgentHostError::InvalidField { .. } => 0,
     }
 }
 
@@ -450,15 +996,15 @@ impl Display for AgentHostError {
                 )
             }
             Self::Http { source } => write!(formatter, "agent_host HTTP error: {source}"),
-            Self::HttpStatus { status, body } => {
-                write!(formatter, "agent_host returned HTTP {status}: {body}")
+            Self::HttpStatus { status, .. } => {
+                write!(formatter, "agent_host returned HTTP {status}")
             }
             Self::Json { source } => write!(formatter, "agent_host JSON error: {source}"),
             Self::Utf8 { source } => write!(formatter, "agent_host stream was not UTF-8: {source}"),
-            Self::UnexpectedJson { expected, value } => {
+            Self::UnexpectedJson { expected, .. } => {
                 write!(
                     formatter,
-                    "agent_host returned unexpected JSON; expected {expected}, got {value}"
+                    "agent_host returned unexpected JSON; expected {expected}"
                 )
             }
             Self::MissingField { field } => {
@@ -495,45 +1041,74 @@ pub struct AgentHostEventStream {
     response: reqwest::Response,
     pending: Vec<u8>,
     finished: bool,
+    trace: AgentHostStreamTrace,
 }
 
 impl AgentHostEventStream {
-    const fn new(response: reqwest::Response) -> Self {
+    fn new(response: reqwest::Response, context: RequestTraceContext, status: StatusCode) -> Self {
         Self {
             response,
             pending: Vec::new(),
             finished: false,
+            trace: AgentHostStreamTrace::new(context, status),
         }
     }
 
     pub async fn next_event(&mut self) -> AgentHostResult<Option<KernelEvent>> {
         loop {
             if let Some(line) = self.next_buffered_line() {
-                if let Some(event) = parse_stream_line(&line)? {
-                    return Ok(Some(event));
+                match parse_stream_line(&line) {
+                    Ok(Some(event)) => {
+                        self.trace.record_event(&event);
+                        return Ok(Some(event));
+                    }
+                    Ok(None) => {
+                        self.trace.record_ignored_line();
+                    }
+                    Err(error) => {
+                        self.trace.record_parse_error(&error);
+                        return Err(error);
+                    }
                 }
                 continue;
             }
 
             if self.finished {
                 if self.pending.is_empty() {
+                    self.trace.finish();
                     return Ok(None);
                 }
                 let line = std::mem::take(&mut self.pending);
-                if let Some(event) = parse_stream_line(&line)? {
-                    return Ok(Some(event));
+                match parse_stream_line(&line) {
+                    Ok(Some(event)) => {
+                        self.trace.record_event(&event);
+                        return Ok(Some(event));
+                    }
+                    Ok(None) => {
+                        self.trace.record_ignored_line();
+                    }
+                    Err(error) => {
+                        self.trace.record_parse_error(&error);
+                        return Err(error);
+                    }
                 }
 
+                self.trace.finish();
                 return Ok(None);
             }
 
-            match self
-                .response
-                .chunk()
-                .await
-                .map_err(|source| AgentHostError::Http { source })?
-            {
-                Some(chunk) => self.pending.extend_from_slice(&chunk),
+            let chunk = match self.response.chunk().await {
+                Ok(chunk) => chunk,
+                Err(source) => {
+                    self.trace.record_read_error(&source);
+                    return Err(AgentHostError::Http { source });
+                }
+            };
+            match chunk {
+                Some(chunk) => {
+                    self.trace.record_chunk(chunk.len());
+                    self.pending.extend_from_slice(&chunk);
+                }
                 None => self.finished = true,
             }
         }
@@ -550,6 +1125,193 @@ impl AgentHostEventStream {
         }
 
         Some(line)
+    }
+}
+
+impl Drop for AgentHostEventStream {
+    fn drop(&mut self) {
+        if self.trace.ended {
+            return;
+        }
+        if self.finished && self.pending.is_empty() {
+            self.trace.finish();
+        } else {
+            self.trace.record_drop(self.pending.len());
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AgentHostStreamTrace {
+    context: RequestTraceContext,
+    status: StatusCode,
+    started_at: Instant,
+    chunks: usize,
+    bytes: usize,
+    events: usize,
+    ignored_lines: usize,
+    parse_errors: usize,
+    read_errors: usize,
+    ended: bool,
+}
+
+impl AgentHostStreamTrace {
+    fn new(context: RequestTraceContext, status: StatusCode) -> Self {
+        let trace = Self {
+            context,
+            status,
+            started_at: Instant::now(),
+            chunks: 0,
+            bytes: 0,
+            events: 0,
+            ignored_lines: 0,
+            parse_errors: 0,
+            read_errors: 0,
+            ended: false,
+        };
+        trace.log_start();
+        trace
+    }
+
+    fn record_chunk(&mut self, byte_count: usize) {
+        self.chunks = self.chunks.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(byte_count);
+        tracing::debug!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            chunk_bytes = byte_count,
+            chunks = self.chunks,
+            bytes = self.bytes,
+            "agent_host stream chunk received"
+        );
+    }
+
+    fn record_event(&mut self, event: &KernelEvent) {
+        self.events = self.events.saturating_add(1);
+        tracing::debug!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            event_kind = stream_event_kind(event),
+            events = self.events,
+            chunks = self.chunks,
+            bytes = self.bytes,
+            "agent_host stream event parsed"
+        );
+    }
+
+    fn record_ignored_line(&mut self) {
+        self.ignored_lines = self.ignored_lines.saturating_add(1);
+        tracing::trace!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            ignored_lines = self.ignored_lines,
+            events = self.events,
+            "agent_host stream line ignored"
+        );
+    }
+
+    fn record_parse_error(&mut self, error: &AgentHostError) {
+        self.parse_errors = self.parse_errors.saturating_add(1);
+        tracing::warn!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            elapsed_ms = duration_ms(self.started_at.elapsed()),
+            chunks = self.chunks,
+            bytes = self.bytes,
+            events = self.events,
+            ignored_lines = self.ignored_lines,
+            parse_errors = self.parse_errors,
+            read_errors = self.read_errors,
+            error_kind = agent_host_error_kind(error),
+            error_status = agent_host_error_status(error),
+            "agent_host stream parse failed"
+        );
+    }
+
+    fn record_read_error(&mut self, source: &reqwest::Error) {
+        self.read_errors = self.read_errors.saturating_add(1);
+        tracing::warn!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            elapsed_ms = duration_ms(self.started_at.elapsed()),
+            chunks = self.chunks,
+            bytes = self.bytes,
+            events = self.events,
+            ignored_lines = self.ignored_lines,
+            parse_errors = self.parse_errors,
+            read_errors = self.read_errors,
+            error_kind = reqwest_error_kind(source),
+            error_status = reqwest_error_status(source),
+            "agent_host stream read failed"
+        );
+    }
+
+    fn finish(&mut self) {
+        if self.ended {
+            return;
+        }
+        self.ended = true;
+        tracing::info!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            elapsed_ms = duration_ms(self.started_at.elapsed()),
+            chunks = self.chunks,
+            bytes = self.bytes,
+            events = self.events,
+            ignored_lines = self.ignored_lines,
+            parse_errors = self.parse_errors,
+            read_errors = self.read_errors,
+            "agent_host stream ended"
+        );
+    }
+
+    fn record_drop(&mut self, pending_bytes: usize) {
+        self.ended = true;
+        tracing::warn!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            elapsed_ms = duration_ms(self.started_at.elapsed()),
+            chunks = self.chunks,
+            bytes = self.bytes,
+            events = self.events,
+            ignored_lines = self.ignored_lines,
+            parse_errors = self.parse_errors,
+            read_errors = self.read_errors,
+            pending_bytes = pending_bytes,
+            "agent_host stream dropped"
+        );
+    }
+
+    fn log_start(&self) {
+        tracing::info!(
+            target = %self.context.target,
+            session_id = self.context.session_id(),
+            gateway_id = self.context.gateway_id(),
+            skill_id = self.context.skill_id(),
+            status = self.status.as_u16(),
+            "agent_host stream started"
+        );
     }
 }
 
@@ -615,6 +1377,34 @@ fn parse_stream_line(line: &[u8]) -> AgentHostResult<Option<KernelEvent>> {
     }
 }
 
+fn stream_event_kind(event: &KernelEvent) -> &'static str {
+    match event.get("type").and_then(Value::as_str) {
+        Some("session/update") => match event
+            .get("update")
+            .and_then(Value::as_object)
+            .and_then(|update| update.get("sessionUpdate"))
+            .and_then(Value::as_str)
+        {
+            Some("agent_message_chunk") => "session/update.agent_message_chunk",
+            Some("tool_call") => "session/update.tool_call",
+            Some("tool_call_update") => "session/update.tool_call_update",
+            Some("error") => "session/update.error",
+            Some(_other) => "session/update.other",
+            None => "session/update",
+        },
+        Some("reasoning_delta") => "reasoning_delta",
+        Some("text_delta") => "text_delta",
+        Some("tool_call") => "tool_call",
+        Some("tool_result") => "tool_result",
+        Some("start") => "start",
+        Some("content") => "content",
+        Some("error") => "error",
+        Some("done") => "done",
+        Some(_other) => "other",
+        None => "unknown",
+    }
+}
+
 fn string_list_field(mut object: JsonObject, field: &'static str) -> AgentHostResult<Vec<String>> {
     let value = object
         .remove(field)
@@ -659,7 +1449,7 @@ mod tests {
     use serde_json::{Value, json};
     use tokio::{net::TcpListener, task::JoinHandle};
 
-    use super::{AgentHostClient, JsonObject};
+    use super::{AgentHostClient, AgentHostError, JsonObject};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedRequest {
@@ -738,6 +1528,40 @@ mod tests {
         fn recorded(&self) -> Result<Vec<RecordedRequest>, Box<dyn Error + Send + Sync>> {
             self.state.recorded()
         }
+    }
+
+    #[test]
+    fn http_status_error_display_does_not_include_body() {
+        let error = AgentHostError::HttpStatus {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            body: "secret token and stack trace".to_owned(),
+        };
+
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "agent_host returned HTTP 500 Internal Server Error"
+        );
+        assert!(!message.contains("secret token"));
+        assert!(!message.contains("stack trace"));
+    }
+
+    #[test]
+    fn unexpected_json_error_display_does_not_include_value() {
+        let error = AgentHostError::UnexpectedJson {
+            expected: "object",
+            value: json!({ "api_key": "secret-token", "stack": ["internal"] }),
+        };
+
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "agent_host returned unexpected JSON; expected object"
+        );
+        assert!(!message.contains("secret-token"));
+        assert!(!message.contains("internal"));
     }
 
     impl Drop for TestServer {

@@ -835,11 +835,17 @@ async fn skills_routes_proxy_crud_and_not_found_status() -> Result<(), Box<dyn E
 
     let (status, missing_get) = get_json(&app, "/skills/missing-skill").await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(missing_get["detail"], "skill not found");
+    assert_eq!(
+        missing_get["detail"],
+        "agent_host returned HTTP 404 Not Found"
+    );
 
     let (status, missing_delete) = delete_json(&app, "/skills/missing-skill").await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(missing_delete["detail"], "skill not found");
+    assert_eq!(
+        missing_delete["detail"],
+        "agent_host returned HTTP 404 Not Found"
+    );
 
     Ok(())
 }

@@ -102,13 +102,35 @@ pub fn router() -> Router<AppState> {
 }
 
 async fn healthz() -> Json<HealthResponse> {
+    tracing::debug!(
+        route = "/healthz",
+        action = "healthz",
+        "api handler completed"
+    );
     Json(HealthResponse { status: "ok" })
 }
 
 async fn info(State(state): State<AppState>) -> Json<Value> {
     let agent_host = match state.agent_host.info().await {
-        Ok(info) => Value::Object(info),
-        Err(error) => json!({ "service": "agent_host", "error": error.to_string() }),
+        Ok(info) => {
+            tracing::info!(
+                route = "/info",
+                action = "info",
+                agent_host_available = true,
+                "api handler completed"
+            );
+            Value::Object(info)
+        }
+        Err(error) => {
+            tracing::warn!(
+                route = "/info",
+                action = "info",
+                agent_host_available = false,
+                error_kind = "agent_host_info_failed",
+                "agent_host info unavailable"
+            );
+            json!({ "service": "agent_host", "error": error.to_string() })
+        }
     };
 
     Json(json!({
@@ -126,12 +148,17 @@ async fn info(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn list_harnesses() -> Json<Vec<&'static str>> {
-    Json(
-        HarnessName::all()
-            .iter()
-            .map(|harness| harness.as_str())
-            .collect(),
-    )
+    let harnesses = HarnessName::all()
+        .iter()
+        .map(|harness| harness.as_str())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/harnesses",
+        action = "list_harnesses",
+        harness_count = harnesses.len(),
+        "api handler completed"
+    );
+    Json(harnesses)
 }
 
 async fn list_kernel_configs(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
@@ -140,7 +167,13 @@ async fn list_kernel_configs(State(state): State<AppState>) -> Result<Json<Vec<V
         .list()?
         .into_iter()
         .map(|record| record.summary())
-        .collect();
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/kernel-configs",
+        action = "list_kernel_configs",
+        config_count = configs.len(),
+        "api handler completed"
+    );
     Ok(Json(configs))
 }
 
@@ -153,6 +186,13 @@ async fn get_kernel_config(
         || json!({ "harness": harness.as_str(), "env_vars": "", "updated_at": null }),
         |record| record.summary(),
     );
+    tracing::info!(
+        route = "/kernel-configs/:harness",
+        action = "get_kernel_config",
+        harness = harness.as_str(),
+        configured = !value["updated_at"].is_null(),
+        "api handler completed"
+    );
     Ok(Json(value))
 }
 
@@ -163,6 +203,12 @@ async fn update_kernel_config(
 ) -> Result<Json<Value>, ApiError> {
     let harness = parse_harness(&raw_harness)?;
     let record = state.kernel_configs.upsert(harness, payload.env_vars)?;
+    tracing::info!(
+        route = "/kernel-configs/:harness",
+        action = "update_kernel_config",
+        harness = harness.as_str(),
+        "api handler completed"
+    );
     Ok(Json(record.summary()))
 }
 
@@ -172,7 +218,13 @@ async fn list_connections(State(state): State<AppState>) -> Result<Json<Vec<Valu
         .list()?
         .into_iter()
         .map(|connection| connection.summary(false))
-        .collect();
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/connections",
+        action = "list_connections",
+        connection_count = connections.len(),
+        "api handler completed"
+    );
     Ok(Json(connections))
 }
 
@@ -181,6 +233,14 @@ async fn get_connection(
     Path(connection_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let connection = require_connection(&state, &connection_id)?;
+    tracing::info!(
+        route = "/connections/:connection_id",
+        action = "get_connection",
+        connection_id = %connection_id,
+        api_flavor = connection.api_flavor.as_str(),
+        has_api_key = !connection.api_key.is_empty(),
+        "api handler completed"
+    );
     Ok(Json(connection.summary(false)))
 }
 
@@ -189,6 +249,13 @@ async fn list_connection_models(
     Path(connection_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let connection = require_connection(&state, &connection_id)?;
+    tracing::info!(
+        route = "/connections/:connection_id/models",
+        action = "list_connection_models",
+        connection_id = %connection_id,
+        api_flavor = connection.api_flavor.as_str(),
+        "fetching connection models"
+    );
     let url = format!("{}/models", connection.url.trim_end_matches('/'));
     let mut request = state.http_client.get(url);
     if !connection.api_key.is_empty() {
@@ -200,8 +267,23 @@ async fn list_connection_models(
         ))
     })?;
     let response = if response.status().is_success() {
+        tracing::info!(
+            route = "/connections/:connection_id/models",
+            action = "list_connection_models",
+            connection_id = %connection_id,
+            upstream_status = response.status().as_u16(),
+            "connection models fetched"
+        );
         response
     } else {
+        tracing::warn!(
+            route = "/connections/:connection_id/models",
+            action = "list_connection_models",
+            connection_id = %connection_id,
+            upstream_status = response.status().as_u16(),
+            error_kind = "upstream_http_status",
+            "connection models fetch failed"
+        );
         return Err(ApiError::bad_gateway(format!(
             "failed to fetch models for connection {connection_id}: HTTP {}",
             response.status()
@@ -213,10 +295,23 @@ async fn list_connection_models(
         ))
     })?;
     if !value.is_object() {
+        tracing::warn!(
+            route = "/connections/:connection_id/models",
+            action = "list_connection_models",
+            connection_id = %connection_id,
+            error_kind = "invalid_upstream_shape",
+            "connection models response was not an object"
+        );
         return Err(ApiError::bad_gateway(format!(
             "models response for connection {connection_id} was not a JSON object"
         )));
     }
+    tracing::info!(
+        route = "/connections/:connection_id/models",
+        action = "list_connection_models",
+        connection_id = %connection_id,
+        "api handler completed"
+    );
     Ok(Json(value))
 }
 
@@ -230,6 +325,14 @@ async fn create_connection(
     connection.api_key = payload.api_key;
     let value = connection.summary(true);
     state.connections.insert(connection)?;
+    tracing::info!(
+        route = "/connections",
+        action = "create_connection",
+        connection_id = %value["connection_id"].as_str().unwrap_or_default(),
+        api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
+        has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
+        "api handler completed"
+    );
     Ok(Json(value))
 }
 
@@ -254,6 +357,14 @@ async fn update_connection(
     connection.updated_at = utc_now();
     let value = connection.summary(true);
     state.connections.update(connection)?;
+    tracing::info!(
+        route = "/connections/:connection_id",
+        action = "update_connection",
+        connection_id = %connection_id,
+        api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
+        has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
+        "api handler completed"
+    );
     Ok(Json(value))
 }
 
@@ -262,6 +373,13 @@ async fn delete_connection(
     Path(connection_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     if state.connections.delete(&connection_id)? {
+        tracing::info!(
+            route = "/connections/:connection_id",
+            action = "delete_connection",
+            connection_id = %connection_id,
+            deleted = true,
+            "api handler completed"
+        );
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::not_found(format!(
@@ -289,6 +407,15 @@ async fn create_agent(
     agent.connection_id = payload.connection_id;
     let value = agent.summary();
     state.agents.insert(agent)?;
+    tracing::info!(
+        route = "/agents",
+        action = "create_agent",
+        agent_id = %value["agent_id"].as_str().unwrap_or_default(),
+        harness = %value["harness"].as_str().unwrap_or_default(),
+        skill_count = value["skills"].as_array().map_or(0, Vec::len),
+        has_connection = value["connection_id"].is_string(),
+        "api handler completed"
+    );
     Ok(Json(value))
 }
 
@@ -298,7 +425,13 @@ async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<Value>>, 
         .list()?
         .into_iter()
         .map(|agent| agent.summary())
-        .collect();
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/agents",
+        action = "list_agents",
+        agent_count = agents.len(),
+        "api handler completed"
+    );
     Ok(Json(agents))
 }
 
@@ -307,6 +440,15 @@ async fn get_agent(
     Path(agent_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let agent = require_agent(&state, &agent_id)?;
+    tracing::info!(
+        route = "/agents/:agent_id",
+        action = "get_agent",
+        agent_id = %agent_id,
+        harness = agent.harness.as_str(),
+        skill_count = agent.skills.len(),
+        has_connection = agent.connection_id.is_some(),
+        "api handler completed"
+    );
     Ok(Json(agent.summary()))
 }
 
@@ -344,6 +486,15 @@ async fn update_agent(
     agent.updated_at = utc_now();
     let value = agent.summary();
     state.agents.update(agent)?;
+    tracing::info!(
+        route = "/agents/:agent_id",
+        action = "update_agent",
+        agent_id = %agent_id,
+        harness = %value["harness"].as_str().unwrap_or_default(),
+        skill_count = value["skills"].as_array().map_or(0, Vec::len),
+        has_connection = value["connection_id"].is_string(),
+        "api handler completed"
+    );
     Ok(Json(value))
 }
 
@@ -359,12 +510,26 @@ async fn delete_agent(
         .into_iter()
         .filter(|session| session.agent_id == agent_id)
     {
+        tracing::info!(
+            route = "/agents/:agent_id",
+            action = "delete_agent",
+            agent_id = %agent_id,
+            session_id = %session.session_id,
+            kernel_session_id = %session.agent_host_session_id,
+            "destroying session for deleted agent"
+        );
         let _removed = state.sessions.delete(&session.session_id)?;
         state
             .agent_host
             .destroy_session(&session.agent_host_session_id)
             .await?;
     }
+    tracing::info!(
+        route = "/agents/:agent_id",
+        action = "delete_agent",
+        agent_id = %agent_id,
+        "api handler completed"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -374,6 +539,16 @@ async fn create_session(
 ) -> Result<Json<Value>, ApiError> {
     let agent = require_agent(&state, &payload.agent_id)?;
     let env = session_env(&state, &agent)?;
+    tracing::info!(
+        route = "/sessions",
+        action = "create_session",
+        agent_id = %agent.agent_id,
+        harness = agent.harness.as_str(),
+        skill_count = agent.skills.len(),
+        env_var_count = env.len(),
+        has_connection = agent.connection_id.is_some(),
+        "creating upstream session"
+    );
     let upstream = state
         .agent_host
         .create_session(agent.harness.as_str(), Some(&agent.skills), Some(&env))
@@ -383,13 +558,22 @@ async fn create_session(
     let session = SessionRecord::new(
         Uuid::now_v7().simple().to_string(),
         payload.agent_id,
-        upstream_session_id,
-        status,
+        upstream_session_id.clone(),
+        status.clone(),
         payload.channel_name,
         payload.client_type,
     );
     let value = session.summary();
     state.sessions.insert(session)?;
+    tracing::info!(
+        route = "/sessions",
+        action = "create_session",
+        session_id = %value["session_id"].as_str().unwrap_or_default(),
+        agent_id = %value["agent_id"].as_str().unwrap_or_default(),
+        kernel_session_id = %upstream_session_id,
+        upstream_status = %status,
+        "api handler completed"
+    );
     Ok(Json(value))
 }
 
@@ -399,7 +583,13 @@ async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Value>>
         .list()?
         .into_iter()
         .map(|session| session.summary())
-        .collect();
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/sessions",
+        action = "list_sessions",
+        session_count = sessions.len(),
+        "api handler completed"
+    );
     Ok(Json(sessions))
 }
 
@@ -417,6 +607,16 @@ async fn get_session(
         session.updated_at = utc_now();
         state.sessions.update(session.clone())?;
     }
+    tracing::info!(
+        route = "/sessions/:session_id",
+        action = "get_session",
+        session_id = %session_id,
+        agent_id = %session.agent_id,
+        kernel_session_id = %session.agent_host_session_id,
+        status = %session.status,
+        message_count = session.messages.len(),
+        "api handler completed"
+    );
     Ok(Json(session.detail()))
 }
 
@@ -430,6 +630,15 @@ async fn list_messages(
         .iter()
         .map(MessageRecord::summary)
         .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/sessions/:session_id/messages",
+        action = "list_messages",
+        session_id = %session_id,
+        agent_id = %session.agent_id,
+        kernel_session_id = %session.agent_host_session_id,
+        message_count = messages.len(),
+        "api handler completed"
+    );
     Ok(Json(json!({ "messages": messages })))
 }
 
@@ -438,6 +647,12 @@ async fn send_message(
     Path(session_id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    tracing::info!(
+        route = "/sessions/:session_id/messages",
+        action = "send_message",
+        session_id = %session_id,
+        "starting synchronous turn"
+    );
     Ok(Json(run_turn(&state, &session_id, &payload.message).await?))
 }
 
@@ -447,6 +662,14 @@ async fn stream_message(
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Response, ApiError> {
     let turn = start_streaming_turn(&state, &session_id, payload.message)?;
+    tracing::info!(
+        route = "/sessions/:session_id/messages/stream",
+        action = "stream_message",
+        session_id = %turn.session_id,
+        turn_id = %turn.turn_id,
+        kernel_session_id = %turn.agent_host_session_id,
+        "stream response started"
+    );
     let (sender, receiver) = mpsc::channel(16);
     tokio::spawn(run_streaming_turn(state, turn, sender));
     Ok(ndjson_stream_response(receiver))
@@ -457,6 +680,14 @@ async fn stream_turn(
     Path((session_id, turn_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
     let _session = require_session(&state, &session_id)?;
+    tracing::info!(
+        route = "/sessions/:session_id/turns/:turn_id/stream",
+        action = "stream_turn",
+        session_id = %session_id,
+        turn_id = %turn_id,
+        implemented = false,
+        "turn replay requested"
+    );
     Err(ApiError::not_found(format!(
         "turn not found: {turn_id}; active turn replay is not implemented in client_service_rs yet"
     )))
@@ -476,6 +707,15 @@ async fn reset_session(
     session.updated_at = utc_now();
     state.sessions.clear_messages(&session_id)?;
     state.sessions.update(session.clone())?;
+    tracing::info!(
+        route = "/sessions/:session_id/reset",
+        action = "reset_session",
+        session_id = %session_id,
+        agent_id = %session.agent_id,
+        kernel_session_id = %session.agent_host_session_id,
+        status = %session.status,
+        "api handler completed"
+    );
     Ok(Json(session.summary()))
 }
 
@@ -493,6 +733,14 @@ async fn delete_session(
         .agent_host
         .destroy_session(&session.agent_host_session_id)
         .await?;
+    tracing::info!(
+        route = "/sessions/:session_id",
+        action = "delete_session",
+        session_id = %session_id,
+        agent_id = %session.agent_id,
+        kernel_session_id = %session.agent_host_session_id,
+        "api handler completed"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -523,6 +771,13 @@ async fn list_kernels(State(state): State<AppState>) -> Result<Json<Vec<Value>>,
         upstream.insert("agent_ids".to_owned(), json!(agent_ids));
         kernels.push(Value::Object(upstream));
     }
+    tracing::info!(
+        route = "/kernels",
+        action = "list_kernels",
+        kernel_count = kernels.len(),
+        client_session_count = client_sessions.len(),
+        "api handler completed"
+    );
     Ok(Json(kernels))
 }
 
@@ -539,6 +794,12 @@ async fn kill_kernel(
             state.sessions.update(session)?;
         }
     }
+    tracing::info!(
+        route = "/kernels/:kernel_session_id",
+        action = "kill_kernel",
+        kernel_session_id = %kernel_session_id,
+        "api handler completed"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -548,6 +809,13 @@ async fn kernel_logs(
 ) -> Result<Json<Value>, ApiError> {
     require_kernel(&state, &kernel_session_id).await?;
     let lines = state.agent_host.logs(&kernel_session_id).await?;
+    tracing::info!(
+        route = "/kernels/:kernel_session_id/logs",
+        action = "kernel_logs",
+        kernel_session_id = %kernel_session_id,
+        line_count = lines.len(),
+        "api handler completed"
+    );
     Ok(Json(json!({ "lines": lines })))
 }
 
@@ -573,6 +841,14 @@ async fn kernel_container_logs(
         .agent_host
         .container_logs(&kernel_session_id, tail)
         .await?;
+    tracing::info!(
+        route = "/kernels/:kernel_session_id/container-logs",
+        action = "kernel_container_logs",
+        kernel_session_id = %kernel_session_id,
+        tail = ?tail,
+        line_count = lines.len(),
+        "api handler completed"
+    );
     Ok(Json(json!({ "lines": lines })))
 }
 
@@ -585,6 +861,13 @@ async fn create_skill(
         .agent_host
         .create_skill(&payload.skill_id, &payload.files)
         .await?;
+    tracing::info!(
+        route = "/skills",
+        action = "create_skill",
+        skill_id = %payload.skill_id,
+        file_count = payload.files.len(),
+        "api handler completed"
+    );
     Ok(Json(Value::Object(skill)))
 }
 
@@ -595,7 +878,13 @@ async fn list_skills(State(state): State<AppState>) -> Result<Json<Vec<Value>>, 
         .await?
         .into_iter()
         .map(Value::Object)
-        .collect();
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/skills",
+        action = "list_skills",
+        skill_count = skills.len(),
+        "api handler completed"
+    );
     Ok(Json(skills))
 }
 
@@ -604,6 +893,12 @@ async fn get_skill(
     Path(skill_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let skill = state.agent_host.get_skill(&skill_id).await?;
+    tracing::info!(
+        route = "/skills/:skill_id",
+        action = "get_skill",
+        skill_id = %skill_id,
+        "api handler completed"
+    );
     Ok(Json(Value::Object(skill)))
 }
 
@@ -617,6 +912,13 @@ async fn update_skill(
         .agent_host
         .update_skill(&skill_id, &payload.files)
         .await?;
+    tracing::info!(
+        route = "/skills/:skill_id",
+        action = "update_skill",
+        skill_id = %skill_id,
+        file_count = payload.files.len(),
+        "api handler completed"
+    );
     Ok(Json(Value::Object(skill)))
 }
 
@@ -625,22 +927,39 @@ async fn delete_skill(
     Path(skill_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     state.agent_host.delete_skill(&skill_id).await?;
+    tracing::info!(
+        route = "/skills/:skill_id",
+        action = "delete_skill",
+        skill_id = %skill_id,
+        "api handler completed"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn list_gateway_types() -> Json<Vec<&'static str>> {
-    Json(
-        GatewayType::all()
-            .iter()
-            .map(|gateway_type| gateway_type.as_str())
-            .collect(),
-    )
+    let gateway_types = GatewayType::all()
+        .iter()
+        .map(|gateway_type| gateway_type.as_str())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/gateway-types",
+        action = "list_gateway_types",
+        gateway_type_count = gateway_types.len(),
+        "api handler completed"
+    );
+    Json(gateway_types)
 }
 
 async fn get_gateway_type_schema(
     Path(raw_gateway_type): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let gateway_type = parse_gateway_type(&raw_gateway_type)?;
+    tracing::info!(
+        route = "/gateway-types/:gateway_type/schema",
+        action = "get_gateway_type_schema",
+        gateway_type = gateway_type.as_str(),
+        "api handler completed"
+    );
     Ok(Json(gateway_type_schema(gateway_type)))
 }
 
@@ -699,7 +1018,13 @@ async fn list_gateways(State(state): State<AppState>) -> Result<Json<Vec<Value>>
         .list()?
         .into_iter()
         .map(|gateway| gateway.summary(false))
-        .collect();
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/gateways",
+        action = "list_gateways",
+        gateway_count = gateways.len(),
+        "api handler completed"
+    );
     Ok(Json(gateways))
 }
 
@@ -709,6 +1034,9 @@ async fn create_gateway(
 ) -> Result<Json<Value>, ApiError> {
     validate_gateway_id(&payload.gateway_id)?;
     require_agent(&state, &payload.agent_id)?;
+    let agent_id = payload.agent_id.clone();
+    let gateway_type = payload.gateway_type;
+    let enabled = payload.enabled;
     let mut gateway = GatewayRecord::new(
         payload.gateway_id,
         payload.name,
@@ -720,10 +1048,28 @@ async fn create_gateway(
     gateway.secrets = payload.secrets;
     let gateway_id = gateway.gateway_id.clone();
     state.gateways.insert(gateway)?;
-    if payload.enabled {
+    tracing::info!(
+        route = "/gateways",
+        action = "create_gateway",
+        gateway_id = %gateway_id,
+        agent_id = %agent_id,
+        gateway_type = gateway_type.as_str(),
+        enabled,
+        "gateway created"
+    );
+    if enabled {
         return start_gateway_by_id(&state, &gateway_id).await.map(Json);
     }
     let gateway = require_gateway(&state, &gateway_id)?;
+    tracing::info!(
+        route = "/gateways",
+        action = "create_gateway",
+        gateway_id = %gateway_id,
+        agent_id = %gateway.agent_id,
+        gateway_type = gateway.gateway_type.as_str(),
+        status = %gateway.status,
+        "api handler completed"
+    );
     Ok(Json(gateway.summary(false)))
 }
 
@@ -732,6 +1078,16 @@ async fn get_gateway(
     Path(gateway_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let gateway = require_gateway(&state, &gateway_id)?;
+    tracing::info!(
+        route = "/gateways/:gateway_id",
+        action = "get_gateway",
+        gateway_id = %gateway_id,
+        agent_id = %gateway.agent_id,
+        gateway_type = gateway.gateway_type.as_str(),
+        enabled = gateway.enabled,
+        status = %gateway.status,
+        "api handler completed"
+    );
     Ok(Json(gateway.summary(false)))
 }
 
@@ -773,7 +1129,21 @@ async fn update_gateway(
     }
     gateway.updated_at = utc_now();
     let enabled = gateway.enabled;
+    let gateway_type = gateway.gateway_type;
+    let agent_id = gateway.agent_id.clone();
     state.gateways.update(gateway)?;
+    tracing::info!(
+        route = "/gateways/:gateway_id",
+        action = "update_gateway",
+        gateway_id = %gateway_id,
+        agent_id = %agent_id,
+        gateway_type = gateway_type.as_str(),
+        enabled,
+        previously_enabled,
+        config_changed,
+        was_running,
+        "gateway updated"
+    );
     if enabled && !previously_enabled {
         start_gateway_by_id(&state, &gateway_id).await.map(Json)
     } else if !enabled && previously_enabled {
@@ -793,9 +1163,24 @@ async fn delete_gateway(
 ) -> Result<StatusCode, ApiError> {
     let gateway = require_gateway(&state, &gateway_id)?;
     if !matches!(gateway.status.as_str(), "stopped" | "error") {
+        tracing::info!(
+            route = "/gateways/:gateway_id",
+            action = "delete_gateway",
+            gateway_id = %gateway_id,
+            agent_id = %gateway.agent_id,
+            gateway_type = gateway.gateway_type.as_str(),
+            status = %gateway.status,
+            "destroying gateway before delete"
+        );
         let _ignored = state.agent_host.destroy_gateway(&gateway_id).await;
     }
     let _removed = state.gateways.delete(&gateway_id)?;
+    tracing::info!(
+        route = "/gateways/:gateway_id",
+        action = "delete_gateway",
+        gateway_id = %gateway_id,
+        "api handler completed"
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -803,6 +1188,12 @@ async fn start_gateway(
     State(state): State<AppState>,
     Path(gateway_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    tracing::info!(
+        route = "/gateways/:gateway_id/start",
+        action = "start_gateway",
+        gateway_id = %gateway_id,
+        "starting gateway"
+    );
     start_gateway_by_id(&state, &gateway_id).await.map(Json)
 }
 
@@ -810,6 +1201,12 @@ async fn stop_gateway(
     State(state): State<AppState>,
     Path(gateway_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    tracing::info!(
+        route = "/gateways/:gateway_id/stop",
+        action = "stop_gateway",
+        gateway_id = %gateway_id,
+        "stopping gateway"
+    );
     stop_gateway_by_id(&state, &gateway_id).await.map(Json)
 }
 
@@ -819,6 +1216,13 @@ async fn gateway_logs(
 ) -> Result<Json<Value>, ApiError> {
     let _gateway = require_gateway(&state, &gateway_id)?;
     let lines = state.agent_host.gateway_logs(&gateway_id).await?;
+    tracing::info!(
+        route = "/gateways/:gateway_id/logs",
+        action = "gateway_logs",
+        gateway_id = %gateway_id,
+        line_count = lines.len(),
+        "api handler completed"
+    );
     Ok(Json(json!({ "lines": lines })))
 }
 
@@ -829,6 +1233,14 @@ async fn start_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value
     gateway.updated_at = utc_now();
     state.gateways.update(gateway.clone())?;
     let env = gateway.effective_env();
+    tracing::info!(
+        action = "start_gateway_by_id",
+        gateway_id = %gateway_id,
+        agent_id = %gateway.agent_id,
+        gateway_type = gateway.gateway_type.as_str(),
+        env_var_count = env.len(),
+        "creating upstream gateway"
+    );
     match state
         .agent_host
         .create_gateway(
@@ -847,6 +1259,15 @@ async fn start_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value
                 .map(ToOwned::to_owned);
             gateway.updated_at = utc_now();
             state.gateways.update(gateway.clone())?;
+            tracing::info!(
+                action = "start_gateway_by_id",
+                gateway_id = %gateway_id,
+                agent_id = %gateway.agent_id,
+                gateway_type = gateway.gateway_type.as_str(),
+                status = %gateway.status,
+                has_container = gateway.container_name.is_some(),
+                "gateway started"
+            );
             Ok(gateway.summary(false))
         }
         Err(error) => {
@@ -854,6 +1275,12 @@ async fn start_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value
             gateway.last_error = Some(error.to_string());
             gateway.updated_at = utc_now();
             state.gateways.update(gateway)?;
+            tracing::warn!(
+                action = "start_gateway_by_id",
+                gateway_id = %gateway_id,
+                error_kind = "agent_host_error",
+                "gateway start failed"
+            );
             Err(error.into())
         }
     }
@@ -863,11 +1290,25 @@ async fn stop_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value,
     let mut gateway = require_gateway(state, gateway_id)?;
     if let Err(error) = state.agent_host.destroy_gateway(gateway_id).await {
         gateway.last_error = Some(error.to_string());
+        tracing::warn!(
+            action = "stop_gateway_by_id",
+            gateway_id = %gateway_id,
+            error_kind = "agent_host_error",
+            "gateway destroy failed while stopping"
+        );
     }
     "stopped".clone_into(&mut gateway.status);
     gateway.container_name = None;
     gateway.updated_at = utc_now();
     state.gateways.update(gateway.clone())?;
+    tracing::info!(
+        action = "stop_gateway_by_id",
+        gateway_id = %gateway_id,
+        agent_id = %gateway.agent_id,
+        gateway_type = gateway.gateway_type.as_str(),
+        status = %gateway.status,
+        "gateway stopped"
+    );
     Ok(gateway.summary(false))
 }
 
@@ -879,8 +1320,22 @@ async fn require_kernel(state: &AppState, kernel_session_id: &str) -> Result<(),
             .and_then(Value::as_str)
             .is_some_and(|value| value == kernel_session_id)
     }) {
+        tracing::debug!(
+            action = "require_kernel",
+            kernel_session_id = %kernel_session_id,
+            kernel_count = sessions.len(),
+            found = true,
+            "kernel found"
+        );
         Ok(())
     } else {
+        tracing::warn!(
+            action = "require_kernel",
+            kernel_session_id = %kernel_session_id,
+            kernel_count = sessions.len(),
+            found = false,
+            "kernel not found"
+        );
         Err(ApiError::not_found(format!(
             "kernel {kernel_session_id:?} not found"
         )))
@@ -913,6 +1368,15 @@ fn session_env(
             agent.system_prompt.clone(),
         );
     }
+    tracing::debug!(
+        action = "session_env",
+        agent_id = %agent.agent_id,
+        harness = agent.harness.as_str(),
+        env_var_count = env.len(),
+        has_connection = agent.connection_id.is_some(),
+        has_system_prompt = !agent.system_prompt.is_empty(),
+        "session environment prepared"
+    );
     Ok(env)
 }
 
@@ -938,6 +1402,13 @@ impl Drop for ActiveTurnGuard {
             Ok(mut active_turns) => {
                 if active_turns.get(&self.session_id) == Some(&self.turn_id) {
                     active_turns.remove(&self.session_id);
+                    tracing::debug!(
+                        action = "active_turn_guard_drop",
+                        session_id = %self.session_id,
+                        turn_id = %self.turn_id,
+                        active_turn_count = active_turns.len(),
+                        "active turn cleared"
+                    );
                 }
             }
             Err(_error) => {
@@ -981,8 +1452,17 @@ fn start_streaming_turn(
     "busy".clone_into(&mut session.status);
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
-    state.sessions.append_message(user_message)?;
-    state.sessions.append_message(assistant_message)?;
+    state.sessions.append_message(&user_message)?;
+    state.sessions.append_message(&assistant_message)?;
+
+    tracing::info!(
+        action = "start_streaming_turn",
+        session_id = %session.session_id,
+        turn_id = %turn_id,
+        kernel_session_id = %session.agent_host_session_id,
+        message_char_count = message.chars().count(),
+        "streaming turn initialized"
+    );
 
     Ok(StreamingTurn {
         turn_id,
@@ -1005,12 +1485,28 @@ fn begin_active_turn(
         .lock()
         .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
     if let Some(existing_turn_id) = active_turns.get(session_id) {
+        tracing::warn!(
+            action = "begin_active_turn",
+            session_id = %session_id,
+            turn_id = %turn_id,
+            existing_turn_id = %existing_turn_id,
+            error_kind = "active_turn_conflict",
+            "session already has active turn"
+        );
         return Err(ApiError::conflict(format!(
             "session {session_id:?} already has active turn {existing_turn_id:?}"
         )));
     }
     active_turns.insert(session_id.to_owned(), turn_id.to_owned());
+    let active_turn_count = active_turns.len();
     drop(active_turns);
+    tracing::info!(
+        action = "begin_active_turn",
+        session_id = %session_id,
+        turn_id = %turn_id,
+        active_turn_count,
+        "active turn registered"
+    );
     Ok(ActiveTurnGuard {
         state: state.clone(),
         session_id: session_id.to_owned(),
@@ -1018,67 +1514,166 @@ fn begin_active_turn(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_streaming_turn(state: AppState, turn: StreamingTurn, sender: NdjsonSender) {
     let mut events = Vec::new();
     let mut completed = false;
     let mut error = None;
+
+    tracing::info!(
+        action = "run_streaming_turn",
+        session_id = %turn.session_id,
+        turn_id = %turn.turn_id,
+        kernel_session_id = %turn.agent_host_session_id,
+        "upstream stream starting"
+    );
 
     match state
         .agent_host
         .stream_message(&turn.agent_host_session_id, &turn.message)
         .await
     {
-        Ok(mut stream) => loop {
-            match stream.next_event().await {
-                Ok(Some(event)) => {
-                    events.push(event);
-                    let assistant_message = assistant_message_from_events(
-                        &turn.session_id,
-                        &turn.assistant_message_id,
-                        &turn.assistant_created_at,
-                        &events,
-                    );
-                    if let Err(store_error) = state.sessions.update_message(assistant_message) {
-                        error = Some(store_error.to_string());
+        Ok(mut stream) => {
+            tracing::info!(
+                action = "run_streaming_turn",
+                session_id = %turn.session_id,
+                turn_id = %turn.turn_id,
+                kernel_session_id = %turn.agent_host_session_id,
+                "upstream stream opened"
+            );
+            loop {
+                match stream.next_event().await {
+                    Ok(Some(event)) => {
+                        let event_type = kernel_event_type(&event).to_owned();
+                        let update_type = kernel_event_update_type(&event).map(ToOwned::to_owned);
+                        events.push(event);
+                        let assistant_message = assistant_message_from_events(
+                            &turn.session_id,
+                            &turn.assistant_message_id,
+                            &turn.assistant_created_at,
+                            &events,
+                        );
+                        if let Err(store_error) = state.sessions.update_message(&assistant_message)
+                        {
+                            error = Some(store_error.to_string());
+                            tracing::error!(
+                                action = "run_streaming_turn",
+                                session_id = %turn.session_id,
+                                turn_id = %turn.turn_id,
+                                kernel_session_id = %turn.agent_host_session_id,
+                                event_count = events.len(),
+                                error_kind = "store_update_message",
+                                "streaming turn failed to persist event"
+                            );
+                            break;
+                        }
+
+                        tracing::debug!(
+                            action = "run_streaming_turn",
+                            session_id = %turn.session_id,
+                            turn_id = %turn.turn_id,
+                            kernel_session_id = %turn.agent_host_session_id,
+                            event_count = events.len(),
+                            event_type = %event_type,
+                            update_type = ?update_type,
+                            "streaming event processed"
+                        );
+
+                        let event = Value::Object(events.last().cloned().unwrap_or_default());
+                        let sent = send_ndjson_item(
+                            &sender,
+                            &json!({
+                                "type": "event",
+                                "event": event,
+                            }),
+                        )
+                        .await;
+                        if !sent {
+                            tracing::warn!(
+                                action = "run_streaming_turn",
+                                session_id = %turn.session_id,
+                                turn_id = %turn.turn_id,
+                                kernel_session_id = %turn.agent_host_session_id,
+                                event_count = events.len(),
+                                error_kind = "stream_receiver_closed",
+                                "streaming event send failed"
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        completed = true;
+                        tracing::info!(
+                            action = "run_streaming_turn",
+                            session_id = %turn.session_id,
+                            turn_id = %turn.turn_id,
+                            kernel_session_id = %turn.agent_host_session_id,
+                            event_count = events.len(),
+                            "upstream stream completed"
+                        );
                         break;
                     }
-
-                    let event = Value::Object(events.last().cloned().unwrap_or_default());
-                    let _sent = send_ndjson_item(
-                        &sender,
-                        &json!({
-                            "type": "event",
-                            "event": event,
-                        }),
-                    )
-                    .await;
-                }
-                Ok(None) => {
-                    completed = true;
-                    break;
-                }
-                Err(stream_error) => {
-                    error = Some(stream_error.to_string());
-                    break;
+                    Err(stream_error) => {
+                        error = Some(stream_error.to_string());
+                        tracing::warn!(
+                            action = "run_streaming_turn",
+                            session_id = %turn.session_id,
+                            turn_id = %turn.turn_id,
+                            kernel_session_id = %turn.agent_host_session_id,
+                            event_count = events.len(),
+                            error_kind = "upstream_stream_event",
+                            "upstream stream event failed"
+                        );
+                        break;
+                    }
                 }
             }
-        },
+        }
         Err(stream_error) => {
             error = Some(stream_error.to_string());
+            tracing::warn!(
+                action = "run_streaming_turn",
+                session_id = %turn.session_id,
+                turn_id = %turn.turn_id,
+                kernel_session_id = %turn.agent_host_session_id,
+                error_kind = "upstream_stream_start",
+                "upstream stream failed to start"
+            );
         }
     }
 
     let final_payload =
         match finalize_streaming_turn(&state, &turn, &events, completed, error.as_deref()).await {
             Ok(payload) => payload,
-            Err(finalize_error) => json!({
-                "type": "final",
-                "turn_id": turn.turn_id,
-                "completed": false,
-                "error": finalize_error.detail,
-            }),
+            Err(finalize_error) => {
+                tracing::error!(
+                    action = "run_streaming_turn",
+                    session_id = %turn.session_id,
+                    turn_id = %turn.turn_id,
+                    kernel_session_id = %turn.agent_host_session_id,
+                    error_kind = finalize_error.error_kind(),
+                    status = finalize_error.status.as_u16(),
+                    "streaming turn finalization failed"
+                );
+                json!({
+                    "type": "final",
+                    "turn_id": turn.turn_id.clone(),
+                    "completed": false,
+                    "error": finalize_error.detail,
+                })
+            }
         };
-    let _sent = send_ndjson_item(&sender, &final_payload).await;
+    let sent = send_ndjson_item(&sender, &final_payload).await;
+    tracing::info!(
+        action = "run_streaming_turn",
+        session_id = %turn.session_id,
+        turn_id = %turn.turn_id,
+        kernel_session_id = %turn.agent_host_session_id,
+        completed,
+        has_error = error.is_some(),
+        event_count = events.len(),
+        final_sent = sent,
+        "streaming turn finished"
+    );
 }
 
 async fn finalize_streaming_turn(
@@ -1094,7 +1689,7 @@ async fn finalize_streaming_turn(
         &turn.assistant_created_at,
         events,
     );
-    state.sessions.update_message(assistant_message.clone())?;
+    state.sessions.update_message(&assistant_message.clone())?;
 
     let mut session = require_session(state, &turn.session_id)?;
     if let Ok(upstream) = state
@@ -1110,6 +1705,19 @@ async fn finalize_streaming_turn(
     }
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
+
+    tracing::info!(
+        action = "finalize_streaming_turn",
+        session_id = %turn.session_id,
+        turn_id = %turn.turn_id,
+        kernel_session_id = %turn.agent_host_session_id,
+        status = %session.status,
+        completed,
+        has_error = error.is_some(),
+        event_count = events.len(),
+        tool_call_count = assistant_message.tool_calls.len(),
+        "streaming turn finalized"
+    );
 
     let mut payload = json!({
         "type": "final",
@@ -1138,6 +1746,14 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
     let mut session = require_session(state, session_id)?;
     let turn_id = Uuid::now_v7().simple().to_string();
     let _active_turn = begin_active_turn(state, &session.session_id, &turn_id)?;
+    tracing::info!(
+        action = "run_turn",
+        session_id = %session.session_id,
+        turn_id = %turn_id,
+        kernel_session_id = %session.agent_host_session_id,
+        message_char_count = message.chars().count(),
+        "synchronous turn started"
+    );
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
         session.session_id.clone(),
@@ -1149,19 +1765,27 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
     "busy".clone_into(&mut session.status);
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
-    state.sessions.append_message(user_message)?;
+    state.sessions.append_message(&user_message)?;
 
     let events = state
         .agent_host
         .send_message(&session.agent_host_session_id, message)
         .await?;
+    tracing::info!(
+        action = "run_turn",
+        session_id = %session.session_id,
+        turn_id = %turn_id,
+        kernel_session_id = %session.agent_host_session_id,
+        event_count = events.len(),
+        "synchronous turn upstream completed"
+    );
     let assistant_message = assistant_message_from_events(
         &session.session_id,
         &assistant_message_id,
         &assistant_created_at,
         &events,
     );
-    state.sessions.append_message(assistant_message.clone())?;
+    state.sessions.append_message(&assistant_message.clone())?;
     let mut session = require_session(state, session_id)?;
     if let Ok(upstream) = state
         .agent_host
@@ -1173,6 +1797,16 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
     }
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
+    tracing::info!(
+        action = "run_turn",
+        session_id = %session.session_id,
+        turn_id = %turn_id,
+        kernel_session_id = %session.agent_host_session_id,
+        status = %session.status,
+        event_count = events.len(),
+        tool_call_count = assistant_message.tool_calls.len(),
+        "synchronous turn completed"
+    );
     Ok(json!({
         "session": session.summary(),
         "assistant_message": assistant_message.summary(),
@@ -1180,6 +1814,17 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
         "turn_id": turn_id,
         "completed": true,
     }))
+}
+
+fn kernel_event_type(event: &KernelEvent) -> &str {
+    event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+}
+
+fn kernel_event_update_type(event: &KernelEvent) -> Option<&str> {
+    session_update(event).and_then(|update| update.get("sessionUpdate").and_then(Value::as_str))
 }
 
 fn assistant_message_from_events(
@@ -1653,11 +2298,32 @@ impl ApiError {
             detail,
         }
     }
+
+    fn error_kind(&self) -> &'static str {
+        match self.status {
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::CONFLICT => "conflict",
+            StatusCode::UNPROCESSABLE_ENTITY => "validation",
+            StatusCode::BAD_GATEWAY => "bad_gateway",
+            StatusCode::INTERNAL_SERVER_ERROR => "internal",
+            status if status.is_client_error() => "client_error",
+            status if status.is_server_error() => "server_error",
+            _ => "error",
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.status, Json(json!({ "detail": self.detail }))).into_response()
+        let status = self.status;
+        let error_kind = self.error_kind();
+        let detail = self.detail;
+        if status.is_server_error() {
+            tracing::error!(status = status.as_u16(), error_kind, "api error response");
+        } else {
+            tracing::warn!(status = status.as_u16(), error_kind, "api error response");
+        }
+        (status, Json(json!({ "detail": detail }))).into_response()
     }
 }
 
@@ -1688,12 +2354,12 @@ impl From<StoreError> for ApiError {
 impl From<AgentHostError> for ApiError {
     fn from(error: AgentHostError) -> Self {
         match error {
-            AgentHostError::HttpStatus { status, body } if status == StatusCode::NOT_FOUND => {
-                Self::not_found(body)
+            AgentHostError::HttpStatus { status, .. } if status == StatusCode::NOT_FOUND => {
+                Self::not_found(format!("agent_host returned HTTP {status}"))
             }
-            AgentHostError::HttpStatus { status, body } if status.is_client_error() => Self {
+            AgentHostError::HttpStatus { status, .. } if status.is_client_error() => Self {
                 status,
-                detail: body,
+                detail: format!("agent_host returned HTTP {status}"),
             },
             other => Self::bad_gateway(other.to_string()),
         }
