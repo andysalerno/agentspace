@@ -1,1 +1,95 @@
-//! Placeholder module for future client service errors.
+use std::{
+    error::Error,
+    fmt::{self, Display, Formatter},
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ValidationError {
+    InvalidAgentId { value: String },
+    InvalidConnectionId { value: String },
+    InvalidGatewayId { value: String },
+    InvalidSkillId { value: String },
+    InvalidConnectionApiFlavor { value: String },
+    InvalidHarnessName { value: String },
+    InvalidGatewayType { value: String },
+}
+
+impl Display for ValidationError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAgentId { value } => write!(
+                formatter,
+                "agent_id must use lowercase letters and single dashes only, got {value:?}"
+            ),
+            Self::InvalidConnectionId { value } => write!(
+                formatter,
+                "connection_id must use lowercase letters and single dashes only, got {value:?}"
+            ),
+            Self::InvalidGatewayId { value } => write!(
+                formatter,
+                "gateway_id must use lowercase letters and single dashes only, got {value:?}"
+            ),
+            Self::InvalidSkillId { value } => write!(
+                formatter,
+                "skill_id must use lowercase letters, digits, and single dashes only, got {value:?}"
+            ),
+            Self::InvalidConnectionApiFlavor { value } => write!(
+                formatter,
+                "connection api_flavor must be chat_completions or responses, got {value:?}"
+            ),
+            Self::InvalidHarnessName { value } => {
+                write!(formatter, "unsupported harness name {value:?}")
+            }
+            Self::InvalidGatewayType { value } => {
+                write!(formatter, "unsupported gateway type {value:?}")
+            }
+        }
+    }
+}
+
+impl Error for ValidationError {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoreError {
+    AgentAlreadyExists { agent_id: String },
+    AgentNotFound { agent_id: String },
+    ConnectionAlreadyExists { connection_id: String },
+    ConnectionNotFound { connection_id: String },
+    GatewayAlreadyExists { gateway_id: String },
+    GatewayNotFound { gateway_id: String },
+    SessionAlreadyExists { session_id: String },
+    SessionNotFound { session_id: String },
+    LockPoisoned { store: &'static str },
+}
+
+impl Display for StoreError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AgentAlreadyExists { agent_id } => {
+                write!(formatter, "agent {agent_id:?} already exists")
+            }
+            Self::AgentNotFound { agent_id } => write!(formatter, "agent {agent_id:?} not found"),
+            Self::ConnectionAlreadyExists { connection_id } => {
+                write!(formatter, "connection {connection_id:?} already exists")
+            }
+            Self::ConnectionNotFound { connection_id } => {
+                write!(formatter, "connection {connection_id:?} not found")
+            }
+            Self::GatewayAlreadyExists { gateway_id } => {
+                write!(formatter, "gateway {gateway_id:?} already exists")
+            }
+            Self::GatewayNotFound { gateway_id } => {
+                write!(formatter, "gateway {gateway_id:?} not found")
+            }
+            Self::SessionAlreadyExists { session_id } => {
+                write!(formatter, "session {session_id:?} already exists")
+            }
+            Self::SessionNotFound { session_id } => {
+                write!(formatter, "session {session_id:?} not found")
+            }
+            Self::LockPoisoned { store } => write!(formatter, "{store} store lock is poisoned"),
+        }
+    }
+}
+
+impl Error for StoreError {}
