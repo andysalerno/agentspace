@@ -29,6 +29,14 @@ check:
 test:
   uv run --all-packages pytest
 
+client-service-rs-check:
+  cargo fmt --check --manifest-path services/client_service_rs/Cargo.toml
+  cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
+  cargo clippy --manifest-path services/client_service_rs/Cargo.toml --all-targets --all-features
+
+client-service-rs-image:
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest services/client_service_rs
+
 webui-outdated:
   npm --prefix clients/webui outdated
 

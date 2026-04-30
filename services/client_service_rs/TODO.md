@@ -2,10 +2,9 @@
 
 ## Current state
 
-`client_service_rs` is an initial Rust port milestone for
-`services/client_service`. It is a standalone Axum service intended to match the
-Python FastAPI service API surface closely enough for incremental replacement
-work.
+`client_service_rs` is a Rust port milestone for `services/client_service`. It
+is a standalone Axum service intended to match the Python FastAPI service API
+surface closely enough for incremental replacement work.
 
 The crate currently builds and validates with:
 
@@ -48,47 +47,34 @@ The service can be started from this directory with:
 - Added route and unit tests for the implemented in-memory behavior and upstream
   client helpers.
 - Added `README.md`, `.gitignore`, and `run-service.sh`.
+- Added durable SQLite persistence selected by `CLIENT_SERVICE_DB_PATH`, using
+  table and column names compatible with the Python service where practical.
+- Added route-level contract tests for Python-compatible response shapes and
+  status codes.
+- Added stub `agent_host` integration tests for session environment merging,
+  message send/stream behavior, kernels, logs, skills, and gateways.
+- Expanded `/harnesses` to all modeled harnesses and improved gateway schema
+  responses for echo and Discord gateways.
+- Added opt-in Docker and compose wiring plus `just client-service-rs-check` and
+  `just client-service-rs-image`.
 
 ## Remaining work
 
-### In progress in the current porting pass
-
-- Add durable SQLite persistence for Rust service state.
-- Add route-level contract coverage for Python-compatible response shapes and
-  status codes.
-- Add stub `agent_host` integration coverage for proxied routes and session
-  environment merging.
-- Improve harness listing and gateway schema parity.
-- Add operational Docker/check wiring where it is useful without replacing the
-  Python service defaults.
-
-### Backlog
-
-1. Add durable SQLite persistence compatible with the Python service tables or
-   define and document a migration path.
-2. Compare every Rust response body against the Python FastAPI service with
-   contract tests, especially update/patch semantics and error payload details.
-3. Expand `/harnesses` parity once the Rust service can discover all registered
-   harnesses instead of returning only the currently wired default.
-4. Improve active-turn lifecycle parity for streaming reconnects via
+1. Compare every Rust response body against a live Python FastAPI service with
+   end-to-end contract tests; current tests cover important route contracts and
+   proxy behavior but do not run both implementations side by side.
+2. Improve active-turn lifecycle parity for streaming reconnects via
    `/sessions/{session_id}/turns/{turn_id}/stream`.
-5. Persist and replay completed turn metadata if reconnect behavior needs to
+3. Persist and replay completed turn metadata if reconnect behavior needs to
    survive process restarts.
-6. Implement full gateway schema parity for
-   `/gateway-types/{gateway_type}/schema` instead of the current simplified
-   schema response.
-7. Add integration tests with a stub or real `agent_host` covering:
-   - session creation environment merging
-   - message send and stream behavior
-   - kernel list/log/container-log routes
-   - skill proxy routes
-   - gateway start/stop/log routes
-8. Add Docker and compose integration once the Rust service is ready to run as a
-   drop-in replacement in the stack.
-9. Decide whether `client_service_rs` should be wired into top-level repo checks
-   such as `just check`.
-10. Add performance and concurrency tests for simultaneous sessions, message
+4. Continue refining gateway schema parity if new gateway implementations add
+   dynamic settings beyond the current echo/Discord schema responses.
+5. Decide whether `client_service_rs` should be wired into top-level repo checks
+   such as `just check`; it currently has a dedicated `just client-service-rs-check`.
+6. Add performance and concurrency tests for simultaneous sessions, message
     streams, and gateway operations.
+7. Add a planned cutover path for running `client_service_rs` as the default
+   `client_service` in the full stack once parity is proven.
 
 ## Notes for the next porting pass
 
