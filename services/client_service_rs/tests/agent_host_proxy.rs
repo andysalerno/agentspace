@@ -186,7 +186,12 @@ async fn stream_host_message(
     )?;
     let stream = concat!(
         "{\"type\":\"reasoning_delta\",\"content\":\"thinking\"}\n",
-        "{\"type\":\"text_delta\",\"content\":\"Hello from stub\"}\n",
+        "{\"type\":\"text_delta\",\"content\":\"Hello \"}\n",
+        "{\"type\":\"tool_call\",\"tool\":\"shell\",\"input\":{\"cmd\":\"pwd\"}}\n",
+        "{\"type\":\"tool_result\",\"tool\":\"shell\",\"output\":\"/repo\"}\n",
+        "{\"type\":\"session/update\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"from stub\"}}}\n",
+        "{\"type\":\"session/update\",\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"call_1\",\"title\":\"Run tests\",\"kind\":\"command\",\"status\":\"pending\",\"rawInput\":{\"cmd\":\"pytest\"}}}\n",
+        "{\"type\":\"session/update\",\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"call_1\",\"status\":\"completed\",\"content\":[{\"type\":\"content\",\"content\":{\"type\":\"text\",\"text\":\"passed\"}}]}}\n",
     );
     Ok((
         StatusCode::OK,
@@ -563,6 +568,26 @@ async fn send_message_proxies_to_stream_and_persists_messages()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["assistant_message"]["content"], "Hello from stub");
     assert_eq!(value["assistant_message"]["reasoning"], "thinking");
+    assert_eq!(
+        value["assistant_message"]["tool_calls"],
+        json!([
+            {
+                "tool": "shell",
+                "input": "{\n  \"cmd\": \"pwd\"\n}",
+                "output": "/repo",
+                "content_offset": 5
+            },
+            {
+                "tool": "Run tests",
+                "tool_call_id": "call_1",
+                "status": "completed",
+                "kind": "command",
+                "input": "{\n  \"cmd\": \"pytest\"\n}",
+                "output": "passed",
+                "content_offset": 15
+            }
+        ])
+    );
 
     let (status, messages) = get_json(&app, &format!("/sessions/{session_id}/messages")).await?;
     assert_eq!(status, StatusCode::OK);
@@ -570,6 +595,10 @@ async fn send_message_proxies_to_stream_and_persists_messages()
     assert_eq!(messages["messages"][0]["content"], "Hello?");
     assert_eq!(messages["messages"][1]["role"], "assistant");
     assert_eq!(messages["messages"][1]["content"], "Hello from stub");
+    assert_eq!(
+        messages["messages"][1]["tool_calls"],
+        value["assistant_message"]["tool_calls"]
+    );
 
     assert_eq!(
         server.recorded()?,
@@ -623,13 +652,35 @@ async fn stream_message_returns_ndjson_events_and_final_payload()
         .lines()
         .map(serde_json::from_str::<Value>)
         .collect::<Result<Vec<_>, _>>()?;
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 8);
     assert_eq!(lines[0]["type"], "event");
     assert_eq!(lines[0]["event"]["type"], "reasoning_delta");
-    assert_eq!(lines[1]["event"]["content"], "Hello from stub");
-    assert_eq!(lines[2]["type"], "final");
-    assert_eq!(lines[2]["completed"], true);
-    assert_eq!(lines[2]["assistant_message"]["content"], "Hello from stub");
+    assert_eq!(lines[1]["event"]["content"], "Hello ");
+    assert_eq!(lines[2]["event"]["type"], "tool_call");
+    assert_eq!(lines[5]["event"]["update"]["sessionUpdate"], "tool_call");
+    assert_eq!(lines[7]["type"], "final");
+    assert_eq!(lines[7]["completed"], true);
+    assert_eq!(lines[7]["assistant_message"]["content"], "Hello from stub");
+    assert_eq!(
+        lines[7]["assistant_message"]["tool_calls"],
+        json!([
+            {
+                "tool": "shell",
+                "input": "{\n  \"cmd\": \"pwd\"\n}",
+                "output": "/repo",
+                "content_offset": 5
+            },
+            {
+                "tool": "Run tests",
+                "tool_call_id": "call_1",
+                "status": "completed",
+                "kind": "command",
+                "input": "{\n  \"cmd\": \"pytest\"\n}",
+                "output": "passed",
+                "content_offset": 15
+            }
+        ])
+    );
 
     Ok(())
 }

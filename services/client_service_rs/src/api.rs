@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, str::FromStr};
+use std::{collections::BTreeMap, convert::Infallible, str::FromStr};
 
 use axum::{
     Json, Router,
@@ -10,6 +10,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::{
@@ -18,8 +20,8 @@ use crate::{
     errors::{StoreError, ValidationError},
     models::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
-        HarnessName, MessageRecord, MessageRole, SessionRecord, parse_env_vars, utc_now,
-        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord, parse_env_vars,
+        utc_now, validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
     },
 };
 
@@ -444,19 +446,10 @@ async fn stream_message(
     Path(session_id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Response, ApiError> {
-    let final_payload = run_turn(&state, &session_id, &payload.message).await?;
-    let mut lines = String::new();
-    if let Some(events) = final_payload.get("events").and_then(Value::as_array) {
-        for event in events {
-            push_ndjson_line(&mut lines, &json!({ "type": "event", "event": event }))?;
-        }
-    }
-    let mut final_stream_payload = final_payload;
-    if let Value::Object(object) = &mut final_stream_payload {
-        object.insert("type".to_owned(), json!("final"));
-    }
-    push_ndjson_line(&mut lines, &final_stream_payload)?;
-    Ok(ndjson_response(lines))
+    let turn = start_streaming_turn(&state, &session_id, payload.message)?;
+    let (sender, receiver) = mpsc::channel(16);
+    tokio::spawn(run_streaming_turn(state, turn, sender));
+    Ok(ndjson_stream_response(receiver))
 }
 
 async fn stream_turn(
@@ -923,9 +916,228 @@ fn session_env(
     Ok(env)
 }
 
+struct StreamingTurn {
+    turn_id: String,
+    session_id: String,
+    agent_host_session_id: String,
+    message: String,
+    assistant_message_id: String,
+    assistant_created_at: String,
+    _active_turn: ActiveTurnGuard,
+}
+
+struct ActiveTurnGuard {
+    state: AppState,
+    session_id: String,
+    turn_id: String,
+}
+
+impl Drop for ActiveTurnGuard {
+    fn drop(&mut self) {
+        match self.state.active_turns.lock() {
+            Ok(mut active_turns) => {
+                if active_turns.get(&self.session_id) == Some(&self.turn_id) {
+                    active_turns.remove(&self.session_id);
+                }
+            }
+            Err(_error) => {
+                tracing::error!(
+                    session_id = %self.session_id,
+                    turn_id = %self.turn_id,
+                    "active turn lock poisoned while clearing turn"
+                );
+            }
+        }
+    }
+}
+
+type NdjsonSender = mpsc::Sender<Result<Vec<u8>, Infallible>>;
+type NdjsonReceiver = mpsc::Receiver<Result<Vec<u8>, Infallible>>;
+
+fn start_streaming_turn(
+    state: &AppState,
+    session_id: &str,
+    message: String,
+) -> Result<StreamingTurn, ApiError> {
+    let mut session = require_session(state, session_id)?;
+    let turn_id = Uuid::now_v7().simple().to_string();
+    let active_turn = begin_active_turn(state, &session.session_id, &turn_id)?;
+    let user_message = MessageRecord::new(
+        Uuid::now_v7().simple().to_string(),
+        session.session_id.clone(),
+        MessageRole::User,
+        message.clone(),
+    );
+    let assistant_message_id = Uuid::now_v7().simple().to_string();
+    let assistant_created_at = utc_now();
+    let mut assistant_message = MessageRecord::new(
+        assistant_message_id.clone(),
+        session.session_id.clone(),
+        MessageRole::Assistant,
+        "",
+    );
+    assistant_created_at.clone_into(&mut assistant_message.created_at);
+
+    "busy".clone_into(&mut session.status);
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+    state.sessions.append_message(user_message)?;
+    state.sessions.append_message(assistant_message)?;
+
+    Ok(StreamingTurn {
+        turn_id,
+        session_id: session.session_id,
+        agent_host_session_id: session.agent_host_session_id,
+        message,
+        assistant_message_id,
+        assistant_created_at,
+        _active_turn: active_turn,
+    })
+}
+
+fn begin_active_turn(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<ActiveTurnGuard, ApiError> {
+    let mut active_turns = state
+        .active_turns
+        .lock()
+        .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
+    if let Some(existing_turn_id) = active_turns.get(session_id) {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} already has active turn {existing_turn_id:?}"
+        )));
+    }
+    active_turns.insert(session_id.to_owned(), turn_id.to_owned());
+    drop(active_turns);
+    Ok(ActiveTurnGuard {
+        state: state.clone(),
+        session_id: session_id.to_owned(),
+        turn_id: turn_id.to_owned(),
+    })
+}
+
+async fn run_streaming_turn(state: AppState, turn: StreamingTurn, sender: NdjsonSender) {
+    let mut events = Vec::new();
+    let mut completed = false;
+    let mut error = None;
+
+    match state
+        .agent_host
+        .stream_message(&turn.agent_host_session_id, &turn.message)
+        .await
+    {
+        Ok(mut stream) => loop {
+            match stream.next_event().await {
+                Ok(Some(event)) => {
+                    events.push(event);
+                    let assistant_message = assistant_message_from_events(
+                        &turn.session_id,
+                        &turn.assistant_message_id,
+                        &turn.assistant_created_at,
+                        &events,
+                    );
+                    if let Err(store_error) = state.sessions.update_message(assistant_message) {
+                        error = Some(store_error.to_string());
+                        break;
+                    }
+
+                    let event = Value::Object(events.last().cloned().unwrap_or_default());
+                    let _sent = send_ndjson_item(
+                        &sender,
+                        &json!({
+                            "type": "event",
+                            "event": event,
+                        }),
+                    )
+                    .await;
+                }
+                Ok(None) => {
+                    completed = true;
+                    break;
+                }
+                Err(stream_error) => {
+                    error = Some(stream_error.to_string());
+                    break;
+                }
+            }
+        },
+        Err(stream_error) => {
+            error = Some(stream_error.to_string());
+        }
+    }
+
+    let final_payload =
+        match finalize_streaming_turn(&state, &turn, &events, completed, error.as_deref()).await {
+            Ok(payload) => payload,
+            Err(finalize_error) => json!({
+                "type": "final",
+                "turn_id": turn.turn_id,
+                "completed": false,
+                "error": finalize_error.detail,
+            }),
+        };
+    let _sent = send_ndjson_item(&sender, &final_payload).await;
+}
+
+async fn finalize_streaming_turn(
+    state: &AppState,
+    turn: &StreamingTurn,
+    events: &[KernelEvent],
+    completed: bool,
+    error: Option<&str>,
+) -> Result<Value, ApiError> {
+    let assistant_message = assistant_message_from_events(
+        &turn.session_id,
+        &turn.assistant_message_id,
+        &turn.assistant_created_at,
+        events,
+    );
+    state.sessions.update_message(assistant_message.clone())?;
+
+    let mut session = require_session(state, &turn.session_id)?;
+    if let Ok(upstream) = state
+        .agent_host
+        .get_session(&turn.agent_host_session_id)
+        .await
+    {
+        if let Ok(status) = string_field(&upstream, "status") {
+            session.status = status;
+        }
+    } else if error.is_some() {
+        "error".clone_into(&mut session.status);
+    }
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+
+    let mut payload = json!({
+        "type": "final",
+        "session": session.summary(),
+        "assistant_message": assistant_message.summary(),
+        "events": events,
+        "turn_id": turn.turn_id,
+        "completed": completed,
+    });
+    if let Some(error) = error
+        && let Value::Object(object) = &mut payload
+    {
+        object.insert("error".to_owned(), json!(error));
+    }
+    Ok(payload)
+}
+
+async fn send_ndjson_item(sender: &NdjsonSender, value: &Value) -> bool {
+    match ndjson_line_bytes(value) {
+        Ok(line) => sender.send(Ok(line)).await.is_ok(),
+        Err(_error) => false,
+    }
+}
+
 async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<Value, ApiError> {
     let mut session = require_session(state, session_id)?;
     let turn_id = Uuid::now_v7().simple().to_string();
+    let _active_turn = begin_active_turn(state, &session.session_id, &turn_id)?;
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
         session.session_id.clone(),
@@ -984,7 +1196,164 @@ fn assistant_message_from_events(
     );
     created_at.clone_into(&mut message.created_at);
     message.reasoning = flatten_reasoning(events);
+    message.tool_calls = extract_tool_calls(events);
     message
+}
+
+fn extract_tool_calls(events: &[KernelEvent]) -> Vec<ToolCallRecord> {
+    let mut calls = Vec::new();
+    let mut by_id = BTreeMap::new();
+    let mut content = String::new();
+
+    for event in events {
+        match event.get("type").and_then(Value::as_str) {
+            Some("text_delta") => {
+                if let Some(chunk) = event.get("content").and_then(Value::as_str) {
+                    content.push_str(chunk);
+                }
+                continue;
+            }
+            Some("tool_call") => {
+                if let Some(tool) = event.get("tool").and_then(Value::as_str) {
+                    let mut call = ToolCallRecord::new(tool);
+                    call.input = event.get("input").and_then(json_string);
+                    call.content_offset = Some(trimmed_char_count(&content));
+                    calls.push(call);
+                }
+                continue;
+            }
+            Some("tool_result") => {
+                if let Some(tool) = event.get("tool").and_then(Value::as_str) {
+                    apply_legacy_tool_result(&mut calls, tool, event.get("output"));
+                }
+                continue;
+            }
+            _ => {}
+        }
+
+        let update = session_update(event);
+        match update.and_then(|update| update.get("sessionUpdate").and_then(Value::as_str)) {
+            Some("agent_message_chunk") => {
+                if let Some(update) = update {
+                    content.push_str(&content_text(update.get("content")));
+                }
+            }
+            Some("tool_call" | "tool_call_update") => {
+                if let Some(update) = update {
+                    upsert_tool_call(&mut calls, &mut by_id, update, trimmed_char_count(&content));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    calls
+}
+
+fn apply_legacy_tool_result(calls: &mut [ToolCallRecord], tool: &str, output: Option<&Value>) {
+    let Some(output) = output.and_then(Value::as_str) else {
+        return;
+    };
+    if let Some(call) = calls
+        .iter_mut()
+        .find(|call| call.tool == tool && call.output.is_none())
+    {
+        call.output = Some(output.to_owned());
+    }
+}
+
+fn session_update(event: &KernelEvent) -> Option<&JsonObject> {
+    if event.get("type").and_then(Value::as_str) != Some("session/update") {
+        return None;
+    }
+    event.get("update").and_then(Value::as_object)
+}
+
+fn upsert_tool_call(
+    calls: &mut Vec<ToolCallRecord>,
+    by_id: &mut BTreeMap<String, usize>,
+    update: &JsonObject,
+    content_offset: usize,
+) {
+    let tool_call_id = optional_string(update.get("toolCallId"));
+    let mut index = tool_call_id
+        .as_ref()
+        .and_then(|tool_call_id| by_id.get(tool_call_id).copied());
+    if index.is_none() {
+        let title = optional_non_empty_string(update.get("title"))
+            .or_else(|| {
+                tool_call_id
+                    .as_ref()
+                    .filter(|value| !value.is_empty())
+                    .cloned()
+            })
+            .unwrap_or_else(|| "tool".to_owned());
+        let new_index = calls.len();
+        index = Some(new_index);
+        calls.push(ToolCallRecord {
+            tool: title,
+            tool_call_id: tool_call_id.clone(),
+            status: None,
+            kind: None,
+            input: None,
+            output: None,
+            content_offset: Some(content_offset),
+        });
+        if let Some(tool_call_id) = tool_call_id {
+            by_id.insert(tool_call_id, new_index);
+        }
+    }
+
+    let Some(call) = index.and_then(|index| calls.get_mut(index)) else {
+        return;
+    };
+    if let Some(title) = optional_non_empty_string(update.get("title")) {
+        call.tool = title;
+    }
+    if let Some(status) = optional_non_empty_string(update.get("status")) {
+        call.status = Some(status);
+    }
+    if let Some(kind) = optional_non_empty_string(update.get("kind")) {
+        call.kind = Some(kind);
+    }
+    if let Some(raw_input) = update.get("rawInput") {
+        call.input = json_string(raw_input);
+    }
+    if let Some(output) = tool_output(update) {
+        call.output = Some(output);
+    }
+}
+
+fn tool_output(update: &JsonObject) -> Option<String> {
+    if let Some(raw_output) = update.get("rawOutput") {
+        return json_string(raw_output);
+    }
+    let content = content_text(update.get("content"));
+    if content.is_empty() {
+        None
+    } else {
+        Some(content)
+    }
+}
+
+fn json_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        _ => serde_json::to_string_pretty(value).ok(),
+    }
+}
+
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(ToOwned::to_owned)
+}
+
+fn optional_non_empty_string(value: Option<&Value>) -> Option<String> {
+    optional_string(value).filter(|value| !value.is_empty())
+}
+
+fn trimmed_char_count(value: &str) -> usize {
+    value.trim().chars().count()
 }
 
 fn flatten_text(events: &[KernelEvent]) -> String {
@@ -1045,15 +1414,13 @@ fn content_text(content: Option<&Value>) -> String {
     }
 }
 
-fn push_ndjson_line(lines: &mut String, value: &Value) -> Result<(), ApiError> {
-    let line = serde_json::to_string(value)
-        .map_err(|error| ApiError::internal(format!("failed to serialize stream item: {error}")))?;
-    lines.push_str(&line);
-    lines.push('\n');
-    Ok(())
+fn ndjson_line_bytes(value: &Value) -> Result<Vec<u8>, serde_json::Error> {
+    let mut line = serde_json::to_vec(value)?;
+    line.push(b'\n');
+    Ok(line)
 }
 
-fn ndjson_response(lines: String) -> Response {
+fn ndjson_stream_response(receiver: NdjsonReceiver) -> Response {
     (
         StatusCode::OK,
         [
@@ -1061,7 +1428,7 @@ fn ndjson_response(lines: String) -> Response {
             (header::CACHE_CONTROL, "no-cache"),
             (header::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
-        Body::from(lines),
+        Body::from_stream(ReceiverStream::new(receiver)),
     )
         .into_response()
 }
@@ -1336,24 +1703,119 @@ impl From<AgentHostError> for ApiError {
 #[cfg(test)]
 #[allow(clippy::too_many_lines)]
 mod tests {
-    use std::{collections::BTreeMap, error::Error, time::Duration};
+    use std::{
+        collections::BTreeMap,
+        convert::Infallible,
+        error::Error,
+        net::SocketAddr,
+        time::{Duration, Instant},
+    };
 
     use axum::{
-        Router,
+        Json, Router,
         body::{Body, to_bytes},
-        http::{Method, Request, StatusCode},
+        extract::{Path, State},
+        http::{Method, Request, StatusCode, header},
+        response::{IntoResponse, Response},
+        routing::{get, post},
     };
+    use http_body_util::BodyExt;
     use serde_json::{Value, json};
+    use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::sleep};
+    use tokio_stream::wrappers::ReceiverStream;
     use tower::ServiceExt;
 
     use crate::{AppConfig, AppState, agent_host::AgentHostClient, build_router};
 
     fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
+        test_router_with_agent_host("http://127.0.0.1:9", Duration::from_millis(50))
+    }
+
+    fn test_router_with_agent_host(
+        agent_host_base_url: &str,
+        timeout: Duration,
+    ) -> Result<Router, Box<dyn Error + Send + Sync>> {
         let mut env = BTreeMap::new();
         env.insert("CLIENT_SERVICE_TEST".to_owned(), "enabled".to_owned());
-        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env);
-        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let config = AppConfig::new("127.0.0.1", 0, agent_host_base_url, env);
+        let agent_host = AgentHostClient::new(agent_host_base_url, timeout)?;
         Ok(build_router(AppState::with_agent_host(config, agent_host)))
+    }
+
+    struct StreamingUpstream {
+        base_url: String,
+        handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    impl StreamingUpstream {
+        async fn start(final_delay: Duration) -> Result<Self, Box<dyn Error + Send + Sync>> {
+            let app = Router::new()
+                .route("/sessions", post(upstream_create_session))
+                .route("/sessions/{session_id}", get(upstream_get_session))
+                .route(
+                    "/sessions/{session_id}/messages/stream",
+                    post(upstream_stream_message),
+                )
+                .with_state(final_delay);
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let handle = tokio::spawn(axum::serve(listener, app).into_future());
+
+            Ok(Self {
+                base_url: format_base_url(address),
+                handle,
+            })
+        }
+    }
+
+    impl Drop for StreamingUpstream {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
+    }
+
+    fn format_base_url(address: SocketAddr) -> String {
+        format!("http://{address}")
+    }
+
+    async fn upstream_create_session(Json(_body): Json<Value>) -> Json<Value> {
+        Json(json!({ "session_id": "upstream-session", "status": "idle" }))
+    }
+
+    async fn upstream_get_session(Path(session_id): Path<String>) -> Json<Value> {
+        Json(json!({ "session_id": session_id, "status": "idle" }))
+    }
+
+    async fn upstream_stream_message(
+        State(final_delay): State<Duration>,
+        Path(_session_id): Path<String>,
+        Json(_body): Json<Value>,
+    ) -> Response {
+        let (sender, receiver) = mpsc::channel::<Result<Vec<u8>, Infallible>>(4);
+        tokio::spawn(async move {
+            let _sent = sender
+                .send(Ok(test_ndjson_line(
+                    &json!({ "type": "text_delta", "content": "he" }),
+                )))
+                .await;
+            sleep(final_delay).await;
+            let _sent = sender
+                .send(Ok(test_ndjson_line(
+                    &json!({ "type": "text_delta", "content": "llo" }),
+                )))
+                .await;
+        });
+        (
+            StatusCode::OK,
+            Body::from_stream(ReceiverStream::new(receiver)),
+        )
+            .into_response()
+    }
+
+    fn test_ndjson_line(value: &Value) -> Vec<u8> {
+        let mut line = serde_json::to_vec(value).unwrap_or_else(|_error| Vec::from("{}"));
+        line.push(b'\n');
+        line
     }
 
     async fn request_json(
@@ -1650,6 +2112,205 @@ mod tests {
         let (status, value) = get_json(app, "/gateways/gateway-one").await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn message_stream_yields_events_before_final_response()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = StreamingUpstream::start(Duration::from_millis(200)).await?;
+        let app = test_router_with_agent_host(&upstream.base_url, Duration::from_secs(1))?;
+
+        let (status, _agent) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, session) = request_json(
+            app.clone(),
+            Method::POST,
+            "/sessions",
+            Some(json!({ "agent_id": "agent-one" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let session_id = session
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| std::io::Error::other("session_id missing"))?;
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/messages/stream"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "message": "hello" }),
+            )?))?;
+        let started = Instant::now();
+        let response =
+            tokio::time::timeout(Duration::from_millis(100), app.clone().oneshot(request))
+                .await
+                .map_err(|_elapsed| {
+                    std::io::Error::other("stream response was buffered until upstream completion")
+                })??;
+        assert!(
+            started.elapsed() < Duration::from_millis(150),
+            "stream response was not returned promptly"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&header::HeaderValue::from_static("application/x-ndjson"))
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static("no-cache"))
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::HeaderName::from_static("x-accel-buffering")),
+            Some(&header::HeaderValue::from_static("no"))
+        );
+
+        let mut body = response.into_body();
+        let first_frame = tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .map_err(|_elapsed| {
+                std::io::Error::other("first stream event did not arrive promptly")
+            })?
+            .ok_or_else(|| std::io::Error::other("stream ended before first event"))??;
+        let first_data = first_frame
+            .into_data()
+            .map_err(|_frame| std::io::Error::other("first frame was not data"))?;
+        let first_chunk = serde_json::from_slice::<Value>(&first_data)?;
+        assert_eq!(first_chunk["type"], "event");
+        assert_eq!(first_chunk["event"]["content"], "he");
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), body.frame())
+                .await
+                .is_err(),
+            "final stream item arrived before delayed upstream event"
+        );
+
+        let rest = tokio::time::timeout(Duration::from_millis(500), body.collect())
+            .await
+            .map_err(|_elapsed| {
+                std::io::Error::other("stream did not finish after delayed upstream event")
+            })??
+            .to_bytes();
+        let rest_chunks = std::str::from_utf8(&rest)?
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rest_chunks.len(), 2);
+        assert_eq!(rest_chunks[0]["type"], "event");
+        assert_eq!(rest_chunks[0]["event"]["content"], "llo");
+        assert_eq!(rest_chunks[1]["type"], "final");
+        assert_eq!(rest_chunks[1]["assistant_message"]["content"], "hello");
+        assert_eq!(rest_chunks[1]["completed"], true);
+
+        let (status, messages) = get_json(app, &format!("/sessions/{session_id}/messages")).await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(messages["messages"][1]["content"], "hello");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_message_requests_for_session_are_rejected()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = StreamingUpstream::start(Duration::from_millis(200)).await?;
+        let app = test_router_with_agent_host(&upstream.base_url, Duration::from_secs(1))?;
+
+        let (status, _agent) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, session) = request_json(
+            app.clone(),
+            Method::POST,
+            "/sessions",
+            Some(json!({ "agent_id": "agent-one" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let session_id = session
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| std::io::Error::other("session_id missing"))?;
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/messages/stream"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "message": "first" }),
+            )?))?;
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let first_frame = tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .map_err(|_elapsed| std::io::Error::other("first stream event did not arrive"))?
+            .ok_or_else(|| std::io::Error::other("stream ended before first event"))??;
+        let first_data = first_frame
+            .into_data()
+            .map_err(|_frame| std::io::Error::other("first frame was not data"))?;
+        let first_chunk = serde_json::from_slice::<Value>(&first_data)?;
+        assert_eq!(first_chunk["type"], "event");
+
+        for path in [
+            format!("/sessions/{session_id}/messages"),
+            format!("/sessions/{session_id}/messages/stream"),
+        ] {
+            let (status, value) = request_json(
+                app.clone(),
+                Method::POST,
+                &path,
+                Some(json!({ "message": "second" })),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::CONFLICT);
+            assert!(
+                value["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("already has active turn"))
+            );
+        }
+
+        let _rest = tokio::time::timeout(Duration::from_millis(500), body.collect())
+            .await
+            .map_err(|_elapsed| std::io::Error::other("stream did not finish"))??;
+
+        let (status, messages) =
+            get_json(app.clone(), &format!("/sessions/{session_id}/messages")).await?;
+        assert_eq!(status, StatusCode::OK);
+        let messages = messages["messages"]
+            .as_array()
+            .ok_or_else(|| std::io::Error::other("messages missing"))?;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"], "first");
+        assert_eq!(messages[1]["content"], "hello");
+
+        let (status, value) = request_json(
+            app,
+            Method::POST,
+            &format!("/sessions/{session_id}/messages"),
+            Some(json!({ "message": "third" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["assistant_message"]["content"], "hello");
 
         Ok(())
     }

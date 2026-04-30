@@ -4,6 +4,7 @@ use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     num::ParseIntError,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -131,6 +132,7 @@ pub struct AppState {
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
     pub(crate) sessions: SessionStore,
+    pub(crate) active_turns: Arc<Mutex<BTreeMap<String, String>>>,
     pub(crate) instance_id: Uuid,
     pub(crate) started_at: DateTime<Utc>,
 }
@@ -167,6 +169,7 @@ impl AppState {
             connections: stores.connections,
             gateways: stores.gateways,
             sessions: stores.sessions,
+            active_turns: Arc::new(Mutex::new(BTreeMap::new())),
             instance_id: Uuid::now_v7(),
             started_at: Utc::now(),
         }
