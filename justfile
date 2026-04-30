@@ -52,7 +52,7 @@ stack-up:
   podman compose -f compose.yaml up -d --build
 
 stack-up-client-service-rs:
-  CLIENT_SERVICE_IMAGE=agentspace-client-service-rs:latest CLIENT_SERVICE_BUILD_CONTEXT=services/client_service_rs CLIENT_SERVICE_DOCKERFILE=Dockerfile podman compose -f compose.yaml up -d --build
+  podman compose --env-file compose.client-service-rs.env -f compose.yaml up -d --build
 
 # Same as stack-up but with the rootless-Podman override (uses the user's
 # podman.sock instead of /var/run/docker.sock and works around libpod's

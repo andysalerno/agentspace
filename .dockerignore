@@ -28,6 +28,10 @@
 **/.next/
 **/*.tsbuildinfo
 
+# Rust build artifacts
+**/target/
+**/.cargo/
+
 # Local environment / secrets (compose loads these from disk separately)
 .env
 **/.env
