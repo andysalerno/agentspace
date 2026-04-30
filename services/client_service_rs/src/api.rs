@@ -124,7 +124,12 @@ async fn info(State(state): State<AppState>) -> Json<Value> {
 }
 
 async fn list_harnesses() -> Json<Vec<&'static str>> {
-    Json(vec![HarnessName::Acp.as_str()])
+    Json(
+        HarnessName::all()
+            .iter()
+            .map(|harness| harness.as_str())
+            .collect(),
+    )
 }
 
 async fn list_kernel_configs(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
@@ -324,9 +329,15 @@ async fn update_agent(
     if let Some(env_vars) = payload.env_vars {
         agent.env_vars = env_vars;
     }
-    if let Some(connection_id) = payload.connection_id {
-        require_connection(&state, &connection_id)?;
-        agent.connection_id = Some(connection_id);
+    match payload.connection_id {
+        NullableStringField::Missing => {}
+        NullableStringField::Null => {
+            agent.connection_id = None;
+        }
+        NullableStringField::Value(connection_id) => {
+            require_connection(&state, &connection_id)?;
+            agent.connection_id = Some(connection_id);
+        }
     }
     agent.updated_at = utc_now();
     let value = agent.summary();
@@ -625,22 +636,68 @@ async fn delete_skill(
 }
 
 async fn list_gateway_types() -> Json<Vec<&'static str>> {
-    Json(vec![
-        GatewayType::Echo.as_str(),
-        GatewayType::Discord.as_str(),
-    ])
+    Json(
+        GatewayType::all()
+            .iter()
+            .map(|gateway_type| gateway_type.as_str())
+            .collect(),
+    )
 }
 
 async fn get_gateway_type_schema(
     Path(raw_gateway_type): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let gateway_type = parse_gateway_type(&raw_gateway_type)?;
-    Ok(Json(json!({
-        "gateway_type": gateway_type.as_str(),
-        "type": "object",
-        "properties": {},
-        "required": [],
-    })))
+    Ok(Json(gateway_type_schema(gateway_type)))
+}
+
+fn gateway_type_schema(gateway_type: GatewayType) -> Value {
+    match gateway_type {
+        GatewayType::Echo => json!({ "fields": [] }),
+        GatewayType::Discord => json!({
+            "fields": [
+                {
+                    "key": "DISCORD_BOT_TOKEN",
+                    "label": "Bot token",
+                    "kind": "secret",
+                    "required": true,
+                    "description": "Bot token from the Discord Developer Portal.",
+                },
+                {
+                    "key": "DISCORD_OWNER_USER_ID",
+                    "label": "Owner user ID",
+                    "kind": "env",
+                    "required": true,
+                    "description": "Discord snowflake user ID of the only user the bot will respond to in DMs.",
+                    "placeholder": "123456789012345678",
+                },
+                {
+                    "key": "DISCORD_CHUNK_MAX_CHARS",
+                    "label": "Max chunk size (chars)",
+                    "kind": "env",
+                    "required": false,
+                    "description": "Maximum characters per outbound Discord message. Discord's hard limit is 2000.",
+                    "default": "1900",
+                },
+                {
+                    "key": "DISCORD_SIMULATED_TYPING_ENABLED",
+                    "label": "Simulated typing enabled",
+                    "kind": "env",
+                    "required": false,
+                    "description": "If true, deliver the agent reply as multiple messages (split on paragraph boundaries) with a typing indicator and a per-paragraph delay sized by SIMULATED_TYPING_WPM. Makes responses feel human-paced.",
+                    "default": "false",
+                },
+                {
+                    "key": "DISCORD_SIMULATED_TYPING_WPM",
+                    "label": "Simulated typing speed (wpm)",
+                    "kind": "env",
+                    "required": false,
+                    "description": "Words-per-minute used to size simulated typing delays. Ignored when SIMULATED_TYPING_ENABLED is false.",
+                    "default": "220",
+                },
+            ],
+        }),
+    }
 }
 
 async fn list_gateways(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
@@ -877,10 +934,10 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
     );
     let assistant_message_id = Uuid::now_v7().simple().to_string();
     let assistant_created_at = utc_now();
-    state.sessions.append_message(user_message)?;
     "busy".clone_into(&mut session.status);
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
+    state.sessions.append_message(user_message)?;
 
     let events = state
         .agent_host
@@ -893,6 +950,7 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
         &events,
     );
     state.sessions.append_message(assistant_message.clone())?;
+    let mut session = require_session(state, session_id)?;
     if let Ok(upstream) = state
         .agent_host
         .get_session(&session.agent_host_session_id)
@@ -1108,7 +1166,8 @@ struct UpdateAgentRequest {
     system_prompt: Option<String>,
     skills: Option<Vec<String>>,
     env_vars: Option<String>,
-    connection_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
+    connection_id: NullableStringField,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1166,6 +1225,24 @@ struct UpdateGatewayRequest {
 
 const fn default_harness() -> HarnessName {
     HarnessName::Acp
+}
+
+#[derive(Debug, Default)]
+enum NullableStringField {
+    #[default]
+    Missing,
+    Null,
+    Value(String),
+}
+
+fn deserialize_nullable_string_field<'de, D>(
+    deserializer: D,
+) -> Result<NullableStringField, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+        .map(|value| value.map_or(NullableStringField::Null, NullableStringField::Value))
 }
 
 #[derive(Debug)]
@@ -1234,7 +1311,9 @@ impl From<StoreError> for ApiError {
             | StoreError::ConnectionNotFound { .. }
             | StoreError::GatewayNotFound { .. }
             | StoreError::SessionNotFound { .. } => Self::not_found(error.to_string()),
-            StoreError::LockPoisoned { .. } => Self::internal(error.to_string()),
+            StoreError::LockPoisoned { .. } | StoreError::Persistence { .. } => {
+                Self::internal(error.to_string())
+            }
         }
     }
 }
@@ -1329,7 +1408,17 @@ mod tests {
 
         let (status, value) = get_json(app.clone(), "/harnesses").await?;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value, json!(["acp"]));
+        assert_eq!(
+            value,
+            json!([
+                "claude-code",
+                "echo",
+                "copilot-cli",
+                "codex",
+                "opencode",
+                "acp"
+            ])
+        );
 
         let (status, value) = get_json(app.clone(), "/kernel-configs/acp").await?;
         assert_eq!(status, StatusCode::OK);
@@ -1501,8 +1590,26 @@ mod tests {
 
         let (status, value) = get_json(app.clone(), "/gateway-types/echo/schema").await?;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(value["gateway_type"], "echo");
-        assert_eq!(value["type"], "object");
+        assert_eq!(value, json!({ "fields": [] }));
+
+        let (status, value) = get_json(app.clone(), "/gateway-types/discord/schema").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["fields"].as_array().map(Vec::len), Some(5));
+        assert_eq!(value["fields"][0]["key"], "DISCORD_BOT_TOKEN");
+        assert_eq!(value["fields"][1]["key"], "DISCORD_OWNER_USER_ID");
+        assert_eq!(value["fields"][2]["key"], "DISCORD_CHUNK_MAX_CHARS");
+        assert_eq!(
+            value["fields"][3]["key"],
+            "DISCORD_SIMULATED_TYPING_ENABLED"
+        );
+        assert_eq!(value["fields"][4]["key"], "DISCORD_SIMULATED_TYPING_WPM");
+        assert_eq!(value["fields"][0]["kind"], "secret");
+        assert_eq!(value["fields"][0]["required"], true);
+        assert_eq!(value["fields"][1]["placeholder"], "123456789012345678");
+
+        let (status, value) = get_json(app.clone(), "/gateway-types/not-a-type/schema").await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(value["detail"].is_string());
 
         let (status, value) = request_json(
             app.clone(),

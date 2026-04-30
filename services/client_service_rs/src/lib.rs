@@ -14,10 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     agent_host::AgentHostClient,
-    store::{
-        InMemoryAgentStore, InMemoryConnectionStore, InMemoryGatewayStore,
-        InMemoryKernelConfigStore, InMemorySessionStore,
-    },
+    store::{AgentStore, ConnectionStore, GatewayStore, KernelConfigStore, SessionStore, StoreSet},
 };
 
 pub mod agent_host;
@@ -88,6 +85,14 @@ impl AppConfig {
     pub fn agent_host_base_url(&self) -> &str {
         &self.agent_host_base_url
     }
+
+    #[must_use]
+    pub fn db_path(&self) -> Option<&str> {
+        self.client_service_env
+            .get("CLIENT_SERVICE_DB_PATH")
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    }
 }
 
 #[derive(Debug)]
@@ -121,11 +126,11 @@ pub struct AppState {
     pub(crate) config: AppConfig,
     pub(crate) http_client: reqwest::Client,
     pub(crate) agent_host: AgentHostClient,
-    pub(crate) agents: InMemoryAgentStore,
-    pub(crate) kernel_configs: InMemoryKernelConfigStore,
-    pub(crate) connections: InMemoryConnectionStore,
-    pub(crate) gateways: InMemoryGatewayStore,
-    pub(crate) sessions: InMemorySessionStore,
+    pub(crate) agents: AgentStore,
+    pub(crate) kernel_configs: KernelConfigStore,
+    pub(crate) connections: ConnectionStore,
+    pub(crate) gateways: GatewayStore,
+    pub(crate) sessions: SessionStore,
     pub(crate) instance_id: Uuid,
     pub(crate) started_at: DateTime<Utc>,
 }
@@ -136,20 +141,32 @@ impl AppState {
             config.agent_host_base_url(),
             Duration::from_secs(DEFAULT_AGENT_HOST_TIMEOUT_SECONDS),
         )?;
-        Ok(Self::with_agent_host(config, agent_host))
+        let stores = config
+            .db_path()
+            .map_or_else(|| Ok(StoreSet::in_memory()), StoreSet::sqlite)?;
+        Ok(Self::with_agent_host_and_stores(config, agent_host, stores))
     }
 
     #[must_use]
     pub fn with_agent_host(config: AppConfig, agent_host: AgentHostClient) -> Self {
+        Self::with_agent_host_and_stores(config, agent_host, StoreSet::in_memory())
+    }
+
+    #[must_use]
+    pub fn with_agent_host_and_stores(
+        config: AppConfig,
+        agent_host: AgentHostClient,
+        stores: StoreSet,
+    ) -> Self {
         Self {
             config,
             http_client: reqwest::Client::new(),
             agent_host,
-            agents: InMemoryAgentStore::new(),
-            kernel_configs: InMemoryKernelConfigStore::new(),
-            connections: InMemoryConnectionStore::new(),
-            gateways: InMemoryGatewayStore::new(),
-            sessions: InMemorySessionStore::new(),
+            agents: stores.agents,
+            kernel_configs: stores.kernel_configs,
+            connections: stores.connections,
+            gateways: stores.gateways,
+            sessions: stores.sessions,
             instance_id: Uuid::now_v7(),
             started_at: Utc::now(),
         }
@@ -167,4 +184,43 @@ fn parse_port() -> Result<u16, ConfigError> {
     let raw = env::var("CLIENT_SERVICE_PORT").unwrap_or_else(|_| DEFAULT_BIND_PORT.to_string());
     raw.parse()
         .map_err(|source| ConfigError::InvalidPort { raw, source })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
+
+    use crate::store::AgentStore;
+
+    use super::{AppConfig, AppState};
+
+    #[test]
+    fn app_state_uses_sqlite_when_db_path_is_configured() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("sqlite-tests");
+        fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{}.db", uuid::Uuid::now_v7().simple()));
+        let mut env = BTreeMap::new();
+        env.insert(
+            "CLIENT_SERVICE_DB_PATH".to_owned(),
+            path.to_string_lossy().into_owned(),
+        );
+
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env);
+        let state = AppState::new(config)?;
+        assert!(matches!(state.agents, AgentStore::Sqlite(_)));
+        drop(state);
+
+        let raw = path.to_string_lossy();
+        for candidate in [
+            path.clone(),
+            PathBuf::from(format!("{raw}-wal")),
+            PathBuf::from(format!("{raw}-shm")),
+        ] {
+            let _ignored = fs::remove_file(candidate);
+        }
+        Ok(())
+    }
 }

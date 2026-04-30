@@ -60,6 +60,7 @@ pub enum StoreError {
     SessionAlreadyExists { session_id: String },
     SessionNotFound { session_id: String },
     LockPoisoned { store: &'static str },
+    Persistence { store: &'static str, detail: String },
 }
 
 impl Display for StoreError {
@@ -88,6 +89,9 @@ impl Display for StoreError {
                 write!(formatter, "session {session_id:?} not found")
             }
             Self::LockPoisoned { store } => write!(formatter, "{store} store lock is poisoned"),
+            Self::Persistence { store, detail } => {
+                write!(formatter, "{store} store persistence error: {detail}")
+            }
         }
     }
 }

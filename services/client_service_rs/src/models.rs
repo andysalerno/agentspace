@@ -77,6 +77,20 @@ pub enum HarnessName {
 }
 
 impl HarnessName {
+    const ALL: [Self; 6] = [
+        Self::ClaudeCode,
+        Self::Echo,
+        Self::CopilotCli,
+        Self::Codex,
+        Self::Opencode,
+        Self::Acp,
+    ];
+
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -122,6 +136,13 @@ pub enum GatewayType {
 }
 
 impl GatewayType {
+    const ALL: [Self; 2] = [Self::Echo, Self::Discord];
+
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -872,6 +893,27 @@ mod tests {
 
     #[test]
     fn enum_parsing_accepts_contract_values() -> Result<(), Box<dyn Error + Send + Sync>> {
+        assert_eq!(
+            HarnessName::all()
+                .iter()
+                .map(|harness| harness.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "claude-code",
+                "echo",
+                "copilot-cli",
+                "codex",
+                "opencode",
+                "acp"
+            ]
+        );
+        assert_eq!(
+            GatewayType::all()
+                .iter()
+                .map(|gateway_type| gateway_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["echo", "discord"]
+        );
         assert_eq!(
             HarnessName::from_str("claude-code")?,
             HarnessName::ClaudeCode

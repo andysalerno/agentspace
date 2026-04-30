@@ -1,7 +1,10 @@
 use std::{
     collections::BTreeMap,
+    path::Path,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
+
+mod sqlite;
 
 use crate::{
     errors::StoreError,
@@ -10,6 +13,8 @@ use crate::{
         MessageRecord, SessionRecord, utc_now,
     },
 };
+
+pub use sqlite::SqliteDatabase;
 
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryAgentStore {
@@ -368,6 +373,332 @@ impl InMemorySessionStore {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct StoreSet {
+    pub(crate) agents: AgentStore,
+    pub(crate) kernel_configs: KernelConfigStore,
+    pub(crate) connections: ConnectionStore,
+    pub(crate) gateways: GatewayStore,
+    pub(crate) sessions: SessionStore,
+}
+
+impl StoreSet {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self {
+            agents: AgentStore::in_memory(),
+            kernel_configs: KernelConfigStore::in_memory(),
+            connections: ConnectionStore::in_memory(),
+            gateways: GatewayStore::in_memory(),
+            sessions: SessionStore::in_memory(),
+        }
+    }
+
+    pub fn sqlite(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let stores = sqlite::SqliteStoreSet::open(path)?;
+        Ok(Self {
+            agents: AgentStore::Sqlite(stores.agents),
+            kernel_configs: KernelConfigStore::Sqlite(stores.kernel_configs),
+            connections: ConnectionStore::Sqlite(stores.connections),
+            gateways: GatewayStore::Sqlite(stores.gateways),
+            sessions: SessionStore::Sqlite(stores.sessions),
+        })
+    }
+}
+
+impl Default for StoreSet {
+    fn default() -> Self {
+        Self::in_memory()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum AgentStore {
+    InMemory(InMemoryAgentStore),
+    Sqlite(sqlite::SqliteAgentStore),
+}
+
+impl AgentStore {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self::InMemory(InMemoryAgentStore::new())
+    }
+
+    pub fn list(&self) -> Result<Vec<AgentRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.list(),
+            Self::Sqlite(store) => store.list(),
+        }
+    }
+
+    pub fn get(&self, agent_id: &str) -> Result<Option<AgentRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.get(agent_id),
+            Self::Sqlite(store) => store.get(agent_id),
+        }
+    }
+
+    pub fn insert(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.insert(agent),
+            Self::Sqlite(store) => store.insert(agent),
+        }
+    }
+
+    pub fn update(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.update(agent),
+            Self::Sqlite(store) => store.update(agent),
+        }
+    }
+
+    pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.upsert(agent),
+            Self::Sqlite(store) => store.upsert(agent),
+        }
+    }
+
+    pub fn delete(&self, agent_id: &str) -> Result<bool, StoreError> {
+        match self {
+            Self::InMemory(store) => store.delete(agent_id),
+            Self::Sqlite(store) => store.delete(agent_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum KernelConfigStore {
+    InMemory(InMemoryKernelConfigStore),
+    Sqlite(sqlite::SqliteKernelConfigStore),
+}
+
+impl KernelConfigStore {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self::InMemory(InMemoryKernelConfigStore::new())
+    }
+
+    pub fn list(&self) -> Result<Vec<KernelConfigRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.list(),
+            Self::Sqlite(store) => store.list(),
+        }
+    }
+
+    pub fn get(&self, harness: HarnessName) -> Result<Option<KernelConfigRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.get(harness),
+            Self::Sqlite(store) => store.get(harness),
+        }
+    }
+
+    pub fn upsert(
+        &self,
+        harness: HarnessName,
+        env_vars: impl Into<String>,
+    ) -> Result<KernelConfigRecord, StoreError> {
+        let env_vars = env_vars.into();
+        match self {
+            Self::InMemory(store) => store.upsert(harness, env_vars),
+            Self::Sqlite(store) => store.upsert(harness, env_vars),
+        }
+    }
+
+    pub fn delete(&self, harness: HarnessName) -> Result<bool, StoreError> {
+        match self {
+            Self::InMemory(store) => store.delete(harness),
+            Self::Sqlite(store) => store.delete(harness),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ConnectionStore {
+    InMemory(InMemoryConnectionStore),
+    Sqlite(sqlite::SqliteConnectionStore),
+}
+
+impl ConnectionStore {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self::InMemory(InMemoryConnectionStore::new())
+    }
+
+    pub fn list(&self) -> Result<Vec<ConnectionRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.list(),
+            Self::Sqlite(store) => store.list(),
+        }
+    }
+
+    pub fn get(&self, connection_id: &str) -> Result<Option<ConnectionRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.get(connection_id),
+            Self::Sqlite(store) => store.get(connection_id),
+        }
+    }
+
+    pub fn insert(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.insert(connection),
+            Self::Sqlite(store) => store.insert(connection),
+        }
+    }
+
+    pub fn update(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.update(connection),
+            Self::Sqlite(store) => store.update(connection),
+        }
+    }
+
+    pub fn upsert(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.upsert(connection),
+            Self::Sqlite(store) => store.upsert(connection),
+        }
+    }
+
+    pub fn delete(&self, connection_id: &str) -> Result<bool, StoreError> {
+        match self {
+            Self::InMemory(store) => store.delete(connection_id),
+            Self::Sqlite(store) => store.delete(connection_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum GatewayStore {
+    InMemory(InMemoryGatewayStore),
+    Sqlite(sqlite::SqliteGatewayStore),
+}
+
+impl GatewayStore {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self::InMemory(InMemoryGatewayStore::new())
+    }
+
+    pub fn list(&self) -> Result<Vec<GatewayRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.list(),
+            Self::Sqlite(store) => store.list(),
+        }
+    }
+
+    pub fn get(&self, gateway_id: &str) -> Result<Option<GatewayRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.get(gateway_id),
+            Self::Sqlite(store) => store.get(gateway_id),
+        }
+    }
+
+    pub fn insert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.insert(gateway),
+            Self::Sqlite(store) => store.insert(gateway),
+        }
+    }
+
+    pub fn update(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.update(gateway),
+            Self::Sqlite(store) => store.update(gateway),
+        }
+    }
+
+    pub fn upsert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.upsert(gateway),
+            Self::Sqlite(store) => store.upsert(gateway),
+        }
+    }
+
+    pub fn delete(&self, gateway_id: &str) -> Result<bool, StoreError> {
+        match self {
+            Self::InMemory(store) => store.delete(gateway_id),
+            Self::Sqlite(store) => store.delete(gateway_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionStore {
+    InMemory(InMemorySessionStore),
+    Sqlite(sqlite::SqliteSessionStore),
+}
+
+impl SessionStore {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self::InMemory(InMemorySessionStore::new())
+    }
+
+    pub fn list(&self) -> Result<Vec<SessionRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.list(),
+            Self::Sqlite(store) => store.list(),
+        }
+    }
+
+    pub fn get(&self, session_id: &str) -> Result<Option<SessionRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.get(session_id),
+            Self::Sqlite(store) => store.get(session_id),
+        }
+    }
+
+    pub fn insert(&self, session: SessionRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.insert(session),
+            Self::Sqlite(store) => store.insert(session),
+        }
+    }
+
+    pub fn update(&self, session: SessionRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.update(session),
+            Self::Sqlite(store) => store.update(session),
+        }
+    }
+
+    pub fn upsert(&self, session: SessionRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.upsert(session),
+            Self::Sqlite(store) => store.upsert(session),
+        }
+    }
+
+    pub fn delete(&self, session_id: &str) -> Result<bool, StoreError> {
+        match self {
+            Self::InMemory(store) => store.delete(session_id),
+            Self::Sqlite(store) => store.delete(session_id),
+        }
+    }
+
+    pub fn append_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.append_message(message),
+            Self::Sqlite(store) => store.append_message(message),
+        }
+    }
+
+    pub fn update_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.update_message(message),
+            Self::Sqlite(store) => store.update_message(message),
+        }
+    }
+
+    pub fn clear_messages(&self, session_id: &str) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.clear_messages(session_id),
+            Self::Sqlite(store) => store.clear_messages(session_id),
+        }
+    }
+}
+
 fn read_lock<'a, T>(
     lock: &'a RwLock<T>,
     store: &'static str,
@@ -408,19 +739,23 @@ fn with_write<T, R>(
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{
+        error::Error,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     use crate::{
         errors::StoreError,
         models::{
-            AgentRecord, ConnectionRecord, GatewayRecord, GatewayType, HarnessName, MessageRecord,
-            MessageRole, SessionRecord,
+            AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord,
+            GatewayType, HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
         },
     };
 
     use super::{
         InMemoryAgentStore, InMemoryConnectionStore, InMemoryGatewayStore,
-        InMemoryKernelConfigStore, InMemorySessionStore,
+        InMemoryKernelConfigStore, InMemorySessionStore, StoreSet,
     };
 
     fn agent(agent_id: &str, created_at: &str) -> AgentRecord {
@@ -451,6 +786,25 @@ mod tests {
         record.created_at = created_at.to_owned();
         record.updated_at = created_at.to_owned();
         record
+    }
+
+    fn sqlite_test_path() -> Result<PathBuf, Box<dyn Error + Send + Sync>> {
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("sqlite-tests");
+        fs::create_dir_all(&directory)?;
+        Ok(directory.join(format!("{}.db", uuid::Uuid::now_v7().simple())))
+    }
+
+    fn cleanup_sqlite_path(path: &Path) {
+        let raw = path.to_string_lossy();
+        for candidate in [
+            path.to_path_buf(),
+            PathBuf::from(format!("{raw}-wal")),
+            PathBuf::from(format!("{raw}-shm")),
+        ] {
+            let _ignored = fs::remove_file(candidate);
+        }
     }
 
     #[test]
@@ -613,6 +967,123 @@ mod tests {
         ));
         assert!(store.delete("session")?);
         assert!(!store.delete("session")?);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_stores_persist_records_across_reopen() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = sqlite_test_path()?;
+        {
+            let stores = StoreSet::sqlite(&path)?;
+
+            let mut connection = connection("conn", "2024-01-01");
+            connection.api_flavor = ConnectionApiFlavor::Responses;
+            connection.api_key = "secret".to_owned();
+            stores.connections.insert(connection)?;
+
+            let mut agent = agent("agent", "2024-01-02");
+            agent.skills = vec!["skill-a".to_owned(), "skill-b".to_owned()];
+            agent.env_vars = "A=B".to_owned();
+            agent.connection_id = Some("conn".to_owned());
+            stores.agents.insert(agent)?;
+
+            stores.kernel_configs.upsert(HarnessName::Acp, "K=V")?;
+
+            let mut gateway = gateway("gateway", "2024-01-03");
+            gateway.enabled = true;
+            gateway.env_vars = "G=V".to_owned();
+            gateway
+                .secrets
+                .insert("TOKEN".to_owned(), "value".to_owned());
+            gateway.status = "running".to_owned();
+            gateway.container_name = Some("container".to_owned());
+            stores.gateways.insert(gateway)?;
+
+            let mut session = session("session", "2024-01-04");
+            session.channel_name = Some("cli".to_owned());
+            session.client_type = Some(ClientType::Cli);
+            stores.sessions.insert(session)?;
+
+            let mut message =
+                MessageRecord::new("message", "session", MessageRole::Assistant, "hello");
+            message.created_at = "2024-01-05".to_owned();
+            message.reasoning = "because".to_owned();
+            let mut tool_call = ToolCallRecord::new("shell");
+            tool_call.tool_call_id = Some("call-1".to_owned());
+            tool_call.status = Some("done".to_owned());
+            tool_call.kind = Some("command".to_owned());
+            tool_call.input = Some("echo hi".to_owned());
+            tool_call.output = Some("hi".to_owned());
+            tool_call.content_offset = Some(3);
+            message.tool_calls.push(tool_call);
+            stores.sessions.append_message(message)?;
+        }
+
+        {
+            let stores = StoreSet::sqlite(&path)?;
+
+            let connection =
+                stores
+                    .connections
+                    .get("conn")?
+                    .ok_or_else(|| StoreError::ConnectionNotFound {
+                        connection_id: "conn".to_owned(),
+                    })?;
+            assert_eq!(connection.api_flavor, ConnectionApiFlavor::Responses);
+            assert_eq!(connection.api_key, "secret");
+
+            let agent = stores
+                .agents
+                .get("agent")?
+                .ok_or_else(|| StoreError::AgentNotFound {
+                    agent_id: "agent".to_owned(),
+                })?;
+            assert_eq!(
+                agent.skills,
+                vec!["skill-a".to_owned(), "skill-b".to_owned()]
+            );
+            assert_eq!(agent.connection_id.as_deref(), Some("conn"));
+
+            let config = stores
+                .kernel_configs
+                .get(HarnessName::Acp)?
+                .ok_or_else(|| StoreError::Persistence {
+                    store: "kernel_configs",
+                    detail: "missing acp config".to_owned(),
+                })?;
+            assert_eq!(config.env_vars, "K=V");
+
+            let gateway =
+                stores
+                    .gateways
+                    .get("gateway")?
+                    .ok_or_else(|| StoreError::GatewayNotFound {
+                        gateway_id: "gateway".to_owned(),
+                    })?;
+            assert!(gateway.enabled);
+            assert_eq!(
+                gateway.secrets.get("TOKEN").map(String::as_str),
+                Some("value")
+            );
+            assert_eq!(gateway.container_name.as_deref(), Some("container"));
+
+            let session =
+                stores
+                    .sessions
+                    .get("session")?
+                    .ok_or_else(|| StoreError::SessionNotFound {
+                        session_id: "session".to_owned(),
+                    })?;
+            assert_eq!(session.client_type, Some(ClientType::Cli));
+            assert_eq!(session.messages.len(), 1);
+            let message = &session.messages[0];
+            assert_eq!(message.reasoning, "because");
+            assert_eq!(message.tool_calls.len(), 1);
+            assert_eq!(message.tool_calls[0].tool, "shell");
+            assert_eq!(message.tool_calls[0].content_offset, Some(3));
+        }
+
+        cleanup_sqlite_path(&path);
         Ok(())
     }
 }
