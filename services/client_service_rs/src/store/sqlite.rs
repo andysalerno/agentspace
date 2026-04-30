@@ -1,0 +1,1245 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::{self, Formatter},
+    fs,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
+
+use rusqlite::{Connection, Error as RusqliteError, ErrorCode, OptionalExtension, Row, params};
+
+use crate::{
+    errors::{StoreError, ValidationError},
+    models::{
+        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
+        HarnessName, KernelConfigRecord, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+        utc_now,
+    },
+};
+
+const AGENTS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS agents (
+    agent_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    system_prompt TEXT NOT NULL DEFAULT '',
+    skills_json TEXT NOT NULL DEFAULT '[]',
+    env_vars TEXT NOT NULL DEFAULT '',
+    connection_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
+const KERNEL_CONFIGS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS kernel_configs (
+    harness TEXT PRIMARY KEY,
+    env_vars TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+";
+
+const CONNECTIONS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS connections (
+    connection_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    api_flavor TEXT NOT NULL DEFAULT 'chat_completions',
+    api_key TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
+const GATEWAYS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS gateways (
+    gateway_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    gateway_type TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    env_vars TEXT NOT NULL DEFAULT '',
+    secrets_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'stopped',
+    last_error TEXT,
+    container_name TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
+const SESSIONS_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS client_sessions (
+    session_id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    agent_host_session_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    channel_name TEXT,
+    client_type TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS client_messages (
+    message_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    reasoning TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES client_sessions(session_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS client_message_tool_calls (
+    message_id TEXT NOT NULL,
+    idx INTEGER NOT NULL,
+    tool TEXT NOT NULL,
+    tool_call_id TEXT,
+    status TEXT,
+    kind TEXT,
+    input TEXT,
+    output TEXT,
+    content_offset INTEGER,
+    PRIMARY KEY(message_id, idx),
+    FOREIGN KEY(message_id) REFERENCES client_messages(message_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_client_messages_session
+    ON client_messages(session_id, created_at);
+";
+
+impl From<RusqliteError> for StoreError {
+    fn from(error: RusqliteError) -> Self {
+        Self::Persistence {
+            store: "sqlite",
+            detail: error.to_string(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct SqliteDatabase {
+    path: Arc<PathBuf>,
+    connection: Arc<Mutex<Connection>>,
+}
+
+impl SqliteDatabase {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let path = path.as_ref().to_path_buf();
+        if path != Path::new(":memory:")
+            && let Some(parent) = path.parent()
+        {
+            fs::create_dir_all(parent).map_err(|error| StoreError::Persistence {
+                store: "sqlite",
+                detail: format!("failed to create database directory: {error}"),
+            })?;
+        }
+        let connection = Connection::open(&path)?;
+        connection.execute_batch(
+            "PRAGMA foreign_keys=ON;\nPRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;",
+        )?;
+        Ok(Self {
+            path: Arc::new(path),
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn with_connection<T>(
+        &self,
+        store: &'static str,
+        action: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let guard = self
+            .connection
+            .lock()
+            .map_err(|_error| StoreError::LockPoisoned { store })?;
+        action(&guard)
+    }
+
+    fn with_mut_connection<T>(
+        &self,
+        store: &'static str,
+        action: impl FnOnce(&mut Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut guard = self
+            .connection
+            .lock()
+            .map_err(|_error| StoreError::LockPoisoned { store })?;
+        action(&mut guard)
+    }
+}
+
+impl fmt::Debug for SqliteDatabase {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SqliteDatabase")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqliteStoreSet {
+    pub(super) agents: SqliteAgentStore,
+    pub(super) kernel_configs: SqliteKernelConfigStore,
+    pub(super) connections: SqliteConnectionStore,
+    pub(super) gateways: SqliteGatewayStore,
+    pub(super) sessions: SqliteSessionStore,
+}
+
+impl SqliteStoreSet {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let database = SqliteDatabase::open(path)?;
+        initialize_schema(&database)?;
+        Ok(Self {
+            agents: SqliteAgentStore::new(database.clone()),
+            kernel_configs: SqliteKernelConfigStore::new(database.clone()),
+            connections: SqliteConnectionStore::new(database.clone()),
+            gateways: SqliteGatewayStore::new(database.clone()),
+            sessions: SqliteSessionStore::new(database),
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqliteAgentStore {
+    database: SqliteDatabase,
+}
+
+impl SqliteAgentStore {
+    #[must_use]
+    pub const fn new(database: SqliteDatabase) -> Self {
+        Self { database }
+    }
+
+    pub fn list(&self) -> Result<Vec<AgentRecord>, StoreError> {
+        self.database.with_connection("agents", |connection| {
+            let mut statement =
+                connection.prepare("SELECT * FROM agents ORDER BY created_at ASC, agent_id ASC")?;
+            let rows = statement.query_and_then([], row_to_agent)?;
+            rows.collect()
+        })
+    }
+
+    pub fn get(&self, agent_id: &str) -> Result<Option<AgentRecord>, StoreError> {
+        self.database.with_connection("agents", |connection| {
+            let mut statement = connection.prepare("SELECT * FROM agents WHERE agent_id = ?")?;
+            let mut rows = statement.query_and_then(params![agent_id], row_to_agent)?;
+            rows.next().transpose()
+        })
+    }
+
+    pub fn insert(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        self.database.with_connection("agents", |connection| {
+            match insert_agent(connection, &agent) {
+                Ok(()) => Ok(()),
+                Err(error) if is_constraint(&error) => Err(StoreError::AgentAlreadyExists {
+                    agent_id: agent.agent_id,
+                }),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
+    pub fn update(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        self.database.with_connection("agents", |connection| {
+            if !agent_exists(connection, &agent.agent_id)? {
+                return Err(StoreError::AgentNotFound {
+                    agent_id: agent.agent_id,
+                });
+            }
+            connection.execute(
+                "
+                UPDATE agents
+                   SET name = ?,
+                       harness = ?,
+                       system_prompt = ?,
+                       skills_json = ?,
+                       env_vars = ?,
+                       connection_id = ?,
+                       updated_at = ?
+                 WHERE agent_id = ?
+                ",
+                params![
+                    agent.name,
+                    agent.harness.as_str(),
+                    agent.system_prompt,
+                    skills_json(&agent.skills)?,
+                    agent.env_vars,
+                    agent.connection_id,
+                    agent.updated_at,
+                    agent.agent_id,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
+        self.database.with_connection("agents", |connection| {
+            connection.execute(
+                "
+                INSERT INTO agents (
+                    agent_id, name, harness, system_prompt,
+                    skills_json, env_vars, connection_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(agent_id) DO UPDATE SET
+                    name = excluded.name,
+                    harness = excluded.harness,
+                    system_prompt = excluded.system_prompt,
+                    skills_json = excluded.skills_json,
+                    env_vars = excluded.env_vars,
+                    connection_id = excluded.connection_id,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    agent.agent_id,
+                    agent.name,
+                    agent.harness.as_str(),
+                    agent.system_prompt,
+                    skills_json(&agent.skills)?,
+                    agent.env_vars,
+                    agent.connection_id,
+                    agent.created_at,
+                    agent.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delete(&self, agent_id: &str) -> Result<bool, StoreError> {
+        self.database.with_connection("agents", |connection| {
+            Ok(connection.execute("DELETE FROM agents WHERE agent_id = ?", params![agent_id])? > 0)
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqliteKernelConfigStore {
+    database: SqliteDatabase,
+}
+
+impl SqliteKernelConfigStore {
+    #[must_use]
+    pub const fn new(database: SqliteDatabase) -> Self {
+        Self { database }
+    }
+
+    pub fn list(&self) -> Result<Vec<KernelConfigRecord>, StoreError> {
+        self.database
+            .with_connection("kernel_configs", |connection| {
+                let mut statement =
+                    connection.prepare("SELECT * FROM kernel_configs ORDER BY harness ASC")?;
+                let rows = statement.query_and_then([], row_to_kernel_config)?;
+                rows.collect()
+            })
+    }
+
+    pub fn get(&self, harness: HarnessName) -> Result<Option<KernelConfigRecord>, StoreError> {
+        self.database
+            .with_connection("kernel_configs", |connection| {
+                let mut statement =
+                    connection.prepare("SELECT * FROM kernel_configs WHERE harness = ?")?;
+                let mut rows =
+                    statement.query_and_then(params![harness.as_str()], row_to_kernel_config)?;
+                rows.next().transpose()
+            })
+    }
+
+    pub fn upsert(
+        &self,
+        harness: HarnessName,
+        env_vars: impl Into<String>,
+    ) -> Result<KernelConfigRecord, StoreError> {
+        let env_vars = env_vars.into();
+        let record = KernelConfigRecord {
+            harness,
+            env_vars,
+            updated_at: utc_now(),
+        };
+        self.database
+            .with_connection("kernel_configs", |connection| {
+                connection.execute(
+                    "
+                    INSERT INTO kernel_configs (harness, env_vars, updated_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(harness) DO UPDATE SET
+                        env_vars = excluded.env_vars,
+                        updated_at = excluded.updated_at
+                    ",
+                    params![record.harness.as_str(), record.env_vars, record.updated_at],
+                )?;
+                Ok(())
+            })?;
+        Ok(record)
+    }
+
+    pub fn delete(&self, harness: HarnessName) -> Result<bool, StoreError> {
+        self.database
+            .with_connection("kernel_configs", |connection| {
+                Ok(connection.execute(
+                    "DELETE FROM kernel_configs WHERE harness = ?",
+                    params![harness.as_str()],
+                )? > 0)
+            })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqliteConnectionStore {
+    database: SqliteDatabase,
+}
+
+impl SqliteConnectionStore {
+    #[must_use]
+    pub const fn new(database: SqliteDatabase) -> Self {
+        Self { database }
+    }
+
+    pub fn list(&self) -> Result<Vec<ConnectionRecord>, StoreError> {
+        self.database.with_connection("connections", |connection| {
+            let mut statement = connection
+                .prepare("SELECT * FROM connections ORDER BY created_at ASC, connection_id ASC")?;
+            let rows = statement.query_and_then([], row_to_connection)?;
+            rows.collect()
+        })
+    }
+
+    pub fn get(&self, connection_id: &str) -> Result<Option<ConnectionRecord>, StoreError> {
+        self.database.with_connection("connections", |connection| {
+            let mut statement =
+                connection.prepare("SELECT * FROM connections WHERE connection_id = ?")?;
+            let mut rows = statement.query_and_then(params![connection_id], row_to_connection)?;
+            rows.next().transpose()
+        })
+    }
+
+    pub fn insert(&self, connection_record: ConnectionRecord) -> Result<(), StoreError> {
+        self.database.with_connection("connections", |connection| {
+            match insert_connection(connection, &connection_record) {
+                Ok(()) => Ok(()),
+                Err(error) if is_constraint(&error) => Err(StoreError::ConnectionAlreadyExists {
+                    connection_id: connection_record.connection_id,
+                }),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
+    pub fn update(&self, connection_record: ConnectionRecord) -> Result<(), StoreError> {
+        self.database.with_connection("connections", |connection| {
+            if !connection_exists(connection, &connection_record.connection_id)? {
+                return Err(StoreError::ConnectionNotFound {
+                    connection_id: connection_record.connection_id,
+                });
+            }
+            connection.execute(
+                "
+                UPDATE connections
+                   SET name = ?,
+                       url = ?,
+                       api_flavor = ?,
+                       api_key = ?,
+                       updated_at = ?
+                 WHERE connection_id = ?
+                ",
+                params![
+                    connection_record.name,
+                    connection_record.url,
+                    connection_record.api_flavor.as_str(),
+                    connection_record.api_key,
+                    connection_record.updated_at,
+                    connection_record.connection_id,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn upsert(&self, connection_record: ConnectionRecord) -> Result<(), StoreError> {
+        self.database.with_connection("connections", |connection| {
+            connection.execute(
+                "
+                INSERT INTO connections (
+                    connection_id, name, url, api_flavor, api_key, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(connection_id) DO UPDATE SET
+                    name = excluded.name,
+                    url = excluded.url,
+                    api_flavor = excluded.api_flavor,
+                    api_key = excluded.api_key,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    connection_record.connection_id,
+                    connection_record.name,
+                    connection_record.url,
+                    connection_record.api_flavor.as_str(),
+                    connection_record.api_key,
+                    connection_record.created_at,
+                    connection_record.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delete(&self, connection_id: &str) -> Result<bool, StoreError> {
+        self.database.with_connection("connections", |connection| {
+            Ok(connection.execute(
+                "DELETE FROM connections WHERE connection_id = ?",
+                params![connection_id],
+            )? > 0)
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqliteGatewayStore {
+    database: SqliteDatabase,
+}
+
+impl SqliteGatewayStore {
+    #[must_use]
+    pub const fn new(database: SqliteDatabase) -> Self {
+        Self { database }
+    }
+
+    pub fn list(&self) -> Result<Vec<GatewayRecord>, StoreError> {
+        self.database.with_connection("gateways", |connection| {
+            let mut statement = connection
+                .prepare("SELECT * FROM gateways ORDER BY created_at ASC, gateway_id ASC")?;
+            let rows = statement.query_and_then([], row_to_gateway)?;
+            rows.collect()
+        })
+    }
+
+    pub fn get(&self, gateway_id: &str) -> Result<Option<GatewayRecord>, StoreError> {
+        self.database.with_connection("gateways", |connection| {
+            let mut statement =
+                connection.prepare("SELECT * FROM gateways WHERE gateway_id = ?")?;
+            let mut rows = statement.query_and_then(params![gateway_id], row_to_gateway)?;
+            rows.next().transpose()
+        })
+    }
+
+    pub fn insert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        self.database.with_connection("gateways", |connection| {
+            match insert_gateway(connection, &gateway) {
+                Ok(()) => Ok(()),
+                Err(error) if is_constraint(&error) => Err(StoreError::GatewayAlreadyExists {
+                    gateway_id: gateway.gateway_id,
+                }),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
+    pub fn update(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        self.database.with_connection("gateways", |connection| {
+            if !gateway_exists(connection, &gateway.gateway_id)? {
+                return Err(StoreError::GatewayNotFound {
+                    gateway_id: gateway.gateway_id,
+                });
+            }
+            connection.execute(
+                "
+                UPDATE gateways
+                   SET name = ?,
+                       gateway_type = ?,
+                       agent_id = ?,
+                       enabled = ?,
+                       env_vars = ?,
+                       secrets_json = ?,
+                       status = ?,
+                       last_error = ?,
+                       container_name = ?,
+                       updated_at = ?
+                 WHERE gateway_id = ?
+                ",
+                params![
+                    gateway.name,
+                    gateway.gateway_type.as_str(),
+                    gateway.agent_id,
+                    enabled_int(gateway.enabled),
+                    gateway.env_vars,
+                    secrets_json(&gateway.secrets)?,
+                    gateway.status,
+                    gateway.last_error,
+                    gateway.container_name,
+                    gateway.updated_at,
+                    gateway.gateway_id,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn upsert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
+        self.database.with_connection("gateways", |connection| {
+            connection.execute(
+                "
+                INSERT INTO gateways (
+                    gateway_id, name, gateway_type, agent_id, enabled,
+                    env_vars, secrets_json, status, last_error,
+                    container_name, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(gateway_id) DO UPDATE SET
+                    name = excluded.name,
+                    gateway_type = excluded.gateway_type,
+                    agent_id = excluded.agent_id,
+                    enabled = excluded.enabled,
+                    env_vars = excluded.env_vars,
+                    secrets_json = excluded.secrets_json,
+                    status = excluded.status,
+                    last_error = excluded.last_error,
+                    container_name = excluded.container_name,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    gateway.gateway_id,
+                    gateway.name,
+                    gateway.gateway_type.as_str(),
+                    gateway.agent_id,
+                    enabled_int(gateway.enabled),
+                    gateway.env_vars,
+                    secrets_json(&gateway.secrets)?,
+                    gateway.status,
+                    gateway.last_error,
+                    gateway.container_name,
+                    gateway.created_at,
+                    gateway.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delete(&self, gateway_id: &str) -> Result<bool, StoreError> {
+        self.database.with_connection("gateways", |connection| {
+            Ok(connection.execute(
+                "DELETE FROM gateways WHERE gateway_id = ?",
+                params![gateway_id],
+            )? > 0)
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqliteSessionStore {
+    database: SqliteDatabase,
+}
+
+impl SqliteSessionStore {
+    #[must_use]
+    pub const fn new(database: SqliteDatabase) -> Self {
+        Self { database }
+    }
+
+    pub fn list(&self) -> Result<Vec<SessionRecord>, StoreError> {
+        self.database.with_connection("sessions", |connection| {
+            let mut statement = connection
+                .prepare("SELECT * FROM client_sessions ORDER BY created_at ASC, session_id ASC")?;
+            let rows = statement.query_and_then([], row_to_session_without_messages)?;
+            let mut sessions = rows.collect::<Result<Vec<_>, StoreError>>()?;
+            for session in &mut sessions {
+                session.messages = messages_for_session(connection, &session.session_id)?;
+            }
+            Ok(sessions)
+        })
+    }
+
+    pub fn get(&self, session_id: &str) -> Result<Option<SessionRecord>, StoreError> {
+        self.database.with_connection("sessions", |connection| {
+            let mut statement =
+                connection.prepare("SELECT * FROM client_sessions WHERE session_id = ?")?;
+            let mut rows =
+                statement.query_and_then(params![session_id], row_to_session_without_messages)?;
+            let mut session = rows.next().transpose()?;
+            if let Some(session) = &mut session {
+                session.messages = messages_for_session(connection, &session.session_id)?;
+            }
+            Ok(session)
+        })
+    }
+
+    pub fn insert(&self, session: SessionRecord) -> Result<(), StoreError> {
+        self.database.with_connection("sessions", |connection| {
+            match insert_session(connection, &session) {
+                Ok(()) => Ok(()),
+                Err(error) if is_constraint(&error) => Err(StoreError::SessionAlreadyExists {
+                    session_id: session.session_id,
+                }),
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
+    pub fn update(&self, session: SessionRecord) -> Result<(), StoreError> {
+        self.database.with_connection("sessions", |connection| {
+            if !session_exists(connection, &session.session_id)? {
+                return Err(StoreError::SessionNotFound {
+                    session_id: session.session_id,
+                });
+            }
+            connection.execute(
+                "
+                UPDATE client_sessions
+                   SET agent_id = ?,
+                       agent_host_session_id = ?,
+                       status = ?,
+                       channel_name = ?,
+                       client_type = ?,
+                       updated_at = ?
+                 WHERE session_id = ?
+                ",
+                params![
+                    session.agent_id,
+                    session.agent_host_session_id,
+                    session.status,
+                    session.channel_name,
+                    session.client_type.map(ClientType::as_str),
+                    session.updated_at,
+                    session.session_id,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn upsert(&self, session: SessionRecord) -> Result<(), StoreError> {
+        self.database.with_connection("sessions", |connection| {
+            connection.execute(
+                "
+                INSERT INTO client_sessions (
+                    session_id, agent_id, agent_host_session_id, status,
+                    channel_name, client_type, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    agent_id = excluded.agent_id,
+                    agent_host_session_id = excluded.agent_host_session_id,
+                    status = excluded.status,
+                    channel_name = excluded.channel_name,
+                    client_type = excluded.client_type,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    session.session_id,
+                    session.agent_id,
+                    session.agent_host_session_id,
+                    session.status,
+                    session.channel_name,
+                    session.client_type.map(ClientType::as_str),
+                    session.created_at,
+                    session.updated_at,
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn delete(&self, session_id: &str) -> Result<bool, StoreError> {
+        self.database.with_connection("sessions", |connection| {
+            Ok(connection.execute(
+                "DELETE FROM client_sessions WHERE session_id = ?",
+                params![session_id],
+            )? > 0)
+        })
+    }
+
+    pub fn append_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+        self.upsert_message(message)
+    }
+
+    pub fn update_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+        self.upsert_message(message)
+    }
+
+    pub fn clear_messages(&self, session_id: &str) -> Result<(), StoreError> {
+        self.database.with_connection("sessions", |connection| {
+            if !session_exists(connection, session_id)? {
+                return Err(StoreError::SessionNotFound {
+                    session_id: session_id.to_owned(),
+                });
+            }
+            connection.execute(
+                "DELETE FROM client_messages WHERE session_id = ?",
+                params![session_id],
+            )?;
+            Ok(())
+        })
+    }
+
+    fn upsert_message(&self, message: MessageRecord) -> Result<(), StoreError> {
+        self.database.with_mut_connection("sessions", |connection| {
+            if !session_exists(connection, &message.session_id)? {
+                return Err(StoreError::SessionNotFound {
+                    session_id: message.session_id,
+                });
+            }
+            let transaction = connection.transaction()?;
+            transaction.execute(
+                "
+                    INSERT INTO client_messages (
+                        message_id, session_id, role, content, reasoning, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(message_id) DO UPDATE SET
+                        role = excluded.role,
+                        content = excluded.content,
+                        reasoning = excluded.reasoning
+                    ",
+                params![
+                    message.message_id,
+                    message.session_id,
+                    message.role.as_str(),
+                    message.content,
+                    message.reasoning,
+                    message.created_at,
+                ],
+            )?;
+            transaction.execute(
+                "DELETE FROM client_message_tool_calls WHERE message_id = ?",
+                params![message.message_id],
+            )?;
+            for (index, tool_call) in message.tool_calls.iter().enumerate() {
+                transaction.execute(
+                    "
+                        INSERT INTO client_message_tool_calls (
+                            message_id, idx, tool, tool_call_id, status, kind,
+                            input, output, content_offset
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ",
+                    params![
+                        message.message_id,
+                        index_to_i64(index)?,
+                        tool_call.tool,
+                        tool_call.tool_call_id,
+                        tool_call.status,
+                        tool_call.kind,
+                        tool_call.input,
+                        tool_call.output,
+                        optional_usize_to_i64(tool_call.content_offset)?,
+                    ],
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })
+    }
+}
+
+fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
+    database.with_connection("sqlite", |connection| {
+        connection.execute_batch(AGENTS_SCHEMA)?;
+        connection.execute_batch(KERNEL_CONFIGS_SCHEMA)?;
+        connection.execute_batch(CONNECTIONS_SCHEMA)?;
+        connection.execute_batch(GATEWAYS_SCHEMA)?;
+        connection.execute_batch(SESSIONS_SCHEMA)?;
+        ensure_column(connection, "agents", "connection_id", "connection_id TEXT")?;
+        ensure_column(
+            connection,
+            "connections",
+            "api_flavor",
+            "api_flavor TEXT NOT NULL DEFAULT 'chat_completions'",
+        )?;
+        Ok(())
+    })
+}
+
+fn ensure_column(
+    connection: &Connection,
+    table: &'static str,
+    column: &'static str,
+    definition: &'static str,
+) -> Result<(), StoreError> {
+    let columns = table_columns(connection, table)?;
+    if !columns.contains(column) {
+        connection.execute(&format!("ALTER TABLE {table} ADD COLUMN {definition}"), [])?;
+    }
+    Ok(())
+}
+
+fn table_columns(connection: &Connection, table: &str) -> Result<BTreeSet<String>, StoreError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = statement.query_map([], |row| row.get::<_, String>("name"))?;
+    rows.collect::<Result<BTreeSet<_>, _>>().map_err(Into::into)
+}
+
+fn row_to_agent(row: &Row<'_>) -> Result<AgentRecord, StoreError> {
+    let skills_json: String = row.get("skills_json")?;
+    let decoded: serde_json::Value =
+        serde_json::from_str(&skills_json).map_err(json_error("agents"))?;
+    let skills = decoded
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let harness_raw: String = row.get("harness")?;
+    Ok(AgentRecord {
+        agent_id: row.get("agent_id")?,
+        name: row.get("name")?,
+        harness: parse_harness(&harness_raw)?,
+        system_prompt: row.get("system_prompt")?,
+        skills,
+        env_vars: row.get("env_vars")?,
+        connection_id: row.get("connection_id")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn row_to_kernel_config(row: &Row<'_>) -> Result<KernelConfigRecord, StoreError> {
+    let harness_raw: String = row.get("harness")?;
+    Ok(KernelConfigRecord {
+        harness: parse_harness(&harness_raw)?,
+        env_vars: row.get("env_vars")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn row_to_connection(row: &Row<'_>) -> Result<ConnectionRecord, StoreError> {
+    let api_flavor_raw: String = row.get("api_flavor")?;
+    Ok(ConnectionRecord {
+        connection_id: row.get("connection_id")?,
+        name: row.get("name")?,
+        url: row.get("url")?,
+        api_flavor: ConnectionApiFlavor::from_str(&api_flavor_raw).unwrap_or_default(),
+        api_key: row.get("api_key")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn row_to_gateway(row: &Row<'_>) -> Result<GatewayRecord, StoreError> {
+    let gateway_type_raw: String = row.get("gateway_type")?;
+    let secrets_json: String = row.get("secrets_json")?;
+    let secrets = serde_json::from_str::<BTreeMap<String, String>>(&secrets_json)
+        .map_err(json_error("gateways"))?;
+    let enabled: i64 = row.get("enabled")?;
+    Ok(GatewayRecord {
+        gateway_id: row.get("gateway_id")?,
+        name: row.get("name")?,
+        gateway_type: parse_gateway_type(&gateway_type_raw)?,
+        agent_id: row.get("agent_id")?,
+        enabled: enabled != 0,
+        env_vars: row.get("env_vars")?,
+        secrets,
+        status: row.get("status")?,
+        last_error: row.get("last_error")?,
+        container_name: row.get("container_name")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, StoreError> {
+    let client_type_raw: Option<String> = row.get("client_type")?;
+    Ok(SessionRecord {
+        session_id: row.get("session_id")?,
+        agent_id: row.get("agent_id")?,
+        agent_host_session_id: row.get("agent_host_session_id")?,
+        status: row.get("status")?,
+        channel_name: row.get("channel_name")?,
+        client_type: client_type_raw
+            .as_deref()
+            .map(parse_client_type)
+            .transpose()?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        messages: Vec::new(),
+    })
+}
+
+fn row_to_message(row: &Row<'_>, connection: &Connection) -> Result<MessageRecord, StoreError> {
+    let message_id: String = row.get("message_id")?;
+    let role_raw: String = row.get("role")?;
+    Ok(MessageRecord {
+        message_id: message_id.clone(),
+        session_id: row.get("session_id")?,
+        role: parse_message_role(&role_raw)?,
+        content: row.get("content")?,
+        created_at: row.get("created_at")?,
+        tool_calls: tool_calls_for_message(connection, &message_id)?,
+        reasoning: row.get("reasoning")?,
+    })
+}
+
+fn row_to_tool_call(row: &Row<'_>) -> Result<ToolCallRecord, StoreError> {
+    let content_offset: Option<i64> = row.get("content_offset")?;
+    Ok(ToolCallRecord {
+        tool: row.get("tool")?,
+        tool_call_id: row.get("tool_call_id")?,
+        status: row.get("status")?,
+        kind: row.get("kind")?,
+        input: row.get("input")?,
+        output: row.get("output")?,
+        content_offset: content_offset.map(i64_to_usize).transpose()?,
+    })
+}
+
+fn messages_for_session(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Vec<MessageRecord>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT * FROM client_messages
+         WHERE session_id = ?
+         ORDER BY rowid ASC
+        ",
+    )?;
+    let rows =
+        statement.query_and_then(params![session_id], |row| row_to_message(row, connection))?;
+    rows.collect()
+}
+
+fn tool_calls_for_message(
+    connection: &Connection,
+    message_id: &str,
+) -> Result<Vec<ToolCallRecord>, StoreError> {
+    let mut statement = connection.prepare(
+        "
+        SELECT * FROM client_message_tool_calls
+         WHERE message_id = ?
+         ORDER BY idx ASC
+        ",
+    )?;
+    let rows = statement.query_and_then(params![message_id], row_to_tool_call)?;
+    rows.collect()
+}
+
+fn insert_agent(connection: &Connection, agent: &AgentRecord) -> Result<(), RusqliteError> {
+    connection.execute(
+        "
+        INSERT INTO agents (
+            agent_id, name, harness, system_prompt,
+            skills_json, env_vars, connection_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ",
+        params![
+            agent.agent_id,
+            agent.name,
+            agent.harness.as_str(),
+            agent.system_prompt,
+            skills_json(&agent.skills)?,
+            agent.env_vars,
+            agent.connection_id,
+            agent.created_at,
+            agent.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_connection(
+    connection: &Connection,
+    connection_record: &ConnectionRecord,
+) -> Result<(), RusqliteError> {
+    connection.execute(
+        "
+        INSERT INTO connections (
+            connection_id, name, url, api_flavor, api_key, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ",
+        params![
+            connection_record.connection_id,
+            connection_record.name,
+            connection_record.url,
+            connection_record.api_flavor.as_str(),
+            connection_record.api_key,
+            connection_record.created_at,
+            connection_record.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_gateway(connection: &Connection, gateway: &GatewayRecord) -> Result<(), RusqliteError> {
+    connection.execute(
+        "
+        INSERT INTO gateways (
+            gateway_id, name, gateway_type, agent_id, enabled,
+            env_vars, secrets_json, status, last_error,
+            container_name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ",
+        params![
+            gateway.gateway_id,
+            gateway.name,
+            gateway.gateway_type.as_str(),
+            gateway.agent_id,
+            enabled_int(gateway.enabled),
+            gateway.env_vars,
+            secrets_json(&gateway.secrets)?,
+            gateway.status,
+            gateway.last_error,
+            gateway.container_name,
+            gateway.created_at,
+            gateway.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<(), RusqliteError> {
+    connection.execute(
+        "
+        INSERT INTO client_sessions (
+            session_id, agent_id, agent_host_session_id, status,
+            channel_name, client_type, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ",
+        params![
+            session.session_id,
+            session.agent_id,
+            session.agent_host_session_id,
+            session.status,
+            session.channel_name,
+            session.client_type.map(ClientType::as_str),
+            session.created_at,
+            session.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn agent_exists(connection: &Connection, agent_id: &str) -> Result<bool, StoreError> {
+    exists(
+        connection,
+        "SELECT 1 FROM agents WHERE agent_id = ?",
+        agent_id,
+    )
+}
+
+fn connection_exists(connection: &Connection, connection_id: &str) -> Result<bool, StoreError> {
+    exists(
+        connection,
+        "SELECT 1 FROM connections WHERE connection_id = ?",
+        connection_id,
+    )
+}
+
+fn gateway_exists(connection: &Connection, gateway_id: &str) -> Result<bool, StoreError> {
+    exists(
+        connection,
+        "SELECT 1 FROM gateways WHERE gateway_id = ?",
+        gateway_id,
+    )
+}
+
+fn session_exists(connection: &Connection, session_id: &str) -> Result<bool, StoreError> {
+    exists(
+        connection,
+        "SELECT 1 FROM client_sessions WHERE session_id = ?",
+        session_id,
+    )
+}
+
+fn exists(connection: &Connection, sql: &str, id: &str) -> Result<bool, StoreError> {
+    Ok(connection
+        .query_row(sql, params![id], |_row| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+fn skills_json(skills: &[String]) -> Result<String, RusqliteError> {
+    serde_json::to_string(skills).map_err(to_sql_conversion_failure)
+}
+
+fn secrets_json(secrets: &BTreeMap<String, String>) -> Result<String, RusqliteError> {
+    serde_json::to_string(secrets).map_err(to_sql_conversion_failure)
+}
+
+fn to_sql_conversion_failure(error: serde_json::Error) -> RusqliteError {
+    RusqliteError::ToSqlConversionFailure(Box::new(error))
+}
+
+fn json_error(store: &'static str) -> impl FnOnce(serde_json::Error) -> StoreError {
+    move |error| StoreError::Persistence {
+        store,
+        detail: error.to_string(),
+    }
+}
+
+fn parse_harness(value: &str) -> Result<HarnessName, StoreError> {
+    HarnessName::from_str(value).map_err(validation_error("kernel_configs"))
+}
+
+fn parse_gateway_type(value: &str) -> Result<GatewayType, StoreError> {
+    GatewayType::from_str(value).map_err(validation_error("gateways"))
+}
+
+fn parse_client_type(value: &str) -> Result<ClientType, StoreError> {
+    match value {
+        "cli" => Ok(ClientType::Cli),
+        "webui" => Ok(ClientType::Webui),
+        _ => Err(StoreError::Persistence {
+            store: "sessions",
+            detail: format!("unsupported client_type {value:?}"),
+        }),
+    }
+}
+
+fn parse_message_role(value: &str) -> Result<MessageRole, StoreError> {
+    match value {
+        "user" => Ok(MessageRole::User),
+        "assistant" => Ok(MessageRole::Assistant),
+        "system" => Ok(MessageRole::System),
+        _ => Err(StoreError::Persistence {
+            store: "sessions",
+            detail: format!("unsupported message role {value:?}"),
+        }),
+    }
+}
+
+fn validation_error(store: &'static str) -> impl FnOnce(ValidationError) -> StoreError {
+    move |error| StoreError::Persistence {
+        store,
+        detail: error.to_string(),
+    }
+}
+
+const fn enabled_int(enabled: bool) -> i64 {
+    if enabled { 1 } else { 0 }
+}
+
+fn index_to_i64(index: usize) -> Result<i64, StoreError> {
+    i64::try_from(index).map_err(|error| StoreError::Persistence {
+        store: "sessions",
+        detail: format!("tool call index is too large: {error}"),
+    })
+}
+
+fn optional_usize_to_i64(value: Option<usize>) -> Result<Option<i64>, StoreError> {
+    value.map(index_to_i64).transpose()
+}
+
+fn i64_to_usize(value: i64) -> Result<usize, StoreError> {
+    usize::try_from(value).map_err(|error| StoreError::Persistence {
+        store: "sessions",
+        detail: format!("content_offset is invalid: {error}"),
+    })
+}
+
+fn is_constraint(error: &RusqliteError) -> bool {
+    matches!(
+        error,
+        RusqliteError::SqliteFailure(failure, _message)
+            if failure.code == ErrorCode::ConstraintViolation
+    )
+}

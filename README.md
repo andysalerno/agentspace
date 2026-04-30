@@ -100,6 +100,23 @@ Stop it with:
 
 Default endpoint: `http://127.0.0.1:8002`
 
+An opt-in Rust port lives in `services/client_service_rs`. It is not used by the
+default compose stack; use `compose.client-service-rs.yaml` when you explicitly
+want to run the Rust service against the existing `agent_host`.
+
+You can also flip the root compose build to Rust with compose interpolation
+values:
+
+```sh
+podman compose --env-file compose.client-service-rs.env -f compose.yaml up -d --build client-service
+```
+
+Or use the equivalent recipe:
+
+```sh
+just stack-up-client-service-rs
+```
+
 Current endpoints:
 
 - `GET /healthz`
