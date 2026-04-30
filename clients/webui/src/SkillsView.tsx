@@ -9,6 +9,14 @@ import { useErrorContext } from "./ErrorContext";
 
 type FileEntry = { path: string; content: string };
 
+function skillFileTemplate(skillName: string) {
+    return `---
+name: ${skillName}
+description: <place your description here>
+---
+`;
+}
+
 function filesToRecord(entries: FileEntry[]): Record<string, string> {
     const record: Record<string, string> = {};
     for (const entry of entries) {
@@ -25,7 +33,9 @@ export default function SkillsView() {
 
     const [showForm, setShowForm] = useState(false);
     const [skillId, setSkillId] = useState("");
-    const [newFiles, setNewFiles] = useState<FileEntry[]>([{ path: "SKILL.md", content: "" }]);
+    const [newFiles, setNewFiles] = useState<FileEntry[]>([
+        { path: "SKILL.md", content: skillFileTemplate("") },
+    ]);
     const [expandedSkillId, setExpandedSkillId] = useState<string | null>(null);
     const [expandedSkill, setExpandedSkill] = useState<Skill | null>(null);
     const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
@@ -62,6 +72,17 @@ export default function SkillsView() {
         setNewFiles((prev) => prev.map((f, i) => (i === index ? { ...f, [field]: value } : f)));
     }
 
+    function updateSkillId(value: string) {
+        setNewFiles((prev) =>
+            prev.map((file) =>
+                file.path === "SKILL.md" && file.content === skillFileTemplate(skillId)
+                    ? { ...file, content: skillFileTemplate(value) }
+                    : file,
+            ),
+        );
+        setSkillId(value);
+    }
+
     function addNewFile() {
         setNewFiles((prev) => [...prev, { path: "", content: "" }]);
     }
@@ -86,7 +107,7 @@ export default function SkillsView() {
         event.preventDefault();
         await createMutation.mutateAsync({ skill_id: skillId, files: filesToRecord(newFiles) });
         setSkillId("");
-        setNewFiles([{ path: "SKILL.md", content: "" }]);
+        setNewFiles([{ path: "SKILL.md", content: skillFileTemplate("") }]);
         setShowForm(false);
     }
 
@@ -151,7 +172,7 @@ export default function SkillsView() {
                             placeholder="code-review"
                             required
                             value={skillId}
-                            onChange={(e) => setSkillId(e.target.value)}
+                            onChange={(e) => updateSkillId(e.target.value)}
                         />
                     </label>
                     <div className="skill-files-section">
