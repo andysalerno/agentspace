@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Protocol, cast
 
-from client_service.models import ConnectionRecord
+from client_service.models import (
+    DEFAULT_CONNECTION_API_FLAVOR,
+    ConnectionApiFlavor,
+    ConnectionRecord,
+)
 
 if TYPE_CHECKING:
     from client_service.storage.db import Database
@@ -15,6 +19,7 @@ CREATE TABLE IF NOT EXISTS connections (
     connection_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
+    api_flavor TEXT NOT NULL DEFAULT 'chat_completions',
     api_key TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -68,6 +73,7 @@ class SqliteConnectionStore:
 
     async def initialize(self) -> None:
         await self._db.executescript(CONNECTIONS_SCHEMA)
+        await self._ensure_api_flavor_column()
 
     async def list(self) -> list[ConnectionRecord]:
         rows = await self._db.fetch_all(
@@ -87,14 +93,15 @@ class SqliteConnectionStore:
             await self._db.execute(
                 """
                 INSERT INTO connections (
-                    connection_id, name, url, api_key,
+                    connection_id, name, url, api_flavor, api_key,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     connection.connection_id,
                     connection.name,
                     connection.url,
+                    connection.api_flavor,
                     connection.api_key,
                     connection.created_at,
                     connection.updated_at,
@@ -112,6 +119,7 @@ class SqliteConnectionStore:
             UPDATE connections
                SET name = ?,
                    url = ?,
+                   api_flavor = ?,
                    api_key = ?,
                    updated_at = ?
              WHERE connection_id = ?
@@ -119,6 +127,7 @@ class SqliteConnectionStore:
             (
                 connection.name,
                 connection.url,
+                connection.api_flavor,
                 connection.api_key,
                 connection.updated_at,
                 connection.connection_id,
@@ -135,6 +144,15 @@ class SqliteConnectionStore:
         )
         return True
 
+    async def _ensure_api_flavor_column(self) -> None:
+        rows = await self._db.fetch_all("PRAGMA table_info(connections)")
+        columns = {str(row["name"]) for row in rows}
+        if "api_flavor" not in columns:
+            await self._db.execute(
+                "ALTER TABLE connections ADD COLUMN api_flavor TEXT NOT NULL "
+                f"DEFAULT '{DEFAULT_CONNECTION_API_FLAVOR}'",
+            )
+
 
 def _row_to_connection(row: object) -> ConnectionRecord:
     mapping: dict[str, object] = dict(row)  # type: ignore[arg-type]
@@ -142,7 +160,15 @@ def _row_to_connection(row: object) -> ConnectionRecord:
         connection_id=str(mapping["connection_id"]),
         name=str(mapping["name"]),
         url=str(mapping["url"]),
+        api_flavor=_connection_api_flavor(mapping.get("api_flavor")),
         api_key=str(mapping["api_key"]),
         created_at=str(mapping["created_at"]),
         updated_at=str(mapping["updated_at"]),
     )
+
+
+def _connection_api_flavor(value: object) -> ConnectionApiFlavor:
+    api_flavor = str(value or DEFAULT_CONNECTION_API_FLAVOR)
+    if api_flavor in {"chat_completions", "responses"}:
+        return cast("ConnectionApiFlavor", api_flavor)
+    return DEFAULT_CONNECTION_API_FLAVOR

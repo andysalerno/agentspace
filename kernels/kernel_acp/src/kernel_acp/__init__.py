@@ -40,6 +40,11 @@ PROTOCOL_VERSION = 1
 _STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
 _DEFAULT_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
 _UNHANDLED: object = object()
+_DEFAULT_API_FLAVOR = "chat_completions"
+_OPENCODE_PROVIDER_NPM_BY_API_FLAVOR = {
+    "chat_completions": "@ai-sdk/openai-compatible",
+    "responses": "@ai-sdk/openai",
+}
 _OPENCODE_PERMISSION_CONFIG = {
     "*": "allow",
     "bash": {
@@ -334,7 +339,7 @@ class AcpKernel:
         config["model"] = f"customprovider/{model_name}"
         config["provider"] = {
             "customprovider": {
-                "npm": "@ai-sdk/openai-compatible",
+                "npm": self._opencode_provider_npm(),
                 "name": "customprovider",
                 "options": {
                     "baseURL": base_url,
@@ -352,6 +357,19 @@ class AcpKernel:
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(config, indent=2))
         logger.info("wrote opencode config to %s", config_path)
+
+    def _opencode_provider_npm(self) -> str:
+        api_flavor = (
+            self._config.env.get("CONNECTION_API_FLAVOR")
+            or self._config.env.get("KERNEL_ACP_API_FLAVOR")
+            or _DEFAULT_API_FLAVOR
+        )
+        provider_npm = _OPENCODE_PROVIDER_NPM_BY_API_FLAVOR.get(api_flavor)
+        if provider_npm is None:
+            valid = ", ".join(_OPENCODE_PROVIDER_NPM_BY_API_FLAVOR)
+            msg = f"CONNECTION_API_FLAVOR must be one of: {valid}"
+            raise ValueError(msg)
+        return provider_npm
 
     def _write_custom_agent_prompt(self) -> None:
         prompt = self._config.env.get("KERNEL_SYSTEM_PROMPT", "")

@@ -17,7 +17,11 @@ from gateway.schema import get_schema as get_gateway_schema
 from kernel_host.registry import HarnessName
 from pydantic import BaseModel, Field
 
-from client_service.models import ClientType  # noqa: TC001
+from client_service.models import (
+    DEFAULT_CONNECTION_API_FLAVOR,
+    ClientType,
+    ConnectionApiFlavor,
+)
 from client_service.service import (
     AgentAlreadyExistsError,
     AgentNotFoundError,
@@ -185,12 +189,14 @@ class CreateConnectionRequest(BaseModel):
     connection_id: str = Field(pattern=r"^[a-z]+(?:-[a-z]+)*$")
     name: str
     url: str
+    api_flavor: ConnectionApiFlavor = DEFAULT_CONNECTION_API_FLAVOR
     api_key: str = ""
 
 
 class UpdateConnectionRequest(BaseModel):
     name: str | None = None
     url: str | None = None
+    api_flavor: ConnectionApiFlavor | None = None
     api_key: str | None = None
 
 
@@ -224,6 +230,7 @@ async def create_connection(payload: CreateConnectionRequest) -> dict[str, objec
             connection_id=payload.connection_id,
             name=payload.name,
             url=payload.url,
+            api_flavor=payload.api_flavor,
             api_key=payload.api_key,
         )
     except ConnectionAlreadyExistsError as exc:
@@ -242,6 +249,7 @@ async def update_connection(
             connection_id,
             name=payload.name,
             url=payload.url,
+            api_flavor=payload.api_flavor,
             api_key=payload.api_key,
         )
     except ConnectionNotFoundError as exc:

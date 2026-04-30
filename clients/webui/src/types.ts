@@ -162,6 +162,7 @@ export type Connection = {
   connection_id: string;
   name: string;
   url: string;
+  api_flavor: "chat_completions" | "responses";
   has_api_key: boolean;
   api_key?: string;
   created_at: string;

@@ -467,12 +467,14 @@ class StubClientService:
         connection_id: str,
         name: str,
         url: str,
+        api_flavor: str = "chat_completions",
         api_key: str = "",
     ) -> dict[str, object]:
         record: dict[str, object] = {
             "connection_id": connection_id,
             "name": name,
             "url": url,
+            "api_flavor": api_flavor,
             "api_key": api_key,
             "has_api_key": bool(api_key),
             "created_at": "now",
@@ -487,6 +489,7 @@ class StubClientService:
         *,
         name: str | None = None,
         url: str | None = None,
+        api_flavor: str | None = None,
         api_key: str | None = None,
     ) -> dict[str, object]:
         if connection_id not in self.connections:
@@ -496,6 +499,8 @@ class StubClientService:
             record["name"] = name
         if url is not None:
             record["url"] = url
+        if api_flavor is not None:
+            record["api_flavor"] = api_flavor
         if api_key is not None:
             record["api_key"] = api_key
             record["has_api_key"] = bool(api_key)
@@ -614,6 +619,7 @@ def test_connection_models_route(client: TestClient) -> None:
             "connection_id": "connection-one",
             "name": "Connection One",
             "url": "https://connection.test/v1",
+            "api_flavor": "responses",
             "api_key": "secret",
         },
     )

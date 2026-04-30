@@ -690,6 +690,7 @@ async def test_create_session_adds_agent_connection_env() -> None:
     assert len(upstream.created) == 1
     env = cast("dict[str, str]", upstream.created[0]["env"])
     assert env["CONNECTION_URL"] == "https://connection.test/v1"
+    assert env["CONNECTION_API_FLAVOR"] == "chat_completions"
     assert env["CONNECTION_API_KEY"] == "connection-secret"
 
 
@@ -707,6 +708,7 @@ async def test_create_acp_session_adds_connection_and_model_env() -> None:
         connection_id="test-connection",
         name="Test Connection",
         url="https://connection.test/v1",
+        api_flavor="responses",
         api_key="connection-secret",
     )
     agent = await service.create_agent(
@@ -723,6 +725,7 @@ async def test_create_acp_session_adds_connection_and_model_env() -> None:
     assert created["harness"] == HarnessName.ACP
     env = cast("dict[str, str]", created["env"])
     assert env["CONNECTION_URL"] == "https://connection.test/v1"
+    assert env["CONNECTION_API_FLAVOR"] == "responses"
     assert env["CONNECTION_API_KEY"] == "connection-secret"
     assert env["KERNEL_ACP_MODEL_NAME"] == "base-model"
 

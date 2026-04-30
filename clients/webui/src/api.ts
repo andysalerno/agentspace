@@ -273,6 +273,7 @@ export const api = {
     connection_id: string;
     name: string;
     url: string;
+    api_flavor?: "chat_completions" | "responses";
     api_key?: string;
   }) =>
     requestJson<Connection>("/connections", {
@@ -284,6 +285,7 @@ export const api = {
     payload: {
       name?: string;
       url?: string;
+      api_flavor?: "chat_completions" | "responses";
       api_key?: string;
     },
   ) =>
