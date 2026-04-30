@@ -458,6 +458,28 @@ async def test_stream_message_yields_events_then_final_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_final_stream_payload_is_not_broadcast_while_turn_is_active() -> None:
+    runtime = cast("AgentHostClient", StubAgentHostClient())
+    service = ClientService(agent_host_client=runtime)
+
+    agent = await service.create_agent(agent_id="stream-agent", name="Stream Agent")
+    session = await service.create_session(agent_id=str(agent["agent_id"]))
+    session_id = str(session["session_id"])
+
+    stream = service.stream_message(session_id, "hello")
+    chunks: list[dict[str, object]] = []
+    async for chunk in stream:
+        chunks.append(chunk)
+        if chunk["type"] == "final":
+            final_session = cast("dict[str, object]", chunk["session"])
+            assert "active_turn" not in final_session
+            detail = await service.get_session(session_id)
+            assert "active_turn" not in detail
+
+    assert chunks[-1]["type"] == "final"
+
+
+@pytest.mark.asyncio
 async def test_stream_message_continues_after_client_closes() -> None:
     upstream = SlowAgentHostClient()
     service = ClientService(agent_host_client=cast("AgentHostClient", upstream))

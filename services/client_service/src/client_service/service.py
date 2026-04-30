@@ -656,6 +656,10 @@ class ClientService:
             session.status = "error" if turn.error else session.status
         session.updated_at = utc_now()
         await self._session_store.update(session)
+        async with self._turn_lock:
+            if self._session_turns.get(turn.session_id) == turn.turn_id:
+                self._session_turns.pop(turn.session_id, None)
+            self._turns.pop(turn.turn_id, None)
         payload: dict[str, object] = {
             "type": "final",
             "session": self._session_summary(session),
@@ -668,9 +672,6 @@ class ClientService:
             payload["error"] = turn.error
         turn.final_payload = payload
         await self._broadcast_turn(turn, payload, close=True)
-        async with self._turn_lock:
-            self._session_turns.pop(turn.session_id, None)
-            self._turns.pop(turn.turn_id, None)
 
     async def _broadcast_turn(
         self,
