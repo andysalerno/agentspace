@@ -55,8 +55,8 @@ The service can be started from this directory with:
   message send/stream behavior, kernels, logs, skills, and gateways.
 - Expanded `/harnesses` to all modeled harnesses and improved gateway schema
   responses for echo and Discord gateways.
-- Added opt-in Docker and compose wiring plus `just client-service-rs-check` and
-  `just client-service-rs-image`.
+- Added opt-in Docker and compose wiring plus `just client-service-rs-check`,
+  `just client-service-rs-image`, and `just stack-up-client-service-rs`.
 
 ## Remaining work
 
@@ -73,7 +73,7 @@ The service can be started from this directory with:
    such as `just check`; it currently has a dedicated `just client-service-rs-check`.
 6. Add performance and concurrency tests for simultaneous sessions, message
     streams, and gateway operations.
-7. Add a planned cutover path for running `client_service_rs` as the default
+7. Add a planned cutover path for making `client_service_rs` the default
    `client_service` in the full stack once parity is proven.
 
 ## Notes for the next porting pass

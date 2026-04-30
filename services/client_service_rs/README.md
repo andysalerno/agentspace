@@ -47,6 +47,19 @@ When running on the repo compose network, point the Rust service at the existing
 podman compose -f compose.yaml -f compose.client-service-rs.yaml up -d --build client-service
 ```
 
+The root compose file can also be flipped to the Rust service with interpolation
+values:
+
+```sh
+podman compose --env-file compose.client-service-rs.env -f compose.yaml up -d --build client-service
+```
+
+Or use the equivalent repository-root recipe:
+
+```sh
+just stack-up-client-service-rs
+```
+
 Add `webui` to that command if you also want the dashboard to talk to the Rust
 client service through the usual `client-service:8002` compose DNS name.
 
