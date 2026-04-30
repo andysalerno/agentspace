@@ -1,1 +1,1565 @@
-//! Placeholder module for the future HTTP API surface.
+use std::{collections::BTreeMap, str::FromStr};
+
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use crate::{
+    AppState, ENV_PREFIX,
+    agent_host::{AgentHostError, JsonObject, KernelEvent},
+    errors::{StoreError, ValidationError},
+    models::{
+        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
+        HarnessName, MessageRecord, MessageRole, SessionRecord, parse_env_vars, utc_now,
+        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+    },
+};
+
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/info", get(info))
+        .route("/harnesses", get(list_harnesses))
+        .route("/kernel-configs", get(list_kernel_configs))
+        .route(
+            "/kernel-configs/{harness}",
+            get(get_kernel_config).put(update_kernel_config),
+        )
+        .route(
+            "/connections",
+            get(list_connections).post(create_connection),
+        )
+        .route(
+            "/connections/{connection_id}",
+            get(get_connection)
+                .patch(update_connection)
+                .delete(delete_connection),
+        )
+        .route(
+            "/connections/{connection_id}/models",
+            get(list_connection_models),
+        )
+        .route("/agents", get(list_agents).post(create_agent))
+        .route(
+            "/agents/{agent_id}",
+            get(get_agent).patch(update_agent).delete(delete_agent),
+        )
+        .route("/sessions", get(list_sessions).post(create_session))
+        .route(
+            "/sessions/{session_id}",
+            get(get_session).delete(delete_session),
+        )
+        .route(
+            "/sessions/{session_id}/messages",
+            get(list_messages).post(send_message),
+        )
+        .route(
+            "/sessions/{session_id}/messages/stream",
+            post(stream_message),
+        )
+        .route(
+            "/sessions/{session_id}/turns/{turn_id}/stream",
+            get(stream_turn),
+        )
+        .route("/sessions/{session_id}/reset", post(reset_session))
+        .route("/kernels", get(list_kernels))
+        .route("/kernels/{kernel_session_id}", delete(kill_kernel))
+        .route("/kernels/{kernel_session_id}/logs", get(kernel_logs))
+        .route(
+            "/kernels/{kernel_session_id}/container-logs",
+            get(kernel_container_logs),
+        )
+        .route("/skills", get(list_skills).post(create_skill))
+        .route(
+            "/skills/{skill_id}",
+            get(get_skill).put(update_skill).delete(delete_skill),
+        )
+        .route("/gateway-types", get(list_gateway_types))
+        .route(
+            "/gateway-types/{gateway_type}/schema",
+            get(get_gateway_type_schema),
+        )
+        .route("/gateways", get(list_gateways).post(create_gateway))
+        .route(
+            "/gateways/{gateway_id}",
+            get(get_gateway)
+                .patch(update_gateway)
+                .delete(delete_gateway),
+        )
+        .route("/gateways/{gateway_id}/start", post(start_gateway))
+        .route("/gateways/{gateway_id}/stop", post(stop_gateway))
+        .route("/gateways/{gateway_id}/logs", get(gateway_logs))
+}
+
+async fn healthz() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
+}
+
+async fn info(State(state): State<AppState>) -> Json<Value> {
+    let agent_host = match state.agent_host.info().await {
+        Ok(info) => Value::Object(info),
+        Err(error) => json!({ "service": "agent_host", "error": error.to_string() }),
+    };
+
+    Json(json!({
+        "client_service": {
+            "service": "client_service",
+            "title": "Client Service",
+            "version": env!("CARGO_PKG_VERSION"),
+            "env_prefix": ENV_PREFIX,
+            "env": state.config.client_service_env,
+            "instance_id": state.instance_id,
+            "started_at": state.started_at,
+        },
+        "agent_host": agent_host,
+    }))
+}
+
+async fn list_harnesses() -> Json<Vec<&'static str>> {
+    Json(vec![HarnessName::Acp.as_str()])
+}
+
+async fn list_kernel_configs(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let configs = state
+        .kernel_configs
+        .list()?
+        .into_iter()
+        .map(|record| record.summary())
+        .collect();
+    Ok(Json(configs))
+}
+
+async fn get_kernel_config(
+    State(state): State<AppState>,
+    Path(raw_harness): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let harness = parse_harness(&raw_harness)?;
+    let value = state.kernel_configs.get(harness)?.map_or_else(
+        || json!({ "harness": harness.as_str(), "env_vars": "", "updated_at": null }),
+        |record| record.summary(),
+    );
+    Ok(Json(value))
+}
+
+async fn update_kernel_config(
+    State(state): State<AppState>,
+    Path(raw_harness): Path<String>,
+    Json(payload): Json<UpdateKernelConfigRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let harness = parse_harness(&raw_harness)?;
+    let record = state.kernel_configs.upsert(harness, payload.env_vars)?;
+    Ok(Json(record.summary()))
+}
+
+async fn list_connections(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let connections = state
+        .connections
+        .list()?
+        .into_iter()
+        .map(|connection| connection.summary(false))
+        .collect();
+    Ok(Json(connections))
+}
+
+async fn get_connection(
+    State(state): State<AppState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let connection = require_connection(&state, &connection_id)?;
+    Ok(Json(connection.summary(false)))
+}
+
+async fn list_connection_models(
+    State(state): State<AppState>,
+    Path(connection_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let connection = require_connection(&state, &connection_id)?;
+    let url = format!("{}/models", connection.url.trim_end_matches('/'));
+    let mut request = state.http_client.get(url);
+    if !connection.api_key.is_empty() {
+        request = request.bearer_auth(&connection.api_key);
+    }
+    let response = request.send().await.map_err(|error| {
+        ApiError::bad_gateway(format!(
+            "failed to fetch models for connection {connection_id}: {error}"
+        ))
+    })?;
+    let response = if response.status().is_success() {
+        response
+    } else {
+        return Err(ApiError::bad_gateway(format!(
+            "failed to fetch models for connection {connection_id}: HTTP {}",
+            response.status()
+        )));
+    };
+    let value = response.json::<Value>().await.map_err(|error| {
+        ApiError::bad_gateway(format!(
+            "models response for connection {connection_id} was not valid JSON: {error}"
+        ))
+    })?;
+    if !value.is_object() {
+        return Err(ApiError::bad_gateway(format!(
+            "models response for connection {connection_id} was not a JSON object"
+        )));
+    }
+    Ok(Json(value))
+}
+
+async fn create_connection(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateConnectionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_connection_id(&payload.connection_id)?;
+    let mut connection = ConnectionRecord::new(payload.connection_id, payload.name, payload.url);
+    connection.api_flavor = payload.api_flavor;
+    connection.api_key = payload.api_key;
+    let value = connection.summary(true);
+    state.connections.insert(connection)?;
+    Ok(Json(value))
+}
+
+async fn update_connection(
+    State(state): State<AppState>,
+    Path(connection_id): Path<String>,
+    Json(payload): Json<UpdateConnectionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mut connection = require_connection(&state, &connection_id)?;
+    if let Some(name) = payload.name {
+        connection.name = name;
+    }
+    if let Some(url) = payload.url {
+        connection.url = url;
+    }
+    if let Some(api_flavor) = payload.api_flavor {
+        connection.api_flavor = api_flavor;
+    }
+    if let Some(api_key) = payload.api_key {
+        connection.api_key = api_key;
+    }
+    connection.updated_at = utc_now();
+    let value = connection.summary(true);
+    state.connections.update(connection)?;
+    Ok(Json(value))
+}
+
+async fn delete_connection(
+    State(state): State<AppState>,
+    Path(connection_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if state.connections.delete(&connection_id)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!(
+            "connection {connection_id:?} not found"
+        )))
+    }
+}
+
+async fn create_agent(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateAgentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_agent_id(&payload.agent_id)?;
+    if let Some(connection_id) = payload.connection_id.as_deref() {
+        require_connection(&state, connection_id)?;
+    }
+    let mut agent = AgentRecord::new(
+        payload.agent_id,
+        payload.name,
+        payload.harness,
+        payload.system_prompt,
+    );
+    agent.skills = payload.skills;
+    agent.env_vars = payload.env_vars;
+    agent.connection_id = payload.connection_id;
+    let value = agent.summary();
+    state.agents.insert(agent)?;
+    Ok(Json(value))
+}
+
+async fn list_agents(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let agents = state
+        .agents
+        .list()?
+        .into_iter()
+        .map(|agent| agent.summary())
+        .collect();
+    Ok(Json(agents))
+}
+
+async fn get_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let agent = require_agent(&state, &agent_id)?;
+    Ok(Json(agent.summary()))
+}
+
+async fn update_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+    Json(payload): Json<UpdateAgentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mut agent = require_agent(&state, &agent_id)?;
+    if let Some(name) = payload.name {
+        agent.name = name;
+    }
+    if let Some(harness) = payload.harness {
+        agent.harness = harness;
+    }
+    if let Some(system_prompt) = payload.system_prompt {
+        agent.system_prompt = system_prompt;
+    }
+    if let Some(skills) = payload.skills {
+        agent.skills = skills;
+    }
+    if let Some(env_vars) = payload.env_vars {
+        agent.env_vars = env_vars;
+    }
+    if let Some(connection_id) = payload.connection_id {
+        require_connection(&state, &connection_id)?;
+        agent.connection_id = Some(connection_id);
+    }
+    agent.updated_at = utc_now();
+    let value = agent.summary();
+    state.agents.update(agent)?;
+    Ok(Json(value))
+}
+
+async fn delete_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if !state.agents.delete(&agent_id)? {
+        return Err(ApiError::not_found(format!("agent {agent_id:?} not found")));
+    }
+    let sessions = state.sessions.list()?;
+    for session in sessions
+        .into_iter()
+        .filter(|session| session.agent_id == agent_id)
+    {
+        let _removed = state.sessions.delete(&session.session_id)?;
+        state
+            .agent_host
+            .destroy_session(&session.agent_host_session_id)
+            .await?;
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn create_session(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateSessionRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let agent = require_agent(&state, &payload.agent_id)?;
+    let env = session_env(&state, &agent)?;
+    let upstream = state
+        .agent_host
+        .create_session(agent.harness.as_str(), Some(&agent.skills), Some(&env))
+        .await?;
+    let upstream_session_id = string_field(&upstream, "session_id")?;
+    let status = string_field(&upstream, "status")?;
+    let session = SessionRecord::new(
+        Uuid::now_v7().simple().to_string(),
+        payload.agent_id,
+        upstream_session_id,
+        status,
+        payload.channel_name,
+        payload.client_type,
+    );
+    let value = session.summary();
+    state.sessions.insert(session)?;
+    Ok(Json(value))
+}
+
+async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let sessions = state
+        .sessions
+        .list()?
+        .into_iter()
+        .map(|session| session.summary())
+        .collect();
+    Ok(Json(sessions))
+}
+
+async fn get_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let mut session = require_session(&state, &session_id)?;
+    let upstream = state
+        .agent_host
+        .get_session(&session.agent_host_session_id)
+        .await?;
+    if let Ok(status) = string_field(&upstream, "status") {
+        session.status = status;
+        session.updated_at = utc_now();
+        state.sessions.update(session.clone())?;
+    }
+    Ok(Json(session.detail()))
+}
+
+async fn list_messages(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &session_id)?;
+    let messages = session
+        .messages
+        .iter()
+        .map(MessageRecord::summary)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({ "messages": messages })))
+}
+
+async fn send_message(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<SendMessageRequest>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(run_turn(&state, &session_id, &payload.message).await?))
+}
+
+async fn stream_message(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<SendMessageRequest>,
+) -> Result<Response, ApiError> {
+    let final_payload = run_turn(&state, &session_id, &payload.message).await?;
+    let mut lines = String::new();
+    if let Some(events) = final_payload.get("events").and_then(Value::as_array) {
+        for event in events {
+            push_ndjson_line(&mut lines, &json!({ "type": "event", "event": event }))?;
+        }
+    }
+    let mut final_stream_payload = final_payload;
+    if let Value::Object(object) = &mut final_stream_payload {
+        object.insert("type".to_owned(), json!("final"));
+    }
+    push_ndjson_line(&mut lines, &final_stream_payload)?;
+    Ok(ndjson_response(lines))
+}
+
+async fn stream_turn(
+    State(state): State<AppState>,
+    Path((session_id, turn_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let _session = require_session(&state, &session_id)?;
+    Err(ApiError::not_found(format!(
+        "turn not found: {turn_id}; active turn replay is not implemented in client_service_rs yet"
+    )))
+}
+
+async fn reset_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let mut session = require_session(&state, &session_id)?;
+    let upstream = state
+        .agent_host
+        .reset_session(&session.agent_host_session_id)
+        .await?;
+    session.agent_host_session_id = string_field(&upstream, "session_id")?;
+    session.status = string_field(&upstream, "status")?;
+    session.updated_at = utc_now();
+    state.sessions.clear_messages(&session_id)?;
+    state.sessions.update(session.clone())?;
+    Ok(Json(session.summary()))
+}
+
+async fn delete_session(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let session = require_session(&state, &session_id)?;
+    if !state.sessions.delete(&session_id)? {
+        return Err(ApiError::not_found(format!(
+            "session {session_id:?} not found"
+        )));
+    }
+    state
+        .agent_host
+        .destroy_session(&session.agent_host_session_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_kernels(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let upstream_sessions = state.agent_host.list_sessions(true).await?;
+    let client_sessions = state.sessions.list()?;
+    let mut kernels = Vec::new();
+    for mut upstream in upstream_sessions {
+        let upstream_session_id = string_field(&upstream, "session_id")?;
+        let linked_sessions = client_sessions
+            .iter()
+            .filter(|session| session.agent_host_session_id == upstream_session_id)
+            .collect::<Vec<_>>();
+        let client_session_ids = linked_sessions
+            .iter()
+            .map(|session| session.session_id.clone())
+            .collect::<Vec<_>>();
+        let channel_names = linked_sessions
+            .iter()
+            .filter_map(|session| session.channel_name.clone())
+            .collect::<Vec<_>>();
+        let agent_ids = linked_sessions
+            .iter()
+            .map(|session| session.agent_id.clone())
+            .collect::<Vec<_>>();
+        upstream.insert("client_session_ids".to_owned(), json!(client_session_ids));
+        upstream.insert("channel_names".to_owned(), json!(channel_names));
+        upstream.insert("agent_ids".to_owned(), json!(agent_ids));
+        kernels.push(Value::Object(upstream));
+    }
+    Ok(Json(kernels))
+}
+
+async fn kill_kernel(
+    State(state): State<AppState>,
+    Path(kernel_session_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_kernel(&state, &kernel_session_id).await?;
+    state.agent_host.destroy_session(&kernel_session_id).await?;
+    for mut session in state.sessions.list()? {
+        if session.agent_host_session_id == kernel_session_id {
+            "dead".clone_into(&mut session.status);
+            session.updated_at = utc_now();
+            state.sessions.update(session)?;
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn kernel_logs(
+    State(state): State<AppState>,
+    Path(kernel_session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_kernel(&state, &kernel_session_id).await?;
+    let lines = state.agent_host.logs(&kernel_session_id).await?;
+    Ok(Json(json!({ "lines": lines })))
+}
+
+async fn kernel_container_logs(
+    State(state): State<AppState>,
+    Path(kernel_session_id): Path<String>,
+    Query(query): Query<ContainerLogsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    require_kernel(&state, &kernel_session_id).await?;
+    let tail = if query.all.unwrap_or(false) {
+        None
+    } else {
+        Some(query.tail.unwrap_or(2_000))
+    };
+    if let Some(tail) = tail
+        && !(1..=50_000).contains(&tail)
+    {
+        return Err(ApiError::unprocessable(
+            "tail must be between 1 and 50000".to_owned(),
+        ));
+    }
+    let lines = state
+        .agent_host
+        .container_logs(&kernel_session_id, tail)
+        .await?;
+    Ok(Json(json!({ "lines": lines })))
+}
+
+async fn create_skill(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateSkillRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_skill_id(&payload.skill_id)?;
+    let skill = state
+        .agent_host
+        .create_skill(&payload.skill_id, &payload.files)
+        .await?;
+    Ok(Json(Value::Object(skill)))
+}
+
+async fn list_skills(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let skills = state
+        .agent_host
+        .list_skills()
+        .await?
+        .into_iter()
+        .map(Value::Object)
+        .collect();
+    Ok(Json(skills))
+}
+
+async fn get_skill(
+    State(state): State<AppState>,
+    Path(skill_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let skill = state.agent_host.get_skill(&skill_id).await?;
+    Ok(Json(Value::Object(skill)))
+}
+
+async fn update_skill(
+    State(state): State<AppState>,
+    Path(skill_id): Path<String>,
+    Json(payload): Json<UpdateSkillRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_skill_id(&skill_id)?;
+    let skill = state
+        .agent_host
+        .update_skill(&skill_id, &payload.files)
+        .await?;
+    Ok(Json(Value::Object(skill)))
+}
+
+async fn delete_skill(
+    State(state): State<AppState>,
+    Path(skill_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    state.agent_host.delete_skill(&skill_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_gateway_types() -> Json<Vec<&'static str>> {
+    Json(vec![
+        GatewayType::Echo.as_str(),
+        GatewayType::Discord.as_str(),
+    ])
+}
+
+async fn get_gateway_type_schema(
+    Path(raw_gateway_type): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let gateway_type = parse_gateway_type(&raw_gateway_type)?;
+    Ok(Json(json!({
+        "gateway_type": gateway_type.as_str(),
+        "type": "object",
+        "properties": {},
+        "required": [],
+    })))
+}
+
+async fn list_gateways(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let gateways = state
+        .gateways
+        .list()?
+        .into_iter()
+        .map(|gateway| gateway.summary(false))
+        .collect();
+    Ok(Json(gateways))
+}
+
+async fn create_gateway(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateGatewayRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_gateway_id(&payload.gateway_id)?;
+    require_agent(&state, &payload.agent_id)?;
+    let mut gateway = GatewayRecord::new(
+        payload.gateway_id,
+        payload.name,
+        payload.gateway_type,
+        payload.agent_id,
+        payload.enabled,
+    );
+    gateway.env_vars = payload.env_vars;
+    gateway.secrets = payload.secrets;
+    let gateway_id = gateway.gateway_id.clone();
+    state.gateways.insert(gateway)?;
+    if payload.enabled {
+        return start_gateway_by_id(&state, &gateway_id).await.map(Json);
+    }
+    let gateway = require_gateway(&state, &gateway_id)?;
+    Ok(Json(gateway.summary(false)))
+}
+
+async fn get_gateway(
+    State(state): State<AppState>,
+    Path(gateway_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let gateway = require_gateway(&state, &gateway_id)?;
+    Ok(Json(gateway.summary(false)))
+}
+
+async fn update_gateway(
+    State(state): State<AppState>,
+    Path(gateway_id): Path<String>,
+    Json(payload): Json<UpdateGatewayRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mut gateway = require_gateway(&state, &gateway_id)?;
+    let was_running = gateway.status == "running";
+    let previously_enabled = gateway.enabled;
+    let mut config_changed = false;
+    if let Some(name) = payload.name {
+        gateway.name = name;
+    }
+    if let Some(agent_id) = payload.agent_id
+        && agent_id != gateway.agent_id
+    {
+        require_agent(&state, &agent_id)?;
+        gateway.agent_id = agent_id;
+        config_changed = true;
+    }
+    if let Some(enabled) = payload.enabled {
+        gateway.enabled = enabled;
+    }
+    if let Some(env_vars) = payload.env_vars
+        && env_vars != gateway.env_vars
+    {
+        gateway.env_vars = env_vars;
+        config_changed = true;
+    }
+    if let Some(secrets) = payload.secrets {
+        let mut merged = gateway.secrets.clone();
+        merged.extend(secrets);
+        if merged != gateway.secrets {
+            gateway.secrets = merged;
+            config_changed = true;
+        }
+    }
+    gateway.updated_at = utc_now();
+    let enabled = gateway.enabled;
+    state.gateways.update(gateway)?;
+    if enabled && !previously_enabled {
+        start_gateway_by_id(&state, &gateway_id).await.map(Json)
+    } else if !enabled && previously_enabled {
+        stop_gateway_by_id(&state, &gateway_id).await.map(Json)
+    } else if config_changed && was_running {
+        let _stopped = stop_gateway_by_id(&state, &gateway_id).await?;
+        start_gateway_by_id(&state, &gateway_id).await.map(Json)
+    } else {
+        let gateway = require_gateway(&state, &gateway_id)?;
+        Ok(Json(gateway.summary(false)))
+    }
+}
+
+async fn delete_gateway(
+    State(state): State<AppState>,
+    Path(gateway_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let gateway = require_gateway(&state, &gateway_id)?;
+    if !matches!(gateway.status.as_str(), "stopped" | "error") {
+        let _ignored = state.agent_host.destroy_gateway(&gateway_id).await;
+    }
+    let _removed = state.gateways.delete(&gateway_id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn start_gateway(
+    State(state): State<AppState>,
+    Path(gateway_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    start_gateway_by_id(&state, &gateway_id).await.map(Json)
+}
+
+async fn stop_gateway(
+    State(state): State<AppState>,
+    Path(gateway_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    stop_gateway_by_id(&state, &gateway_id).await.map(Json)
+}
+
+async fn gateway_logs(
+    State(state): State<AppState>,
+    Path(gateway_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let _gateway = require_gateway(&state, &gateway_id)?;
+    let lines = state.agent_host.gateway_logs(&gateway_id).await?;
+    Ok(Json(json!({ "lines": lines })))
+}
+
+async fn start_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value, ApiError> {
+    let mut gateway = require_gateway(state, gateway_id)?;
+    "starting".clone_into(&mut gateway.status);
+    gateway.last_error = None;
+    gateway.updated_at = utc_now();
+    state.gateways.update(gateway.clone())?;
+    let env = gateway.effective_env();
+    match state
+        .agent_host
+        .create_gateway(
+            gateway_id,
+            gateway.gateway_type.as_str(),
+            &gateway.agent_id,
+            &env,
+        )
+        .await
+    {
+        Ok(response) => {
+            "running".clone_into(&mut gateway.status);
+            gateway.container_name = response
+                .get("container_name")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            gateway.updated_at = utc_now();
+            state.gateways.update(gateway.clone())?;
+            Ok(gateway.summary(false))
+        }
+        Err(error) => {
+            "error".clone_into(&mut gateway.status);
+            gateway.last_error = Some(error.to_string());
+            gateway.updated_at = utc_now();
+            state.gateways.update(gateway)?;
+            Err(error.into())
+        }
+    }
+}
+
+async fn stop_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value, ApiError> {
+    let mut gateway = require_gateway(state, gateway_id)?;
+    if let Err(error) = state.agent_host.destroy_gateway(gateway_id).await {
+        gateway.last_error = Some(error.to_string());
+    }
+    "stopped".clone_into(&mut gateway.status);
+    gateway.container_name = None;
+    gateway.updated_at = utc_now();
+    state.gateways.update(gateway.clone())?;
+    Ok(gateway.summary(false))
+}
+
+async fn require_kernel(state: &AppState, kernel_session_id: &str) -> Result<(), ApiError> {
+    let sessions = state.agent_host.list_sessions(false).await?;
+    if sessions.iter().any(|session| {
+        session
+            .get("session_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == kernel_session_id)
+    }) {
+        Ok(())
+    } else {
+        Err(ApiError::not_found(format!(
+            "kernel {kernel_session_id:?} not found"
+        )))
+    }
+}
+
+fn session_env(
+    state: &AppState,
+    agent: &AgentRecord,
+) -> Result<BTreeMap<String, String>, ApiError> {
+    let mut env = BTreeMap::new();
+    if let Some(config) = state.kernel_configs.get(agent.harness)? {
+        env.extend(parse_env_vars(&config.env_vars));
+    }
+    if let Some(connection_id) = agent.connection_id.as_deref() {
+        let connection = require_connection(state, connection_id)?;
+        env.insert("CONNECTION_URL".to_owned(), connection.url);
+        env.insert(
+            "CONNECTION_API_FLAVOR".to_owned(),
+            connection.api_flavor.as_str().to_owned(),
+        );
+        if !connection.api_key.is_empty() {
+            env.insert("CONNECTION_API_KEY".to_owned(), connection.api_key);
+        }
+    }
+    env.extend(parse_env_vars(&agent.env_vars));
+    if !agent.system_prompt.is_empty() {
+        env.insert(
+            "KERNEL_SYSTEM_PROMPT".to_owned(),
+            agent.system_prompt.clone(),
+        );
+    }
+    Ok(env)
+}
+
+async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<Value, ApiError> {
+    let mut session = require_session(state, session_id)?;
+    let turn_id = Uuid::now_v7().simple().to_string();
+    let user_message = MessageRecord::new(
+        Uuid::now_v7().simple().to_string(),
+        session.session_id.clone(),
+        MessageRole::User,
+        message,
+    );
+    let assistant_message_id = Uuid::now_v7().simple().to_string();
+    let assistant_created_at = utc_now();
+    state.sessions.append_message(user_message)?;
+    "busy".clone_into(&mut session.status);
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+
+    let events = state
+        .agent_host
+        .send_message(&session.agent_host_session_id, message)
+        .await?;
+    let assistant_message = assistant_message_from_events(
+        &session.session_id,
+        &assistant_message_id,
+        &assistant_created_at,
+        &events,
+    );
+    state.sessions.append_message(assistant_message.clone())?;
+    if let Ok(upstream) = state
+        .agent_host
+        .get_session(&session.agent_host_session_id)
+        .await
+        && let Ok(status) = string_field(&upstream, "status")
+    {
+        session.status = status;
+    }
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+    Ok(json!({
+        "session": session.summary(),
+        "assistant_message": assistant_message.summary(),
+        "events": events,
+        "turn_id": turn_id,
+        "completed": true,
+    }))
+}
+
+fn assistant_message_from_events(
+    session_id: &str,
+    message_id: &str,
+    created_at: &str,
+    events: &[KernelEvent],
+) -> MessageRecord {
+    let mut message = MessageRecord::new(
+        message_id.to_owned(),
+        session_id.to_owned(),
+        MessageRole::Assistant,
+        flatten_text(events),
+    );
+    created_at.clone_into(&mut message.created_at);
+    message.reasoning = flatten_reasoning(events);
+    message
+}
+
+fn flatten_text(events: &[KernelEvent]) -> String {
+    let mut chunks = Vec::new();
+    for event in events {
+        if event.get("type").and_then(Value::as_str) == Some("text_delta") {
+            if let Some(content) = event.get("content").and_then(Value::as_str) {
+                chunks.push(content.to_owned());
+            }
+            continue;
+        }
+        if let Some(update) = event.get("update").and_then(Value::as_object)
+            && update.get("sessionUpdate").and_then(Value::as_str) == Some("agent_message_chunk")
+        {
+            chunks.push(content_text(update.get("content")));
+        }
+    }
+    chunks.join("").trim().to_owned()
+}
+
+fn flatten_reasoning(events: &[KernelEvent]) -> String {
+    let mut chunks = Vec::new();
+    for event in events {
+        if event.get("type").and_then(Value::as_str) == Some("reasoning_delta") {
+            if let Some(content) = event.get("content").and_then(Value::as_str) {
+                chunks.push(content.to_owned());
+            }
+            continue;
+        }
+        if let Some(update) = event.get("update").and_then(Value::as_object)
+            && update.get("sessionUpdate").and_then(Value::as_str) == Some("agent_thought_chunk")
+        {
+            chunks.push(content_text(update.get("content")));
+        }
+    }
+    chunks.join("").trim().to_owned()
+}
+
+fn content_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(items)) => items.iter().map(|item| content_text(Some(item))).collect(),
+        Some(Value::Object(object)) => {
+            if object.get("type").and_then(Value::as_str) == Some("text") {
+                return object
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+            }
+            if object.get("type").and_then(Value::as_str) == Some("content") {
+                return content_text(object.get("content"));
+            }
+            serde_json::to_string(&Value::Object(object.clone())).unwrap_or_default()
+        }
+        Some(Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn push_ndjson_line(lines: &mut String, value: &Value) -> Result<(), ApiError> {
+    let line = serde_json::to_string(value)
+        .map_err(|error| ApiError::internal(format!("failed to serialize stream item: {error}")))?;
+    lines.push_str(&line);
+    lines.push('\n');
+    Ok(())
+}
+
+fn ndjson_response(lines: String) -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        Body::from(lines),
+    )
+        .into_response()
+}
+
+fn require_agent(state: &AppState, agent_id: &str) -> Result<AgentRecord, ApiError> {
+    state
+        .agents
+        .get(agent_id)?
+        .ok_or_else(|| ApiError::not_found(format!("agent {agent_id:?} not found")))
+}
+
+fn require_connection(state: &AppState, connection_id: &str) -> Result<ConnectionRecord, ApiError> {
+    state
+        .connections
+        .get(connection_id)?
+        .ok_or_else(|| ApiError::not_found(format!("connection {connection_id:?} not found")))
+}
+
+fn require_gateway(state: &AppState, gateway_id: &str) -> Result<GatewayRecord, ApiError> {
+    state
+        .gateways
+        .get(gateway_id)?
+        .ok_or_else(|| ApiError::not_found(format!("gateway {gateway_id:?} not found")))
+}
+
+fn require_session(state: &AppState, session_id: &str) -> Result<SessionRecord, ApiError> {
+    state
+        .sessions
+        .get(session_id)?
+        .ok_or_else(|| ApiError::not_found(format!("session {session_id:?} not found")))
+}
+
+fn parse_harness(raw: &str) -> Result<HarnessName, ApiError> {
+    HarnessName::from_str(raw).map_err(ApiError::from)
+}
+
+fn parse_gateway_type(raw: &str) -> Result<GatewayType, ApiError> {
+    GatewayType::from_str(raw).map_err(ApiError::from)
+}
+
+fn string_field(object: &JsonObject, field: &'static str) -> Result<String, ApiError> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            ApiError::bad_gateway(format!(
+                "agent_host response missing string field {field:?}"
+            ))
+        })
+}
+
+#[derive(Debug, Serialize)]
+struct HealthResponse {
+    status: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateKernelConfigRequest {
+    #[serde(default)]
+    env_vars: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateConnectionRequest {
+    connection_id: String,
+    name: String,
+    url: String,
+    #[serde(default)]
+    api_flavor: ConnectionApiFlavor,
+    #[serde(default)]
+    api_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateConnectionRequest {
+    name: Option<String>,
+    url: Option<String>,
+    api_flavor: Option<ConnectionApiFlavor>,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAgentRequest {
+    agent_id: String,
+    name: String,
+    #[serde(default = "default_harness")]
+    harness: HarnessName,
+    #[serde(default)]
+    system_prompt: String,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    env_vars: String,
+    connection_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateAgentRequest {
+    name: Option<String>,
+    harness: Option<HarnessName>,
+    system_prompt: Option<String>,
+    skills: Option<Vec<String>>,
+    env_vars: Option<String>,
+    connection_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSessionRequest {
+    agent_id: String,
+    channel_name: Option<String>,
+    client_type: Option<ClientType>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendMessageRequest {
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ContainerLogsQuery {
+    tail: Option<u64>,
+    #[serde(default, rename = "all")]
+    all: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSkillRequest {
+    skill_id: String,
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSkillRequest {
+    files: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateGatewayRequest {
+    gateway_id: String,
+    name: String,
+    gateway_type: GatewayType,
+    agent_id: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    env_vars: String,
+    #[serde(default)]
+    secrets: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateGatewayRequest {
+    name: Option<String>,
+    agent_id: Option<String>,
+    enabled: Option<bool>,
+    env_vars: Option<String>,
+    secrets: Option<BTreeMap<String, String>>,
+}
+
+const fn default_harness() -> HarnessName {
+    HarnessName::Acp
+}
+
+#[derive(Debug)]
+struct ApiError {
+    status: StatusCode,
+    detail: String,
+}
+
+impl ApiError {
+    const fn not_found(detail: String) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            detail,
+        }
+    }
+
+    const fn conflict(detail: String) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            detail,
+        }
+    }
+
+    const fn unprocessable(detail: String) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            detail,
+        }
+    }
+
+    const fn bad_gateway(detail: String) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            detail,
+        }
+    }
+
+    const fn internal(detail: String) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            detail,
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "detail": self.detail }))).into_response()
+    }
+}
+
+impl From<ValidationError> for ApiError {
+    fn from(error: ValidationError) -> Self {
+        Self::unprocessable(error.to_string())
+    }
+}
+
+impl From<StoreError> for ApiError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::AgentAlreadyExists { .. }
+            | StoreError::ConnectionAlreadyExists { .. }
+            | StoreError::GatewayAlreadyExists { .. }
+            | StoreError::SessionAlreadyExists { .. } => Self::conflict(error.to_string()),
+            StoreError::AgentNotFound { .. }
+            | StoreError::ConnectionNotFound { .. }
+            | StoreError::GatewayNotFound { .. }
+            | StoreError::SessionNotFound { .. } => Self::not_found(error.to_string()),
+            StoreError::LockPoisoned { .. } => Self::internal(error.to_string()),
+        }
+    }
+}
+
+impl From<AgentHostError> for ApiError {
+    fn from(error: AgentHostError) -> Self {
+        match error {
+            AgentHostError::HttpStatus { status, body } if status == StatusCode::NOT_FOUND => {
+                Self::not_found(body)
+            }
+            AgentHostError::HttpStatus { status, body } if status.is_client_error() => Self {
+                status,
+                detail: body,
+            },
+            other => Self::bad_gateway(other.to_string()),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_lines)]
+mod tests {
+    use std::{collections::BTreeMap, error::Error, time::Duration};
+
+    use axum::{
+        Router,
+        body::{Body, to_bytes},
+        http::{Method, Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use crate::{AppConfig, AppState, agent_host::AgentHostClient, build_router};
+
+    fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
+        let mut env = BTreeMap::new();
+        env.insert("CLIENT_SERVICE_TEST".to_owned(), "enabled".to_owned());
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        Ok(build_router(AppState::with_agent_host(config, agent_host)))
+    }
+
+    async fn request_json(
+        app: Router,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
+        let mut builder = Request::builder().method(method).uri(path);
+        let body = if let Some(body) = body {
+            builder = builder.header("content-type", "application/json");
+            Body::from(serde_json::to_vec(&body)?)
+        } else {
+            Body::empty()
+        };
+        let response = app.oneshot(builder.body(body)?).await?;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let value = if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body)?
+        };
+        Ok((status, value))
+    }
+
+    async fn get_json(
+        app: Router,
+        path: &str,
+    ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
+        request_json(app, Method::GET, path, None).await
+    }
+
+    #[tokio::test]
+    async fn health_info_harnesses_and_kernel_configs_work()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let app = test_router()?;
+
+        let (status, value) = get_json(app.clone(), "/healthz").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value, json!({ "status": "ok" }));
+
+        let (status, value) = get_json(app.clone(), "/info").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["client_service"]["service"], "client_service");
+        assert_eq!(
+            value["client_service"]["env"],
+            json!({ "CLIENT_SERVICE_TEST": "enabled" })
+        );
+        assert_eq!(value["agent_host"]["service"], "agent_host");
+        assert!(value["agent_host"]["error"].is_string());
+
+        let (status, value) = get_json(app.clone(), "/harnesses").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value, json!(["acp"]));
+
+        let (status, value) = get_json(app.clone(), "/kernel-configs/acp").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["harness"], "acp");
+        assert_eq!(value["env_vars"], "");
+        assert!(value["updated_at"].is_null());
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::PUT,
+            "/kernel-configs/acp",
+            Some(json!({ "env_vars": "A=B" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["env_vars"], "A=B");
+
+        let (status, value) = get_json(app, "/kernel-configs/unknown").await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_routes_handle_crud_and_status_codes()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let app = test_router()?;
+        let payload = json!({
+            "connection_id": "main",
+            "name": "Main",
+            "url": "http://models.example.test",
+            "api_flavor": "responses",
+            "api_key": "secret",
+        });
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::POST,
+            "/connections",
+            Some(payload.clone()),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["connection_id"], "main");
+        assert_eq!(value["api_key"], "secret");
+        assert_eq!(value["has_api_key"], true);
+
+        let (status, value) =
+            request_json(app.clone(), Method::POST, "/connections", Some(payload)).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(value["detail"].is_string());
+
+        let (status, value) = get_json(app.clone(), "/connections/main").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert!(value.get("api_key").is_none());
+        assert_eq!(value["api_flavor"], "responses");
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::PATCH,
+            "/connections/main",
+            Some(json!({ "name": "Renamed", "api_key": "" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["name"], "Renamed");
+        assert_eq!(value["api_key"], "");
+        assert_eq!(value["has_api_key"], false);
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::POST,
+            "/connections",
+            Some(json!({ "connection_id": "Bad", "name": "Bad", "url": "x" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(value["detail"].is_string());
+
+        let (status, value) =
+            request_json(app.clone(), Method::DELETE, "/connections/main", None).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(value, Value::Null);
+
+        let (status, value) = get_json(app, "/connections/main").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_routes_handle_crud_and_missing_connections()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let app = test_router()?;
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({
+                "agent_id": "agent-one",
+                "name": "Agent One",
+                "system_prompt": "help",
+                "skills": ["skill-a"],
+                "env_vars": "A=B",
+                "connection_id": "missing",
+            })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(value["detail"].is_string());
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["harness"], "acp");
+        assert_eq!(value["system_prompt"], "");
+        assert_eq!(value["skills"], json!([]));
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::PATCH,
+            "/agents/agent-one",
+            Some(json!({ "name": "Renamed", "harness": "echo" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["name"], "Renamed");
+        assert_eq!(value["harness"], "echo");
+
+        let (status, value) = get_json(app.clone(), "/agents").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value.as_array().map(Vec::len), Some(1));
+
+        let (status, _value) =
+            request_json(app.clone(), Method::DELETE, "/agents/agent-one", None).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (status, value) = get_json(app, "/agents/agent-one").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gateway_type_and_stopped_gateway_routes_work()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let app = test_router()?;
+        let (status, _value) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, value) = get_json(app.clone(), "/gateway-types").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value, json!(["echo", "discord"]));
+
+        let (status, value) = get_json(app.clone(), "/gateway-types/echo/schema").await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["gateway_type"], "echo");
+        assert_eq!(value["type"], "object");
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::POST,
+            "/gateways",
+            Some(json!({
+                "gateway_id": "gateway-one",
+                "name": "Gateway One",
+                "gateway_type": "echo",
+                "agent_id": "agent-one",
+                "enabled": false,
+                "env_vars": "A=B",
+                "secrets": { "TOKEN": "secret" },
+            })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["status"], "stopped");
+        assert_eq!(value["secret_keys"], json!(["TOKEN"]));
+        assert!(value.get("secrets").is_none());
+
+        let (status, value) = request_json(
+            app.clone(),
+            Method::PATCH,
+            "/gateways/gateway-one",
+            Some(json!({ "name": "Renamed", "secrets": { "OTHER": "value" } })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(value["name"], "Renamed");
+        assert_eq!(value["secret_keys"], json!(["OTHER", "TOKEN"]));
+
+        let (status, value) =
+            request_json(app.clone(), Method::DELETE, "/gateways/gateway-one", None).await?;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(value, Value::Null);
+
+        let (status, value) = get_json(app, "/gateways/gateway-one").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_session_message_and_turn_routes_return_404()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let app = test_router()?;
+
+        let (status, value) = get_json(app.clone(), "/sessions/missing/messages").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(value["detail"].is_string());
+
+        let (status, value) = get_json(app, "/sessions/missing/turns/turn-one/stream").await?;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+}

@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let config = AppConfig::from_env()?;
     let bind_host = config.bind_host().to_owned();
     let bind_port = config.bind_port();
-    let state = AppState::new(config);
+    let state = AppState::new(config)?;
     let app = build_router(state);
     let listener = TcpListener::bind((bind_host.as_str(), bind_port)).await?;
 
