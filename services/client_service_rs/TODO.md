@@ -51,6 +51,19 @@ The service can be started from this directory with:
 
 ## Remaining work
 
+### In progress in the current porting pass
+
+- Add durable SQLite persistence for Rust service state.
+- Add route-level contract coverage for Python-compatible response shapes and
+  status codes.
+- Add stub `agent_host` integration coverage for proxied routes and session
+  environment merging.
+- Improve harness listing and gateway schema parity.
+- Add operational Docker/check wiring where it is useful without replacing the
+  Python service defaults.
+
+### Backlog
+
 1. Add durable SQLite persistence compatible with the Python service tables or
    define and document a migration path.
 2. Compare every Rust response body against the Python FastAPI service with
