@@ -6,6 +6,7 @@ import pytest
 from agent_host.service import (
     SKILLS_MOUNT_PATHS,
     AgentHost,
+    DockerKernelRuntime,
     KernelRuntimeSession,
     SessionNotFoundError,
     _summarize_docker_stats,  # pyright: ignore[reportPrivateUsage]
@@ -152,9 +153,39 @@ class StubRuntime:
     def vscode_url(self, *, session: KernelRuntimeSession) -> str | None:
         return f"http://127.0.0.1/vscode/{self._session_key(session)}"
 
+    def free_port_url(self, *, session: KernelRuntimeSession) -> str | None:
+        return f"http://127.0.0.1/free/{self._session_key(session)}"
+
     def _session_key(self, session: KernelRuntimeSession) -> str:
         assert isinstance(session.value, str)
         return session.value
+
+
+class FakeDockerContainers:
+    def __init__(self, captured: dict[str, Any]) -> None:
+        self._captured = captured
+
+    def run(self, *_args: object, **kwargs: object) -> object:
+        self._captured.update(kwargs)
+        return object()
+
+
+class FakeDockerClient:
+    def __init__(self, captured: dict[str, Any]) -> None:
+        self.containers = FakeDockerContainers(captured)
+
+
+def _runtime_with_captured_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[DockerKernelRuntime, dict[str, Any]]:
+    captured: dict[str, Any] = {}
+    fake_client = FakeDockerClient(captured)
+
+    def fake_from_env() -> FakeDockerClient:
+        return fake_client
+
+    monkeypatch.setattr("agent_host.service.docker.from_env", fake_from_env)
+    return DockerKernelRuntime(), captured
 
 
 @pytest.mark.asyncio
@@ -337,6 +368,9 @@ async def test_get_session_includes_container_name_and_stats() -> None:
     fetched = await host.get_session(session["session_id"], with_stats=True)
 
     assert fetched["container_name"] == f"container-{session['session_id'][:8]}"
+    assert fetched["free_port_url"] == (
+        f"http://127.0.0.1/free/container-{session['session_id'][:8]}"
+    )
     stats = fetched["stats"]
     assert isinstance(stats, dict)
     assert stats["cpu_percent"] == 12.5
@@ -384,3 +418,44 @@ async def test_container_logs_default_tail_passed_through() -> None:
     lines = await host.container_logs(session["session_id"], tail=None)
 
     assert len(lines) == 5
+
+
+def test_docker_runtime_publishes_vscode_and_free_ports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AGENT_HOST_KERNEL_VSCODE_CONTAINER_PORT", raising=False)
+    monkeypatch.delenv("AGENT_HOST_KERNEL_FREE_PORT_CONTAINER_PORT", raising=False)
+    runtime, captured = _runtime_with_captured_run(monkeypatch)
+
+    runtime._run_container(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        "agentspace-kernel-test",
+        HarnessName.ECHO,
+        {},
+        (),
+    )
+
+    ports = captured["ports"]
+    environment = captured["environment"]
+    assert isinstance(ports, dict)
+    assert ports["8080/tcp"] == ("0.0.0.0", 0)  # noqa: S104
+    assert ports["8081/tcp"] == ("0.0.0.0", 0)  # noqa: S104
+    assert isinstance(environment, dict)
+    assert environment["KERNEL_FREE_PORT"] == "8081"
+
+
+def test_docker_runtime_keeps_free_port_when_vscode_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, captured = _runtime_with_captured_run(monkeypatch)
+
+    runtime._run_container(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        "agentspace-kernel-test",
+        HarnessName.ECHO,
+        {"KERNEL_VSCODE_ENABLED": "0"},
+        (),
+    )
+
+    ports = captured["ports"]
+    assert isinstance(ports, dict)
+    assert "8080/tcp" not in ports
+    assert ports["8081/tcp"] == ("0.0.0.0", 0)  # noqa: S104

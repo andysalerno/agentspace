@@ -95,6 +95,7 @@ export type KernelSummary = {
   agent_ids: string[];
   container_name: string | null;
   vscode_url: string | null;
+  free_port_url: string | null;
   stats: KernelStats | null;
 };
 
@@ -161,6 +162,7 @@ export type Connection = {
   connection_id: string;
   name: string;
   url: string;
+  api_flavor: "chat_completions" | "responses";
   has_api_key: boolean;
   api_key?: string;
   created_at: string;

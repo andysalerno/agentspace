@@ -26,15 +26,15 @@ type LogsModalState = {
     source: LogSource;
 };
 
-function browserReachableVscodeUrl(vscodeUrl: string): string {
+function browserReachableLocalUrl(localUrl: string): string {
     try {
-        const url = new URL(vscodeUrl);
+        const url = new URL(localUrl);
         if (LOCAL_VSCODE_HOSTNAMES.has(url.hostname.toLowerCase())) {
             url.hostname = window.location.hostname;
         }
         return url.toString();
     } catch {
-        return vscodeUrl;
+        return localUrl;
     }
 }
 
@@ -429,7 +429,7 @@ function KernelRow({
                                 <a
                                     role="menuitem"
                                     className="kebab-menu-item"
-                                    href={browserReachableVscodeUrl(kernel.vscode_url)}
+                                    href={browserReachableLocalUrl(kernel.vscode_url)}
                                     target="_blank"
                                     rel="noreferrer"
                                     onClick={onToggleMenu}
@@ -446,6 +446,18 @@ function KernelRow({
                                     VS Code unavailable
                                 </button>
                             )}
+                            {kernel.free_port_url ? (
+                                <a
+                                    role="menuitem"
+                                    className="kebab-menu-item"
+                                    href={browserReachableLocalUrl(kernel.free_port_url)}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    onClick={onToggleMenu}
+                                >
+                                    Open service
+                                </a>
+                            ) : null}
                             <button
                                 type="button"
                                 role="menuitem"

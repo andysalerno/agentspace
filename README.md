@@ -155,6 +155,10 @@ the kernel reports a loopback or wildcard host. For remote deployments, make sur
 interface, and allow the dynamically published kernel VS Code ports through the
 host firewall.
 
+Spawned kernel containers also publish container port `8081` to a dynamic host
+port by default. The host URL is exposed as `free_port_url`, and the container
+receives `KERNEL_FREE_PORT=8081` so agents can bind ad hoc services there.
+
 ## CliChannel
 
 `cli_channel` is the first proof-of-concept CLI session client. It is separate from the future native CLI client and exists only to validate the client-service session contract.

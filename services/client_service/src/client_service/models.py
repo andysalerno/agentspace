@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from gateway.protocol import GatewayType
@@ -165,11 +165,16 @@ def _empty_env_dict() -> dict[str, str]:
     return {}
 
 
+ConnectionApiFlavor = Literal["chat_completions", "responses"]
+DEFAULT_CONNECTION_API_FLAVOR: ConnectionApiFlavor = "chat_completions"
+
+
 @dataclass(slots=True)
 class ConnectionRecord:
     connection_id: str
     name: str
     url: str
+    api_flavor: ConnectionApiFlavor = DEFAULT_CONNECTION_API_FLAVOR
     api_key: str = ""
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -179,6 +184,7 @@ class ConnectionRecord:
             "connection_id": self.connection_id,
             "name": self.name,
             "url": self.url,
+            "api_flavor": self.api_flavor,
             "has_api_key": bool(self.api_key),
             "created_at": self.created_at,
             "updated_at": self.updated_at,

@@ -17,8 +17,10 @@ from kernel_host.registry import HarnessName, available_harnesses
 
 from client_service.agent_host_client import AgentHostClient, HttpAgentHostClient
 from client_service.models import (
+    DEFAULT_CONNECTION_API_FLAVOR,
     AgentRecord,
     ClientType,
+    ConnectionApiFlavor,
     ConnectionRecord,
     GatewayRecord,
     MessageRecord,
@@ -308,6 +310,7 @@ class ClientService:
         if agent.connection_id is not None:
             connection = await self._require_connection(agent.connection_id)
             env["CONNECTION_URL"] = connection.url
+            env["CONNECTION_API_FLAVOR"] = connection.api_flavor
             if connection.api_key:
                 env["CONNECTION_API_KEY"] = connection.api_key
         env.update(parse_env_vars(agent.env_vars))
@@ -1104,6 +1107,7 @@ class ClientService:
         connection_id: str,
         name: str,
         url: str,
+        api_flavor: ConnectionApiFlavor = DEFAULT_CONNECTION_API_FLAVOR,
         api_key: str = "",
     ) -> dict[str, object]:
         _validate_connection_id(connection_id)
@@ -1111,6 +1115,7 @@ class ClientService:
             connection_id=connection_id,
             name=name,
             url=url,
+            api_flavor=api_flavor,
             api_key=api_key,
         )
         try:
@@ -1126,6 +1131,7 @@ class ClientService:
         *,
         name: str | None = None,
         url: str | None = None,
+        api_flavor: ConnectionApiFlavor | None = None,
         api_key: str | None = None,
     ) -> dict[str, object]:
         record = await self._require_connection(connection_id)
@@ -1133,6 +1139,8 @@ class ClientService:
             record.name = name
         if url is not None:
             record.url = url
+        if api_flavor is not None:
+            record.api_flavor = api_flavor
         if api_key is not None:
             record.api_key = api_key
         record.updated_at = utc_now()

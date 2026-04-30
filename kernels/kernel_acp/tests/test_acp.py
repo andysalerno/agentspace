@@ -268,6 +268,9 @@ class TestAcpMapping:
         config = json.loads(config_path.read_text())
         options = config["provider"]["customprovider"]["options"]
         assert config["$schema"] == "https://opencode.ai/config.json"
+        assert (
+            config["provider"]["customprovider"]["npm"] == "@ai-sdk/openai-compatible"
+        )
         assert options["baseURL"] == "https://connection.test/v1"
         assert options["apiKey"] == "from-connection"
         assert config["model"] == "customprovider/model-a"
@@ -276,6 +279,28 @@ class TestAcpMapping:
         }
         assert config["permission"]["bash"] == {"*": "allow"}
         assert config["permission"]["webfetch"] == "deny"
+
+    def test_write_opencode_config_uses_openai_provider_for_responses_flavor(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        kernel._config = KernelConfig(
+            env={
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_API_KEY": "from-connection",
+                "CONNECTION_API_FLAVOR": "responses",
+                "KERNEL_ACP_MODEL_NAME": "model-a",
+            },
+        )
+
+        kernel._write_opencode_config()
+
+        config_path = tmp_path / ".config" / "opencode" / "opencode.json"
+        config = json.loads(config_path.read_text())
+        assert config["provider"]["customprovider"]["npm"] == "@ai-sdk/openai"
 
     def test_write_opencode_config_accepts_legacy_opencode_model_name(
         self,

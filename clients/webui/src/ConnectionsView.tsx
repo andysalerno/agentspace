@@ -6,6 +6,16 @@ import { api } from "./api";
 import { queryKeys, useConnections } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 
+type ConnectionApiFlavor = Connection["api_flavor"];
+
+const API_FLAVOR_OPTIONS: Array<{ value: ConnectionApiFlavor; label: string }> = [
+    { value: "chat_completions", label: "Chat completions" },
+    { value: "responses", label: "Responses" },
+];
+
+const apiFlavorLabel = (value: ConnectionApiFlavor) =>
+    API_FLAVOR_OPTIONS.find((option) => option.value === value)?.label ?? value;
+
 export default function ConnectionsView() {
     const { data: connections = [] } = useConnections();
     const queryClient = useQueryClient();
@@ -15,11 +25,13 @@ export default function ConnectionsView() {
     const [formId, setFormId] = useState("");
     const [formName, setFormName] = useState("");
     const [formUrl, setFormUrl] = useState("");
+    const [formApiFlavor, setFormApiFlavor] = useState<ConnectionApiFlavor>("chat_completions");
     const [formApiKey, setFormApiKey] = useState("");
 
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editName, setEditName] = useState("");
     const [editUrl, setEditUrl] = useState("");
+    const [editApiFlavor, setEditApiFlavor] = useState<ConnectionApiFlavor>("chat_completions");
     const [editApiKey, setEditApiKey] = useState("");
 
     const invalidate = () =>
@@ -30,6 +42,7 @@ export default function ConnectionsView() {
             connection_id: string;
             name: string;
             url: string;
+            api_flavor: ConnectionApiFlavor;
             api_key: string;
         }) => api.createConnection(payload),
         onSuccess: () => invalidate(),
@@ -37,7 +50,7 @@ export default function ConnectionsView() {
     });
 
     const updateMutation = useMutation({
-        mutationFn: ({ id, payload }: { id: string; payload: { name?: string; url?: string; api_key?: string } }) =>
+        mutationFn: ({ id, payload }: { id: string; payload: { name?: string; url?: string; api_flavor?: ConnectionApiFlavor; api_key?: string } }) =>
             api.updateConnection(id, payload),
         onSuccess: () => invalidate(),
         onError: reportError,
@@ -60,11 +73,13 @@ export default function ConnectionsView() {
             connection_id: formId,
             name: formName,
             url: formUrl,
+            api_flavor: formApiFlavor,
             api_key: formApiKey,
         });
         setFormId("");
         setFormName("");
         setFormUrl("");
+        setFormApiFlavor("chat_completions");
         setFormApiKey("");
         setShowForm(false);
     }
@@ -73,6 +88,7 @@ export default function ConnectionsView() {
         setEditingId(conn.connection_id);
         setEditName(conn.name);
         setEditUrl(conn.url);
+        setEditApiFlavor(conn.api_flavor);
         setEditApiKey("");
     }
 
@@ -80,6 +96,7 @@ export default function ConnectionsView() {
         setEditingId(null);
         setEditName("");
         setEditUrl("");
+        setEditApiFlavor("chat_completions");
         setEditApiKey("");
     }
 
@@ -91,6 +108,7 @@ export default function ConnectionsView() {
             payload: {
                 name: editName,
                 url: editUrl,
+                api_flavor: editApiFlavor,
                 api_key: editApiKey || undefined,
             },
         });
@@ -150,6 +168,20 @@ export default function ConnectionsView() {
                         />
                         <span className="muted">Leave blank if the endpoint does not require a key</span>
                     </label>
+                    <label>
+                        API Flavor
+                        <select
+                            required
+                            value={formApiFlavor}
+                            onChange={(e) => setFormApiFlavor(e.target.value as ConnectionApiFlavor)}
+                        >
+                            {API_FLAVOR_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                    {option.label}
+                                </option>
+                            ))}
+                        </select>
+                    </label>
                     <button disabled={busy} type="submit">
                         Create Connection
                     </button>
@@ -169,6 +201,9 @@ export default function ConnectionsView() {
                                 <div>
                                     <strong>API Key:</strong>{" "}
                                     {conn.has_api_key ? "set" : "not set"}
+                                </div>
+                                <div>
+                                    <strong>API Flavor:</strong> {apiFlavorLabel(conn.api_flavor)}
                                 </div>
                             </div>
                             {editingId === conn.connection_id && (
@@ -200,6 +235,20 @@ export default function ConnectionsView() {
                                             value={editApiKey}
                                             onChange={(e) => setEditApiKey(e.target.value)}
                                         />
+                                    </label>
+                                    <label>
+                                        API Flavor
+                                        <select
+                                            required
+                                            value={editApiFlavor}
+                                            onChange={(e) => setEditApiFlavor(e.target.value as ConnectionApiFlavor)}
+                                        >
+                                            {API_FLAVOR_OPTIONS.map((option) => (
+                                                <option key={option.value} value={option.value}>
+                                                    {option.label}
+                                                </option>
+                                            ))}
+                                        </select>
                                     </label>
                                     <div className="card-footer-actions">
                                         <button
