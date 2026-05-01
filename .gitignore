@@ -9,6 +9,8 @@ build/
 .env
 
 node_modules/
+.playwright-cli/
+.vite/
 clients/webui/*.tsbuildinfo
 clients/webui/vite.config.js
 clients/webui/vite.config.d.ts
