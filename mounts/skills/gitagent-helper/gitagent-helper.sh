@@ -71,6 +71,35 @@ ensure_origin_remote() {
   git remote add origin "$REMOTE_URL"
 }
 
+is_uncloneable_empty_remote_error() {
+  local output="$1"
+
+  [[ "$output" == *"repository"* ]] || return 1
+  [[ "$output" == *"not found"* || "$output" == *"does not exist"* ]]
+}
+
+init_empty_checkout() {
+  local target_dir="$1"
+
+  rm -rf "$target_dir"
+  if ! git init -b "$DEFAULT_BRANCH" "$target_dir" >/dev/null 2>&1; then
+    git init "$target_dir" >/dev/null
+    git -C "$target_dir" checkout -b "$DEFAULT_BRANCH" >/dev/null
+  fi
+  git -C "$target_dir" remote add origin "$REMOTE_URL"
+  cat >&2 <<EOF
+GitAgent remote is not cloneable yet, so initialized an empty local checkout.
+This is expected on first run before GitAgent has accepted its first commit.
+
+Next steps:
+  cd $target_dir
+  create the new project files
+  git add .
+  git commit -m "<message>"
+  gitagent-helper.sh submit --message "<message>"
+EOF
+}
+
 fetch_target_sha() {
   local target_ref="$1"
   local output
@@ -173,7 +202,29 @@ cmd_clone() {
     exit 1
   fi
 
-  git clone "$REMOTE_URL" "${1:-gitagent-repo}"
+  local target_dir="${1:-gitagent-repo}"
+  local output
+  local status
+
+  [[ ! -e "$target_dir" ]] || die "target path already exists: $target_dir"
+
+  set +e
+  output="$(git clone "$REMOTE_URL" "$target_dir" 2>&1)"
+  status=$?
+  set -e
+
+  if [[ "$status" -eq 0 ]]; then
+    [[ -z "$output" ]] || printf '%s\n' "$output" >&2
+    return
+  fi
+
+  if is_uncloneable_empty_remote_error "$output"; then
+    init_empty_checkout "$target_dir"
+    return
+  fi
+
+  printf '%s\n' "$output" >&2
+  return "$status"
 }
 
 cmd_env() {

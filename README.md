@@ -125,11 +125,17 @@ patch submission workflow. In compose it is reachable to kernels as
 `http://gitagent:8004`.
 
 Default endpoint: `http://127.0.0.1:8004`
+Default in-network git remote: `http://gitagent:8004/repo.git`
 
 GitAgent stores its repository and request database in the stable named Docker
 volume `${GITAGENT_DATA_VOLUME:-agentspace-git-agent-data}`. This volume
 persists across `just stack-down` and `just stack-up`; remove it only when you
 intentionally want to erase GitAgent state.
+
+On first run, agents may not be able to clone until the first patch has been
+accepted. Use the `gitagent-helper` skill's `clone` command; it falls back to an
+empty local repo with `origin` set to GitAgent, so agents can create a new
+project, commit locally, and submit the initial patch with the all-zero base SHA.
 
 The same volume is exposed through `client_service` as the built-in `git-agent`
 workspace. It always appears on the Workspaces page and can be opened in VS Code

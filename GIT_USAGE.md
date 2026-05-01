@@ -20,13 +20,24 @@ export GITAGENT_REMOTE_URL="${GITAGENT_REMOTE_URL:-http://gitagent:8004/repo.git
 export GITAGENT_PATCH_URL="${GITAGENT_PATCH_URL:-http://gitagent:8004/PatchRequest}"
 export GITAGENT_DEFAULT_BRANCH="${GITAGENT_DEFAULT_BRANCH:-main}"
 
-git clone "$GITAGENT_REMOTE_URL" repo
+/builtin-skills/gitagent-helper/gitagent-helper.sh clone repo
 cd repo
-git fetch origin
 ```
 
-If the repository is empty, create local commits normally. If `main` exists, base
-work on the latest remote `main`:
+On first run, GitAgent may not have a cloneable repo until the first patch is
+accepted. If clone reports `repository ... not found`, do not stop. Initialize a
+local repo with the GitAgent remote, create the project, commit locally, and
+submit with an all-zero base SHA:
+
+```bash
+mkdir repo
+cd repo
+git init -b "${GITAGENT_DEFAULT_BRANCH:-main}"
+git remote add origin "$GITAGENT_REMOTE_URL"
+```
+
+The helper's `clone` command does this fallback automatically. If `main` exists,
+base work on the latest remote `main`:
 
 ```bash
 git fetch origin "refs/heads/${GITAGENT_DEFAULT_BRANCH}"
