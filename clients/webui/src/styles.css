@@ -296,6 +296,7 @@ summary:focus-visible {
 .sidebar-collapse-btn {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 9px;
   width: 100%;
   min-height: 30px;
