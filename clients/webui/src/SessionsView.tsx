@@ -35,15 +35,19 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
     }
 
     return (
-        <div className="view-content">
+        <div className="view-content management-view sessions-management-view">
             <div className="view-header">
-                <h2>Sessions</h2>
-                <span className="muted">{sessions.length} total</span>
+                <div>
+                    <h2>Sessions</h2>
+                    <span className="muted">
+                        {sessions.length} total · {sessions.filter((s) => s.status === "active").length} active
+                    </span>
+                </div>
             </div>
 
             {sessions.length > 0 ? (
-                <div className="table-container">
-                    <table className="data-table">
+                <div className="table-container management-table-container">
+                    <table className="data-table management-table">
                         <thead>
                             <tr>
                                 <th>Agent</th>
@@ -59,15 +63,20 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                             {sessions.map((s) => (
                                 <tr key={s.session_id}>
                                     <td>
-                                        <strong>{agentMap[s.agent_id]?.name ?? s.agent_id}</strong>
+                                        <strong className="truncate-value">{agentMap[s.agent_id]?.name ?? s.agent_id}</strong>
+                                        <div className="muted mono truncate-value">{s.agent_id}</div>
                                     </td>
-                                    <td className="mono">{s.session_id.slice(0, 8)}…</td>
+                                    <td className="mono" title={s.session_id}>
+                                        <span className="truncate-value">{s.session_id.slice(0, 12)}…</span>
+                                    </td>
                                     <td>
                                         <span className={`status-badge ${s.status}`}>{s.status}</span>
                                     </td>
                                     <td>{s.message_count}</td>
-                                    <td>{s.channel_name ?? "—"}</td>
-                                    <td>{new Date(s.created_at).toLocaleDateString()}</td>
+                                    <td>
+                                        <span className="truncate-value">{s.channel_name ?? "—"}</span>
+                                    </td>
+                                    <td className="nowrap">{new Date(s.created_at).toLocaleString()}</td>
                                     <td className="actions-cell">
                                         <div className="card-footer-actions">
                                             <button

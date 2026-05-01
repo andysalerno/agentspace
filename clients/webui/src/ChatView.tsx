@@ -23,6 +23,7 @@ import {
     useSessions,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import "./chat-workspace.css";
 
 type ChatViewProps = {
     selectedSessionId: string | null;
@@ -253,6 +254,54 @@ function addInlineToolCalls(content: string, toolCalls: ToolCall[]): string {
     }
 
     return `${markdown}${content.slice(cursor)}`;
+}
+
+function compactSessionId(sessionId: string): string {
+    if (sessionId.length <= 18) {
+        return sessionId;
+    }
+    return `${sessionId.slice(0, 8)}…${sessionId.slice(-6)}`;
+}
+
+function formatTimestamp(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+        return value;
+    }
+    return new Intl.DateTimeFormat(undefined, {
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        month: "short",
+    }).format(date);
+}
+
+function messageRoleLabel(role: string): string {
+    if (role === "user") {
+        return "You";
+    }
+    if (role === "assistant") {
+        return "Agent";
+    }
+    return role;
+}
+
+function sessionChannelLabel(channelName: string | null): string {
+    return channelName?.trim() || "default channel";
+}
+
+function statusTone(status: string | undefined): "active" | "busy" | "error" | "neutral" {
+    const normalized = status?.toLowerCase() ?? "";
+    if (/(error|fail|stopped|unhealthy|cancel)/.test(normalized)) {
+        return "error";
+    }
+    if (/(active|busy|pending|running|start|stream|working)/.test(normalized)) {
+        return "busy";
+    }
+    if (/(ready|idle|complete|success|ok|online)/.test(normalized)) {
+        return "active";
+    }
+    return "neutral";
 }
 
 function hasMessageWithId(messages: ChatMessage[], message: ChatMessage): boolean {
@@ -672,81 +721,139 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     const serviceUrl = selectedKernel?.free_port_url
         ? browserReachableLocalUrl(selectedKernel.free_port_url)
         : null;
+    const selectedStatusTone = statusTone(selectedSession?.status);
 
     return (
         <div className="chat-layout">
-            <aside className="chat-sessions-panel">
+            <aside className="chat-sessions-panel chat-session-rail">
                 <div className="chat-sessions-heading">
-                    <h3>Sessions</h3>
+                    <div className="rail-title-stack">
+                        <span className="rail-eyebrow">Workspace</span>
+                        <h3>
+                            Sessions
+                            <span className="rail-count">{sessions.length}</span>
+                        </h3>
+                    </div>
                     <button
-                        className="icon-button"
+                        className="icon-button new-session-button"
                         onClick={() => setShowNewSession(!showNewSession)}
                         type="button"
                         title="New session"
+                        aria-expanded={showNewSession}
                     >
                         {showNewSession ? "×" : "+"}
                     </button>
                 </div>
                 {showNewSession && (
-                    <form className="compact-form" onSubmit={(e) => { void handleCreateSession(e); }}>
-                        <select
-                            value={newSessionAgentId}
-                            onChange={(e) => setNewSessionAgentId(e.target.value)}
-                        >
-                            {agents.map((a) => (
-                                <option key={a.agent_id} value={a.agent_id}>
-                                    {a.name}
-                                </option>
-                            ))}
-                        </select>
-                        <input
-                            placeholder="Channel name"
-                            value={newSessionChannelName}
-                            onChange={(e) => setNewSessionChannelName(e.target.value)}
-                        />
+                    <form className="compact-form new-session-form" onSubmit={(e) => { void handleCreateSession(e); }}>
+                        <label>
+                            <span>Agent</span>
+                            <select
+                                value={newSessionAgentId}
+                                onChange={(e) => setNewSessionAgentId(e.target.value)}
+                            >
+                                {agents.map((a) => (
+                                    <option key={a.agent_id} value={a.agent_id}>
+                                        {a.name}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <label>
+                            <span>Channel</span>
+                            <input
+                                placeholder="default channel"
+                                value={newSessionChannelName}
+                                onChange={(e) => setNewSessionChannelName(e.target.value)}
+                            />
+                        </label>
                         <button disabled={busy || !newSessionAgentId} type="submit">
-                            Start
+                            Start session
                         </button>
                     </form>
                 )}
-                <div className="session-list">
-                    {sessions.map((session) => (
-                        <div
-                            className={`session-row ${selectedSessionId === session.session_id ? "active" : ""}`}
-                            key={session.session_id}
-                        >
-                            <button
-                                className="session-item"
-                                onClick={() => onSelectSession(session.session_id)}
-                                type="button"
+                <div className="session-list" aria-label="Sessions">
+                    {sessions.map((session) => {
+                        const tone = statusTone(session.status);
+                        return (
+                            <div
+                                className={`session-row chat-session-row ${selectedSessionId === session.session_id ? "active" : ""}`}
+                                key={session.session_id}
                             >
-                                <strong>{session.agent_id}</strong>
-                                <span className="muted">
-                                    {session.message_count} messages · {session.status}
-                                </span>
-                            </button>
-                            <button
-                                aria-label={`Delete session ${session.session_id}`}
-                                className="session-delete-button"
-                                disabled={deleteSessionMutation.isPending}
-                                onClick={() => handleDeleteSession(session.session_id)}
-                                title="Delete session"
-                                type="button"
-                            >
-                                Delete
+                                <button
+                                    className="session-item chat-session-card"
+                                    onClick={() => onSelectSession(session.session_id)}
+                                    type="button"
+                                    title={session.session_id}
+                                >
+                                    <span className={`status-dot status-${tone}`} aria-hidden="true" />
+                                    <span className="session-card-main">
+                                        <strong title={session.agent_id}>{session.agent_id}</strong>
+                                        <span className="session-card-meta">
+                                            <span title={session.session_id}>{compactSessionId(session.session_id)}</span>
+                                            <span>{session.message_count} msg</span>
+                                        </span>
+                                        <span className="session-card-channel" title={sessionChannelLabel(session.channel_name)}>
+                                            {sessionChannelLabel(session.channel_name)}
+                                        </span>
+                                    </span>
+                                    <span className={`session-status-pill status-${tone}`}>
+                                        {session.status}
+                                    </span>
+                                </button>
+                                <button
+                                    aria-label={`Delete session ${session.session_id}`}
+                                    className="session-delete-button"
+                                    disabled={deleteSessionMutation.isPending}
+                                    onClick={() => handleDeleteSession(session.session_id)}
+                                    title="Delete session"
+                                    type="button"
+                                >
+                                    ×
+                                </button>
+                            </div>
+                        );
+                    })}
+                    {sessions.length === 0 && (
+                        <div className="empty-state rail-empty-state">
+                            <span>No sessions yet</span>
+                            <button className="secondary-button small" onClick={() => setShowNewSession(true)} type="button">
+                                Create one
                             </button>
                         </div>
-                    ))}
-                    {sessions.length === 0 && <div className="empty-state">No sessions yet</div>}
+                    )}
                 </div>
             </aside>
             <section className="chat-main">
                 {selectedSession ? (
                     <>
-                        <div className="chat-header">
+                        <div className="chat-header chat-workspace-header">
                             <div className="chat-header-title">
-                                <h3>{selectedSession.agent_id}</h3>
-                                <span className="muted">{selectedSession.session_id}</span>
+                                <div className="workspace-title-row">
+                                    <span className={`status-dot status-${selectedStatusTone}`} aria-hidden="true" />
+                                    <h2>{selectedSession.agent_id}</h2>
+                                    <span className={`workspace-status-chip status-${selectedStatusTone}`}>
+                                        {selectedSession.status}
+                                    </span>
+                                </div>
+                                <div className="workspace-meta-grid">
+                                    <span>
+                                        <span>session</span>
+                                        <code title={selectedSession.session_id}>{selectedSession.session_id}</code>
+                                    </span>
+                                    <span>
+                                        <span>channel</span>
+                                        <strong>{sessionChannelLabel(selectedSession.channel_name)}</strong>
+                                    </span>
+                                    <span>
+                                        <span>messages</span>
+                                        <strong>{transcriptMessages.length}</strong>
+                                    </span>
+                                    <span>
+                                        <span>kernel</span>
+                                        <strong>{selectedKernel?.status ?? "not attached"}</strong>
+                                    </span>
+                                </div>
                             </div>
                             <div className="chat-header-actions">
                                 {selectedKernel ? (
@@ -758,7 +865,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                 target="_blank"
                                                 rel="noreferrer"
                                             >
-                                                Open VS Code
+                                                VS Code
                                             </a>
                                         ) : (
                                             <button
@@ -767,7 +874,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                 title="VS Code unavailable"
                                                 type="button"
                                             >
-                                                Open VS Code
+                                                VS Code
                                             </button>
                                         )}
                                         {serviceUrl ? (
@@ -777,7 +884,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                 target="_blank"
                                                 rel="noreferrer"
                                             >
-                                                Open service
+                                                Service
                                             </a>
                                         ) : null}
                                     </>
@@ -804,17 +911,20 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 </button>
                             </div>
                         </div>
-                        <div className="transcript">
+                        <div className="transcript chat-transcript" aria-live={streaming ? "polite" : "off"}>
                             {transcriptMessages.length > 0 || streamingMessage ? (
                                 <>
                                     {transcriptMessages.map((msg) => {
                                         const messageStreaming = msg.message_id === activeAssistantMessageId;
                                         return (
                                             <article
-                                                className={`message ${msg.role}${messageStreaming ? " streaming" : ""}`}
+                                                className={`message chat-message ${msg.role}${messageStreaming ? " streaming" : ""}`}
                                                 key={msg.message_id}
                                             >
-                                                <header>{msg.role}</header>
+                                                <header className="message-header">
+                                                    <span className="message-role">{messageRoleLabel(msg.role)}</span>
+                                                    <time dateTime={msg.created_at}>{formatTimestamp(msg.created_at)}</time>
+                                                </header>
                                                 {msg.reasoning && (
                                                     <details className="reasoning-block">
                                                         <summary>Reasoning</summary>
@@ -832,10 +942,13 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     })}
                                     {streamingMessage && (
                                         <article
-                                            className={`message ${streamingMessage.role} streaming`}
+                                            className={`message chat-message ${streamingMessage.role} streaming`}
                                             key={streamingMessage.message_id}
                                         >
-                                            <header>{streamingMessage.role}</header>
+                                            <header className="message-header">
+                                                <span className="message-role">{messageRoleLabel(streamingMessage.role)}</span>
+                                                <time dateTime={streamingMessage.created_at}>{formatTimestamp(streamingMessage.created_at)}</time>
+                                            </header>
                                             {streamingMessage.reasoning && (
                                                 <details className="reasoning-block" open>
                                                     <summary>Reasoning</summary>
@@ -854,32 +967,45 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     )}
                                 </>
                             ) : (
-                                <div className="empty-state centered">
-                                    Send a message to start the conversation.
+                                <div className="empty-state centered chat-empty-state">
+                                    <div className="empty-state-kicker">No transcript</div>
+                                    <h3>Ready for a focused agent turn</h3>
+                                    <p>Send the first prompt. Tool calls, reasoning, and streaming output stay inline.</p>
                                 </div>
                             )}
                         </div>
-                        <form className="composer" onSubmit={handleSendMessage}>
-                            <textarea
-                                placeholder="Type a message…"
-                                rows={1}
-                                value={messageDraft}
-                                onChange={(e) => setMessageDraft(e.target.value)}
-                                onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
-                                    if (e.key === "Enter" && !e.shiftKey) {
-                                        e.preventDefault();
-                                        submitDraft();
-                                    }
-                                }}
-                            />
-                            <button disabled={busy || !messageDraft.trim()} type="submit">
+                        <form className="composer chat-composer" onSubmit={handleSendMessage}>
+                            <div className="composer-input-shell">
+                                <div className="composer-toolbar">
+                                    <span>{sessionChannelLabel(selectedSession.channel_name)}</span>
+                                    <span>Enter sends · Shift+Enter newline</span>
+                                </div>
+                                <textarea
+                                    placeholder="Ask the agent to inspect, edit, run, or explain…"
+                                    rows={2}
+                                    value={messageDraft}
+                                    onChange={(e) => setMessageDraft(e.target.value)}
+                                    onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
+                                        if (e.key === "Enter" && !e.shiftKey) {
+                                            e.preventDefault();
+                                            submitDraft();
+                                        }
+                                    }}
+                                />
+                            </div>
+                            <button className="composer-send-button" disabled={busy || !messageDraft.trim()} type="submit">
                                 Send
                             </button>
                         </form>
                     </>
                 ) : (
-                    <div className="empty-state centered full-height">
-                        Select a session or create a new one to start chatting.
+                    <div className="empty-state centered full-height chat-empty-state chat-empty-workspace">
+                        <div className="empty-state-kicker">AgentSpace chat</div>
+                        <h3>Select a session to enter the workspace</h3>
+                        <p>Create a fresh channel or jump back into an existing session from the rail.</p>
+                        <button className="secondary-button" onClick={() => setShowNewSession(true)} type="button">
+                            New session
+                        </button>
                     </div>
                 )}
             </section>

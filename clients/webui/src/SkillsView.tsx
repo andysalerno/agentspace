@@ -155,12 +155,19 @@ export default function SkillsView() {
     }
 
     return (
-        <div className="view-content">
+        <div className="view-content management-view skills-management-view">
             <div className="view-header">
-                <h2>Skills</h2>
-                <button onClick={() => setShowForm(!showForm)} type="button">
-                    {showForm ? "Cancel" : "New Skill"}
-                </button>
+                <div>
+                    <h2>Skills</h2>
+                    <span className="muted">
+                        {skills.length} total · {skills.filter((skill) => skill.source === "builtin").length} builtin
+                    </span>
+                </div>
+                <div className="view-header-actions">
+                    <button onClick={() => setShowForm(!showForm)} type="button">
+                        {showForm ? "Cancel" : "New Skill"}
+                    </button>
+                </div>
             </div>
 
             {showForm && (
@@ -222,16 +229,31 @@ export default function SkillsView() {
                 </form>
             )}
 
-            <div className="card-grid">
+            <div className="card-grid management-card-grid">
                 {skills.map((skill) => (
-                    <div className="card" key={skill.skill_id}>
+                    <div className="card management-card" key={skill.skill_id}>
                         <div className="card-body">
-                            <h3>
-                                {skill.skill_id}
-                                {skill.source === "builtin" && (
+                            <div className="management-card-heading">
+                                <div className="management-title-block">
+                                    <h3>{skill.skill_id}</h3>
+                                    <code className="management-id">skill</code>
+                                </div>
+                                {skill.source === "builtin" ? (
                                     <span className="badge builtin-badge" title="Predefined skill (read-only)">builtin</span>
+                                ) : (
+                                    <span className="tag">user</span>
                                 )}
-                            </h3>
+                            </div>
+                            <div className="card-meta management-meta">
+                                <div>
+                                    <strong>Source</strong>
+                                    <span>{skill.source ?? "user"}</span>
+                                </div>
+                                <div>
+                                    <strong>Files</strong>
+                                    <span>{Object.keys(skill.files ?? {}).length || "load to inspect"}</span>
+                                </div>
+                            </div>
                             {expandedSkillId === skill.skill_id && expandedSkill?.files && (
                                 <div className="skill-file-preview">
                                     {Object.entries(expandedSkill.files).map(([filename, content]) => (
