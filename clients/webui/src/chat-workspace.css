@@ -474,11 +474,6 @@
   margin-right: clamp(0px, 7vw, 72px);
 }
 
-.chat-message.streaming {
-  border-style: solid;
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-
 .message-header {
   display: flex;
   align-items: center;
