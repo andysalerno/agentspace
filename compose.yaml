@@ -52,10 +52,10 @@ services:
       - agentspace
 
   client-service:
-    image: ${CLIENT_SERVICE_IMAGE:-agentspace-client-service-client-service:latest}
+    image: agentspace-client-service-rs:latest
     build:
-      context: ${CLIENT_SERVICE_BUILD_CONTEXT:-.}
-      dockerfile: ${CLIENT_SERVICE_DOCKERFILE:-services/client_service/Dockerfile}
+      context: services/client_service_rs
+      dockerfile: Dockerfile
     depends_on:
       agent-host:
         condition: service_started

@@ -84,9 +84,8 @@ kernel container
   - sees linked workspaces at /workspace/<workspace_id>
 ```
 
-The Rust `client_service_rs` implementation is the active client service. The
-older Python `services/client_service` implementation is deprecated and should
-not be treated as the source of truth for new work.
+The Rust `client_service_rs` implementation is the active and default client
+service.
 
 ## Public API Contract
 
@@ -456,8 +455,8 @@ handling, Docker mount options, Web UI selectors, and tests.
 
 ## Operational Notes
 
-- `just stack-up` currently uses the Rust client service image through
-  `compose.client-service-rs.env`.
+- `just stack-up` uses the Rust client service image from
+  `services/client_service_rs`.
 - The Web UI is served at `http://127.0.0.1:8003`.
 - The Rust client service is available at `http://127.0.0.1:8002`.
 - `agent_host` is available at `http://127.0.0.1:8001`.

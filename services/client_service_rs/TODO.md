@@ -2,9 +2,9 @@
 
 ## Current state
 
-`client_service_rs` is a Rust port milestone for `services/client_service`. It
-is a standalone Axum service intended to match the Python FastAPI service API
-surface closely enough for incremental replacement work.
+`client_service_rs` is the active Rust implementation of the AgentSpace
+`client_service` API. It is a standalone Axum service and the default
+client-service used by the compose stack.
 
 The crate currently builds and validates with:
 
@@ -55,31 +55,26 @@ The service can be started from this directory with:
   message send/stream behavior, kernels, logs, skills, and gateways.
 - Expanded `/harnesses` to all modeled harnesses and improved gateway schema
   responses for echo and Discord gateways.
-- Added opt-in Docker and compose wiring plus `just client-service-rs-check`,
-  `just client-service-rs-image`, and `just stack-up-client-service-rs`.
+- Added Docker wiring plus `just client-service-rs-check` and
+  `just client-service-rs-image`.
+- Promoted the Rust service to the root compose default and removed the old
+  Python implementation.
 
 ## Remaining work
 
-1. Compare every Rust response body against a live Python FastAPI service with
-   end-to-end contract tests; current tests cover important route contracts and
-   proxy behavior but do not run both implementations side by side.
-2. Improve active-turn lifecycle parity for streaming reconnects via
+1. Improve active-turn lifecycle parity for streaming reconnects via
    `/sessions/{session_id}/turns/{turn_id}/stream`.
-3. Persist and replay completed turn metadata if reconnect behavior needs to
+2. Persist and replay completed turn metadata if reconnect behavior needs to
    survive process restarts.
-4. Continue refining gateway schema parity if new gateway implementations add
+3. Continue refining gateway schema parity if new gateway implementations add
    dynamic settings beyond the current echo/Discord schema responses.
-5. Decide whether `client_service_rs` should be wired into top-level repo checks
+4. Decide whether `client_service_rs` should be wired into top-level repo checks
    such as `just check`; it currently has a dedicated `just client-service-rs-check`.
-6. Add performance and concurrency tests for simultaneous sessions, message
+5. Add performance and concurrency tests for simultaneous sessions, message
     streams, and gateway operations.
-7. Add a planned cutover path for making `client_service_rs` the default
-   `client_service` in the full stack once parity is proven.
 
-## Notes for the next porting pass
+## Notes for future changes
 
-- Keep the Python `services/client_service` implementation available as the
-  source of truth until contract tests show parity.
 - Run the Rust crate checks after each change from `services/client_service_rs`.
-- Prefer adding parity tests before changing behavior so differences from the
-  Python service are intentional and visible.
+- Prefer adding route contract tests before changing behavior so API differences
+  are intentional and visible.

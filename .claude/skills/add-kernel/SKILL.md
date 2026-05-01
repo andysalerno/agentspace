@@ -123,14 +123,14 @@ These Dockerfiles copy the root `pyproject.toml` which references all workspace 
 
 - `kernels/kernel_host/Dockerfile` — add `COPY kernels/kernel_<name> kernels/kernel_<name>`
 - `services/agent_host/Dockerfile` — add `COPY kernels/kernel_<name> kernels/kernel_<name>`
-- `services/client_service/Dockerfile` — add `COPY kernels/kernel_<name> kernels/kernel_<name>`
+- `services/client_service_rs/Dockerfile` — add `COPY kernels/kernel_<name> kernels/kernel_<name>`
 
 If the CLI tool needs to be installed in the kernel_host container, also add an install command to `kernels/kernel_host/Dockerfile` (in the `RUN apt-get update` block).
 
 ### 8. Update tests that enumerate harnesses
 
 Check and update any tests that assert on the full list of harnesses, e.g.:
-- `services/client_service/tests/test_service.py` — `test_list_harnesses_returns_registered_harnesses`
+- `services/client_service_rs/tests/route_contract.rs` — route tests that assert harness lists or session creation behavior
 - `services/agent_host/tests/test_agent_host_service.py` — `test_skills_mount_paths_covers_all_harnesses`
 
 ### 9. Verify
