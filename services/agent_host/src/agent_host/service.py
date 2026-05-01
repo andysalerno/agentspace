@@ -84,6 +84,11 @@ SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
     HarnessName.ECHO: "/skills",
     HarnessName.OPENCODE: "/root/.config/opencode/skills",
 }
+GITAGENT_ENV_PASSTHROUGH: dict[str, str] = {
+    "AGENT_HOST_GITAGENT_REMOTE_URL": "GITAGENT_REMOTE_URL",
+    "AGENT_HOST_GITAGENT_PATCH_URL": "GITAGENT_PATCH_URL",
+    "AGENT_HOST_GITAGENT_DEFAULT_BRANCH": "GITAGENT_DEFAULT_BRANCH",
+}
 
 
 class SessionNotFoundError(KeyError):
@@ -297,6 +302,11 @@ class DockerKernelRuntime:
             "AGENT_HOST_SKILLS_DIR",
             "/skills",
         )
+        self._gitagent_env = {
+            container_name: value
+            for host_name, container_name in GITAGENT_ENV_PASSTHROUGH.items()
+            if (value := os.environ.get(host_name))
+        }
 
     @property
     def _client(self) -> docker.DockerClient:
@@ -581,6 +591,7 @@ class DockerKernelRuntime:
             "1",
         )
         environment["KERNEL_FREE_PORT"] = str(self._free_port_container_port)
+        environment.update(self._gitagent_env)
         vscode_enabled = environment["KERNEL_VSCODE_ENABLED"].lower() not in {
             "0",
             "false",

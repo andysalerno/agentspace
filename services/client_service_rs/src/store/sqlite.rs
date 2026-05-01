@@ -13,8 +13,9 @@ use crate::{
     errors::{StoreError, ValidationError},
     models::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
-        HarnessName, KernelConfigRecord, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now,
+        GitAgentConfigRecord, HarnessName, KernelConfigRecord, MessageRecord, MessageRole,
+        SessionRecord, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus,
+        utc_now,
     },
 };
 use tracing::{debug, info, warn};
@@ -38,6 +39,22 @@ const KERNEL_CONFIGS_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS kernel_configs (
     harness TEXT PRIMARY KEY,
     env_vars TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
+";
+
+const GIT_AGENT_CONFIG_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS git_agent_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    enabled INTEGER NOT NULL DEFAULT 1,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    allowed_ref_prefixes_json TEXT NOT NULL DEFAULT '[\"refs/heads/wip/\"]',
+    allowed_refs_json TEXT NOT NULL DEFAULT '[\"refs/heads/main\"]',
+    remote_url TEXT NOT NULL DEFAULT 'http://gitagent:8004/repo.git',
+    patch_url TEXT NOT NULL DEFAULT 'http://gitagent:8004/PatchRequest',
+    review_agent_id TEXT NOT NULL DEFAULT 'git-agent',
+    validation_command TEXT NOT NULL DEFAULT 'just validate',
+    created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
 ";
@@ -219,6 +236,7 @@ impl fmt::Debug for SqliteDatabase {
 #[derive(Clone, Debug)]
 pub struct SqliteStoreSet {
     pub(super) agents: SqliteAgentStore,
+    pub(super) git_agent_config: SqliteGitAgentConfigStore,
     pub(super) kernel_configs: SqliteKernelConfigStore,
     pub(super) connections: SqliteConnectionStore,
     pub(super) gateways: SqliteGatewayStore,
@@ -234,6 +252,7 @@ impl SqliteStoreSet {
         info!("sqlite store set ready");
         Ok(Self {
             agents: SqliteAgentStore::new(database.clone()),
+            git_agent_config: SqliteGitAgentConfigStore::new(database.clone()),
             kernel_configs: SqliteKernelConfigStore::new(database.clone()),
             connections: SqliteConnectionStore::new(database.clone()),
             gateways: SqliteGatewayStore::new(database.clone()),
@@ -514,6 +533,80 @@ impl SqliteKernelConfigStore {
                 );
                 Ok(deleted)
             })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SqliteGitAgentConfigStore {
+    database: SqliteDatabase,
+}
+
+impl SqliteGitAgentConfigStore {
+    #[must_use]
+    pub const fn new(database: SqliteDatabase) -> Self {
+        Self { database }
+    }
+
+    pub fn get(&self) -> Result<Option<GitAgentConfigRecord>, StoreError> {
+        self.database
+            .with_connection("git_agent_config", |connection| {
+                let mut statement =
+                    connection.prepare("SELECT * FROM git_agent_config WHERE id = 1")?;
+                let mut rows = statement.query_and_then([], row_to_git_agent_config)?;
+                let record = rows.next().transpose()?;
+                debug!(
+                    store = "git_agent_config",
+                    found = record.is_some(),
+                    "looked up git agent config"
+                );
+                Ok(record)
+            })
+    }
+
+    pub fn upsert(&self, config: GitAgentConfigRecord) -> Result<GitAgentConfigRecord, StoreError> {
+        self.database
+            .with_connection("git_agent_config", |connection| {
+                connection.execute(
+                    "
+                    INSERT INTO git_agent_config (
+                        id, enabled, default_branch, allowed_ref_prefixes_json,
+                        allowed_refs_json, remote_url, patch_url, review_agent_id,
+                        validation_command, created_at, updated_at
+                    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        default_branch = excluded.default_branch,
+                        allowed_ref_prefixes_json = excluded.allowed_ref_prefixes_json,
+                        allowed_refs_json = excluded.allowed_refs_json,
+                        remote_url = excluded.remote_url,
+                        patch_url = excluded.patch_url,
+                        review_agent_id = excluded.review_agent_id,
+                        validation_command = excluded.validation_command,
+                        updated_at = excluded.updated_at
+                    ",
+                    params![
+                        enabled_int(config.enabled),
+                        &config.default_branch,
+                        string_vec_json(&config.allowed_ref_prefixes)?,
+                        string_vec_json(&config.allowed_refs)?,
+                        &config.remote_url,
+                        &config.patch_url,
+                        &config.review_agent_id,
+                        &config.validation_command,
+                        &config.created_at,
+                        &config.updated_at,
+                    ],
+                )?;
+                debug!(
+                    store = "git_agent_config",
+                    enabled = config.enabled,
+                    default_branch = %config.default_branch,
+                    review_agent_id = %config.review_agent_id,
+                    "upserted git agent config"
+                );
+                Ok(())
+            })?;
+        Ok(config)
     }
 }
 
@@ -1325,6 +1418,7 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
         for (schema, sql) in [
             ("agents", AGENTS_SCHEMA),
             ("kernel_configs", KERNEL_CONFIGS_SCHEMA),
+            ("git_agent_config", GIT_AGENT_CONFIG_SCHEMA),
             ("connections", CONNECTIONS_SCHEMA),
             ("gateways", GATEWAYS_SCHEMA),
             ("workspaces", WORKSPACES_SCHEMA),
@@ -1451,6 +1545,24 @@ fn row_to_kernel_config(row: &Row<'_>) -> Result<KernelConfigRecord, StoreError>
     Ok(KernelConfigRecord {
         harness: parse_harness(&harness_raw)?,
         env_vars: row.get("env_vars")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn row_to_git_agent_config(row: &Row<'_>) -> Result<GitAgentConfigRecord, StoreError> {
+    let enabled: i64 = row.get("enabled")?;
+    let allowed_ref_prefixes_json: String = row.get("allowed_ref_prefixes_json")?;
+    let allowed_refs_json: String = row.get("allowed_refs_json")?;
+    Ok(GitAgentConfigRecord {
+        enabled: enabled != 0,
+        default_branch: row.get("default_branch")?,
+        allowed_ref_prefixes: string_vec_from_json(&allowed_ref_prefixes_json)?,
+        allowed_refs: string_vec_from_json(&allowed_refs_json)?,
+        remote_url: row.get("remote_url")?,
+        patch_url: row.get("patch_url")?,
+        review_agent_id: row.get("review_agent_id")?,
+        validation_command: row.get("validation_command")?,
+        created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
 }
@@ -1752,6 +1864,14 @@ fn exists(connection: &Connection, sql: &str, id: &str) -> Result<bool, StoreErr
 
 fn skills_json(skills: &[String]) -> Result<String, RusqliteError> {
     serde_json::to_string(skills).map_err(to_sql_conversion_failure)
+}
+
+fn string_vec_json(values: &[String]) -> Result<String, RusqliteError> {
+    serde_json::to_string(values).map_err(to_sql_conversion_failure)
+}
+
+fn string_vec_from_json(raw: &str) -> Result<Vec<String>, StoreError> {
+    serde_json::from_str(raw).map_err(json_error("git_agent_config"))
 }
 
 fn workspace_mounts_json(mounts: &[WorkspaceMountRecord]) -> Result<String, RusqliteError> {

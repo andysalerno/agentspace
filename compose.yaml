@@ -41,6 +41,9 @@ services:
       - AGENT_HOST_KERNEL_VSCODE_URL_TEMPLATE=http://127.0.0.1:{host_port}
       - AGENT_HOST_GATEWAY_IMAGE=agentspace-gateway-gateway:latest
       - AGENT_HOST_GATEWAY_CLIENT_SERVICE_URL=http://client-service:8002
+      - AGENT_HOST_GITAGENT_REMOTE_URL=${AGENT_HOST_GITAGENT_REMOTE_URL:-http://gitagent:8004/repo.git}
+      - AGENT_HOST_GITAGENT_PATCH_URL=${AGENT_HOST_GITAGENT_PATCH_URL:-http://gitagent:8004/PatchRequest}
+      - AGENT_HOST_GITAGENT_DEFAULT_BRANCH=${AGENT_HOST_GITAGENT_DEFAULT_BRANCH:-main}
       - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     ports:
       - "8001:8001"
@@ -70,6 +73,34 @@ services:
       - ./mounts/data/client_service:/data
     networks:
       - agentspace
+
+  git-agent:
+    image: agentspace-git-agent:latest
+    build:
+      context: .
+      dockerfile: services/git_agent/Dockerfile
+    depends_on:
+      client-service:
+        condition: service_started
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=INFO
+      - GITAGENT_REPO_PATH=/data/repos/main.git
+      - GITAGENT_DB_PATH=/data/gitagent.sqlite
+      - GITAGENT_WORKDIR=/data/worktrees
+      - GITAGENT_SCRATCH_PATH=/data/worktrees
+      - GITAGENT_CLIENT_SERVICE_BASE_URL=http://client-service:8002
+      - GITAGENT_CLIENT_SERVICE_URL=http://client-service:8002
+      - GITAGENT_REVIEW_AGENT_ID=git-agent
+      - GITAGENT_DEFAULT_BRANCH=${GITAGENT_DEFAULT_BRANCH:-main}
+    ports:
+      - "8004:8004"
+    volumes:
+      - git-agent-data:/data
+    networks:
+      agentspace:
+        aliases:
+          - gitagent
 
   webui:
     image: agentspace-webui-webui:latest
@@ -104,3 +135,5 @@ networks:
 volumes:
   skills:
     name: agentspace-skills
+  git-agent-data:
+    name: agentspace-git-agent-data
