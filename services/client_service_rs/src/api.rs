@@ -853,7 +853,9 @@ async fn create_session(
     Json(payload): Json<CreateSessionRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let agent = require_agent(&state, &payload.agent_id)?;
-    validate_workspace_mounts(&state, &agent.workspace_mounts)?;
+    let session_mounts =
+        session_workspace_mounts(&agent.workspace_mounts, &payload.workspace_mounts);
+    validate_workspace_mounts(&state, &session_mounts)?;
     let env = session_env(&state, &agent)?;
     tracing::info!(
         route = "/sessions",
@@ -862,10 +864,11 @@ async fn create_session(
         harness = agent.harness.as_str(),
         skill_count = agent.skills.len(),
         env_var_count = env.len(),
+        workspace_mount_count = session_mounts.len(),
         has_connection = agent.connection_id.is_some(),
         "creating upstream session"
     );
-    let workspace_mounts = agent_host_workspace_mounts(&state, &agent.workspace_mounts);
+    let workspace_mounts = agent_host_workspace_mounts(&state, &session_mounts);
     let upstream = state
         .agent_host
         .create_session(
@@ -2640,6 +2643,24 @@ fn agent_host_workspace_mounts(
         .collect()
 }
 
+fn session_workspace_mounts(
+    agent_mounts: &[WorkspaceMountRecord],
+    request_mounts: &[WorkspaceMountRecord],
+) -> Vec<WorkspaceMountRecord> {
+    let mut mounts = agent_mounts.to_vec();
+    for request_mount in request_mounts {
+        if let Some(existing) = mounts
+            .iter_mut()
+            .find(|mount| mount.workspace_id == request_mount.workspace_id)
+        {
+            *existing = request_mount.clone();
+        } else {
+            mounts.push(request_mount.clone());
+        }
+    }
+    mounts
+}
+
 fn get_or_init_git_agent_config(state: &AppState) -> Result<GitAgentConfigRecord, ApiError> {
     if let Some(config) = state.git_agent_config.get()? {
         return Ok(config);
@@ -2965,6 +2986,8 @@ struct CreateSessionRequest {
     agent_id: String,
     channel_name: Option<String>,
     client_type: Option<ClientType>,
+    #[serde(default)]
+    workspace_mounts: Vec<WorkspaceMountRecord>,
 }
 
 #[derive(Debug, Deserialize)]

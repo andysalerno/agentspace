@@ -508,3 +508,49 @@ async fn git_agent_workspace_mount_uses_git_agent_volume()
 
     Ok(())
 }
+
+#[tokio::test]
+async fn session_request_can_add_git_agent_workspace_mount()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let agent_host = StubAgentHost::start().await?;
+    let app = test_router_with_agent_host_and_stores(
+        "http://127.0.0.1:9",
+        &agent_host.base_url,
+        StoreSet::in_memory(),
+    )?;
+    let (status, _config) = get_json(&app, "/git-agent/config").await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _session) = request_json(
+        &app,
+        Method::POST,
+        "/sessions",
+        Some(json!({
+            "agent_id": "git-agent",
+            "workspace_mounts": [
+                { "workspace_id": "git-agent", "mode": "rw" }
+            ]
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        agent_host.recorded()?,
+        vec![json!({
+            "env": {
+                "KERNEL_SYSTEM_PROMPT": "Review submitted patches for correctness, safety, and repository policy before GitAgent commits them."
+            },
+            "harness": "acp",
+            "skills": [],
+            "workspace_mounts": [
+                {
+                    "workspace_id": "git-agent",
+                    "mode": "rw",
+                    "volume_name": "custom-git-agent-data"
+                }
+            ]
+        })],
+    );
+
+    Ok(())
+}
