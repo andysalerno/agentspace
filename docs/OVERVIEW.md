@@ -57,7 +57,7 @@ agentspace/
 │   └── kernel_host/         # Container entry point + HTTP service
 ├── services/
 │   ├── agent_host/          # Kernel lifecycle manager + skills
-│   └── client_service/      # Public API gateway
+│   └── client_service_rs/   # Rust public API gateway
 ├── clients/
 │   ├── webui/               # React/TypeScript dashboard
 │   └── cli_ui/              # Textual TUI client
@@ -161,6 +161,7 @@ The `DockerKernelRuntime` implements the `KernelRuntime` protocol, which could b
 #### `client_service` — Public API Gateway
 
 The single entry point for all clients. No client talks to `agent_host` directly.
+The active implementation is the Rust crate in `services/client_service_rs`.
 
 Responsibilities:
 - CRUD for agent definitions (name, harness type, system prompt, skills)
@@ -256,10 +257,11 @@ Kernel containers are not defined in Compose — they are created dynamically by
 
 ### Workspace
 
-The repo is a `uv` workspace. All Python packages are workspace members:
+The repo is a `uv` workspace for Python packages. The Rust client service is a
+separate Cargo crate under `services/client_service_rs`.
 
 ```
-kernels/*  services/*  channels/*  clients/cli_ui
+kernels/*  services/agent_host  channels/*  clients/cli_ui
 ```
 
 ### Commands
@@ -291,7 +293,7 @@ The codebase uses strict pyright type-checking, ruff with all lint rules enabled
 - Kernel host with both runner and HTTP service modes
 - Docker-based kernel container lifecycle
 - Agent host service with skills management
-- Client service gateway with agents, sessions, and transcript storage
+- Rust client service gateway with agents, sessions, and transcript storage
 - Web UI with chat, agents, sessions, kernels, and skills views
 - Terminal UI with equivalent functionality
 - CLI channel proof-of-concept
@@ -302,6 +304,6 @@ The codebase uses strict pyright type-checking, ruff with all lint rules enabled
 
 - `proto/` — formal API contract definitions
 - `channels/` — platform relays (Discord, Matrix, IRC)
-- `store/` — durable database persistence (currently in-memory)
+- `store/` — shared durable database library
 - Streaming attach / real-time observer fan-out
 - Authentication and multi-user support

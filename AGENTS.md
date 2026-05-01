@@ -4,7 +4,8 @@ AgentSpace is a system for defining, interacting with, and observing AI agents.
 
 ## System Architecture
 
-The repository is a monorepo managed by `uv`.
+The repository is a monorepo managed by `uv` for Python packages, with the
+Rust client service managed by Cargo under `services/client_service_rs`.
 
 ### Key Components
 
@@ -13,7 +14,7 @@ The repository is a monorepo managed by `uv`.
   - `kernel_host`: Runner for kernel containers.
 - **Services** (`services/`):
   - `agent_host`: Containerized FastAPI service that manages sessions by spawning `kernel_host` containers.
-  - `client_service`: The intended public backend API. Clients should talk to this, not `agent_host` directly.
+  - `client_service_rs`: Rust implementation of the public backend API. Clients should talk to this, not `agent_host` directly.
 - **Clients** (`clients/`, `channels/`):
   - `webui`: TypeScript dashboard.
   - `cli_channel`: CLI session client for validating `client_service` contract.
@@ -46,6 +47,6 @@ present, and the web build.
 - **Kernel Host**: Requires `KERNEL_WORKDIR` to be set in `.env` or `kernels/kernel_host/.env.example` (not defaulted by compose).
 - **Copilot Sessions**: To resume a session, set `COPILOT_SESSION_ID` in `kernels/kernel_host/.env.example`.
 - **Service Ports**:
-  - `agent_host`: `http://127.0.0.1:8001`
-  - `client_service`: `http://127.0.0.1:8002`
-  - `webui`: `http://127.0.0.1:8003`
+- `agent_host`: `http://127.0.0.1:8001`
+- `client_service_rs`: `http://127.0.0.1:8002`
+- `webui`: `http://127.0.0.1:8003`

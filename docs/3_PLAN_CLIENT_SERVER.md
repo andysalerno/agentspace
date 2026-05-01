@@ -333,7 +333,7 @@ If time permits later in the same slice, add a very small Python CLI that can:
 
 ### Phase 1: `client_service` foundation
 
-1. scaffold `services/client_service`
+1. scaffold the client service under `services/client_service_rs`
 2. add typed models for agents, sessions, and messages
 3. add an `AgentHostClient` wrapper
 4. implement in-memory `ClientService`

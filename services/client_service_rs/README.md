@@ -1,6 +1,7 @@
 # client_service_rs
 
-Rust port milestone for the AgentSpace `client_service` API.
+Rust implementation of the AgentSpace `client_service` API. This is the active
+and default client-service implementation.
 
 ## Run locally
 
@@ -10,8 +11,7 @@ Start the service from this directory:
 ./run-service.sh
 ```
 
-The script runs `cargo run` with the same default bind address as the Python
-service:
+The script runs `cargo run` with the default client-service bind address:
 
 - `CLIENT_SERVICE_HOST` defaults to `0.0.0.0`
 - `CLIENT_SERVICE_PORT` defaults to `8002`
@@ -40,28 +40,14 @@ The container defaults match `run-service.sh`:
 - `CLIENT_SERVICE_PORT=8002`
 - `CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://127.0.0.1:8001`
 
-When running on the repo compose network, point the Rust service at the existing
-`agent-host` service without changing the default Python compose wiring:
+The root compose stack builds and runs this Rust service by default:
 
 ```sh
-podman compose -f compose.yaml -f compose.client-service-rs.yaml up -d --build client-service
+just stack-up
 ```
 
-The root compose file can also be flipped to the Rust service with interpolation
-values:
-
-```sh
-podman compose --env-file compose.client-service-rs.env -f compose.yaml up -d --build client-service
-```
-
-Or use the equivalent repository-root recipe:
-
-```sh
-just stack-up-client-service-rs
-```
-
-Add `webui` to that command if you also want the dashboard to talk to the Rust
-client service through the usual `client-service:8002` compose DNS name.
+In compose, the dashboard talks to this service through the usual
+`client-service:8002` DNS name.
 
 ## Validate
 
