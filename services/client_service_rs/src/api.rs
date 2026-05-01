@@ -25,10 +25,11 @@ use crate::{
     git_agent::GitAgentError,
     models::{
         AgentRecord, BUILTIN_GIT_AGENT_WORKSPACE_ID, BUILTIN_GIT_AGENT_WORKSPACE_NAME, ClientType,
-        ConnectionApiFlavor, ConnectionRecord, DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord,
-        GatewayType, GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole, SessionRecord,
-        ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars,
-        utc_now, validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
+        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord, GatewayType, GitAgentConfigRecord,
+        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
+        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
         validate_workspace_id,
     },
 };
@@ -2923,7 +2924,7 @@ struct CreateAgentRequest {
     name: String,
     #[serde(default = "default_harness")]
     harness: HarnessName,
-    #[serde(default)]
+    #[serde(default = "default_agent_system_prompt")]
     system_prompt: String,
     #[serde(default)]
     skills: Vec<String>,
@@ -3038,6 +3039,10 @@ struct UpdateGatewayRequest {
 
 const fn default_harness() -> HarnessName {
     HarnessName::Acp
+}
+
+fn default_agent_system_prompt() -> String {
+    DEFAULT_AGENT_SYSTEM_PROMPT.to_owned()
 }
 
 #[derive(Debug, Default)]

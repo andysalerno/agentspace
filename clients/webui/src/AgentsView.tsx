@@ -27,6 +27,8 @@ type AgentsViewProps = {
 };
 
 const DEFAULT_HARNESS = "copilot-cli";
+const DEFAULT_AGENT_SYSTEM_PROMPT =
+    "You are a helpful assistant. Despite living inside a coding agent harness, you are not strictly a coding assistant. Instead, you help the user with any and all tasks they give you (possibly including coding!) using the tools and skills at your disposal. Pro tip: always prefer your skills and tools over generic CLI tools (though you can use those, too!)";
 
 type AgentFormState = {
     agent_id: string;
@@ -49,7 +51,7 @@ function emptyAgentForm(harnesses: string[]): AgentFormState {
         agent_id: "",
         name: "",
         harness: getInitialHarness(harnesses),
-        system_prompt: "",
+        system_prompt: DEFAULT_AGENT_SYSTEM_PROMPT,
         skills: [],
         env_vars: "",
         connection_id: null,

@@ -9,7 +9,10 @@ use axum::{
     http::{Method, Request, StatusCode},
     routing::{get, post},
 };
-use client_service_rs::{AppConfig, AppState, agent_host::AgentHostClient, build_router};
+use client_service_rs::{
+    AppConfig, AppState, agent_host::AgentHostClient, build_router,
+    models::DEFAULT_AGENT_SYSTEM_PROMPT,
+};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower::ServiceExt;
@@ -444,6 +447,7 @@ async fn agent_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["harness"], "echo");
+    assert_eq!(value["system_prompt"], DEFAULT_AGENT_SYSTEM_PROMPT);
 
     let (status, value) = request_json(
         app.clone(),
