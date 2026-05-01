@@ -549,11 +549,27 @@ button:disabled {
   padding: 8px;
 }
 
+.session-row {
+  display: flex;
+  align-items: stretch;
+  border-radius: var(--radius-sm);
+}
+
+.session-row:hover {
+  background: var(--session-hover-bg);
+}
+
+.session-row.active {
+  background: var(--session-active-bg);
+}
+
 .session-item {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
+  flex: 1;
   gap: 2px;
+  min-width: 0;
   width: 100%;
   padding: 10px 12px;
   background: transparent;
@@ -567,15 +583,39 @@ button:disabled {
 }
 
 .session-item:hover {
-  background: var(--session-hover-bg);
+  background: transparent;
 }
 
 .session-item.active {
   background: var(--session-active-bg);
 }
 
-.session-item strong {
+.session-item strong,
+.session-item .muted {
   font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-item .muted {
+  font-weight: 400;
+}
+
+.session-delete-button {
+  align-self: center;
+  background: transparent;
+  color: var(--danger);
+  flex: 0 0 auto;
+  margin-right: 4px;
+  padding: 5px 8px;
+  font-size: 0.78rem;
+}
+
+.session-delete-button:hover:not(:disabled) {
+  background: rgba(211, 51, 51, 0.1);
+  color: var(--danger-hover);
 }
 
 /* ─── Chat Main ─── */
@@ -626,7 +666,8 @@ button:disabled {
   flex: 0 1 auto;
 }
 
-.chat-header-actions .secondary-button {
+.chat-header-actions .secondary-button,
+.chat-header-actions .danger-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;

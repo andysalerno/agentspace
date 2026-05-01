@@ -582,9 +582,23 @@ async fn created_session_message_listing_shape_matches_contract()
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["message_count"], json!(0));
 
-    let (status, value) = get_json(app, &format!("/sessions/{session_id}")).await?;
+    let (status, value) = get_json(app.clone(), &format!("/sessions/{session_id}")).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["messages"], json!([]));
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::DELETE,
+        &format!("/sessions/{session_id}"),
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(value, Value::Null);
+
+    let (status, value) = get_json(app, &format!("/sessions/{session_id}")).await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_error_detail(&value);
 
     Ok(())
 }

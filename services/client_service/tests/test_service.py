@@ -248,7 +248,8 @@ class SlowAgentHostClient(StubAgentHostClient):
 
 @pytest.mark.asyncio
 async def test_agent_and_session_lifecycle() -> None:
-    runtime = cast("AgentHostClient", StubAgentHostClient())
+    upstream = StubAgentHostClient()
+    runtime = cast("AgentHostClient", upstream)
     service = ClientService(agent_host_client=runtime)
 
     agent = await service.create_agent(agent_id="test-agent", name="Test Agent")
@@ -262,6 +263,7 @@ async def test_agent_and_session_lifecycle() -> None:
     messages = await service.list_messages(session_id)
     reset = await service.reset_session(session_id)
     assistant_message = cast("dict[str, object]", reply["assistant_message"])
+    await service.delete_session(session_id)
 
     assert agent["harness"] == "acp"
     assert session["agent_id"] == agent["agent_id"]
@@ -271,7 +273,9 @@ async def test_agent_and_session_lifecycle() -> None:
     assert "type" not in reply
     assert len(messages) == 2
     assert str(reset["agent_host_session_id"]).endswith("-reset")
-    assert await service.list_messages(session_id) == []
+    assert upstream.destroyed == [str(reset["agent_host_session_id"])]
+    with pytest.raises(SessionNotFoundError):
+        await service.list_messages(session_id)
 
 
 @pytest.mark.asyncio

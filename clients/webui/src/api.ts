@@ -147,6 +147,8 @@ export const api = {
     requestJson<void>(`/agents/${agentId}`, { method: "DELETE" }),
   listSessions: () => requestJson<SessionSummary[]>("/sessions"),
   getSession: (sessionId: string) => requestJson<SessionDetail>(`/sessions/${sessionId}`),
+  deleteSession: (sessionId: string) =>
+    requestJson<void>(`/sessions/${sessionId}`, { method: "DELETE" }),
   createSession: (payload: {
     agent_id: string;
     channel_name: string | null;

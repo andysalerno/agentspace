@@ -1,4 +1,7 @@
-import { useAgents, useSessions } from "./queries";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "./api";
+import { useErrorContext } from "./ErrorContext";
+import { queryKeys, useAgents, useSessions } from "./queries";
 
 type SessionsViewProps = {
     onNavigateToChat: (sessionId: string) => void;
@@ -7,7 +10,29 @@ type SessionsViewProps = {
 export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
     const { data: sessions = [] } = useSessions();
     const { data: agents = [] } = useAgents();
+    const queryClient = useQueryClient();
+    const { reportError } = useErrorContext();
     const agentMap = Object.fromEntries(agents.map((a) => [a.agent_id, a]));
+    const deleteMutation = useMutation({
+        mutationFn: (sessionId: string) => api.deleteSession(sessionId),
+        onSuccess: (_, sessionId) => {
+            queryClient.removeQueries({ queryKey: queryKeys.session(sessionId) });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
+        },
+        onError: reportError,
+    });
+
+    function handleDeleteSession(sessionId: string) {
+        if (
+            !window.confirm(
+                "Delete this session from history? This cannot be undone.",
+            )
+        ) {
+            return;
+        }
+        deleteMutation.mutate(sessionId);
+    }
 
     return (
         <div className="view-content">
@@ -27,7 +52,7 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                                 <th>Messages</th>
                                 <th>Channel</th>
                                 <th>Created</th>
-                                <th></th>
+                                <th aria-label="Actions"></th>
                             </tr>
                         </thead>
                         <tbody>
@@ -43,14 +68,24 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                                     <td>{s.message_count}</td>
                                     <td>{s.channel_name ?? "—"}</td>
                                     <td>{new Date(s.created_at).toLocaleDateString()}</td>
-                                    <td>
-                                        <button
-                                            className="secondary-button small"
-                                            onClick={() => onNavigateToChat(s.session_id)}
-                                            type="button"
-                                        >
-                                            Open Chat
-                                        </button>
+                                    <td className="actions-cell">
+                                        <div className="card-footer-actions">
+                                            <button
+                                                className="secondary-button small"
+                                                onClick={() => onNavigateToChat(s.session_id)}
+                                                type="button"
+                                            >
+                                                Open Chat
+                                            </button>
+                                            <button
+                                                className="danger-button small"
+                                                disabled={deleteMutation.isPending}
+                                                onClick={() => handleDeleteSession(s.session_id)}
+                                                type="button"
+                                            >
+                                                Delete
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}
