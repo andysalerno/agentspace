@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import threading
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -175,18 +178,86 @@ class StubRuntime:
             "exclude_names": list(exclude_names),
         }
 
+    async def clone_workspace(
+        self,
+        *,
+        source_volume_name: str,
+        target_workspace_id: str,
+        target_volume_name: str,
+    ) -> dict[str, Any]:
+        return {
+            "source_volume_name": source_volume_name,
+            "workspace_id": target_workspace_id,
+            "volume_name": target_volume_name,
+        }
+
+    async def open_workspace_vscode(
+        self,
+        *,
+        workspace_id: str,
+        volume_name: str,
+    ) -> dict[str, Any]:
+        return {
+            "workspace_id": workspace_id,
+            "volume_name": volume_name,
+            "container_name": f"editor-{workspace_id}",
+            "vscode_url": "http://127.0.0.1:12345",
+        }
+
     def _session_key(self, session: KernelRuntimeSession) -> str:
         assert isinstance(session.value, str)
         return session.value
 
 
+class FakeDockerContainer:
+    def __init__(
+        self,
+        captured: dict[str, Any],
+        name: str,
+        *,
+        running: bool = True,
+    ) -> None:
+        self._captured = captured
+        self.name = name
+        self.status = "running" if running else "exited"
+        self.attrs = {
+            "State": {"Running": running},
+            "NetworkSettings": {
+                "Ports": {
+                    "8080/tcp": [{"HostIp": "127.0.0.1", "HostPort": "45678"}],
+                    "8081/tcp": [{"HostIp": "127.0.0.1", "HostPort": "45679"}],
+                },
+            },
+        }
+
+    def reload(self) -> None:
+        self._captured.setdefault("reloaded_containers", []).append(self.name)
+
+    def remove(self, *, force: bool) -> None:
+        self._captured.setdefault("removed_containers", []).append(
+            {"name": self.name, "force": force},
+        )
+
+
 class FakeDockerContainers:
     def __init__(self, captured: dict[str, Any]) -> None:
         self._captured = captured
+        self._containers: dict[str, FakeDockerContainer] = {}
 
-    def run(self, *_args: object, **kwargs: object) -> object:
+    def run(self, image: str, *_args: object, **kwargs: object) -> FakeDockerContainer:
         self._captured.update(kwargs)
-        return object()
+        self._captured["image"] = image
+        name = str(kwargs.get("name", "generated-container"))
+        container = FakeDockerContainer(self._captured, name)
+        self._containers[name] = container
+        return container
+
+    def get(self, name: str) -> FakeDockerContainer:
+        try:
+            return self._containers[name]
+        except KeyError as exc:
+            msg = "missing"
+            raise NotFound(msg) from exc
 
 
 class FakeDockerClient:
@@ -605,3 +676,131 @@ def test_docker_runtime_mounts_workspace_volumes(
             },
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_clones_workspace_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, captured = _runtime_with_captured_run(monkeypatch)
+    cast("Any", runtime._client).volumes.create(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        name="agentspace-workspace-source",
+        labels={"agentspace.role": "workspace"},
+    )
+
+    result = await runtime.clone_workspace(
+        source_volume_name="agentspace-workspace-source",
+        target_workspace_id="target",
+        target_volume_name="agentspace-workspace-target",
+    )
+
+    assert result == {
+        "workspace_id": "target",
+        "volume_name": "agentspace-workspace-target",
+    }
+    assert captured["image"] == "agentspace-kernel-kernel:latest"
+    assert captured["auto_remove"] is True
+    assert captured["detach"] is False
+    assert captured["network_disabled"] is True
+    assert captured["labels"] == {"agentspace.role": "workspace-snapshot"}
+    assert captured["environment"] == {
+        "AGENTSPACE_WORKSPACE_ID": "target",
+        "AGENTSPACE_WORKSPACE_EXCLUDES": "",
+    }
+    assert captured["volumes"] == {
+        "agentspace-workspace-source": {"bind": "/workspace-src", "mode": "ro"},
+        "agentspace-workspace-target": {"bind": "/workspace-dest", "mode": "rw"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_opens_workspace_vscode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, captured = _runtime_with_captured_run(monkeypatch)
+    cast("Any", runtime._client).volumes.create(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        name="agentspace-workspace-todo-list-code",
+        labels={"agentspace.role": "workspace"},
+    )
+
+    result = await runtime.open_workspace_vscode(
+        workspace_id="todo-list-code",
+        volume_name="agentspace-workspace-todo-list-code",
+    )
+
+    assert result == {
+        "workspace_id": "todo-list-code",
+        "volume_name": "agentspace-workspace-todo-list-code",
+        "container_name": "agentspace-workspace-editor-todo-list-code",
+        "vscode_url": "http://127.0.0.1:45678",
+    }
+    assert captured["image"] == "agentspace-kernel-kernel:latest"
+    assert captured["auto_remove"] is True
+    assert captured["detach"] is True
+    assert captured["entrypoint"] == [
+        "/usr/local/bin/code-server",
+        "--bind-addr",
+        "0.0.0.0:8080",
+        "--auth",
+        "none",
+        "--disable-telemetry",
+        "/workspace",
+    ]
+    assert captured["labels"] == {
+        "agentspace.role": "workspace-editor",
+        "agentspace.workspace_id": "todo-list-code",
+    }
+    assert captured["name"] == "agentspace-workspace-editor-todo-list-code"
+    assert captured["ports"] == {"8080/tcp": ("0.0.0.0", 0)}  # noqa: S104
+    assert captured["volumes"] == {
+        "agentspace-workspace-todo-list-code": {
+            "bind": "/workspace",
+            "mode": "rw",
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_serializes_workspace_vscode_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = DockerKernelRuntime()
+    active = 0
+    max_active = 0
+    counter_lock = threading.Lock()
+
+    def fake_open_workspace_vscode(
+        workspace_id: str,
+        _volume_name: str,
+    ) -> tuple[str, str]:
+        nonlocal active, max_active
+        with counter_lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with counter_lock:
+            active -= 1
+        return f"editor-{workspace_id}", "http://127.0.0.1:45678"
+
+    monkeypatch.setattr(
+        runtime,
+        "_open_workspace_vscode",
+        fake_open_workspace_vscode,
+    )
+
+    results = await asyncio.gather(
+        *(
+            runtime.open_workspace_vscode(
+                workspace_id="todo-list-code",
+                volume_name="agentspace-workspace-todo-list-code",
+            )
+            for _ in range(5)
+        ),
+    )
+
+    assert max_active == 1
+    assert all(
+        result["container_name"] == "editor-todo-list-code"
+        and result["vscode_url"] == "http://127.0.0.1:45678"
+        for result in results
+    )

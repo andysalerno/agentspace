@@ -33,6 +33,13 @@ export type Workspace = {
   updated_at: string;
 };
 
+export type WorkspaceVscode = {
+  workspace_id: string;
+  volume_name: string;
+  container_name: string;
+  vscode_url: string | null;
+};
+
 export type Skill = {
   skill_id: string;
   files?: Record<string, string>;

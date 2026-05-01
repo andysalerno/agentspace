@@ -26,6 +26,8 @@ Example flow:
    prompted to save `/workspace` as a new workspace or destroy the scratch
    volume forever. Existing mounted workspaces are not copied into the saved
    scratch snapshot.
+6. A registered workspace can be cloned into a new workspace, or opened in a
+   standalone code-server container from the Workspaces page.
 
 Workspaces can be mounted in two modes:
 
@@ -118,6 +120,8 @@ Supported routes:
 | `GET /workspaces/{workspace_id}` | Fetch one workspace. |
 | `PATCH /workspaces/{workspace_id}` | Update workspace metadata, currently the display name. |
 | `DELETE /workspaces/{workspace_id}` | Unregister a workspace. Does not delete the underlying volume. |
+| `POST /workspaces/{workspace_id}/clone` | Copy a ready workspace volume into a new registered workspace. |
+| `POST /workspaces/{workspace_id}/vscode` | Start or reuse a workspace editor container and return its VS Code URL. |
 | `POST /sessions/{session_id}/workspace/save` | Snapshot a session scratch workspace into a new registered workspace. |
 
 Create payload:
@@ -168,6 +172,34 @@ The Rust service implements the robust save flow:
    `agentspace-workspace-<workspace_id>`.
 3. Mark the workspace `ready` if the snapshot succeeds.
 4. Mark it `failed` and return the upstream error if snapshotting fails.
+
+Clone payload:
+
+```json
+{
+  "workspace_id": "cloned-workspace",
+  "name": "Cloned Workspace"
+}
+```
+
+The clone flow uses the same status lifecycle as saving a session workspace:
+`client_service_rs` inserts the target as `creating`, asks `agent_host` to copy
+the source volume to `agentspace-workspace-<workspace_id>`, and then marks the
+target `ready` or `failed`. The source workspace must already be `ready`.
+
+Open-in-VS-Code response:
+
+```json
+{
+  "workspace_id": "todo-list-code",
+  "volume_name": "agentspace-workspace-todo-list-code",
+  "container_name": "agentspace-workspace-editor-todo-list-code",
+  "vscode_url": "http://127.0.0.1:45678"
+}
+```
+
+The Web UI should pass `vscode_url` through `browserReachableLocalUrl()` before
+opening it so loopback/wildcard host URLs work from the browser.
 
 ### Agent Workspace Mounts
 
@@ -314,6 +346,28 @@ workspace volume without following symlinks. `exclude_names` prevents copying
 linked persistent workspaces such as `/workspace/todo-list-code` and the ACP
 skills mount under `/workspace/.agents/skills`.
 
+### Cloning and Opening Workspaces
+
+`client_service_rs` calls `agent_host` through:
+
+```http
+POST /workspaces/clone
+POST /workspaces/vscode
+```
+
+`/workspaces/clone` copies from an existing source volume to a new target
+workspace volume with the same copy helper used for session snapshots. The
+source volume is opened directly; it is not created if missing, so a stale
+`ready` record with no backing volume fails instead of producing an empty clone.
+
+`/workspaces/vscode` starts a long-running workspace editor container named
+`agentspace-workspace-editor-<workspace_id>` if one is not already running. It
+uses the kernel image so the existing code-server installation can be reused,
+mounts the workspace volume at `/workspace`, publishes the configured VS Code
+port, and returns the same URL shape used by kernel VS Code sessions. The
+workspace volume must already exist; the endpoint does not create missing
+volumes.
+
 ## Web UI
 
 The Web UI feature is implemented in `clients/webui/src`.
@@ -334,6 +388,10 @@ Important files:
 UI behavior:
 
 - Workspaces are managed from the left-nav **Workspaces** page.
+- Ready workspaces can be cloned from the **Clone** button.
+- Ready workspaces can be opened from the **Open in VS Code** button, which
+  starts/reuses the workspace editor container and opens the returned URL in a
+  new tab.
 - Agent create/edit forms show workspace mount selectors when at least one
   workspace exists.
 - Agent cards show the number of mounted workspaces and tags such as
@@ -368,7 +426,7 @@ Workspace-specific Rust tests live in:
 
 | Test file | Coverage |
 |-----------|----------|
-| `services/client_service_rs/tests/route_contract.rs` | Workspace CRUD and agent mount API shape. |
+| `services/client_service_rs/tests/route_contract.rs` | Workspace CRUD, clone, VS Code, and agent mount API shape. |
 | `services/client_service_rs/tests/agent_host_proxy.rs` | Verifies `workspace_mounts` are forwarded to `agent_host`. |
 | `services/client_service_rs/src/models.rs` tests | Workspace ID validation and summary shape. |
 | `services/client_service_rs/src/store.rs` / `store/sqlite.rs` tests | Store behavior and SQLite persistence patterns. |

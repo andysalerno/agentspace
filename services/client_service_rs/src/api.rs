@@ -67,6 +67,11 @@ pub fn router() -> Router<AppState> {
                 .patch(update_workspace)
                 .delete(delete_workspace),
         )
+        .route("/workspaces/{workspace_id}/clone", post(clone_workspace))
+        .route(
+            "/workspaces/{workspace_id}/vscode",
+            post(open_workspace_vscode),
+        )
         .route("/sessions", get(list_sessions).post(create_session))
         .route(
             "/sessions/{session_id}",
@@ -646,6 +651,67 @@ async fn delete_workspace(
             "workspace {workspace_id:?} not found"
         )))
     }
+}
+
+async fn clone_workspace(
+    State(state): State<AppState>,
+    Path(source_workspace_id): Path<String>,
+    Json(payload): Json<CloneWorkspaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_workspace_id(&payload.workspace_id)?;
+    let source_workspace = require_ready_workspace(&state, &source_workspace_id)?;
+    let mut target_workspace = WorkspaceRecord::new_with_status(
+        payload.workspace_id,
+        payload.name,
+        WorkspaceStatus::Creating,
+    );
+    let target_workspace_id = target_workspace.workspace_id.clone();
+    let target_volume_name = target_workspace.volume_name();
+    state.workspaces.insert(target_workspace.clone())?;
+    let clone_result = state
+        .agent_host
+        .clone_workspace(
+            &source_workspace.volume_name(),
+            &target_workspace_id,
+            &target_volume_name,
+        )
+        .await;
+    if let Err(error) = clone_result {
+        target_workspace.status = WorkspaceStatus::Failed;
+        target_workspace.updated_at = utc_now();
+        state.workspaces.update(target_workspace)?;
+        return Err(error.into());
+    }
+    target_workspace.status = WorkspaceStatus::Ready;
+    target_workspace.updated_at = utc_now();
+    let value = target_workspace.summary();
+    state.workspaces.update(target_workspace)?;
+    tracing::info!(
+        route = "/workspaces/:workspace_id/clone",
+        action = "clone_workspace",
+        source_workspace_id = %source_workspace_id,
+        target_workspace_id = %target_workspace_id,
+        "api handler completed"
+    );
+    Ok(Json(value))
+}
+
+async fn open_workspace_vscode(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = require_ready_workspace(&state, &workspace_id)?;
+    let upstream = state
+        .agent_host
+        .open_workspace_vscode(&workspace.workspace_id, &workspace.volume_name())
+        .await?;
+    tracing::info!(
+        route = "/workspaces/:workspace_id/vscode",
+        action = "open_workspace_vscode",
+        workspace_id = %workspace_id,
+        "api handler completed"
+    );
+    Ok(Json(Value::Object(upstream)))
 }
 
 async fn create_session(
@@ -2424,6 +2490,19 @@ fn require_workspace(state: &AppState, workspace_id: &str) -> Result<WorkspaceRe
         .ok_or_else(|| ApiError::not_found(format!("workspace {workspace_id:?} not found")))
 }
 
+fn require_ready_workspace(
+    state: &AppState,
+    workspace_id: &str,
+) -> Result<WorkspaceRecord, ApiError> {
+    let workspace = require_workspace(state, workspace_id)?;
+    if workspace.status != WorkspaceStatus::Ready {
+        return Err(ApiError::conflict(format!(
+            "workspace {workspace_id:?} is not ready"
+        )));
+    }
+    Ok(workspace)
+}
+
 fn require_session(state: &AppState, session_id: &str) -> Result<SessionRecord, ApiError> {
     state
         .sessions
@@ -2444,13 +2523,7 @@ fn validate_workspace_mounts(
                 mount.workspace_id
             )));
         }
-        let workspace = require_workspace(state, &mount.workspace_id)?;
-        if workspace.status != WorkspaceStatus::Ready {
-            return Err(ApiError::conflict(format!(
-                "workspace {:?} is not ready",
-                mount.workspace_id
-            )));
-        }
+        require_ready_workspace(state, &mount.workspace_id)?;
     }
     Ok(())
 }
@@ -2552,6 +2625,12 @@ struct CreateWorkspaceRequest {
 #[derive(Debug, Deserialize)]
 struct UpdateWorkspaceRequest {
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloneWorkspaceRequest {
+    workspace_id: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]

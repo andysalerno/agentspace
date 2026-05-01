@@ -41,7 +41,9 @@ async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send +
         .route(
             "/sessions/{session_id}/workspace/snapshot",
             post(stub_snapshot_workspace),
-        );
+        )
+        .route("/workspaces/clone", post(stub_clone_workspace))
+        .route("/workspaces/vscode", post(stub_workspace_vscode));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let handle = tokio::spawn(async move {
@@ -77,6 +79,22 @@ async fn stub_snapshot_workspace(
         "workspace_id": payload["workspace_id"],
         "volume_name": payload["volume_name"],
         "exclude_names": payload["exclude_names"],
+    }))
+}
+
+async fn stub_clone_workspace(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({
+        "workspace_id": payload["target_workspace_id"],
+        "volume_name": payload["target_volume_name"],
+    }))
+}
+
+async fn stub_workspace_vscode(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({
+        "workspace_id": payload["workspace_id"],
+        "volume_name": payload["volume_name"],
+        "container_name": format!("editor-{}", payload["workspace_id"].as_str().unwrap_or_default()),
+        "vscode_url": "http://127.0.0.1:45678",
     }))
 }
 
@@ -230,6 +248,58 @@ async fn save_session_workspace_marks_workspace_ready() -> Result<(), Box<dyn Er
     let (status, workspaces) = get_json(app, "/workspaces").await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(workspaces[0]["status"], "ready");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn workspace_clone_and_vscode_routes_match_contract()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let stub = spawn_stub_agent_host().await?;
+    let app = test_router(&stub.base_url)?;
+
+    let (status, source) = request_json(
+        app.clone(),
+        Method::POST,
+        "/workspaces",
+        Some(json!({ "workspace_id": "source-workspace", "name": "Source Workspace" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source["status"], "ready");
+
+    let (status, cloned) = request_json(
+        app.clone(),
+        Method::POST,
+        "/workspaces/source-workspace/clone",
+        Some(json!({ "workspace_id": "cloned-workspace", "name": "Cloned Workspace" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cloned["workspace_id"], "cloned-workspace");
+    assert_eq!(cloned["name"], "Cloned Workspace");
+    assert_eq!(cloned["status"], "ready");
+    assert_eq!(
+        cloned["volume_name"],
+        "agentspace-workspace-cloned-workspace"
+    );
+    assert_eq!(cloned["mount_path"], "/workspace/cloned-workspace");
+
+    let (status, vscode) = request_json(
+        app,
+        Method::POST,
+        "/workspaces/cloned-workspace/vscode",
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(vscode["workspace_id"], "cloned-workspace");
+    assert_eq!(
+        vscode["volume_name"],
+        "agentspace-workspace-cloned-workspace"
+    );
+    assert_eq!(vscode["container_name"], "editor-cloned-workspace");
+    assert_eq!(vscode["vscode_url"], "http://127.0.0.1:45678");
 
     Ok(())
 }

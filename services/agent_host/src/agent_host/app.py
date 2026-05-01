@@ -82,6 +82,17 @@ class SnapshotWorkspaceRequest(BaseModel):
     exclude_names: list[str] = Field(default_factory=list)
 
 
+class CloneWorkspaceRequest(BaseModel):
+    source_volume_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    target_workspace_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    target_volume_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+class OpenWorkspaceVscodeRequest(BaseModel):
+    workspace_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    volume_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
 class SendMessageRequest(BaseModel):
     message: str
 
@@ -227,6 +238,23 @@ async def snapshot_session_workspace(
         )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/workspaces/clone")
+async def clone_workspace(payload: CloneWorkspaceRequest) -> dict[str, Any]:
+    return await host.clone_workspace(
+        source_volume_name=payload.source_volume_name,
+        target_workspace_id=payload.target_workspace_id,
+        target_volume_name=payload.target_volume_name,
+    )
+
+
+@app.post("/workspaces/vscode")
+async def open_workspace_vscode(payload: OpenWorkspaceVscodeRequest) -> dict[str, Any]:
+    return await host.open_workspace_vscode(
+        workspace_id=payload.workspace_id,
+        volume_name=payload.volume_name,
+    )
 
 
 @app.delete("/sessions/{session_id}", status_code=204)
