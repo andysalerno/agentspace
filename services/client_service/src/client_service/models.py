@@ -60,6 +60,28 @@ def _empty_tool_calls() -> list[ToolCallRecord]:
     return []
 
 
+class WorkspaceMountMode(StrEnum):
+    READ_WRITE = "rw"
+    READ_ONLY = "ro"
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceMountRecord:
+    workspace_id: str
+    mode: WorkspaceMountMode = WorkspaceMountMode.READ_WRITE
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "workspace_id": self.workspace_id,
+            "mode": self.mode.value,
+            "mount_path": f"/workspaces/{self.workspace_id}",
+        }
+
+
+def _empty_workspace_mounts() -> list[WorkspaceMountRecord]:
+    return []
+
+
 @dataclass(slots=True)
 class AgentRecord:
     agent_id: str
@@ -69,6 +91,9 @@ class AgentRecord:
     skills: list[str] = field(default_factory=_empty_skills)
     env_vars: str = ""
     connection_id: str | None = None
+    workspace_mounts: list[WorkspaceMountRecord] = field(
+        default_factory=_empty_workspace_mounts,
+    )
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -81,6 +106,7 @@ class AgentRecord:
             "skills": list(self.skills),
             "env_vars": self.env_vars,
             "connection_id": self.connection_id,
+            "workspace_mounts": [mount.summary() for mount in self.workspace_mounts],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -96,6 +122,28 @@ class KernelConfigRecord:
         return {
             "harness": self.harness.value,
             "env_vars": self.env_vars,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass(slots=True)
+class WorkspaceRecord:
+    workspace_id: str
+    name: str
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)
+
+    @property
+    def volume_name(self) -> str:
+        return f"agentspace-workspace-{self.workspace_id}"
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "workspace_id": self.workspace_id,
+            "name": self.name,
+            "mount_path": f"/workspaces/{self.workspace_id}",
+            "volume_name": self.volume_name,
+            "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
 

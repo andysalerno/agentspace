@@ -7,6 +7,7 @@ const POLL_MS = 5_000;
 
 export const queryKeys = {
   harnesses: ["harnesses"] as const,
+  workspaces: ["workspaces"] as const,
   agents: ["agents"] as const,
   sessions: ["sessions"] as const,
   session: (sessionId: string) => ["sessions", sessionId] as const,
@@ -34,6 +35,12 @@ export const useHarnesses = () =>
     queryKey: queryKeys.harnesses,
     queryFn: api.listHarnesses,
     staleTime: 60_000,
+  });
+
+export const useWorkspaces = () =>
+  useQuery({
+    queryKey: queryKeys.workspaces,
+    queryFn: api.listWorkspaces,
   });
 
 export const useAgents = () =>

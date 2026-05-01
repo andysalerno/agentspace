@@ -35,6 +35,15 @@ const navItems: NavItem[] = [
         ),
     },
     {
+        id: "workspaces",
+        label: "Workspaces",
+        icon: (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M3 4a2 2 0 012-2h10a2 2 0 012 2v3H3V4zm0 5h14v7a2 2 0 01-2 2H5a2 2 0 01-2-2V9zm3 2v2h8v-2H6z" />
+            </svg>
+        ),
+    },
+    {
         id: "sessions",
         label: "Sessions",
         icon: (

@@ -1,7 +1,7 @@
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent } from "./types";
+import type { Agent, WorkspaceMountMode } from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import {
@@ -18,6 +18,7 @@ import {
     useHarnesses,
     useSessions,
     useSkills,
+    useWorkspaces,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 
@@ -35,6 +36,12 @@ type AgentFormState = {
     skills: string[];
     env_vars: string;
     connection_id: string | null;
+    workspace_mounts: WorkspaceMountFormState[];
+};
+
+type WorkspaceMountFormState = {
+    workspace_id: string;
+    mode: WorkspaceMountMode;
 };
 
 function emptyAgentForm(harnesses: string[]): AgentFormState {
@@ -46,6 +53,7 @@ function emptyAgentForm(harnesses: string[]): AgentFormState {
         skills: [],
         env_vars: "",
         connection_id: null,
+        workspace_mounts: [],
     };
 }
 
@@ -58,6 +66,10 @@ function agentToForm(agent: Agent): AgentFormState {
         skills: [...agent.skills],
         env_vars: agent.env_vars,
         connection_id: agent.connection_id,
+        workspace_mounts: agent.workspace_mounts.map((mount) => ({
+            workspace_id: mount.workspace_id,
+            mode: mount.mode,
+        })),
     };
 }
 
@@ -73,6 +85,19 @@ function formatHarnessLabel(harness: string): string {
         .split("-")
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
         .join(" ");
+}
+
+function upsertWorkspaceMount(
+    mounts: WorkspaceMountFormState[],
+    workspaceId: string,
+    mode: WorkspaceMountMode,
+): WorkspaceMountFormState[] {
+    if (mounts.some((mount) => mount.workspace_id === workspaceId)) {
+        return mounts.map((mount) =>
+            mount.workspace_id === workspaceId ? { ...mount, mode } : mount,
+        );
+    }
+    return [...mounts, { workspace_id: workspaceId, mode }];
 }
 
 type ModelNameFieldProps = {
@@ -138,6 +163,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     const { data: skills = [] } = useSkills();
     const { data: harnesses = [] } = useHarnesses();
     const { data: connections = [] } = useConnections();
+    const { data: workspaces = [] } = useWorkspaces();
     const { data: sessions = [] } = useSessions();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
@@ -160,6 +186,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
             skills: string[];
             env_vars: string;
             connection_id: string | null;
+            workspace_mounts: WorkspaceMountFormState[];
         }) => api.createAgent(payload),
         onSuccess: () => invalidateAgents(),
         onError: reportError,
@@ -175,6 +202,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 skills?: string[];
                 env_vars?: string;
                 connection_id?: string | null;
+                workspace_mounts?: WorkspaceMountFormState[];
             };
         }) =>
             api.updateAgent(agentId, patch),
@@ -273,6 +301,27 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
         });
     }
 
+    function setFormWorkspaceMode(workspaceId: string, mode: WorkspaceMountMode | "") {
+        setForm((prev) => ({
+            ...prev,
+            workspace_mounts: mode
+                ? upsertWorkspaceMount(prev.workspace_mounts, workspaceId, mode)
+                : prev.workspace_mounts.filter((mount) => mount.workspace_id !== workspaceId),
+        }));
+    }
+
+    function setEditWorkspaceMode(workspaceId: string, mode: WorkspaceMountMode | "") {
+        setEditForm((prev) => {
+            if (prev === null) return prev;
+            return {
+                ...prev,
+                workspace_mounts: mode
+                    ? upsertWorkspaceMount(prev.workspace_mounts, workspaceId, mode)
+                    : prev.workspace_mounts.filter((mount) => mount.workspace_id !== workspaceId),
+            };
+        });
+    }
+
     function startEditingAgent(agent: Agent) {
         setEditingAgentId(agent.agent_id);
         setEditForm(agentToForm(agent));
@@ -307,6 +356,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 skills: editForm.skills,
                 env_vars: editForm.env_vars,
                 connection_id: editForm.connection_id,
+                workspace_mounts: editForm.workspace_mounts,
             },
         });
         stopEditingAgent();
@@ -318,7 +368,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 <div>
                     <h2>Agents</h2>
                     <span className="muted">
-                        {agents.length} configured · {sessions.length} sessions · {skills.length} skills
+                        {agents.length} configured · {sessions.length} sessions · {skills.length} skills · {workspaces.length} workspaces
                     </span>
                 </div>
                 <div className="view-header-actions">
@@ -394,9 +444,9 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             height="120px"
                         />
                     </div>
-                    {skills.length > 0 && (
-                        <fieldset className="skills-fieldset">
-                            <legend>Skills</legend>
+                                     {skills.length > 0 && (
+                                         <fieldset className="skills-fieldset">
+                                             <legend>Skills</legend>
                             <div className="checkbox-grid">
                                 {skills.map((skill) => (
                                     <label className="checkbox-label" key={skill.skill_id}>
@@ -411,8 +461,68 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             </div>
                         </fieldset>
                     )}
-                    <div>
-                        <label>Environment Variables</label>
+                    {workspaces.length > 0 && (
+                        <fieldset className="skills-fieldset">
+                            <legend>Workspaces</legend>
+                            <span className="field-help">Mounted at /workspaces/&lt;workspace-id&gt; when new sessions start.</span>
+                            <div className="checkbox-grid">
+                                {workspaces.map((workspace) => {
+                                    const mount = form.workspace_mounts.find(
+                                        (item) => item.workspace_id === workspace.workspace_id,
+                                    );
+                                    return (
+                                        <label className="checkbox-label" key={workspace.workspace_id}>
+                                            <span>{workspace.name} ({workspace.workspace_id})</span>
+                                            <select
+                                                value={mount?.mode ?? ""}
+                                                onChange={(e) =>
+                                                    setFormWorkspaceMode(
+                                                        workspace.workspace_id,
+                                                        e.target.value as WorkspaceMountMode | "",
+                                                    )}
+                                            >
+                                                <option value="">Not mounted</option>
+                                                <option value="rw">Read/write</option>
+                                                <option value="ro">Read-only</option>
+                                            </select>
+                                        </label>
+                                    );
+                                })}
+                                             </div>
+                                         </fieldset>
+                                     )}
+                                     {workspaces.length > 0 && (
+                                         <fieldset className="skills-fieldset">
+                                             <legend>Workspaces</legend>
+                                             <span className="field-help">Changes apply to new or restarted sessions.</span>
+                                             <div className="checkbox-grid">
+                                                 {workspaces.map((workspace) => {
+                                                     const mount = editForm?.workspace_mounts.find(
+                                                         (item) => item.workspace_id === workspace.workspace_id,
+                                                     );
+                                                     return (
+                                                         <label className="checkbox-label" key={workspace.workspace_id}>
+                                                             <span>{workspace.name} ({workspace.workspace_id})</span>
+                                                             <select
+                                                                 value={mount?.mode ?? ""}
+                                                                 onChange={(e) =>
+                                                                     setEditWorkspaceMode(
+                                                                         workspace.workspace_id,
+                                                                         e.target.value as WorkspaceMountMode | "",
+                                                                     )}
+                                                             >
+                                                                 <option value="">Not mounted</option>
+                                                                 <option value="rw">Read/write</option>
+                                                                 <option value="ro">Read-only</option>
+                                                             </select>
+                                                         </label>
+                                                     );
+                                                 })}
+                                             </div>
+                                         </fieldset>
+                                     )}
+                                     <div>
+                                         <label>Environment Variables</label>
                         <CodeEditor
                             value={form.env_vars}
                             onChange={(v) => { setForm({ ...form, env_vars: v }); setEnvDirty(true); }}
@@ -449,27 +559,40 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     <strong>Connection</strong>
                                     <span className="truncate-value">{connectionName}</span>
                                 </div>
-                                <div>
-                                    <strong>Skills</strong>
-                                    <span>{agent.skills.length}</span>
-                                </div>
-                                <div>
-                                    <strong>Sessions</strong>
-                                    <span>{sessionCount}</span>
+                                 <div>
+                                     <strong>Skills</strong>
+                                     <span>{agent.skills.length}</span>
+                                 </div>
+                                 <div>
+                                     <strong>Workspaces</strong>
+                                     <span>{agent.workspace_mounts.length}</span>
+                                 </div>
+                                 <div>
+                                     <strong>Sessions</strong>
+                                     <span>{sessionCount}</span>
                                 </div>
                             </div>
                             {agent.system_prompt && (
                                 <p className="system-prompt-preview">{agent.system_prompt}</p>
                             )}
-                            {agent.skills.length > 0 && (
-                                <div className="tag-row">
-                                    {agent.skills.map((s) => (
+                             {agent.skills.length > 0 && (
+                                 <div className="tag-row">
+                                     {agent.skills.map((s) => (
                                         <span className="tag" key={s}>
                                             {s}
                                         </span>
-                                    ))}
-                                </div>
-                            )}
+                                     ))}
+                                 </div>
+                             )}
+                             {agent.workspace_mounts.length > 0 && (
+                                 <div className="tag-row">
+                                     {agent.workspace_mounts.map((mount) => (
+                                         <span className="tag" key={mount.workspace_id}>
+                                             {mount.workspace_id}:{mount.mode}
+                                         </span>
+                                     ))}
+                                 </div>
+                             )}
                             {editingAgentId === agent.agent_id && editForm !== null && (
                                 <form
                                     className="create-form agent-edit-form"

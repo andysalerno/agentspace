@@ -28,6 +28,7 @@ class AgentHostClient(Protocol):
         harness: HarnessName,
         skills: list[str] | None = None,
         env: dict[str, str] | None = None,
+        workspace_mounts: list[dict[str, object]] | None = None,
     ) -> JsonDict: ...
 
     async def get_session(self, session_id: str) -> JsonDict: ...
@@ -113,12 +114,15 @@ class HttpAgentHostClient:
         harness: HarnessName,
         skills: list[str] | None = None,
         env: dict[str, str] | None = None,
+        workspace_mounts: list[dict[str, object]] | None = None,
     ) -> JsonDict:
         payload: dict[str, object] = {"harness": harness.value}
         if skills is not None:
             payload["skills"] = skills
         if env:
             payload["env"] = env
+        if workspace_mounts is not None:
+            payload["workspace_mounts"] = workspace_mounts
         return cast(
             "JsonDict",
             await self._request_json("POST", "/sessions", json=payload),

@@ -4,6 +4,7 @@ import type { ViewId } from "./types";
 import Sidebar from "./Sidebar";
 import ChatView from "./ChatView";
 import AgentsView from "./AgentsView";
+import WorkspacesView from "./WorkspacesView";
 import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
 import SkillsView from "./SkillsView";
@@ -57,6 +58,8 @@ export default function App() {
         );
       case "agents":
         return <AgentsView onSessionCreated={handleNavigateToChat} />;
+      case "workspaces":
+        return <WorkspacesView />;
       case "sessions":
         return <SessionsView onNavigateToChat={handleNavigateToChat} />;
       case "kernels":
