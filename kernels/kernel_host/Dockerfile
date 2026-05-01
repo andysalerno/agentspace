@@ -2,10 +2,31 @@ FROM docker.io/library/python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-# Install Copilot CLI, Claude Code, opencode (needed for harness kernels),
-# plus Node.js (for npm-distributed CLIs like firecrawl-cli).
+# Install agent CLIs plus generally useful shell, build, and inspection tools.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates gnupg ripgrep && \
+    apt-get install -y --no-install-recommends \
+        bash \
+        build-essential \
+        ca-certificates \
+        coreutils \
+        curl \
+        file \
+        findutils \
+        gawk \
+        git \
+        gnupg \
+        grep \
+        gzip \
+        jq \
+        less \
+        procps \
+        ripgrep \
+        sed \
+        tar \
+        unzip \
+        wget \
+        xz-utils \
+        zip && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     curl -fsSL https://gh.io/copilot-install | bash && \
@@ -14,7 +35,6 @@ RUN apt-get update && \
     npm install -g firecrawl-cli && \
     curl -fsSL https://code-server.dev/install.sh | \
         sh -s -- --method=standalone --prefix=/usr/local && \
-    apt-get purge -y curl gnupg && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
     ln -sf /root/.local/bin/claude /usr/local/bin/claude
