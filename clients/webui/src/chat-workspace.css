@@ -603,11 +603,22 @@
 }
 
 .chat-empty-workspace {
-  align-items: flex-start;
+  align-items: center;
+  flex: 0 1 auto;
+  width: min(420px, calc(100% - 48px));
+  max-width: 420px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: center;
 }
 
 .chat-empty-workspace button {
-  align-self: flex-start;
+  align-self: center;
+}
+
+.chat-empty-workspace p {
+  max-width: 360px;
 }
 
 .chat-composer {
