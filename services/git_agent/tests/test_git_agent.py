@@ -112,6 +112,8 @@ class WorktreeInspectingReviewer:
         prompt = build_review_prompt(context)
         assert ADD_README_PATCH not in prompt
         assert "git diff --stat HEAD" in prompt
+        assert "Review in prototyping mode" in prompt
+        assert "minimal smoke" in prompt
         assert context.agent_worktree_path in prompt
 
         diff = _run(
