@@ -320,11 +320,12 @@
 
 .rail-empty-state {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: flex-start;
   gap: 8px;
   margin: 6px;
-  padding: 12px;
+  padding: 14px;
   border: 1px dashed var(--chat-line-strong);
   border-radius: 8px;
   color: var(--text-secondary);
