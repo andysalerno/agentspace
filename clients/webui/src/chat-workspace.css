@@ -318,14 +318,14 @@
   color: var(--danger);
 }
 
-.rail-empty-state {
+.session-list .rail-empty-state {
   display: flex;
   align-items: flex-start;
   flex-direction: column;
   justify-content: flex-start;
-  gap: 8px;
-  margin: 6px;
-  padding: 14px;
+  gap: 12px;
+  margin: 18px 14px;
+  padding: 28px 20px;
   border: 1px dashed var(--chat-line-strong);
   border-radius: 8px;
   color: var(--text-secondary);
