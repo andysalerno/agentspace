@@ -14,6 +14,8 @@ from git_agent.patch_parser import (
     normalize_patch_path,
 )
 
+REVIEW_WORKSPACE_ID = "git-agent"
+
 if TYPE_CHECKING:
     from git_agent.config import Settings
 
@@ -37,7 +39,8 @@ class ReviewContext:
     request_id: str
     target_ref: str
     base_sha: str | None
-    raw_patch: str
+    service_worktree_path: str
+    agent_worktree_path: str
     commit_message: str
     author: object | None
     requester: object | None
@@ -135,7 +138,7 @@ class ClientServiceReviewer:
         self._agent_id = agent_id
 
     async def review(self, context: ReviewContext) -> ReviewerRawResponse:
-        prompt = _build_review_prompt(context)
+        prompt = build_review_prompt(context)
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 config_response = await client.get(f"{self._base_url}/git-agent/config")
@@ -145,7 +148,12 @@ class ClientServiceReviewer:
                 )
                 session_response = await client.post(
                     f"{self._base_url}/sessions",
-                    json={"agent_id": review_agent_id},
+                    json={
+                        "agent_id": review_agent_id,
+                        "workspace_mounts": [
+                            {"workspace_id": REVIEW_WORKSPACE_ID, "mode": "rw"},
+                        ],
+                    },
                 )
                 session_response.raise_for_status()
                 session_payload = session_response.json()
@@ -337,15 +345,20 @@ def _extract_reviewer_payload(payload: object) -> object:
     return payload
 
 
-def _build_review_prompt(context: ReviewContext) -> str:
+def build_review_prompt(context: ReviewContext) -> str:
     argument_text = json.dumps(context.argument, sort_keys=True, default=str)
     return (
         "You are GitAgent's final reviewer. Decide whether to accept this patch. "
+        "The full patch is intentionally not included in this prompt. Review it by "
+        "exploring the dedicated git worktree mounted in your session, and inspect "
+        "the diff incrementally with git commands instead of relying on a pasted "
+        "diff. Do not modify files in the review worktree. "
         'Return only JSON with this schema: {"accepted": boolean, '
         '"summary": string, "comments": [{"path": string|null, '
         '"side": "left"|"right"|"binary"|"general", '
         '"line": integer|null, "message": string}]}. '
-        "Line comments must point to changed diff lines exactly. "
+        "Line comments must point to changed diff lines exactly; verify line "
+        "numbers with `git diff` before commenting. "
         "Binary files are allowed but discouraged; use side=binary without line "
         "when commenting on a binary patch. Each independent project in this "
         "monorepo must provide a justfile recipe named validate; require that "
@@ -359,6 +372,14 @@ def _build_review_prompt(context: ReviewContext) -> str:
         f"Author: {json.dumps(context.author, sort_keys=True, default=str)}\n"
         f"Requester: {json.dumps(context.requester, sort_keys=True, default=str)}\n"
         f"Argument/appeal: {argument_text}\n"
-        f"Changed line indexes: {context.analysis.line_indexes_json()}\n\n"
-        f"Patch:\n{context.raw_patch}"
+        f"Review worktree: {context.agent_worktree_path}\n\n"
+        "Suggested workflow:\n"
+        f"1. `cd {context.agent_worktree_path}`\n"
+        "2. `git status --short`\n"
+        "3. `git diff --stat HEAD`\n"
+        "4. `git diff --name-only HEAD`\n"
+        "5. Inspect suspicious files with `git diff HEAD -- <path>` or narrower "
+        "`git diff -U40 HEAD -- <path>` commands.\n"
+        "6. Read surrounding source and related files as needed before returning "
+        "the JSON decision."
     )

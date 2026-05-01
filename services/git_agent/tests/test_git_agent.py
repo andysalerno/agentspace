@@ -11,7 +11,12 @@ from fastapi.testclient import TestClient
 
 from git_agent import Settings, create_app
 from git_agent.patch_parser import EMPTY_TREE_SHA, NULL_SHA, ChangedLine, analyze_patch
-from git_agent.reviewer import ReviewContext, Reviewer, ReviewerRawResponse
+from git_agent.reviewer import (
+    ReviewContext,
+    Reviewer,
+    ReviewerRawResponse,
+    build_review_prompt,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -95,6 +100,40 @@ class SequenceReviewer:
                 else [{"side": "general", "message": "sequence rejected"}],
             },
             session_id=f"review-{len(self._decisions)}",
+        )
+
+
+class WorktreeInspectingReviewer:
+    async def review(self, context: ReviewContext) -> ReviewerRawResponse:
+        assert not hasattr(context, "raw_patch")
+        assert context.agent_worktree_path.endswith(
+            f"/worktrees/{context.request_id}/review-worktree",
+        )
+        prompt = build_review_prompt(context)
+        assert ADD_README_PATCH not in prompt
+        assert "git diff --stat HEAD" in prompt
+        assert context.agent_worktree_path in prompt
+
+        diff = _run(
+            [
+                "git",
+                "-C",
+                context.service_worktree_path,
+                "diff",
+                "HEAD",
+                "--",
+                "README.md",
+            ],
+        )
+        assert "diff --git a/README.md b/README.md" in diff
+        assert "+hello" in diff
+        return ReviewerRawResponse(
+            payload={
+                "accepted": True,
+                "summary": "reviewed from worktree",
+                "comments": [],
+            },
+            session_id="worktree-review",
         )
 
 
@@ -290,6 +329,32 @@ def test_reviewer_comments_must_map_to_changed_lines(workspace: Path) -> None:
         assert response["status"] == "review_error"
         assert response["accepted"] is False
         assert client.get("/status").json()["refs"] == []
+
+
+def test_protected_review_uses_worktree_not_prompt_patch(workspace: Path) -> None:
+    settings = Settings(
+        repo_path=workspace / "repo.git",
+        db_path=workspace / "requests.sqlite3",
+        scratch_path=workspace / "worktrees",
+        data_path=workspace,
+        review_workspace_mount_path=Path("/workspace/git-agent"),
+        review_mode="auto_accept",
+    )
+    with TestClient(
+        create_app(settings=settings, reviewer=WorktreeInspectingReviewer()),
+    ) as client:
+        response = client.post(
+            "/PatchRequest",
+            json={
+                "target_ref": "main",
+                "base_sha": NULL_SHA,
+                "raw_patch": ADD_README_PATCH,
+                "commit_message": "Review from worktree",
+            },
+        ).json()
+        assert response["status"] == "accepted"
+        assert response["accepted"] is True
+        assert response["reviewer_session_id"] == "worktree-review"
 
 
 def test_rerun_review_reprocesses_unaccepted_protected_request(

@@ -14,6 +14,8 @@ class Settings:
     repo_path: Path = Path("/data/git-agent/repo.git")
     db_path: Path = Path("/data/git-agent/git_agent.sqlite3")
     scratch_path: Path = Path("/data/git-agent/worktrees")
+    data_path: Path = Path("/data")
+    review_workspace_mount_path: Path = Path("/workspace/git-agent")
     review_mode: ReviewMode = "auto_reject"
     review_agent_id: str | None = None
     client_service_url: str = "http://client-service:8002"
@@ -26,6 +28,13 @@ class Settings:
         db_path = Path(os.environ.get("GITAGENT_DB_PATH", cls.db_path.as_posix()))
         scratch_path = Path(
             os.environ.get("GITAGENT_SCRATCH_PATH", cls.scratch_path.as_posix()),
+        )
+        data_path = Path(os.environ.get("GITAGENT_DATA_PATH", cls.data_path.as_posix()))
+        review_workspace_mount_path = Path(
+            os.environ.get(
+                "GITAGENT_REVIEW_WORKSPACE_MOUNT_PATH",
+                cls.review_workspace_mount_path.as_posix(),
+            ),
         )
         review_agent_id = os.environ.get("GITAGENT_REVIEW_AGENT_ID") or None
         raw_mode = os.environ.get("GITAGENT_REVIEW_MODE")
@@ -47,6 +56,8 @@ class Settings:
             repo_path=repo_path,
             db_path=db_path,
             scratch_path=scratch_path,
+            data_path=data_path,
+            review_workspace_mount_path=review_workspace_mount_path,
             review_mode=review_mode,
             review_agent_id=review_agent_id,
             client_service_url=os.environ.get(

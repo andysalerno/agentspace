@@ -42,6 +42,7 @@ from git_agent.storage import PatchRequestCreate, PatchRequestUpdate, PatchStore
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from pathlib import Path
 
 
 class PatchRequestBody(BaseModel):
@@ -348,6 +349,7 @@ async def _process_protected_patch(  # noqa: PLR0911, PLR0913
         request_id=request_id,
         base_sha=None if is_empty_base_sha(base_sha) else base_sha,
         raw_patch=payload.raw_patch,
+        create_review_worktree=True,
         head_before=head_before,
     )
     if not isinstance(prepared, PreparedPatch):
@@ -361,6 +363,7 @@ async def _process_protected_patch(  # noqa: PLR0911, PLR0913
             target_ref=target_ref,
             base_sha=base_sha,
             analysis=analysis,
+            prepared=prepared,
             head_before=head_before,
         )
         if isinstance(review_result, dict):
@@ -544,19 +547,21 @@ def _process_wip_patch(
     return updated.to_dict(include_raw_patch=True)
 
 
-def _prepare_or_conflict(
+def _prepare_or_conflict(  # noqa: PLR0913
     *,
     state: AppState,
     request_id: str,
     base_sha: str | None,
     raw_patch: str,
     head_before: str | None,
+    create_review_worktree: bool = False,
 ) -> PreparedPatch | dict[str, object]:
     try:
         return state.git.prepare_patch(
             request_id=request_id,
             base_sha=base_sha,
             raw_patch=raw_patch,
+            create_review_worktree=create_review_worktree,
         )
     except PatchApplyError as exc:
         updated = state.store.update(
@@ -579,13 +584,19 @@ async def _review_patch(  # noqa: PLR0913
     target_ref: str,
     base_sha: str | None,
     analysis: PatchAnalysis,
+    prepared: PreparedPatch,
     head_before: str | None,
 ) -> ReviewDecision | dict[str, object]:
+    review_worktree = prepared.review_worktree
+    if review_worktree is None:
+        msg = "review worktree was not prepared"
+        raise RuntimeError(msg)
     context = ReviewContext(
         request_id=request_id,
         target_ref=target_ref,
         base_sha=base_sha,
-        raw_patch=payload.raw_patch,
+        service_worktree_path=str(review_worktree),
+        agent_worktree_path=_agent_visible_review_path(state, review_worktree),
         commit_message=payload.commit_message,
         author=payload.author,
         requester=payload.requester,
@@ -613,6 +624,16 @@ async def _review_patch(  # noqa: PLR0913
             ),
         )
         return updated.to_dict(include_raw_patch=True)
+
+
+def _agent_visible_review_path(state: AppState, review_worktree: Path) -> str:
+    data_path = state.settings.data_path.resolve()
+    resolved_worktree = review_worktree.resolve()
+    try:
+        relative = resolved_worktree.relative_to(data_path)
+    except ValueError:
+        return str(resolved_worktree)
+    return str(state.settings.review_workspace_mount_path / relative)
 
 
 def _run_validation_if_configured(  # noqa: PLR0913

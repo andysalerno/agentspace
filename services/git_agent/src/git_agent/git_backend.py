@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-from git_agent.patch_parser import NULL_SHA
+from git_agent.patch_parser import EMPTY_TREE_SHA, NULL_SHA
 
 
 class GitCommandError(RuntimeError):
@@ -53,10 +53,14 @@ class PreparedPatch:
     request_id: str
     scratch_dir: Path
     worktree: Path
+    review_worktree: Path | None
     index_path: Path
     base_sha: str | None
+    repo_path: Path
 
     def cleanup(self) -> None:
+        if self.review_worktree is not None:
+            _remove_registered_worktree(self.repo_path, self.review_worktree)
         if self.scratch_dir.exists():
             shutil.rmtree(self.scratch_dir)
 
@@ -152,6 +156,7 @@ class GitBackend:
         request_id: str,
         base_sha: str | None,
         raw_patch: str,
+        create_review_worktree: bool = False,
     ) -> PreparedPatch:
         scratch_dir = self.scratch_path / request_id
         if scratch_dir.exists():
@@ -214,13 +219,93 @@ class GitBackend:
                 checkout_result.stderr.strip() or checkout_result.stdout.strip(),
             )
 
+        review_worktree: Path | None = None
+        if create_review_worktree:
+            try:
+                review_worktree = self._prepare_review_worktree(
+                    scratch_dir=scratch_dir,
+                    base_sha=base_sha,
+                    raw_patch=raw_patch,
+                )
+            except PatchApplyError:
+                _cleanup_path(scratch_dir)
+                raise
+
         return PreparedPatch(
             request_id=request_id,
             scratch_dir=scratch_dir,
             worktree=worktree,
+            review_worktree=review_worktree,
             index_path=index_path,
             base_sha=base_sha,
+            repo_path=self.repo_path,
         )
+
+    def _prepare_review_worktree(
+        self,
+        *,
+        scratch_dir: Path,
+        base_sha: str | None,
+        raw_patch: str,
+    ) -> Path:
+        review_worktree = scratch_dir / "review-worktree"
+        review_base_sha = base_sha or self._create_empty_review_base_commit()
+        add_result = _run_git(
+            [
+                "--git-dir",
+                str(self.repo_path),
+                "worktree",
+                "add",
+                "--detach",
+                str(review_worktree),
+                review_base_sha,
+            ],
+            check=False,
+        )
+        if add_result.returncode != 0:
+            raise PatchApplyError(
+                add_result.stderr.strip() or add_result.stdout.strip(),
+            )
+
+        apply_result = _run_git(
+            ["-C", str(review_worktree), "apply", "--index", "--binary", "-"],
+            input_text=raw_patch,
+            check=False,
+        )
+        if apply_result.returncode != 0:
+            _remove_registered_worktree(self.repo_path, review_worktree)
+            raise PatchApplyError(
+                apply_result.stderr.strip() or apply_result.stdout.strip(),
+            )
+
+        diff_result = _run_git(
+            ["-C", str(review_worktree), "diff", "--quiet", "--exit-code", "HEAD"],
+            check=False,
+        )
+        if diff_result.returncode == 0:
+            _remove_registered_worktree(self.repo_path, review_worktree)
+            msg = "patch applies but produces no review worktree changes"
+            raise PatchApplyError(msg)
+        if diff_result.returncode != 1:
+            _remove_registered_worktree(self.repo_path, review_worktree)
+            raise PatchApplyError(
+                diff_result.stderr.strip() or diff_result.stdout.strip(),
+            )
+        return review_worktree
+
+    def _create_empty_review_base_commit(self) -> str:
+        env = _git_identity_env()
+        return _run_git(
+            [
+                "--git-dir",
+                str(self.repo_path),
+                "commit-tree",
+                EMPTY_TREE_SHA,
+                "-m",
+                "GitAgent empty review base",
+            ],
+            env=env,
+        ).stdout.strip()
 
     def commit_prepared_patch(
         self,
@@ -398,6 +483,35 @@ def _author_env(author: object | None) -> dict[str, str]:
     if isinstance(email, str) and email.strip():
         result["GIT_AUTHOR_EMAIL"] = email.strip()
     return result
+
+
+def _git_identity_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "GIT_AUTHOR_NAME": "GitAgent",
+            "GIT_AUTHOR_EMAIL": "gitagent@example.invalid",
+            "GIT_COMMITTER_NAME": "GitAgent",
+            "GIT_COMMITTER_EMAIL": "gitagent@example.invalid",
+        },
+    )
+    return env
+
+
+def _remove_registered_worktree(repo_path: Path, worktree: Path) -> None:
+    if not worktree.exists():
+        return
+    _run_git(
+        [
+            "--git-dir",
+            str(repo_path),
+            "worktree",
+            "remove",
+            "--force",
+            str(worktree),
+        ],
+        check=False,
+    )
 
 
 def _cleanup_path(path: Path) -> None:
