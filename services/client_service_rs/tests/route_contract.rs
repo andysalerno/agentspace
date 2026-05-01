@@ -37,6 +37,10 @@ async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send +
         .route(
             "/sessions/{session_id}",
             get(stub_get_session).delete(stub_delete_session),
+        )
+        .route(
+            "/sessions/{session_id}/workspace/snapshot",
+            post(stub_snapshot_workspace),
         );
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
@@ -62,6 +66,18 @@ async fn stub_get_session(Path(session_id): Path<String>) -> Json<Value> {
 
 async fn stub_delete_session(Path(_session_id): Path<String>) -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+async fn stub_snapshot_workspace(
+    Path(session_id): Path<String>,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    Json(json!({
+        "session_id": session_id,
+        "workspace_id": payload["workspace_id"],
+        "volume_name": payload["volume_name"],
+        "exclude_names": payload["exclude_names"],
+    }))
 }
 
 async fn request_json(
@@ -162,6 +178,58 @@ async fn basic_routes_and_kernel_configs_match_contract() -> Result<(), Box<dyn 
     let (status, value) = get_json(app, "/kernel-configs/missing").await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_error_detail(&value);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn save_session_workspace_marks_workspace_ready() -> Result<(), Box<dyn Error + Send + Sync>>
+{
+    let stub = spawn_stub_agent_host().await?;
+    let app = test_router(&stub.base_url)?;
+
+    let (status, _agent) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, session) = request_json(
+        app.clone(),
+        Method::POST,
+        "/sessions",
+        Some(json!({
+            "agent_id": "agent-one",
+            "channel_name": "webui",
+            "client_type": "webui",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = string_field(&session, "session_id")?;
+
+    let (status, workspace) = request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/sessions/{session_id}/workspace/save"),
+        Some(json!({ "workspace_id": "saved-workspace", "name": "Saved Workspace" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workspace["workspace_id"], "saved-workspace");
+    assert_eq!(workspace["status"], "ready");
+    assert_eq!(workspace["mount_path"], "/workspace/saved-workspace");
+    assert_eq!(
+        workspace["volume_name"],
+        "agentspace-workspace-saved-workspace"
+    );
+
+    let (status, workspaces) = get_json(app, "/workspaces").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workspaces[0]["status"], "ready");
 
     Ok(())
 }

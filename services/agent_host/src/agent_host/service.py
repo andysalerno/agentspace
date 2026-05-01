@@ -23,6 +23,57 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 WORKSPACE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+SESSION_WORKSPACE_MOUNT_PATH = "/workspace"
+PERSISTENT_WORKSPACES_MOUNT_ROOT = "/workspaces"
+WORKSPACE_LINKS_ENV = "AGENTSPACE_WORKSPACE_LINKS"
+WORKSPACE_SETUP_SCRIPT = r"""
+from __future__ import annotations
+
+import os
+import pathlib
+import sys
+
+links_env = os.environ.get("AGENTSPACE_WORKSPACE_LINKS", "")
+links = [item for item in links_env.split(",") if item]
+workspace_root = pathlib.Path("/workspace")
+internal_root = pathlib.Path("/workspaces")
+workspace_root.mkdir(parents=True, exist_ok=True)
+internal_root.mkdir(parents=True, exist_ok=True)
+for workspace_id in links:
+    link = workspace_root / workspace_id
+    target = internal_root / workspace_id
+    if link.is_symlink():
+        if os.readlink(link) == str(target):
+            continue
+        raise RuntimeError(f"{link} points to unexpected target {os.readlink(link)!r}")
+    if link.exists():
+        raise RuntimeError(f"{link} already exists and cannot be linked")
+    link.symlink_to(target, target_is_directory=True)
+os.execvp(sys.argv[1], sys.argv[1:])
+"""
+WORKSPACE_SNAPSHOT_SCRIPT = r"""
+from __future__ import annotations
+
+import os
+import pathlib
+import shutil
+
+source = pathlib.Path("/workspace-src")
+dest = pathlib.Path("/workspace-dest")
+exclude_env = os.environ.get("AGENTSPACE_WORKSPACE_EXCLUDES", "")
+exclude = {item for item in exclude_env.split(",") if item}
+dest.mkdir(parents=True, exist_ok=True)
+for entry in source.iterdir():
+    if entry.name in exclude:
+        continue
+    target = dest / entry.name
+    if entry.is_symlink():
+        target.symlink_to(os.readlink(entry))
+    elif entry.is_dir():
+        shutil.copytree(entry, target, symlinks=True, dirs_exist_ok=True)
+    else:
+        shutil.copy2(entry, target)
+"""
 
 # Where each harness expects to find skill directories inside the container.
 SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
@@ -56,6 +107,10 @@ class WorkspaceMount:
     @property
     def mount_path(self) -> str:
         return f"/workspace/{self.workspace_id}"
+
+    @property
+    def internal_mount_path(self) -> str:
+        return f"{PERSISTENT_WORKSPACES_MOUNT_ROOT}/{self.workspace_id}"
 
     def summary(self) -> dict[str, str]:
         return {
@@ -126,6 +181,15 @@ class KernelRuntime(Protocol):
     def free_port_url(self, *, session: KernelRuntimeSession) -> str | None: ...
 
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None: ...
+
+    async def snapshot_session_workspace(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        workspace_id: str,
+        volume_name: str,
+        exclude_names: tuple[str, ...],
+    ) -> dict[str, Any]: ...
 
 
 def _empty_history() -> list[list[KernelEvent]]:
@@ -270,6 +334,9 @@ class DockerKernelRuntime:
         return KernelRuntimeSession(
             value=DockerKernelSession(
                 container_name=container_name,
+                session_workspace_volume_name=self._session_workspace_volume_name(
+                    session_id,
+                ),
                 base_url=base_url,
                 vscode_url=vscode_url,
                 free_port_url=free_port_url,
@@ -405,7 +472,32 @@ class DockerKernelRuntime:
 
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         handle = self._docker_session(session)
-        await asyncio.to_thread(self._remove_container, handle.container_name)
+        await asyncio.to_thread(
+            self._remove_container_and_session_workspace,
+            handle.container_name,
+            handle.session_workspace_volume_name,
+        )
+
+    async def snapshot_session_workspace(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        workspace_id: str,
+        volume_name: str,
+        exclude_names: tuple[str, ...],
+    ) -> dict[str, Any]:
+        handle = self._docker_session(session)
+        await asyncio.to_thread(
+            self._snapshot_session_workspace,
+            handle.session_workspace_volume_name,
+            workspace_id,
+            volume_name,
+            exclude_names,
+        )
+        return {
+            "workspace_id": workspace_id,
+            "volume_name": volume_name,
+        }
 
     def _run_container(  # noqa: PLR0913
         self,
@@ -418,6 +510,9 @@ class DockerKernelRuntime:
     ) -> None:
         environment = dict(env)
         environment["KERNEL_HARNESS"] = harness.value
+        environment[WORKSPACE_LINKS_ENV] = ",".join(
+            mount.workspace_id for mount in workspace_mounts
+        )
         if additional_paths:
             environment["KERNEL_ADDITIONAL_PATHS"] = os.pathsep.join(additional_paths)
 
@@ -449,7 +544,15 @@ class DockerKernelRuntime:
             environment,
         )
 
+        session_workspace_volume = self._session_workspace_volume_name_from_container(
+            container_name,
+        )
+        self._ensure_session_workspace_volume(session_workspace_volume, container_name)
         volumes = {
+            session_workspace_volume: {
+                "bind": SESSION_WORKSPACE_MOUNT_PATH,
+                "mode": "rw",
+            },
             self._copilot_volume: {
                 "bind": "/root/.copilot",
                 "mode": "rw",
@@ -462,7 +565,7 @@ class DockerKernelRuntime:
         for mount in workspace_mounts:
             self._ensure_workspace_volume(mount.volume_name)
             volumes[mount.volume_name] = {
-                "bind": mount.mount_path,
+                "bind": mount.internal_mount_path,
                 "mode": mount.mode,
             }
 
@@ -471,6 +574,9 @@ class DockerKernelRuntime:
             auto_remove=True,
             detach=True,
             entrypoint=[
+                "/usr/local/bin/python",
+                "-c",
+                WORKSPACE_SETUP_SCRIPT,
                 "/usr/local/bin/uv",
                 "run",
                 "--no-dev",
@@ -499,6 +605,71 @@ class DockerKernelRuntime:
                     "agentspace.managed": "true",
                 },
             )
+
+    def _ensure_session_workspace_volume(
+        self,
+        volume_name: str,
+        container_name: str,
+    ) -> None:
+        volumes = cast("Any", self._client.volumes)
+        try:
+            volumes.get(volume_name)
+        except NotFound:
+            volumes.create(
+                name=volume_name,
+                labels={
+                    "agentspace.role": "session-workspace",
+                    "agentspace.managed": "true",
+                    "agentspace.container_name": container_name,
+                },
+            )
+
+    @staticmethod
+    def _session_workspace_volume_name(session_id: str) -> str:
+        return f"agentspace-session-workspace-{session_id[:12]}"
+
+    @staticmethod
+    def _session_workspace_volume_name_from_container(container_name: str) -> str:
+        prefix = "agentspace-kernel-"
+        if not container_name.startswith(prefix):
+            msg = f"unexpected kernel container name {container_name!r}"
+            raise ValueError(msg)
+        return f"agentspace-session-workspace-{container_name.removeprefix(prefix)}"
+
+    def _snapshot_session_workspace(
+        self,
+        session_workspace_volume_name: str,
+        workspace_id: str,
+        volume_name: str,
+        exclude_names: tuple[str, ...],
+    ) -> None:
+        self._ensure_workspace_volume(volume_name)
+        self._client.containers.run(
+            self._kernel_image,
+            auto_remove=True,
+            detach=False,
+            entrypoint=[
+                "/usr/local/bin/python",
+                "-c",
+                WORKSPACE_SNAPSHOT_SCRIPT,
+            ],
+            environment={
+                "AGENTSPACE_WORKSPACE_ID": workspace_id,
+                "AGENTSPACE_WORKSPACE_EXCLUDES": ",".join(exclude_names),
+            },
+            labels={"agentspace.role": "workspace-snapshot"},
+            network_disabled=True,
+            volumes={
+                session_workspace_volume_name: {
+                    "bind": "/workspace-src",
+                    "mode": "ro",
+                },
+                volume_name: {
+                    "bind": "/workspace-dest",
+                    "mode": "rw",
+                },
+            },
+        )
 
     def _docker_session(self, session: KernelRuntimeSession) -> DockerKernelSession:
         if not isinstance(session.value, DockerKernelSession):
@@ -565,6 +736,21 @@ class DockerKernelRuntime:
         except NotFound:
             return
         container.remove(force=True)
+
+    def _remove_container_and_session_workspace(
+        self,
+        container_name: str,
+        session_workspace_volume_name: str,
+    ) -> None:
+        self._remove_container(container_name)
+        self._remove_volume(session_workspace_volume_name)
+
+    def _remove_volume(self, volume_name: str) -> None:
+        try:
+            volume = self._client.volumes.get(volume_name)
+        except NotFound:
+            return
+        volume.remove(force=True)
 
     def _docker_container_logs(
         self,
@@ -658,7 +844,7 @@ class AgentHost:
         workspace_mounts = _validate_workspace_mounts(workspace_mounts)
         effective_additional_paths = _append_unique_paths(
             additional_paths,
-            tuple(mount.mount_path for mount in workspace_mounts),
+            tuple(mount.internal_mount_path for mount in workspace_mounts),
         )
         logger.info(
             "creating session %s: harness=%s caller_env_keys=%s skills=%s"
@@ -776,6 +962,22 @@ class AgentHost:
         if record is None:
             raise SessionNotFoundError(session_id)
         await self._runtime.destroy_session(session=record.runtime_session)
+
+    async def snapshot_session_workspace(
+        self,
+        session_id: str,
+        *,
+        workspace_id: str,
+        volume_name: str,
+        exclude_names: tuple[str, ...],
+    ) -> dict[str, Any]:
+        record = self._get_session(session_id)
+        return await self._runtime.snapshot_session_workspace(
+            session=record.runtime_session,
+            workspace_id=workspace_id,
+            volume_name=volume_name,
+            exclude_names=exclude_names,
+        )
 
     async def destroy_all_sessions(self) -> None:
         """Destroy all active sessions. Called during shutdown."""
@@ -966,6 +1168,7 @@ def _append_unique_paths(
 @dataclass(frozen=True, slots=True)
 class DockerKernelSession:
     container_name: str
+    session_workspace_volume_name: str
     base_url: str
     vscode_url: str | None = None
     free_port_url: str | None = None

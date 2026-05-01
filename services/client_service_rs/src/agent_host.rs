@@ -239,6 +239,25 @@ impl AgentHostClient {
         .await
     }
 
+    pub async fn snapshot_session_workspace(
+        &self,
+        session_id: &str,
+        workspace_id: &str,
+        volume_name: &str,
+        exclude_names: &[String],
+    ) -> AgentHostResult<JsonObject> {
+        let mut payload = JsonObject::new();
+        payload.insert("workspace_id".to_owned(), json!(workspace_id));
+        payload.insert("volume_name".to_owned(), json!(volume_name));
+        payload.insert("exclude_names".to_owned(), json!(exclude_names));
+        self.request_object(
+            Method::POST,
+            self.endpoint(&["sessions", session_id, "workspace", "snapshot"])?,
+            Some(payload),
+        )
+        .await
+    }
+
     pub async fn destroy_session(&self, session_id: &str) -> AgentHostResult<()> {
         let method = Method::DELETE;
         let url = self.endpoint(&["sessions", session_id])?;

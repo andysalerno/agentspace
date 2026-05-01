@@ -312,6 +312,8 @@ impl WorkspaceMountMode {
 pub struct WorkspaceRecord {
     pub workspace_id: String,
     pub name: String,
+    #[serde(default)]
+    pub status: WorkspaceStatus,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -323,6 +325,23 @@ impl WorkspaceRecord {
         Self {
             workspace_id: workspace_id.into(),
             name: name.into(),
+            status: WorkspaceStatus::Ready,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[must_use]
+    pub fn new_with_status(
+        workspace_id: impl Into<String>,
+        name: impl Into<String>,
+        status: WorkspaceStatus,
+    ) -> Self {
+        let now = utc_now();
+        Self {
+            workspace_id: workspace_id.into(),
+            name: name.into(),
+            status,
             created_at: now.clone(),
             updated_at: now,
         }
@@ -343,11 +362,53 @@ impl WorkspaceRecord {
         json!({
             "workspace_id": self.workspace_id,
             "name": self.name,
+            "status": self.status.as_str(),
             "mount_path": self.mount_path(),
             "volume_name": self.volume_name(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceStatus {
+    Creating,
+    #[default]
+    Ready,
+    Failed,
+}
+
+impl WorkspaceStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Creating => "creating",
+            Self::Ready => "ready",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl Display for WorkspaceStatus {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WorkspaceStatus {
+    type Err = ValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "creating" => Ok(Self::Creating),
+            "ready" => Ok(Self::Ready),
+            "failed" => Ok(Self::Failed),
+            _ => Err(ValidationError::InvalidWorkspaceStatus {
+                value: value.to_owned(),
+            }),
+        }
     }
 }
 

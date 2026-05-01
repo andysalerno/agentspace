@@ -14,7 +14,7 @@ use crate::{
     models::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
         HarnessName, KernelConfigRecord, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, utc_now,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now,
     },
 };
 use tracing::{debug, info, warn};
@@ -75,6 +75,7 @@ const WORKSPACES_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS workspaces (
     workspace_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ready',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -959,10 +960,16 @@ impl SqliteWorkspaceStore {
                 "
                     UPDATE workspaces
                        SET name = ?,
+                           status = ?,
                            updated_at = ?
-                     WHERE workspace_id = ?
+                      WHERE workspace_id = ?
                     ",
-                params![workspace.name, workspace.updated_at, workspace.workspace_id],
+                params![
+                    workspace.name,
+                    workspace.status.as_str(),
+                    workspace.updated_at,
+                    workspace.workspace_id
+                ],
             )?;
             debug!(
                 store = "workspaces",
@@ -1335,6 +1342,12 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
         )?;
         ensure_column(
             connection,
+            "workspaces",
+            "status",
+            "status TEXT NOT NULL DEFAULT 'ready'",
+        )?;
+        ensure_column(
+            connection,
             "connections",
             "api_flavor",
             "api_flavor TEXT NOT NULL DEFAULT 'chat_completions'",
@@ -1427,6 +1440,7 @@ fn row_to_workspace(row: &Row<'_>) -> Result<WorkspaceRecord, StoreError> {
     Ok(WorkspaceRecord {
         workspace_id: row.get("workspace_id")?,
         name: row.get("name")?,
+        status: parse_workspace_status(row.get::<_, String>("status")?.as_str())?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -1603,12 +1617,13 @@ fn insert_workspace(
     connection.execute(
         "
         INSERT INTO workspaces (
-            workspace_id, name, created_at, updated_at
-        ) VALUES (?, ?, ?, ?)
+            workspace_id, name, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?)
         ",
         params![
             workspace.workspace_id,
             workspace.name,
+            workspace.status.as_str(),
             workspace.created_at,
             workspace.updated_at,
         ],
@@ -1764,6 +1779,10 @@ fn parse_harness(value: &str) -> Result<HarnessName, StoreError> {
 
 fn parse_gateway_type(value: &str) -> Result<GatewayType, StoreError> {
     GatewayType::from_str(value).map_err(validation_error("gateways"))
+}
+
+fn parse_workspace_status(value: &str) -> Result<WorkspaceStatus, StoreError> {
+    WorkspaceStatus::from_str(value).map_err(validation_error("workspaces"))
 }
 
 fn parse_client_type(value: &str) -> Result<ClientType, StoreError> {

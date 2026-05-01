@@ -76,6 +76,12 @@ class CreateSessionRequest(BaseModel):
     )
 
 
+class SnapshotWorkspaceRequest(BaseModel):
+    workspace_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    volume_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    exclude_names: list[str] = Field(default_factory=list)
+
+
 class SendMessageRequest(BaseModel):
     message: str
 
@@ -203,6 +209,22 @@ async def session_container_logs(
 async def reset_session(session_id: str) -> dict[str, Any]:
     try:
         return await host.reset_session(session_id)
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/sessions/{session_id}/workspace/snapshot")
+async def snapshot_session_workspace(
+    session_id: str,
+    payload: SnapshotWorkspaceRequest,
+) -> dict[str, Any]:
+    try:
+        return await host.snapshot_session_workspace(
+            session_id,
+            workspace_id=payload.workspace_id,
+            volume_name=payload.volume_name,
+            exclude_names=tuple(payload.exclude_names),
+        )
     except SessionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

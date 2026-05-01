@@ -26,6 +26,7 @@ export type Agent = {
 export type Workspace = {
   workspace_id: string;
   name: string;
+  status: "creating" | "ready" | "failed";
   mount_path: string;
   volume_name: string;
   created_at: string;

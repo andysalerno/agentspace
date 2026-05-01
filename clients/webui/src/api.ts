@@ -166,6 +166,11 @@ export const api = {
   getSession: (sessionId: string) => requestJson<SessionDetail>(`/sessions/${sessionId}`),
   deleteSession: (sessionId: string) =>
     requestJson<void>(`/sessions/${sessionId}`, { method: "DELETE" }),
+  saveSessionWorkspace: (sessionId: string, payload: { workspace_id: string; name: string }) =>
+    requestJson<Workspace>(`/sessions/${sessionId}/workspace/save`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
   createSession: (payload: {
     agent_id: string;
     channel_name: string | null;
