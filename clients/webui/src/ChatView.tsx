@@ -322,6 +322,63 @@ function hasEquivalentServerMessage(
     );
 }
 
+function serializedToolCalls(message: ChatMessage): string {
+    return JSON.stringify(message.tool_calls ?? []);
+}
+
+function mergeAssistantProgress(local: ChatMessage, persisted: ChatMessage): ChatMessage {
+    const localReasoning = local.reasoning ?? "";
+    const persistedReasoning = persisted.reasoning ?? "";
+    const localToolCalls = serializedToolCalls(local);
+    const persistedToolCalls = serializedToolCalls(persisted);
+    const next: ChatMessage = {
+        ...local,
+        content: persisted.content.length > local.content.length
+            ? persisted.content
+            : local.content,
+        reasoning: persistedReasoning.length > localReasoning.length
+            ? persisted.reasoning
+            : local.reasoning,
+        tool_calls: persistedToolCalls.length > localToolCalls.length
+            || (persistedToolCalls !== localToolCalls && persistedToolCalls.length === localToolCalls.length)
+            ? persisted.tool_calls
+            : local.tool_calls,
+    };
+
+    if (
+        next.content === local.content
+        && next.reasoning === local.reasoning
+        && serializedToolCalls(next) === localToolCalls
+    ) {
+        return local;
+    }
+
+    return next;
+}
+
+function findAssistantAfterUser(
+    messages: ChatMessage[],
+    userMessage: ChatMessage,
+): ChatMessage | null {
+    const userIndex = messages.findIndex(
+        (message) =>
+            message.message_id === userMessage.message_id
+            || (
+                message.session_id === userMessage.session_id
+                && message.role === userMessage.role
+                && message.content === userMessage.content
+            ),
+    );
+    if (userIndex < 0) {
+        return null;
+    }
+    return messages.slice(userIndex + 1).find((message) => message.role === "assistant") ?? null;
+}
+
+function isRecoverableStreamError(error: Error): boolean {
+    return error.message === "message stream ended without a final payload";
+}
+
 function MessageMarkdown({
     content,
     onSelectToolCall,
@@ -397,11 +454,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
     const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
     const [streaming, setStreaming] = useState(false);
-    // Pause session polling while streaming so background refetches can't
-    // overwrite the optimistic user message we wrote into the cache.
-    const { data: selectedSession = null } = useSession(selectedSessionId, {
-        poll: !streaming,
-    });
+    const { data: selectedSession = null } = useSession(selectedSessionId);
     const streamControllerRef = useRef<AbortController | null>(null);
     const streamingSessionIdRef = useRef<string | null>(null);
     const streamingTurnIdRef = useRef<string | null>(null);
@@ -584,7 +637,9 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 void queryClient.invalidateQueries({
                     queryKey: queryKeys.session(activeSessionId),
                 });
-                reportError(err);
+                if (!isRecoverableStreamError(err)) {
+                    reportError(err);
+                }
             },
         });
         streamControllerRef.current = controller;
@@ -654,7 +709,9 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 void queryClient.invalidateQueries({
                     queryKey: queryKeys.session(activeSessionId),
                 });
-                reportError(err);
+                if (!isRecoverableStreamError(err)) {
+                    reportError(err);
+                }
             },
         });
         streamControllerRef.current = controller;
@@ -709,16 +766,46 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         deleteSessionMutation.mutate(sessionId);
     }
 
+    const cachedMessages = selectedSession?.messages ?? [];
     const activeAssistantMessageId = selectedSession?.active_turn?.assistant_message_id ?? null;
-    const busy = streaming || Boolean(selectedSession?.active_turn)
+    const completedAssistantFromCache = selectedSession && pendingUserMessage
+        && selectedSession.session_id === pendingUserMessage.session_id
+        && !selectedSession.active_turn
+        ? findAssistantAfterUser(cachedMessages, pendingUserMessage)
+        : null;
+    const streamCompletedFromCache = Boolean(streamingMessage && completedAssistantFromCache);
+    const persistedStreamingAssistant = streamingMessage && activeAssistantMessageId
+        ? cachedMessages.find((message) => message.message_id === activeAssistantMessageId) ?? null
+        : null;
+    const displayedStreamingMessage = streamCompletedFromCache
+        ? null
+        : (streamingMessage && persistedStreamingAssistant
+            ? mergeAssistantProgress(streamingMessage, persistedStreamingAssistant)
+            : streamingMessage);
+    const effectiveStreaming = streaming && !streamCompletedFromCache;
+    const busy = effectiveStreaming || Boolean(selectedSession?.active_turn)
         || createSessionMutation.isPending || resetMutation.isPending
         || deleteSessionMutation.isPending || saveWorkspaceMutation.isPending;
+    const visibleCachedMessages = displayedStreamingMessage && activeAssistantMessageId
+        ? cachedMessages.filter((message) => message.message_id !== activeAssistantMessageId)
+        : cachedMessages;
     const transcriptMessages = selectedSession && pendingUserMessage
         && selectedSession.session_id === pendingUserMessage.session_id
-        && !hasMessageWithId(selectedSession.messages, pendingUserMessage)
-        && !hasEquivalentServerMessage(selectedSession.messages, pendingUserMessage)
-        ? [...selectedSession.messages, pendingUserMessage]
-        : (selectedSession?.messages ?? []);
+        && !hasMessageWithId(cachedMessages, pendingUserMessage)
+        && !hasEquivalentServerMessage(cachedMessages, pendingUserMessage)
+        ? [...visibleCachedMessages, pendingUserMessage]
+        : visibleCachedMessages;
+
+    useEffect(() => {
+        if (!streamCompletedFromCache) {
+            return;
+        }
+        streamControllerRef.current?.abort();
+        streamControllerRef.current = null;
+        streamingSessionIdRef.current = null;
+        streamingTurnIdRef.current = null;
+    }, [streamCompletedFromCache]);
+
     const selectedKernel = useMemo(() => {
         if (!selectedSession) {
             return null;
@@ -924,11 +1011,11 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 </button>
                             </div>
                         </div>
-                        <div className="transcript chat-transcript" aria-live={streaming ? "polite" : "off"}>
-                            {transcriptMessages.length > 0 || streamingMessage ? (
+                        <div className="transcript chat-transcript" aria-live={effectiveStreaming ? "polite" : "off"}>
+                            {transcriptMessages.length > 0 || displayedStreamingMessage ? (
                                 <>
                                     {transcriptMessages.map((msg) => {
-                                        const messageStreaming = msg.message_id === activeAssistantMessageId;
+                                        const messageStreaming = effectiveStreaming && msg.message_id === activeAssistantMessageId;
                                         return (
                                             <article
                                                 className={`message chat-message ${msg.role}${messageStreaming ? " streaming" : ""}`}
@@ -953,26 +1040,26 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                             </article>
                                         );
                                     })}
-                                    {streamingMessage && (
+                                    {displayedStreamingMessage && (
                                         <article
-                                            className={`message chat-message ${streamingMessage.role} streaming`}
-                                            key={streamingMessage.message_id}
+                                            className={`message chat-message ${displayedStreamingMessage.role} streaming`}
+                                            key={displayedStreamingMessage.message_id}
                                         >
                                             <header className="message-header">
-                                                <span className="message-role">{messageRoleLabel(streamingMessage.role)}</span>
-                                                <time dateTime={streamingMessage.created_at}>{formatTimestamp(streamingMessage.created_at)}</time>
+                                                <span className="message-role">{messageRoleLabel(displayedStreamingMessage.role)}</span>
+                                                <time dateTime={displayedStreamingMessage.created_at}>{formatTimestamp(displayedStreamingMessage.created_at)}</time>
                                             </header>
-                                            {streamingMessage.reasoning && (
+                                            {displayedStreamingMessage.reasoning && (
                                                 <details className="reasoning-block" open>
                                                     <summary>Reasoning</summary>
                                                     <div className="reasoning-content">
-                                                        {streamingMessage.reasoning}
+                                                        {displayedStreamingMessage.reasoning}
                                                     </div>
                                                 </details>
                                             )}
                                             <MessageMarkdown
-                                                content={streamingMessage.content}
-                                                toolCalls={streamingMessage.tool_calls}
+                                                content={displayedStreamingMessage.content}
+                                                toolCalls={displayedStreamingMessage.tool_calls}
                                                 onSelectToolCall={setSelectedToolCall}
                                                 streaming
                                             />

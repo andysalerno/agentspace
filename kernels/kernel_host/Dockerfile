@@ -1,6 +1,7 @@
 FROM docker.io/library/python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+COPY --from=ghcr.io/casey/just:latest /just /usr/local/bin/
 
 # Install agent CLIs plus generally useful shell, build, and inspection tools.
 RUN apt-get update && \

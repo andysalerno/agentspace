@@ -16,6 +16,7 @@ pub const DEFAULT_GIT_AGENT_REMOTE_URL: &str = "http://gitagent:8004/repo.git";
 pub const DEFAULT_GIT_AGENT_PATCH_URL: &str = "http://gitagent:8004/PatchRequest";
 pub const DEFAULT_GIT_AGENT_VALIDATION_COMMAND: &str = "just validate";
 pub const DEFAULT_GIT_AGENT_DATA_VOLUME: &str = "agentspace-git-agent-data";
+pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = "You are a helpful assistant. Despite living inside a coding agent harness, you are not strictly a coding assistant. Instead, you help the user with any and all tasks they give you (possibly including coding!) using the tools and skills at your disposal. Pro tip: always prefer your skills and tools over generic CLI tools (though you can use those, too!)";
 pub const BUILTIN_GIT_AGENT_WORKSPACE_ID: &str = "git-agent";
 pub const BUILTIN_GIT_AGENT_WORKSPACE_NAME: &str = "GitAgent Repository";
 

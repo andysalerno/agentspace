@@ -25,10 +25,11 @@ use crate::{
     git_agent::GitAgentError,
     models::{
         AgentRecord, BUILTIN_GIT_AGENT_WORKSPACE_ID, BUILTIN_GIT_AGENT_WORKSPACE_NAME, ClientType,
-        ConnectionApiFlavor, ConnectionRecord, DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord,
-        GatewayType, GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole, SessionRecord,
-        ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars,
-        utc_now, validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
+        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord, GatewayType, GitAgentConfigRecord,
+        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
+        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
         validate_workspace_id,
     },
 };
@@ -1808,6 +1809,7 @@ impl Drop for ActiveTurnGuard {
 }
 
 type NdjsonReceiver = mpsc::Receiver<StreamItem>;
+const STREAM_SUBSCRIBER_CHANNEL_CAPACITY: usize = 256;
 
 fn start_streaming_turn(
     state: &AppState,
@@ -1991,8 +1993,7 @@ async fn run_streaming_turn(state: AppState, turn: StreamingTurn) {
                                 "event": event,
                             }),
                             false,
-                        )
-                        .await;
+                        );
                         if !sent {
                             tracing::warn!(
                                 action = "run_streaming_turn",
@@ -2067,7 +2068,7 @@ async fn run_streaming_turn(state: AppState, turn: StreamingTurn) {
                 })
             }
         };
-    let sent = send_stream_item(&turn.stream, &final_payload, true).await;
+    let sent = send_stream_item(&turn.stream, &final_payload, true);
     tracing::info!(
         action = "run_streaming_turn",
         session_id = %turn.session_id,
@@ -2167,7 +2168,7 @@ fn subscribe_active_turn(
 fn subscribe_stream_state(
     stream: &Arc<Mutex<ActiveTurnStreamState>>,
 ) -> Result<NdjsonReceiver, ApiError> {
-    let (sender, receiver) = mpsc::channel(16);
+    let (sender, receiver) = mpsc::channel(STREAM_SUBSCRIBER_CHANNEL_CAPACITY);
     let final_payload = {
         let mut stream = stream
             .lock()
@@ -2187,7 +2188,7 @@ fn subscribe_stream_state(
     Ok(receiver)
 }
 
-async fn send_stream_item(
+fn send_stream_item(
     stream: &Arc<Mutex<ActiveTurnStreamState>>,
     value: &Value,
     close: bool,
@@ -2196,22 +2197,29 @@ async fn send_stream_item(
         Ok(line) => line,
         Err(_error) => return false,
     };
-    let subscribers = match stream.lock() {
-        Ok(mut stream) => {
-            if close {
-                stream.final_payload = Some(line.clone());
-            }
-            stream.subscribers.clone()
-        }
+    let mut sent = false;
+    let mut stream = match stream.lock() {
+        Ok(stream) => stream,
         Err(_error) => return false,
     };
 
-    let mut sent = false;
-    for subscriber in subscribers {
-        sent |= subscriber.send(Ok(line.clone())).await.is_ok();
+    if close {
+        stream.final_payload = Some(line.clone());
     }
 
-    if close && let Ok(mut stream) = stream.lock() {
+    stream.subscribers.retain(|subscriber| {
+        let keep = match subscriber.try_send(Ok(line.clone())) {
+            Ok(()) => {
+                sent = true;
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_line)) => false,
+            Err(mpsc::error::TrySendError::Closed(_line)) => false,
+        };
+        keep && !close
+    });
+
+    if close {
         stream.subscribers.clear();
     }
 
@@ -2923,7 +2931,7 @@ struct CreateAgentRequest {
     name: String,
     #[serde(default = "default_harness")]
     harness: HarnessName,
-    #[serde(default)]
+    #[serde(default = "default_agent_system_prompt")]
     system_prompt: String,
     #[serde(default)]
     skills: Vec<String>,
@@ -3038,6 +3046,10 @@ struct UpdateGatewayRequest {
 
 const fn default_harness() -> HarnessName {
     HarnessName::Acp
+}
+
+fn default_agent_system_prompt() -> String {
+    DEFAULT_AGENT_SYSTEM_PROMPT.to_owned()
 }
 
 #[derive(Debug, Default)]
@@ -3192,6 +3204,7 @@ mod tests {
         convert::Infallible,
         error::Error,
         net::SocketAddr,
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -3209,7 +3222,10 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
     use tower::ServiceExt;
 
-    use crate::{AppConfig, AppState, agent_host::AgentHostClient, build_router};
+    use super::send_stream_item;
+    use crate::{
+        ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient, build_router,
+    };
 
     fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
         test_router_with_agent_host("http://127.0.0.1:9", Duration::from_millis(50))
@@ -3300,6 +3316,55 @@ mod tests {
         let mut line = serde_json::to_vec(value).unwrap_or_else(|_error| Vec::from("{}"));
         line.push(b'\n');
         line
+    }
+
+    #[tokio::test]
+    async fn stream_fanout_drops_backpressured_subscriber_without_blocking()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let (sender, mut receiver) = mpsc::channel(1);
+        assert!(
+            sender
+                .try_send(Ok(test_ndjson_line(&json!({
+                    "type": "event",
+                    "event": { "type": "text_delta", "content": "queued" }
+                }))))
+                .is_ok()
+        );
+        let stream = Arc::new(Mutex::new(ActiveTurnStreamState {
+            subscribers: vec![sender],
+            final_payload: None,
+        }));
+
+        let sent = tokio::time::timeout(Duration::from_millis(50), async {
+            send_stream_item(
+                &stream,
+                &json!({
+                    "type": "event",
+                    "event": { "type": "text_delta", "content": "blocked" }
+                }),
+                false,
+            )
+        })
+        .await
+        .map_err(|_elapsed| std::io::Error::other("stream fanout blocked"))?;
+
+        assert!(!sent);
+        assert!(
+            stream
+                .lock()
+                .map_err(|_error| std::io::Error::other("stream lock poisoned"))?
+                .subscribers
+                .is_empty()
+        );
+        let queued = receiver
+            .recv()
+            .await
+            .ok_or_else(|| std::io::Error::other("queued item missing"))??;
+        let queued_chunk = serde_json::from_slice::<Value>(&queued)?;
+        assert_eq!(queued_chunk["event"]["content"], "queued");
+        assert!(receiver.recv().await.is_none());
+
+        Ok(())
     }
 
     async fn request_json(
