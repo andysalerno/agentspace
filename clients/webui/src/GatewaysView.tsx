@@ -399,12 +399,19 @@ export default function GatewaysView() {
     }
 
     return (
-        <div className="view-content">
+        <div className="view-content management-view gateways-management-view">
             <div className="view-header">
-                <h2>Gateways</h2>
-                <button onClick={() => setShowForm(!showForm)} type="button">
-                    {showForm ? "Cancel" : "New Gateway"}
-                </button>
+                <div>
+                    <h2>Gateways</h2>
+                    <span className="muted">
+                        {gateways.length} total · {gateways.filter((gateway) => gateway.status === "running").length} running
+                    </span>
+                </div>
+                <div className="view-header-actions">
+                    <button onClick={() => setShowForm(!showForm)} type="button">
+                        {showForm ? "Cancel" : "New Gateway"}
+                    </button>
+                </div>
             </div>
 
             {showForm && (
@@ -544,7 +551,7 @@ export default function GatewaysView() {
                 </form>
             )}
 
-            <div className="card-grid">
+            <div className="card-grid management-card-grid">
                 {gateways.map((gateway) => {
                     const gatewayAgent = agents.find(
                         (agent) => agent.agent_id === gateway.agent_id,
@@ -555,48 +562,59 @@ export default function GatewaysView() {
                     const editShowsMissingAgent =
                         Boolean(editAgentId) && !agentsLoading && !editHasValidAgent;
                     return (
-                    <div className="card" key={gateway.gateway_id}>
+                    <div className="card management-card" key={gateway.gateway_id}>
                         <div className="card-body">
-                            <h3>
-                                <span className="card-title-text">{gateway.name}</span>
-                                {showMissingAgent && (
-                                    <span className="status-badge invalid">invalid</span>
-                                )}
-                                <span className={`status-badge ${gateway.status}`}>
-                                    {gateway.status}
-                                </span>
-                            </h3>
-                            <div className="card-meta">
+                            <div className="management-card-heading">
+                                <div className="management-title-block">
+                                    <h3>{gateway.name}</h3>
+                                    <code className="management-id">{gateway.gateway_id}</code>
+                                </div>
+                                <div className="badge-row">
+                                    {showMissingAgent && (
+                                        <span className="status-badge invalid">invalid</span>
+                                    )}
+                                    <span className={`status-badge ${gateway.status}`}>
+                                        {gateway.status}
+                                    </span>
+                                </div>
+                            </div>
+                            <div className="card-meta management-meta">
                                 <div>
-                                    <strong>ID:</strong> {gateway.gateway_id}
+                                    <strong>ID</strong>
+                                    <span className="truncate-value">{gateway.gateway_id}</span>
                                 </div>
                                 <div>
-                                    <strong>Type:</strong> {gateway.gateway_type}
+                                    <strong>Type</strong>
+                                    <span>{gateway.gateway_type}</span>
                                 </div>
                                 <div className={showMissingAgent ? "error-text" : undefined}>
-                                    <strong>Agent:</strong>{" "}
-                                    {gatewayAgent
-                                        ? `${gatewayAgent.name} (${gatewayAgent.agent_id})`
-                                        : `${gateway.agent_id}${showMissingAgent ? " (missing)" : ""}`}
+                                    <strong>Agent</strong>
+                                    <span className="truncate-value">
+                                        {gatewayAgent
+                                            ? `${gatewayAgent.name} (${gatewayAgent.agent_id})`
+                                            : `${gateway.agent_id}${showMissingAgent ? " (missing)" : ""}`}
+                                    </span>
                                 </div>
                                 <div>
-                                    <strong>Enabled:</strong>{" "}
-                                    {gateway.enabled ? "yes" : "no"}
+                                    <strong>Enabled</strong>
+                                    <span>{gateway.enabled ? "yes" : "no"}</span>
                                 </div>
                                 {gateway.container_name && (
                                     <div>
-                                        <strong>Container:</strong> {gateway.container_name}
+                                        <strong>Container</strong>
+                                        <span className="truncate-value" title={gateway.container_name}>{gateway.container_name}</span>
                                     </div>
                                 )}
                                 {gateway.secret_keys.length > 0 && (
                                     <div>
-                                        <strong>Secrets:</strong>{" "}
-                                        {gateway.secret_keys.join(", ")}
+                                        <strong>Secrets</strong>
+                                        <span className="truncate-value">{gateway.secret_keys.join(", ")}</span>
                                     </div>
                                 )}
                                 {gateway.last_error && (
                                     <div className="error-text">
-                                        <strong>Error:</strong> {gateway.last_error}
+                                        <strong>Error</strong>
+                                        <span className="truncate-value">{gateway.last_error}</span>
                                     </div>
                                 )}
                             </div>
@@ -607,7 +625,7 @@ export default function GatewaysView() {
                                 </div>
                             )}
                             {expandedGatewayId === gateway.gateway_id && logsQuery.data && (
-                                <pre className="skill-file-content">{logsQuery.data.lines.join("\n")}</pre>
+                                <pre className="skill-file-content management-log-block">{logsQuery.data.lines.join("\n")}</pre>
                             )}
                             {editingGatewayId === gateway.gateway_id && (
                                 <form

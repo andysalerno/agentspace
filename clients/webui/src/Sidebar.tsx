@@ -127,8 +127,11 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
     });
 
     function toggleGroup(groupId: string) {
+        if (collapsed) {
+            onToggleCollapse();
+        }
         setExpandedGroups((prev) => {
-            const next = { ...prev, [groupId]: !prev[groupId] };
+            const next = { ...prev, [groupId]: collapsed ? true : !prev[groupId] };
             localStorage.setItem("sidebar-expanded-groups", JSON.stringify(next));
             return next;
         });
@@ -141,12 +144,14 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                 <span className="sidebar-title">AgentSpace</span>
             </div>
             <ul className="sidebar-nav">
+                <li className="sidebar-nav-section-label">Workspace</li>
                 {navItems.map((item) => (
                     <li key={item.id}>
                         <button
                             className={`sidebar-nav-item ${activeView === item.id ? "active" : ""}`}
                             onClick={() => onNavigate(item.id)}
                             type="button"
+                            title={item.label}
                         >
                             {item.icon}
                             <span>{item.label}</span>
@@ -162,6 +167,7 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                                 className={`sidebar-nav-item ${groupActive ? "active" : ""}`}
                                 onClick={() => toggleGroup(group.id)}
                                 type="button"
+                                title={group.label}
                             >
                                 {group.icon}
                                 <span>{group.label}</span>
@@ -184,6 +190,7 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                                                 className={`sidebar-nav-item sidebar-nav-subitem ${activeView === item.id ? "active" : ""}`}
                                                 onClick={() => onNavigate(item.id)}
                                                 type="button"
+                                                title={item.label}
                                             >
                                                 {item.icon}
                                                 <span>{item.label}</span>
@@ -197,6 +204,7 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                 })}
             </ul>
             <div className="sidebar-footer">
+                <div className="sidebar-nav-section-label">Controls</div>
                 <button className="sidebar-nav-item" onClick={onToggleDarkMode} type="button" title={darkMode ? "Light mode" : "Dark mode"}>
                     <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
                         {darkMode ? (

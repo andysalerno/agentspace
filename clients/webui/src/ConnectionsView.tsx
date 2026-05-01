@@ -120,12 +120,19 @@ export default function ConnectionsView() {
         : null;
 
     return (
-        <div className="view-content">
+        <div className="view-content management-view connections-management-view">
             <div className="view-header">
-                <h2>Connections</h2>
-                <button onClick={() => setShowForm(!showForm)} type="button">
-                    {showForm ? "Cancel" : "New Connection"}
-                </button>
+                <div>
+                    <h2>Connections</h2>
+                    <span className="muted">
+                        {connections.length} endpoints · {connections.filter((conn) => conn.has_api_key).length} keyed
+                    </span>
+                </div>
+                <div className="view-header-actions">
+                    <button onClick={() => setShowForm(!showForm)} type="button">
+                        {showForm ? "Cancel" : "New Connection"}
+                    </button>
+                </div>
             </div>
 
             {showForm && (
@@ -188,15 +195,23 @@ export default function ConnectionsView() {
                 </form>
             )}
 
-            <div className="card-grid">
+            <div className="card-grid management-card-grid">
                 {connections.map((conn) => (
-                    <div className="card" key={conn.connection_id}>
+                    <div className="card management-card" key={conn.connection_id}>
                         <div className="card-body">
-                            <h3>{conn.name}</h3>
-                            <div className="muted">{conn.connection_id}</div>
+                            <div className="management-card-heading">
+                                <div className="management-title-block">
+                                    <h3>{conn.name}</h3>
+                                    <code className="management-id">{conn.connection_id}</code>
+                                </div>
+                                <span className={`status-badge ${conn.has_api_key ? "active" : "stopped"}`}>
+                                    {conn.has_api_key ? "key set" : "no key"}
+                                </span>
+                            </div>
                             <div className="card-meta">
                                 <div>
-                                    <strong>URL:</strong> {conn.url}
+                                    <strong>URL:</strong>{" "}
+                                    <span className="truncate-value" title={conn.url}>{conn.url}</span>
                                 </div>
                                 <div>
                                     <strong>API Key:</strong>{" "}

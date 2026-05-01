@@ -98,17 +98,22 @@ export default function ConfigKernelsView() {
     const loading = configQuery.isFetching;
 
     return (
-        <div className="view-content">
+        <div className="view-content management-view config-kernels-management-view">
             <div className="view-header">
-                <h2>Kernel Configuration</h2>
+                <div>
+                    <h2>Kernel Configuration</h2>
+                    <span className="muted">
+                        {harnesses.length} kernels · {CONFIGURABLE_HARNESSES.size} configurable
+                    </span>
+                </div>
             </div>
-            <p className="muted">
+            <p className="muted management-intro">
                 These values act as defaults that pre-fill the Environment Variables
                 field when creating a new agent.
             </p>
 
             <div className="config-kernels-layout">
-                <aside className="config-kernels-list card">
+                <aside className="config-kernels-list card management-card">
                     <h3>Kernels</h3>
                     <ul className="plain-list">
                         {harnesses.map((harness) => (
@@ -131,7 +136,7 @@ export default function ConfigKernelsView() {
                     </ul>
                 </aside>
 
-                <section className="config-kernels-detail card">
+                <section className="config-kernels-detail card management-card">
                     {effectiveSelected === null && (
                         <div className="empty-state">Select a kernel.</div>
                     )}

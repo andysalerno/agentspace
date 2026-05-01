@@ -313,12 +313,19 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     }
 
     return (
-        <div className="view-content">
+        <div className="view-content management-view agents-management-view">
             <div className="view-header">
-                <h2>Agents</h2>
-                <button onClick={() => { setShowForm(!showForm); if (showForm) setEnvDirty(false); }} type="button">
-                    {showForm ? "Cancel" : "New Agent"}
-                </button>
+                <div>
+                    <h2>Agents</h2>
+                    <span className="muted">
+                        {agents.length} configured · {sessions.length} sessions · {skills.length} skills
+                    </span>
+                </div>
+                <div className="view-header-actions">
+                    <button onClick={() => { setShowForm(!showForm); if (showForm) setEnvDirty(false); }} type="button">
+                        {showForm ? "Cancel" : "New Agent"}
+                    </button>
+                </div>
             </div>
 
             {showForm && (
@@ -420,19 +427,37 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 </form>
             )}
 
-            <div className="card-grid">
-                {agents.map((agent) => (
-                    <div className="card" key={agent.agent_id}>
+            <div className="card-grid management-card-grid">
+                {agents.map((agent) => {
+                    const sessionCount = activeSessionCount(agent.agent_id);
+                    const connectionName = agent.connection_id
+                        ? (connections.find((c) => c.connection_id === agent.connection_id)?.name
+                            ?? agent.connection_id)
+                        : "None";
+                    return (
+                    <div className="card management-card" key={agent.agent_id}>
                         <div className="card-body">
-                            <h3>{agent.name}</h3>
-                            <div className="muted">{agent.agent_id}</div>
-                            <div className="tag">{agent.harness}</div>
-                            {agent.connection_id && (
-                                <span className="tag">
-                                    {connections.find((c) => c.connection_id === agent.connection_id)?.name
-                                        ?? agent.connection_id}
-                                </span>
-                            )}
+                            <div className="management-card-heading">
+                                <div className="management-title-block">
+                                    <h3>{agent.name}</h3>
+                                    <code className="management-id">{agent.agent_id}</code>
+                                </div>
+                                <span className="tag">{agent.harness}</span>
+                            </div>
+                            <div className="card-meta management-meta">
+                                <div>
+                                    <strong>Connection</strong>
+                                    <span className="truncate-value">{connectionName}</span>
+                                </div>
+                                <div>
+                                    <strong>Skills</strong>
+                                    <span>{agent.skills.length}</span>
+                                </div>
+                                <div>
+                                    <strong>Sessions</strong>
+                                    <span>{sessionCount}</span>
+                                </div>
+                            </div>
                             {agent.system_prompt && (
                                 <p className="system-prompt-preview">{agent.system_prompt}</p>
                             )}
@@ -594,7 +619,8 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             </div>
                         </div>
                     </div>
-                ))}
+                    );
+                })}
                 {agents.length === 0 && (
                     <div className="empty-state">No agents yet. Create one to get started.</div>
                 )}

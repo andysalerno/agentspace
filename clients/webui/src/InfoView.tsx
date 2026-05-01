@@ -5,7 +5,7 @@ import { queryKeys, useSystemInfo, useWebuiInfo } from "./queries";
 function Section({ title, section }: { title: string; section: ServiceInfoSection | undefined }) {
   if (!section) {
     return (
-      <section className="info-section card">
+      <section className="info-section card management-card">
         <div className="card-body">
           <h3>{title}</h3>
           <p className="muted">No data.</p>
@@ -18,7 +18,7 @@ function Section({ title, section }: { title: string; section: ServiceInfoSectio
   const entries = Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
 
   return (
-    <section className="info-section card">
+    <section className="info-section card management-card">
       <div className="card-body">
         <h3>{title}</h3>
         {section.env_prefix && (
@@ -30,7 +30,7 @@ function Section({ title, section }: { title: string; section: ServiceInfoSectio
         {entries.length === 0 && !section.error ? (
           <p className="muted">No matching environment variables.</p>
         ) : (
-          <table className="info-table">
+          <table className="info-table management-table">
             <thead>
               <tr>
                 <th>Variable</th>
@@ -78,17 +78,22 @@ export default function InfoView() {
   }
 
   return (
-    <div className="view-content">
+    <div className="view-content management-view info-management-view">
       <div className="view-header">
-        <h2>System Info</h2>
-        <button
-          className="secondary-button small"
-          onClick={refresh}
-          type="button"
-          disabled={loading}
-        >
-          {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        <div>
+          <h2>System Info</h2>
+          <span className="muted">Runtime environment across AgentSpace services</span>
+        </div>
+        <div className="view-header-actions">
+          <button
+            className="secondary-button small"
+            onClick={refresh}
+            type="button"
+            disabled={loading}
+          >
+            {loading ? "Refreshing…" : "Refresh"}
+          </button>
+        </div>
       </div>
       {error && (
         <div className="error-banner">

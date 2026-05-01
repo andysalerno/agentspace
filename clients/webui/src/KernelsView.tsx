@@ -169,15 +169,19 @@ export default function KernelsView() {
             : "Auto-refresh 1s";
 
     return (
-        <div className="view-content">
+        <div className="view-content management-view kernels-management-view">
             <div className="view-header">
-                <h2>Running Kernels</h2>
-                <span className="muted">{kernels.length} active</span>
+                <div>
+                    <h2>Running Kernels</h2>
+                    <span className="muted">
+                        {kernels.length} active · {kernels.reduce((total, kernel) => total + kernel.turns, 0)} turns
+                    </span>
+                </div>
             </div>
 
             {kernels.length > 0 ? (
-                <div className="table-container">
-                    <table className="data-table kernels-table">
+                <div className="table-container management-table-container">
+                    <table className="data-table management-table kernels-table">
                         <thead>
                             <tr>
                                 <th>Harness</th>
@@ -352,9 +356,15 @@ function KernelRow({
 
     return (
         <tr>
-            <td>{kernel.harness}</td>
-            <td className="mono">{kernel.session_id.slice(0, 12)}…</td>
-            <td className="mono">{kernel.container_name ?? "—"}</td>
+            <td>
+                <span className="tag">{kernel.harness}</span>
+            </td>
+            <td className="mono" title={kernel.session_id}>
+                <span className="truncate-value">{kernel.session_id.slice(0, 12)}…</span>
+            </td>
+            <td className="mono" title={kernel.container_name ?? undefined}>
+                <span className="truncate-value">{kernel.container_name ?? "—"}</span>
+            </td>
             <td>
                 <span className={`status-badge ${kernel.status}`}>{kernel.status}</span>
             </td>
