@@ -14,7 +14,8 @@ members = [
     "kernels/kernel_acp",
     "kernels/kernel_host",
     "gateways/*",
-    "services/*",
+    "services/agent_host",
+    "services/client_service",
     "channels/*",
     "clients/cli_ui",
 ]

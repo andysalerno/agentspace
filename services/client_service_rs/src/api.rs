@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, convert::Infallible, str::FromStr};
+use std::{
+    collections::BTreeMap,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     Json, Router,
@@ -15,7 +19,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 use crate::{
-    AppState, ENV_PREFIX,
+    ActiveTurnRecord, ActiveTurnStreamState, AppState, ENV_PREFIX, StreamItem,
     agent_host::{AgentHostError, JsonObject, KernelEvent},
     errors::{StoreError, ValidationError},
     models::{
@@ -563,7 +567,7 @@ async fn create_session(
         payload.channel_name,
         payload.client_type,
     );
-    let value = session.summary();
+    let value = session_summary(&state, &session)?;
     state.sessions.insert(session)?;
     tracing::info!(
         route = "/sessions",
@@ -582,8 +586,8 @@ async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Value>>
         .sessions
         .list()?
         .into_iter()
-        .map(|session| session.summary())
-        .collect::<Vec<_>>();
+        .map(|session| session_summary(&state, &session))
+        .collect::<Result<Vec<_>, _>>()?;
     tracing::info!(
         route = "/sessions",
         action = "list_sessions",
@@ -617,7 +621,7 @@ async fn get_session(
         message_count = session.messages.len(),
         "api handler completed"
     );
-    Ok(Json(session.detail()))
+    Ok(Json(session_detail(&state, &session)?))
 }
 
 async fn list_messages(
@@ -661,7 +665,7 @@ async fn stream_message(
     Path(session_id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Response, ApiError> {
-    let turn = start_streaming_turn(&state, &session_id, payload.message)?;
+    let (turn, receiver) = start_streaming_turn(&state, &session_id, payload.message)?;
     tracing::info!(
         route = "/sessions/:session_id/messages/stream",
         action = "stream_message",
@@ -670,8 +674,7 @@ async fn stream_message(
         kernel_session_id = %turn.agent_host_session_id,
         "stream response started"
     );
-    let (sender, receiver) = mpsc::channel(16);
-    tokio::spawn(run_streaming_turn(state, turn, sender));
+    tokio::spawn(run_streaming_turn(state, turn));
     Ok(ndjson_stream_response(receiver))
 }
 
@@ -679,18 +682,17 @@ async fn stream_turn(
     State(state): State<AppState>,
     Path((session_id, turn_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let _session = require_session(&state, &session_id)?;
+    let session = require_session(&state, &session_id)?;
+    let receiver = subscribe_active_turn(&state, &session_id, &turn_id)?;
     tracing::info!(
         route = "/sessions/:session_id/turns/:turn_id/stream",
         action = "stream_turn",
         session_id = %session_id,
         turn_id = %turn_id,
-        implemented = false,
-        "turn replay requested"
+        kernel_session_id = %session.agent_host_session_id,
+        "turn stream attached"
     );
-    Err(ApiError::not_found(format!(
-        "turn not found: {turn_id}; active turn replay is not implemented in client_service_rs yet"
-    )))
+    Ok(ndjson_stream_response(receiver))
 }
 
 async fn reset_session(
@@ -716,7 +718,7 @@ async fn reset_session(
         status = %session.status,
         "api handler completed"
     );
-    Ok(Json(session.summary()))
+    Ok(Json(session_summary(&state, &session)?))
 }
 
 async fn delete_session(
@@ -1387,6 +1389,7 @@ struct StreamingTurn {
     message: String,
     assistant_message_id: String,
     assistant_created_at: String,
+    stream: Arc<Mutex<ActiveTurnStreamState>>,
     _active_turn: ActiveTurnGuard,
 }
 
@@ -1400,7 +1403,10 @@ impl Drop for ActiveTurnGuard {
     fn drop(&mut self) {
         match self.state.active_turns.lock() {
             Ok(mut active_turns) => {
-                if active_turns.get(&self.session_id) == Some(&self.turn_id) {
+                if active_turns
+                    .get(&self.session_id)
+                    .is_some_and(|turn| turn.turn_id == self.turn_id)
+                {
                     active_turns.remove(&self.session_id);
                     tracing::debug!(
                         action = "active_turn_guard_drop",
@@ -1422,17 +1428,15 @@ impl Drop for ActiveTurnGuard {
     }
 }
 
-type NdjsonSender = mpsc::Sender<Result<Vec<u8>, Infallible>>;
-type NdjsonReceiver = mpsc::Receiver<Result<Vec<u8>, Infallible>>;
+type NdjsonReceiver = mpsc::Receiver<StreamItem>;
 
 fn start_streaming_turn(
     state: &AppState,
     session_id: &str,
     message: String,
-) -> Result<StreamingTurn, ApiError> {
+) -> Result<(StreamingTurn, NdjsonReceiver), ApiError> {
     let mut session = require_session(state, session_id)?;
     let turn_id = Uuid::now_v7().simple().to_string();
-    let active_turn = begin_active_turn(state, &session.session_id, &turn_id)?;
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
         session.session_id.clone(),
@@ -1448,6 +1452,21 @@ fn start_streaming_turn(
         "",
     );
     assistant_created_at.clone_into(&mut assistant_message.created_at);
+    let stream = Arc::new(Mutex::new(ActiveTurnStreamState {
+        subscribers: Vec::new(),
+        final_payload: None,
+    }));
+    let active_turn = begin_active_turn(
+        state,
+        &session.session_id,
+        ActiveTurnRecord {
+            turn_id: turn_id.clone(),
+            user_message_id: user_message.message_id.clone(),
+            assistant_message_id: assistant_message_id.clone(),
+            stream: Some(stream.clone()),
+        },
+    )?;
+    let receiver = subscribe_stream_state(&stream)?;
 
     "busy".clone_into(&mut session.status);
     session.updated_at = utc_now();
@@ -1464,40 +1483,46 @@ fn start_streaming_turn(
         "streaming turn initialized"
     );
 
-    Ok(StreamingTurn {
-        turn_id,
-        session_id: session.session_id,
-        agent_host_session_id: session.agent_host_session_id,
-        message,
-        assistant_message_id,
-        assistant_created_at,
-        _active_turn: active_turn,
-    })
+    Ok((
+        StreamingTurn {
+            turn_id,
+            session_id: session.session_id,
+            agent_host_session_id: session.agent_host_session_id,
+            message,
+            assistant_message_id,
+            assistant_created_at,
+            stream,
+            _active_turn: active_turn,
+        },
+        receiver,
+    ))
 }
 
 fn begin_active_turn(
     state: &AppState,
     session_id: &str,
-    turn_id: &str,
+    turn: ActiveTurnRecord,
 ) -> Result<ActiveTurnGuard, ApiError> {
     let mut active_turns = state
         .active_turns
         .lock()
         .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
-    if let Some(existing_turn_id) = active_turns.get(session_id) {
+    if let Some(existing_turn) = active_turns.get(session_id) {
         tracing::warn!(
             action = "begin_active_turn",
             session_id = %session_id,
-            turn_id = %turn_id,
-            existing_turn_id = %existing_turn_id,
+            turn_id = %turn.turn_id,
+            existing_turn_id = %existing_turn.turn_id,
             error_kind = "active_turn_conflict",
             "session already has active turn"
         );
         return Err(ApiError::conflict(format!(
-            "session {session_id:?} already has active turn {existing_turn_id:?}"
+            "session {session_id:?} already has active turn {:?}",
+            existing_turn.turn_id.as_str()
         )));
     }
-    active_turns.insert(session_id.to_owned(), turn_id.to_owned());
+    let turn_id = turn.turn_id.clone();
+    active_turns.insert(session_id.to_owned(), turn);
     let active_turn_count = active_turns.len();
     drop(active_turns);
     tracing::info!(
@@ -1510,12 +1535,12 @@ fn begin_active_turn(
     Ok(ActiveTurnGuard {
         state: state.clone(),
         session_id: session_id.to_owned(),
-        turn_id: turn_id.to_owned(),
+        turn_id,
     })
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_streaming_turn(state: AppState, turn: StreamingTurn, sender: NdjsonSender) {
+async fn run_streaming_turn(state: AppState, turn: StreamingTurn) {
     let mut events = Vec::new();
     let mut completed = false;
     let mut error = None;
@@ -1580,12 +1605,13 @@ async fn run_streaming_turn(state: AppState, turn: StreamingTurn, sender: Ndjson
                         );
 
                         let event = Value::Object(events.last().cloned().unwrap_or_default());
-                        let sent = send_ndjson_item(
-                            &sender,
+                        let sent = send_stream_item(
+                            &turn.stream,
                             &json!({
                                 "type": "event",
                                 "event": event,
                             }),
+                            false,
                         )
                         .await;
                         if !sent {
@@ -1662,7 +1688,7 @@ async fn run_streaming_turn(state: AppState, turn: StreamingTurn, sender: Ndjson
                 })
             }
         };
-    let sent = send_ndjson_item(&sender, &final_payload).await;
+    let sent = send_stream_item(&turn.stream, &final_payload, true).await;
     tracing::info!(
         action = "run_streaming_turn",
         session_id = %turn.session_id,
@@ -1735,25 +1761,87 @@ async fn finalize_streaming_turn(
     Ok(payload)
 }
 
-async fn send_ndjson_item(sender: &NdjsonSender, value: &Value) -> bool {
-    match ndjson_line_bytes(value) {
-        Ok(line) => sender.send(Ok(line)).await.is_ok(),
-        Err(_error) => false,
+fn subscribe_active_turn(
+    state: &AppState,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<NdjsonReceiver, ApiError> {
+    let active_turns = state
+        .active_turns
+        .lock()
+        .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
+    let stream = {
+        let Some(turn) = active_turns.get(session_id) else {
+            return Err(ApiError::not_found(format!("turn not found: {turn_id}")));
+        };
+        if turn.turn_id != turn_id {
+            return Err(ApiError::not_found(format!("turn not found: {turn_id}")));
+        }
+        turn.stream
+            .clone()
+            .ok_or_else(|| ApiError::not_found(format!("turn not found: {turn_id}")))?
+    };
+    drop(active_turns);
+    subscribe_stream_state(&stream)
+}
+
+fn subscribe_stream_state(
+    stream: &Arc<Mutex<ActiveTurnStreamState>>,
+) -> Result<NdjsonReceiver, ApiError> {
+    let (sender, receiver) = mpsc::channel(16);
+    let final_payload = {
+        let mut stream = stream
+            .lock()
+            .map_err(|_error| ApiError::internal("active turn stream lock poisoned".to_owned()))?;
+        if let Some(final_payload) = &stream.final_payload {
+            Some(final_payload.clone())
+        } else {
+            stream.subscribers.push(sender.clone());
+            None
+        }
+    };
+    if let Some(final_payload) = final_payload {
+        sender.try_send(Ok(final_payload)).map_err(|_error| {
+            ApiError::internal("failed to enqueue final stream payload".to_owned())
+        })?;
     }
+    Ok(receiver)
+}
+
+async fn send_stream_item(
+    stream: &Arc<Mutex<ActiveTurnStreamState>>,
+    value: &Value,
+    close: bool,
+) -> bool {
+    let line = match ndjson_line_bytes(value) {
+        Ok(line) => line,
+        Err(_error) => return false,
+    };
+    let subscribers = match stream.lock() {
+        Ok(mut stream) => {
+            if close {
+                stream.final_payload = Some(line.clone());
+            }
+            stream.subscribers.clone()
+        }
+        Err(_error) => return false,
+    };
+
+    let mut sent = false;
+    for subscriber in subscribers {
+        sent |= subscriber.send(Ok(line.clone())).await.is_ok();
+    }
+
+    if close && let Ok(mut stream) = stream.lock() {
+        stream.subscribers.clear();
+    }
+
+    sent
 }
 
 async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<Value, ApiError> {
     let mut session = require_session(state, session_id)?;
     let turn_id = Uuid::now_v7().simple().to_string();
-    let _active_turn = begin_active_turn(state, &session.session_id, &turn_id)?;
-    tracing::info!(
-        action = "run_turn",
-        session_id = %session.session_id,
-        turn_id = %turn_id,
-        kernel_session_id = %session.agent_host_session_id,
-        message_char_count = message.chars().count(),
-        "synchronous turn started"
-    );
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
         session.session_id.clone(),
@@ -1762,6 +1850,24 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
     );
     let assistant_message_id = Uuid::now_v7().simple().to_string();
     let assistant_created_at = utc_now();
+    let _active_turn = begin_active_turn(
+        state,
+        &session.session_id,
+        ActiveTurnRecord {
+            turn_id: turn_id.clone(),
+            user_message_id: user_message.message_id.clone(),
+            assistant_message_id: assistant_message_id.clone(),
+            stream: None,
+        },
+    )?;
+    tracing::info!(
+        action = "run_turn",
+        session_id = %session.session_id,
+        turn_id = %turn_id,
+        kernel_session_id = %session.agent_host_session_id,
+        message_char_count = message.chars().count(),
+        "synchronous turn started"
+    );
     "busy".clone_into(&mut session.status);
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
@@ -2076,6 +2182,43 @@ fn ndjson_stream_response(receiver: NdjsonReceiver) -> Response {
         Body::from_stream(ReceiverStream::new(receiver)),
     )
         .into_response()
+}
+
+fn session_summary(state: &AppState, session: &SessionRecord) -> Result<Value, ApiError> {
+    let mut summary = match session.summary() {
+        Value::Object(summary) => summary,
+        _ => JsonObject::new(),
+    };
+    if let Some(active_turn) = active_turn_summary(state, &session.session_id)? {
+        summary.insert("active_turn".to_owned(), active_turn);
+    }
+    Ok(Value::Object(summary))
+}
+
+fn session_detail(state: &AppState, session: &SessionRecord) -> Result<Value, ApiError> {
+    let mut detail = match session.detail() {
+        Value::Object(detail) => detail,
+        _ => JsonObject::new(),
+    };
+    if let Some(active_turn) = active_turn_summary(state, &session.session_id)? {
+        detail.insert("active_turn".to_owned(), active_turn);
+    }
+    Ok(Value::Object(detail))
+}
+
+fn active_turn_summary(state: &AppState, session_id: &str) -> Result<Option<Value>, ApiError> {
+    let active_turns = state
+        .active_turns
+        .lock()
+        .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
+    Ok(active_turns.get(session_id).map(|turn| {
+        json!({
+            "turn_id": turn.turn_id.as_str(),
+            "user_message_id": turn.user_message_id.as_str(),
+            "assistant_message_id": turn.assistant_message_id.as_str(),
+            "status": "running",
+        })
+    }))
 }
 
 fn require_agent(state: &AppState, agent_id: &str) -> Result<AgentRecord, ApiError> {
@@ -2884,6 +3027,88 @@ mod tests {
         let (status, messages) = get_json(app, &format!("/sessions/{session_id}/messages")).await?;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(messages["messages"][1]["content"], "hello");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_turn_attaches_to_running_turn_after_disconnect()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = StreamingUpstream::start(Duration::from_millis(200)).await?;
+        let app = test_router_with_agent_host(&upstream.base_url, Duration::from_secs(1))?;
+
+        let (status, _agent) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, session) = request_json(
+            app.clone(),
+            Method::POST,
+            "/sessions",
+            Some(json!({ "agent_id": "agent-one" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let session_id = session
+            .get("session_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| std::io::Error::other("session_id missing"))?;
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/messages/stream"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "message": "hello" }),
+            )?))?;
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let first_frame = tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .map_err(|_elapsed| std::io::Error::other("first stream event did not arrive"))?
+            .ok_or_else(|| std::io::Error::other("stream ended before first event"))??;
+        let first_data = first_frame
+            .into_data()
+            .map_err(|_frame| std::io::Error::other("first frame was not data"))?;
+        let first_chunk = serde_json::from_slice::<Value>(&first_data)?;
+        assert_eq!(first_chunk["event"]["content"], "he");
+        drop(body);
+
+        let (status, detail) = get_json(app.clone(), &format!("/sessions/{session_id}")).await?;
+        assert_eq!(status, StatusCode::OK);
+        let active_turn = detail
+            .get("active_turn")
+            .and_then(Value::as_object)
+            .ok_or_else(|| std::io::Error::other("active_turn missing"))?;
+        assert_eq!(detail["messages"][1]["content"], "he");
+        let turn_id = active_turn
+            .get("turn_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| std::io::Error::other("turn_id missing"))?;
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/sessions/{session_id}/turns/{turn_id}/stream"))
+            .body(Body::empty())?;
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = tokio::time::timeout(Duration::from_millis(500), response.into_body().collect())
+            .await
+            .map_err(|_elapsed| std::io::Error::other("attached stream did not finish"))??
+            .to_bytes();
+        let chunks = std::str::from_utf8(&body)?
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0]["event"]["content"], "llo");
+        assert_eq!(chunks[1]["type"], "final");
+        assert_eq!(chunks[1]["assistant_message"]["content"], "hello");
 
         Ok(())
     }
