@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    convert::Infallible,
     env,
     error::Error,
     fmt::{self, Display, Formatter},
@@ -15,6 +16,7 @@ use axum::{
     http::{Request, Response},
 };
 use chrono::{DateTime, Utc};
+use tokio::sync::mpsc;
 use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
 use tracing::Span;
 use uuid::Uuid;
@@ -31,6 +33,8 @@ pub mod models;
 pub mod store;
 
 pub(crate) const ENV_PREFIX: &str = "CLIENT_SERVICE_";
+pub(crate) type StreamItem = Result<Vec<u8>, Infallible>;
+pub(crate) type StreamSender = mpsc::Sender<StreamItem>;
 const DEFAULT_BIND_HOST: &str = "0.0.0.0";
 const DEFAULT_BIND_PORT: u16 = 8002;
 const DEFAULT_AGENT_HOST_BASE_URL: &str = "http://127.0.0.1:8001";
@@ -138,9 +142,22 @@ pub struct AppState {
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
     pub(crate) sessions: SessionStore,
-    pub(crate) active_turns: Arc<Mutex<BTreeMap<String, String>>>,
+    pub(crate) active_turns: Arc<Mutex<BTreeMap<String, ActiveTurnRecord>>>,
     pub(crate) instance_id: Uuid,
     pub(crate) started_at: DateTime<Utc>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ActiveTurnRecord {
+    pub(crate) turn_id: String,
+    pub(crate) user_message_id: String,
+    pub(crate) assistant_message_id: String,
+    pub(crate) stream: Option<Arc<Mutex<ActiveTurnStreamState>>>,
+}
+
+pub(crate) struct ActiveTurnStreamState {
+    pub(crate) subscribers: Vec<StreamSender>,
+    pub(crate) final_payload: Option<Vec<u8>>,
 }
 
 impl AppState {
