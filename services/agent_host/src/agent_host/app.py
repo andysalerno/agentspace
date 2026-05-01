@@ -57,9 +57,17 @@ app = FastAPI(title="Agent Host", version="0.1.0", lifespan=lifespan)
 class WorkspaceMountRequest(BaseModel):
     workspace_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     mode: str = Field(default="rw", pattern=r"^(rw|ro)$")
+    volume_name: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+    )
 
     def to_record(self) -> WorkspaceMount:
-        return WorkspaceMount(workspace_id=self.workspace_id, mode=self.mode)
+        return WorkspaceMount(
+            workspace_id=self.workspace_id,
+            mode=self.mode,
+            volume_name_override=self.volume_name,
+        )
 
 
 def _empty_workspace_mount_requests() -> list[WorkspaceMountRequest]:

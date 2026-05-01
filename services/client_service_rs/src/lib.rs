@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::{
     agent_host::AgentHostClient,
     git_agent::GitAgentClient,
+    models::DEFAULT_GIT_AGENT_DATA_VOLUME,
     store::{
         AgentStore, ConnectionStore, GatewayStore, GitAgentConfigStore, KernelConfigStore,
         SessionStore, StoreSet, WorkspaceStore,
@@ -54,6 +55,7 @@ pub struct AppConfig {
     bind_port: u16,
     agent_host_base_url: String,
     git_agent_base_url: String,
+    git_agent_data_volume_name: String,
     pub(crate) client_service_env: BTreeMap<String, String>,
 }
 
@@ -66,6 +68,8 @@ impl AppConfig {
             .unwrap_or_else(|_| DEFAULT_AGENT_HOST_BASE_URL.to_owned());
         let git_agent_base_url = env::var("CLIENT_SERVICE_GIT_AGENT_BASE_URL")
             .unwrap_or_else(|_| default_git_agent_base_url());
+        let git_agent_data_volume_name = env::var("CLIENT_SERVICE_GIT_AGENT_DATA_VOLUME")
+            .unwrap_or_else(|_| DEFAULT_GIT_AGENT_DATA_VOLUME.to_owned());
         let client_service_env = env::vars()
             .filter(|(key, _value)| key.starts_with(ENV_PREFIX))
             .collect();
@@ -75,6 +79,7 @@ impl AppConfig {
             bind_port,
             agent_host_base_url,
             git_agent_base_url,
+            git_agent_data_volume_name,
             client_service_env,
         })
     }
@@ -91,6 +96,7 @@ impl AppConfig {
             bind_port,
             agent_host_base_url: agent_host_base_url.into(),
             git_agent_base_url: default_git_agent_base_url(),
+            git_agent_data_volume_name: DEFAULT_GIT_AGENT_DATA_VOLUME.to_owned(),
             client_service_env,
         }
     }
@@ -98,6 +104,15 @@ impl AppConfig {
     #[must_use]
     pub fn with_git_agent_base_url(mut self, git_agent_base_url: impl Into<String>) -> Self {
         self.git_agent_base_url = git_agent_base_url.into();
+        self
+    }
+
+    #[must_use]
+    pub fn with_git_agent_data_volume_name(
+        mut self,
+        git_agent_data_volume_name: impl Into<String>,
+    ) -> Self {
+        self.git_agent_data_volume_name = git_agent_data_volume_name.into();
         self
     }
 
@@ -119,6 +134,11 @@ impl AppConfig {
     #[must_use]
     pub fn git_agent_base_url(&self) -> &str {
         &self.git_agent_base_url
+    }
+
+    #[must_use]
+    pub fn git_agent_data_volume_name(&self) -> &str {
+        &self.git_agent_data_volume_name
     }
 
     #[must_use]

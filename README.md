@@ -126,6 +126,16 @@ patch submission workflow. In compose it is reachable to kernels as
 
 Default endpoint: `http://127.0.0.1:8004`
 
+GitAgent stores its repository and request database in the stable named Docker
+volume `${GITAGENT_DATA_VOLUME:-agentspace-git-agent-data}`. This volume
+persists across `just stack-down` and `just stack-up`; remove it only when you
+intentionally want to erase GitAgent state.
+
+The same volume is exposed through `client_service` as the built-in `git-agent`
+workspace. It always appears on the Workspaces page and can be opened in VS Code
+like a normal workspace, but it cannot be edited, cloned, deleted, or replaced by
+a user-created workspace.
+
 ## Web UI
 
 `webui` is a deliberately simple TypeScript dashboard over `client_service`.

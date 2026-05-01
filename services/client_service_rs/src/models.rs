@@ -15,6 +15,9 @@ pub const DEFAULT_GIT_AGENT_REVIEW_AGENT_ID: &str = "git-agent";
 pub const DEFAULT_GIT_AGENT_REMOTE_URL: &str = "http://gitagent:8004/repo.git";
 pub const DEFAULT_GIT_AGENT_PATCH_URL: &str = "http://gitagent:8004/PatchRequest";
 pub const DEFAULT_GIT_AGENT_VALIDATION_COMMAND: &str = "just validate";
+pub const DEFAULT_GIT_AGENT_DATA_VOLUME: &str = "agentspace-git-agent-data";
+pub const BUILTIN_GIT_AGENT_WORKSPACE_ID: &str = "git-agent";
+pub const BUILTIN_GIT_AGENT_WORKSPACE_NAME: &str = "GitAgent Repository";
 
 #[must_use]
 pub fn utc_now() -> String {
@@ -266,6 +269,8 @@ pub struct WorkspaceMountRecord {
     pub workspace_id: String,
     #[serde(default)]
     pub mode: WorkspaceMountMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub volume_name: Option<String>,
 }
 
 impl WorkspaceMountRecord {
@@ -274,6 +279,7 @@ impl WorkspaceMountRecord {
         Self {
             workspace_id: workspace_id.into(),
             mode,
+            volume_name: None,
         }
     }
 
@@ -288,6 +294,7 @@ impl WorkspaceMountRecord {
             "workspace_id": self.workspace_id,
             "mode": self.mode.as_str(),
             "mount_path": self.mount_path(),
+            "volume_name": self.volume_name.as_deref(),
         })
     }
 }
