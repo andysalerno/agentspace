@@ -2,7 +2,7 @@
 
 Agent workspaces are named, persistent storage volumes that can be mounted into
 agent kernel containers. A workspace is implemented as a Docker/Podman volume and
-is exposed inside kernels at a stable path under `/workspace`.
+is exposed to agents at a stable path under `/workspace`.
 
 This document describes the current implementation, the important design
 decisions, and the code paths a new developer or agent should understand before
@@ -16,12 +16,16 @@ Example flow:
 
 1. A user creates a workspace named `TodoListCode` with ID `todo-list-code`.
 2. A user creates or edits an agent and mounts that workspace as `rw`.
-3. When a new session is started for that agent, `agent_host` creates the volume
-   if needed and mounts it into the kernel container at
-   `/workspace/todo-list-code`.
-4. The agent can read and write files in that mounted path. The data persists
-   across sessions and can be shared with other agents that mount the same
-   workspace.
+3. When a new session is started for that agent, `agent_host` creates a
+   per-session scratch volume at `/workspace`, mounts persistent workspace
+   volumes internally under `/workspaces/<workspace_id>`, and creates links such
+   as `/workspace/todo-list-code -> /workspaces/todo-list-code`.
+4. The agent sees mounted workspaces in its cwd (`/workspace`) while normal
+   scratch files also live in `/workspace`.
+5. When the session is deleted or the kernel is killed from the UI, the user is
+   prompted to save `/workspace` as a new workspace or destroy the scratch
+   volume forever. Existing mounted workspaces are not copied into the saved
+   scratch snapshot.
 
 Workspaces can be mounted in two modes:
 
@@ -38,7 +42,7 @@ mounts only affects new or restarted sessions.
 
 Workspace IDs are user-facing identifiers. They must use lowercase letters,
 digits, and single dashes. The same ID is used to derive the volume name and
-container mount path.
+public in-container path.
 
 For `workspace_id = "todo-list-code"`:
 
@@ -46,10 +50,13 @@ For `workspace_id = "todo-list-code"`:
 |-------|-------|
 | Display name | Any user-facing string, for example `TodoListCode` |
 | Docker/Podman volume | `agentspace-workspace-todo-list-code` |
-| Kernel mount path | `/workspace/todo-list-code` |
+| Public kernel path | `/workspace/todo-list-code` |
+| Internal kernel mount | `/workspaces/todo-list-code` |
 
-Use the workspace ID in prompts and docs when telling agents where to read or
-write files. Display names are only for the UI.
+Use the public `/workspace/<workspace_id>` path in prompts and docs when telling
+agents where to read or write files. Display names are only for the UI. The
+internal `/workspaces/<workspace_id>` mount root exists so saving the parent
+`/workspace` scratch volume can exclude mounted workspace contents cleanly.
 
 ## High-Level Architecture
 
@@ -67,12 +74,14 @@ client_service_rs (:8002)
   v
 agent_host (:8001)
   - creates named Docker/Podman volumes lazily
-  - mounts volumes into kernel containers
-  - passes mount paths to kernels as additional accessible paths
+  - mounts one scratch volume at /workspace per session
+  - mounts persistent workspaces under /workspaces and links them into /workspace
+  - snapshots /workspace into new workspace volumes on save
   |
   v
 kernel container
-  - sees /workspace/<workspace_id>
+  - starts in /workspace
+  - sees linked workspaces at /workspace/<workspace_id>
 ```
 
 The Rust `client_service_rs` implementation is the active client service. The
@@ -93,6 +102,7 @@ Workspace API responses have this shape:
 {
   "workspace_id": "todo-list-code",
   "name": "TodoListCode",
+  "status": "ready",
   "mount_path": "/workspace/todo-list-code",
   "volume_name": "agentspace-workspace-todo-list-code",
   "created_at": "2026-04-30T00:00:00Z",
@@ -109,6 +119,7 @@ Supported routes:
 | `GET /workspaces/{workspace_id}` | Fetch one workspace. |
 | `PATCH /workspaces/{workspace_id}` | Update workspace metadata, currently the display name. |
 | `DELETE /workspaces/{workspace_id}` | Unregister a workspace. Does not delete the underlying volume. |
+| `POST /sessions/{session_id}/workspace/save` | Snapshot a session scratch workspace into a new registered workspace. |
 
 Create payload:
 
@@ -131,6 +142,33 @@ Deleting a workspace is rejected with `409 Conflict` if any agent still has that
 workspace mounted. This prevents stale agent configs that reference missing
 workspaces. Deletion only unregisters the workspace from AgentSpace; it does not
 delete the Docker/Podman volume or its data.
+
+Workspace `status` values are:
+
+| Status | Meaning |
+|--------|---------|
+| `creating` | A save operation has registered the workspace and is snapshotting data into the volume. |
+| `ready` | The workspace can be mounted by agents. Manually created workspaces start in this state. |
+| `failed` | A save operation failed after registration; the workspace is visible for diagnosis but cannot be mounted. |
+
+Agent mount validation rejects workspaces that are not `ready`.
+
+Save-session-workspace payload:
+
+```json
+{
+  "workspace_id": "saved-session-workspace",
+  "name": "Saved Session Workspace"
+}
+```
+
+The Rust service implements the robust save flow:
+
+1. Insert the workspace record as `creating`.
+2. Ask `agent_host` to snapshot the session scratch volume into
+   `agentspace-workspace-<workspace_id>`.
+3. Mark the workspace `ready` if the snapshot succeeds.
+4. Mark it `failed` and return the upstream error if snapshotting fails.
 
 ### Agent Workspace Mounts
 
@@ -170,6 +208,7 @@ Create/update agent payloads accept the same mount list without `mount_path`:
 `client_service_rs` validates that:
 
 - every referenced workspace exists;
+- every referenced workspace is `ready`;
 - every referenced workspace ID has a valid format;
 - a single agent cannot mount the same workspace more than once.
 
@@ -186,6 +225,7 @@ Important Rust model types:
 | Type | File | Purpose |
 |------|------|---------|
 | `WorkspaceRecord` | `services/client_service_rs/src/models.rs` | Registered workspace metadata. |
+| `WorkspaceStatus` | `services/client_service_rs/src/models.rs` | `creating`, `ready`, or `failed`. |
 | `WorkspaceMountRecord` | `services/client_service_rs/src/models.rs` | Per-agent mount config. |
 | `WorkspaceMountMode` | `services/client_service_rs/src/models.rs` | `rw` or `ro`. |
 
@@ -202,13 +242,14 @@ SQLite schema additions:
 - `workspaces` table:
   - `workspace_id TEXT PRIMARY KEY`
   - `name TEXT NOT NULL`
+  - `status TEXT NOT NULL DEFAULT 'ready'`
   - `created_at TEXT NOT NULL`
   - `updated_at TEXT NOT NULL`
 - `agents.workspace_mounts_json TEXT NOT NULL DEFAULT '[]'`
 
-The SQLite initializer includes a migration-style `ensure_column` call for
-`agents.workspace_mounts_json`, so existing databases can be opened after the
-feature is added.
+The SQLite initializer includes migration-style `ensure_column` calls for
+`agents.workspace_mounts_json` and `workspaces.status`, so existing databases can
+be opened after the feature is added.
 
 ## Runtime Mounting
 
@@ -229,19 +270,50 @@ The client-service-to-agent-host boundary sends `workspace_mounts` in
 }
 ```
 
-`agent_host` maps each mount to:
+`agent_host` maps each persistent mount to:
 
 - volume name: `agentspace-workspace-<workspace_id>`;
-- container path: `/workspace/<workspace_id>`;
+- internal container path: `/workspaces/<workspace_id>`;
+- public symlink: `/workspace/<workspace_id>`;
 - read/write flag based on `mode`.
 
-Volumes are created lazily if they do not already exist. This makes workspace
-creation cheap: registering a workspace in `client_service_rs` does not need to
-talk to Docker/Podman immediately.
+`agent_host` also creates a per-session scratch volume named
+`agentspace-session-workspace-<session_id_prefix>` and mounts it at `/workspace`
+for every kernel, even when the agent has no persistent workspaces enabled. This
+volume is deleted when the runtime session is destroyed unless the user saves it
+first.
 
-The mount path is also added to the kernel's additional accessible paths. This
-is important for CLI harnesses that need explicit directory allowlists, such as
-Copilot, Codex, or Claude-style agents.
+Persistent workspace volumes are created lazily if they do not already exist.
+This makes workspace creation cheap: registering a workspace in
+`client_service_rs` does not need to talk to Docker/Podman immediately.
+
+The internal mount path is also added to the kernel's additional accessible
+paths. This is important for CLI harnesses that need explicit directory
+allowlists, such as Copilot, Codex, or Claude-style agents. The user-facing path
+remains `/workspace/<workspace_id>`.
+
+### Saving Session Scratch Workspaces
+
+`client_service_rs` calls `agent_host` through:
+
+```http
+POST /sessions/{agent_host_session_id}/workspace/snapshot
+```
+
+Payload:
+
+```json
+{
+  "workspace_id": "saved-session-workspace",
+  "volume_name": "agentspace-workspace-saved-session-workspace",
+  "exclude_names": ["todo-list-code", ".agents"]
+}
+```
+
+The snapshot helper copies top-level entries from `/workspace` into the target
+workspace volume without following symlinks. `exclude_names` prevents copying
+linked persistent workspaces such as `/workspace/todo-list-code` and the ACP
+skills mount under `/workspace/.agents/skills`.
 
 ## Web UI
 
@@ -253,6 +325,8 @@ Important files:
 |------|---------|
 | `WorkspacesView.tsx` | Workspace management page. |
 | `AgentsView.tsx` | Agent create/edit workspace mount controls and workspace mount summaries. |
+| `ChatView.tsx` / `SessionsView.tsx` / `KernelsView.tsx` | Save-or-destroy prompts before session/kernel deletion. |
+| `saveWorkspacePrompt.ts` | Shared browser prompt flow for naming saved scratch workspaces. |
 | `api.ts` | HTTP client methods for workspaces and agent mount payloads. |
 | `queries.ts` | React Query hooks for workspace data. |
 | `types.ts` | TypeScript workspace and mount types. |
@@ -267,6 +341,9 @@ UI behavior:
   `todo-list-code:rw`.
 - The edit form warns when changing an agent that already has active sessions,
   because those running kernels will not pick up new mounts until restarted.
+- Deleting a session or killing a linked kernel prompts the user to save the
+  session scratch `/workspace` as a new workspace or destroy it forever. Orphan
+  kernels without a linked client session can only be killed/destroyed.
 
 ## Validation and Testing
 
@@ -317,7 +394,7 @@ Exercise this flow:
 ```sh
 podman ps --format '{{.ID}} {{.Names}} {{.Image}}'
 podman inspect <kernel-container-id> --format '{{json .Mounts}}' \
-  | jq '[.[] | select(.Destination|startswith("/workspace/")) | {Type,Name,Destination,RW}]'
+  | jq '[.[] | select(.Destination|startswith("/workspace") or .Destination|startswith("/workspaces/")) | {Type,Name,Destination,RW}]'
 ```
 
 Expected mount output includes:
@@ -326,18 +403,27 @@ Expected mount output includes:
 [
   {
     "Type": "volume",
+    "Name": "agentspace-session-workspace-<session-prefix>",
+    "Destination": "/workspace",
+    "RW": true
+  },
+  {
+    "Type": "volume",
     "Name": "agentspace-workspace-todo-list-code",
-    "Destination": "/workspace/todo-list-code",
+    "Destination": "/workspaces/todo-list-code",
     "RW": true
   },
   {
     "Type": "volume",
     "Name": "agentspace-workspace-todo-list-items",
-    "Destination": "/workspace/todo-list-items",
+    "Destination": "/workspaces/todo-list-items",
     "RW": false
   }
 ]
 ```
+
+Inside the container, `ls -l /workspace` should show symlinks for enabled
+workspaces, for example `todo-list-code -> /workspaces/todo-list-code`.
 
 Shut the stack down after manual testing:
 
@@ -378,5 +464,8 @@ handling, Docker mount options, Web UI selectors, and tests.
 - Workspace volume data persists outside AgentSpace records. Deleting a
   workspace through the API unregisters it only; it intentionally does not delete
   Docker/Podman volume contents.
+- Session scratch volumes are temporary. They are mounted at `/workspace` for
+  every kernel and are removed when the runtime session is destroyed unless the
+  user saved them first.
 - Running sessions do not update their mounts after agent config changes.
   Restart the session to pick up new workspace configuration.

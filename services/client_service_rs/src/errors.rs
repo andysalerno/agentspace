@@ -10,6 +10,7 @@ pub enum ValidationError {
     InvalidGatewayId { value: String },
     InvalidSkillId { value: String },
     InvalidWorkspaceId { value: String },
+    InvalidWorkspaceStatus { value: String },
     InvalidConnectionApiFlavor { value: String },
     InvalidHarnessName { value: String },
     InvalidGatewayType { value: String },
@@ -38,6 +39,12 @@ impl Display for ValidationError {
                 formatter,
                 "workspace_id must use lowercase letters, digits, and single dashes only, got {value:?}"
             ),
+            Self::InvalidWorkspaceStatus { value } => {
+                write!(
+                    formatter,
+                    "workspace status must be creating, ready, or failed, got {value:?}"
+                )
+            }
             Self::InvalidConnectionApiFlavor { value } => write!(
                 formatter,
                 "connection api_flavor must be chat_completions or responses, got {value:?}"

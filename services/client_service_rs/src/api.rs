@@ -25,8 +25,9 @@ use crate::{
     models::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
         HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, parse_env_vars, utc_now, validate_agent_id,
-        validate_connection_id, validate_gateway_id, validate_skill_id, validate_workspace_id,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
+        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        validate_workspace_id,
     },
 };
 
@@ -78,6 +79,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/sessions/{session_id}/messages/stream",
             post(stream_message),
+        )
+        .route(
+            "/sessions/{session_id}/workspace/save",
+            post(save_session_workspace),
         )
         .route(
             "/sessions/{session_id}/turns/{turn_id}/stream",
@@ -831,6 +836,64 @@ async fn reset_session(
         "api handler completed"
     );
     Ok(Json(session_summary(&state, &session)?))
+}
+
+async fn save_session_workspace(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<SaveSessionWorkspaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_workspace_id(&payload.workspace_id)?;
+    let session = require_session(&state, &session_id)?;
+    let mut workspace = WorkspaceRecord::new_with_status(
+        payload.workspace_id,
+        payload.name,
+        WorkspaceStatus::Creating,
+    );
+    let volume_name = workspace.volume_name();
+    let workspace_id = workspace.workspace_id.clone();
+    let mut exclude_names = state
+        .agents
+        .get(&session.agent_id)?
+        .map(|agent| {
+            agent
+                .workspace_mounts
+                .into_iter()
+                .map(|mount| mount.workspace_id)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    exclude_names.push(".agents".to_owned());
+    state.workspaces.insert(workspace.clone())?;
+    let snapshot_result = state
+        .agent_host
+        .snapshot_session_workspace(
+            &session.agent_host_session_id,
+            &workspace_id,
+            &volume_name,
+            &exclude_names,
+        )
+        .await;
+    if let Err(error) = snapshot_result {
+        workspace.status = WorkspaceStatus::Failed;
+        workspace.updated_at = utc_now();
+        state.workspaces.update(workspace)?;
+        return Err(error.into());
+    }
+    workspace.status = WorkspaceStatus::Ready;
+    workspace.updated_at = utc_now();
+    let value = workspace.summary();
+    state.workspaces.update(workspace)?;
+    tracing::info!(
+        route = "/sessions/:session_id/workspace/save",
+        action = "save_session_workspace",
+        session_id = %session_id,
+        workspace_id = %workspace_id,
+        kernel_session_id = %session.agent_host_session_id,
+        excluded_workspace_count = exclude_names.len(),
+        "api handler completed"
+    );
+    Ok(Json(value))
 }
 
 async fn delete_session(
@@ -2381,7 +2444,13 @@ fn validate_workspace_mounts(
                 mount.workspace_id
             )));
         }
-        require_workspace(state, &mount.workspace_id)?;
+        let workspace = require_workspace(state, &mount.workspace_id)?;
+        if workspace.status != WorkspaceStatus::Ready {
+            return Err(ApiError::conflict(format!(
+                "workspace {:?} is not ready",
+                mount.workspace_id
+            )));
+        }
     }
     Ok(())
 }
@@ -2483,6 +2552,12 @@ struct CreateWorkspaceRequest {
 #[derive(Debug, Deserialize)]
 struct UpdateWorkspaceRequest {
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SaveSessionWorkspaceRequest {
+    workspace_id: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]

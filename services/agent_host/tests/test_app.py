@@ -100,6 +100,21 @@ class StubRuntime:
     async def destroy_session(self, *, session: KernelRuntimeSession) -> None:
         del session
 
+    async def snapshot_session_workspace(
+        self,
+        *,
+        session: KernelRuntimeSession,
+        workspace_id: str,
+        volume_name: str,
+        exclude_names: tuple[str, ...],
+    ) -> dict[str, object]:
+        return {
+            "session": self._session_key(session),
+            "workspace_id": workspace_id,
+            "volume_name": volume_name,
+            "exclude_names": list(exclude_names),
+        }
+
     async def logs(
         self,
         *,
@@ -208,6 +223,26 @@ def test_session_lifecycle(client: TestClient) -> None:
     assert message.json()["events"][2]["content"] == "hello"
     assert history.json()["history"][0][2]["content"] == "hello"
     assert session.json()["resume_token"].startswith("resume-runtime-")
+
+
+def test_snapshot_session_workspace(client: TestClient) -> None:
+    created = client.post("/sessions", json={"harness": "copilot-cli"})
+    session_id = created.json()["session_id"]
+
+    response = client.post(
+        f"/sessions/{session_id}/workspace/snapshot",
+        json={
+            "workspace_id": "saved-workspace",
+            "volume_name": "agentspace-workspace-saved-workspace",
+            "exclude_names": ["mounted-workspace"],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workspace_id"] == "saved-workspace"
+    assert payload["volume_name"] == "agentspace-workspace-saved-workspace"
+    assert payload["exclude_names"] == ["mounted-workspace"]
 
 
 def test_message_stream_route(client: TestClient) -> None:

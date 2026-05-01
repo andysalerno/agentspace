@@ -8,6 +8,7 @@ import { browserReachableLocalUrl } from "./browserUrls";
 import { queryKeys, useKernels } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 import type { KernelStats, KernelSummary } from "./types";
+import { promptSaveWorkspace } from "./saveWorkspacePrompt";
 
 const LOG_POLL_INTERVAL_MS = 1000;
 const DEFAULT_LOG_TAIL = 2000;
@@ -33,6 +34,26 @@ export default function KernelsView() {
     const killMutation = useMutation({
         mutationFn: (sessionId: string) => api.killKernel(sessionId),
         onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.kernels }),
+        onError: reportError,
+    });
+    const deleteSessionMutation = useMutation({
+        mutationFn: async (sessionIds: string[]) => {
+            for (const sessionId of sessionIds) {
+                await api.deleteSession(sessionId);
+            }
+        },
+        onSuccess: () => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
+        },
+        onError: reportError,
+    });
+    const saveWorkspaceMutation = useMutation({
+        mutationFn: ({ sessionId, workspace_id, name }: { sessionId: string; workspace_id: string; name: string }) =>
+            api.saveSessionWorkspace(sessionId, { workspace_id, name }),
+        onSuccess: () => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces });
+        },
         onError: reportError,
     });
 
@@ -136,6 +157,30 @@ export default function KernelsView() {
         setFollow(true);
     }
 
+    async function handleKillKernel(kernel: KernelSummary) {
+        if (kernel.client_session_ids.length === 0) {
+            if (window.confirm("Kill this orphan kernel? Its /workspace volume will be destroyed.")) {
+                killMutation.mutate(kernel.session_id);
+            }
+            return;
+        }
+        const decision = promptSaveWorkspace();
+        if (decision.action === "cancel") {
+            return;
+        }
+        if (decision.action === "save") {
+            try {
+                await saveWorkspaceMutation.mutateAsync({
+                    sessionId: kernel.client_session_ids[0],
+                    ...decision,
+                });
+            } catch {
+                return;
+            }
+        }
+        deleteSessionMutation.mutate(kernel.client_session_ids);
+    }
+
     async function downloadAllLogs() {
         if (!logsState) return;
         try {
@@ -214,9 +259,13 @@ export default function KernelsView() {
                                     }}
                                     onKill={() => {
                                         setOpenMenuFor(null);
-                                        killMutation.mutate(kernel.session_id);
+                                        void handleKillKernel(kernel);
                                     }}
-                                    killDisabled={killMutation.isPending}
+                                    killDisabled={
+                                        killMutation.isPending
+                                        || deleteSessionMutation.isPending
+                                        || saveWorkspaceMutation.isPending
+                                    }
                                 />
                             ))}
                         </tbody>

@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { useErrorContext } from "./ErrorContext";
 import { queryKeys, useAgents, useSessions } from "./queries";
+import { promptSaveWorkspace } from "./saveWorkspacePrompt";
 
 type SessionsViewProps = {
     onNavigateToChat: (sessionId: string) => void;
@@ -22,14 +23,26 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
         },
         onError: reportError,
     });
+    const saveWorkspaceMutation = useMutation({
+        mutationFn: ({ sessionId, workspace_id, name }: { sessionId: string; workspace_id: string; name: string }) =>
+            api.saveSessionWorkspace(sessionId, { workspace_id, name }),
+        onSuccess: () => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces });
+        },
+        onError: reportError,
+    });
 
-    function handleDeleteSession(sessionId: string) {
-        if (
-            !window.confirm(
-                "Delete this session from history? This cannot be undone.",
-            )
-        ) {
+    async function handleDeleteSession(sessionId: string) {
+        const decision = promptSaveWorkspace();
+        if (decision.action === "cancel") {
             return;
+        }
+        if (decision.action === "save") {
+            try {
+                await saveWorkspaceMutation.mutateAsync({ sessionId, ...decision });
+            } catch {
+                return;
+            }
         }
         deleteMutation.mutate(sessionId);
     }
@@ -88,8 +101,8 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                                             </button>
                                             <button
                                                 className="danger-button small"
-                                                disabled={deleteMutation.isPending}
-                                                onClick={() => handleDeleteSession(s.session_id)}
+                                                disabled={deleteMutation.isPending || saveWorkspaceMutation.isPending}
+                                                onClick={() => void handleDeleteSession(s.session_id)}
                                                 type="button"
                                             >
                                                 Delete

@@ -23,6 +23,7 @@ import {
     useSessions,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { promptSaveWorkspace } from "./saveWorkspacePrompt";
 import "./chat-workspace.css";
 
 type ChatViewProps = {
@@ -441,6 +442,14 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         },
         onError: reportError,
     });
+    const saveWorkspaceMutation = useMutation({
+        mutationFn: ({ sessionId, workspace_id, name }: { sessionId: string; workspace_id: string; name: string }) =>
+            api.saveSessionWorkspace(sessionId, { workspace_id, name }),
+        onSuccess: () => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces });
+        },
+        onError: reportError,
+    });
 
     useEffect(() => {
         if (!newSessionAgentId && agents.length > 0) {
@@ -676,13 +685,17 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         resetMutation.mutate(selectedSessionId);
     }
 
-    function handleDeleteSession(sessionId: string) {
-        if (
-            !window.confirm(
-                "Delete this session from history? This cannot be undone.",
-            )
-        ) {
+    async function handleDeleteSession(sessionId: string) {
+        const decision = promptSaveWorkspace();
+        if (decision.action === "cancel") {
             return;
+        }
+        if (decision.action === "save") {
+            try {
+                await saveWorkspaceMutation.mutateAsync({ sessionId, ...decision });
+            } catch {
+                return;
+            }
         }
         if (selectedSessionId === sessionId || streamingSessionIdRef.current === sessionId) {
             streamControllerRef.current?.abort();
@@ -699,7 +712,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     const activeAssistantMessageId = selectedSession?.active_turn?.assistant_message_id ?? null;
     const busy = streaming || Boolean(selectedSession?.active_turn)
         || createSessionMutation.isPending || resetMutation.isPending
-        || deleteSessionMutation.isPending;
+        || deleteSessionMutation.isPending || saveWorkspaceMutation.isPending;
     const transcriptMessages = selectedSession && pendingUserMessage
         && selectedSession.session_id === pendingUserMessage.session_id
         && !hasMessageWithId(selectedSession.messages, pendingUserMessage)
@@ -804,8 +817,8 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 <button
                                     aria-label={`Delete session ${session.session_id}`}
                                     className="session-delete-button"
-                                    disabled={deleteSessionMutation.isPending}
-                                    onClick={() => handleDeleteSession(session.session_id)}
+                                    disabled={deleteSessionMutation.isPending || saveWorkspaceMutation.isPending}
+                                    onClick={() => void handleDeleteSession(session.session_id)}
                                     title="Delete session"
                                     type="button"
                                 >
@@ -899,10 +912,10 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 </button>
                                 <button
                                     className="danger-button"
-                                    disabled={deleteSessionMutation.isPending}
+                                    disabled={deleteSessionMutation.isPending || saveWorkspaceMutation.isPending}
                                     onClick={() => {
                                         if (selectedSessionId) {
-                                            handleDeleteSession(selectedSessionId);
+                                            void handleDeleteSession(selectedSessionId);
                                         }
                                     }}
                                     type="button"
