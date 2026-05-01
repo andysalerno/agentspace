@@ -14,7 +14,7 @@ use crate::{
     models::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
         HarnessName, KernelConfigRecord, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        utc_now,
+        WorkspaceMountRecord, WorkspaceRecord, utc_now,
     },
 };
 use tracing::{debug, info, warn};
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS agents (
     skills_json TEXT NOT NULL DEFAULT '[]',
     env_vars TEXT NOT NULL DEFAULT '',
     connection_id TEXT,
+    workspace_mounts_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -65,6 +66,15 @@ CREATE TABLE IF NOT EXISTS gateways (
     status TEXT NOT NULL DEFAULT 'stopped',
     last_error TEXT,
     container_name TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+";
+
+const WORKSPACES_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -211,6 +221,7 @@ pub struct SqliteStoreSet {
     pub(super) kernel_configs: SqliteKernelConfigStore,
     pub(super) connections: SqliteConnectionStore,
     pub(super) gateways: SqliteGatewayStore,
+    pub(super) workspaces: SqliteWorkspaceStore,
     pub(super) sessions: SqliteSessionStore,
 }
 
@@ -225,6 +236,7 @@ impl SqliteStoreSet {
             kernel_configs: SqliteKernelConfigStore::new(database.clone()),
             connections: SqliteConnectionStore::new(database.clone()),
             gateways: SqliteGatewayStore::new(database.clone()),
+            workspaces: SqliteWorkspaceStore::new(database.clone()),
             sessions: SqliteSessionStore::new(database),
         })
     }
@@ -321,6 +333,7 @@ impl SqliteAgentStore {
                        skills_json = ?,
                        env_vars = ?,
                        connection_id = ?,
+                       workspace_mounts_json = ?,
                        updated_at = ?
                  WHERE agent_id = ?
                 ",
@@ -331,6 +344,7 @@ impl SqliteAgentStore {
                     skills_json(&agent.skills)?,
                     agent.env_vars,
                     agent.connection_id,
+                    workspace_mounts_json(&agent.workspace_mounts)?,
                     agent.updated_at,
                     agent.agent_id,
                 ],
@@ -358,8 +372,9 @@ impl SqliteAgentStore {
                 "
                 INSERT INTO agents (
                     agent_id, name, harness, system_prompt,
-                    skills_json, env_vars, connection_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    skills_json, env_vars, connection_id, workspace_mounts_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     name = excluded.name,
                     harness = excluded.harness,
@@ -367,6 +382,7 @@ impl SqliteAgentStore {
                     skills_json = excluded.skills_json,
                     env_vars = excluded.env_vars,
                     connection_id = excluded.connection_id,
+                    workspace_mounts_json = excluded.workspace_mounts_json,
                     updated_at = excluded.updated_at
                 ",
                 params![
@@ -377,6 +393,7 @@ impl SqliteAgentStore {
                     skills_json(&agent.skills)?,
                     agent.env_vars,
                     agent.connection_id,
+                    workspace_mounts_json(&agent.workspace_mounts)?,
                     agent.created_at,
                     agent.updated_at,
                 ],
@@ -858,6 +875,120 @@ impl SqliteGatewayStore {
 }
 
 #[derive(Clone, Debug)]
+pub struct SqliteWorkspaceStore {
+    database: SqliteDatabase,
+}
+
+impl SqliteWorkspaceStore {
+    #[must_use]
+    pub const fn new(database: SqliteDatabase) -> Self {
+        Self { database }
+    }
+
+    pub fn list(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+        self.database.with_connection("workspaces", |connection| {
+            let mut statement = connection
+                .prepare("SELECT * FROM workspaces ORDER BY created_at ASC, workspace_id ASC")?;
+            let rows = statement.query_and_then([], row_to_workspace)?;
+            let records = rows.collect::<Result<Vec<_>, StoreError>>()?;
+            debug!(
+                store = "workspaces",
+                count = records.len(),
+                "listed workspaces"
+            );
+            Ok(records)
+        })
+    }
+
+    pub fn get(&self, workspace_id: &str) -> Result<Option<WorkspaceRecord>, StoreError> {
+        self.database.with_connection("workspaces", |connection| {
+            let mut statement =
+                connection.prepare("SELECT * FROM workspaces WHERE workspace_id = ?")?;
+            let mut rows = statement.query_and_then(params![workspace_id], row_to_workspace)?;
+            let record = rows.next().transpose()?;
+            debug!(
+                store = "workspaces",
+                workspace_id,
+                found = record.is_some(),
+                "looked up workspace"
+            );
+            Ok(record)
+        })
+    }
+
+    pub fn insert(&self, workspace: WorkspaceRecord) -> Result<(), StoreError> {
+        self.database.with_connection("workspaces", |connection| {
+            match insert_workspace(connection, &workspace) {
+                Ok(()) => {
+                    debug!(
+                        store = "workspaces",
+                        workspace_id = %workspace.workspace_id,
+                        "inserted workspace"
+                    );
+                    Ok(())
+                }
+                Err(error) if is_constraint(&error) => {
+                    debug!(
+                        store = "workspaces",
+                        workspace_id = %workspace.workspace_id,
+                        "workspace insert hit existing record"
+                    );
+                    Err(StoreError::WorkspaceAlreadyExists {
+                        workspace_id: workspace.workspace_id,
+                    })
+                }
+                Err(error) => Err(error.into()),
+            }
+        })
+    }
+
+    pub fn update(&self, workspace: WorkspaceRecord) -> Result<(), StoreError> {
+        let workspace_id = workspace.workspace_id.clone();
+        self.database.with_connection("workspaces", |connection| {
+            if !workspace_exists(connection, &workspace.workspace_id)? {
+                debug!(
+                    store = "workspaces",
+                    workspace_id = %workspace.workspace_id,
+                    "workspace update missed existing record"
+                );
+                return Err(StoreError::WorkspaceNotFound {
+                    workspace_id: workspace.workspace_id,
+                });
+            }
+            connection.execute(
+                "
+                    UPDATE workspaces
+                       SET name = ?,
+                           updated_at = ?
+                     WHERE workspace_id = ?
+                    ",
+                params![workspace.name, workspace.updated_at, workspace.workspace_id],
+            )?;
+            debug!(
+                store = "workspaces",
+                workspace_id = %workspace_id,
+                "updated workspace"
+            );
+            Ok(())
+        })
+    }
+
+    pub fn delete(&self, workspace_id: &str) -> Result<bool, StoreError> {
+        self.database.with_connection("workspaces", |connection| {
+            let deleted = connection.execute(
+                "DELETE FROM workspaces WHERE workspace_id = ?",
+                params![workspace_id],
+            )? > 0;
+            debug!(
+                store = "workspaces",
+                workspace_id, deleted, "deleted workspace"
+            );
+            Ok(deleted)
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct SqliteSessionStore {
     database: SqliteDatabase,
 }
@@ -1189,12 +1320,19 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
             ("kernel_configs", KERNEL_CONFIGS_SCHEMA),
             ("connections", CONNECTIONS_SCHEMA),
             ("gateways", GATEWAYS_SCHEMA),
+            ("workspaces", WORKSPACES_SCHEMA),
             ("sessions", SESSIONS_SCHEMA),
         ] {
             connection.execute_batch(sql)?;
             debug!(schema, "ensured sqlite store schema");
         }
         ensure_column(connection, "agents", "connection_id", "connection_id TEXT")?;
+        ensure_column(
+            connection,
+            "agents",
+            "workspace_mounts_json",
+            "workspace_mounts_json TEXT NOT NULL DEFAULT '[]'",
+        )?;
         ensure_column(
             connection,
             "connections",
@@ -1267,6 +1405,9 @@ fn row_to_agent(row: &Row<'_>) -> Result<AgentRecord, StoreError> {
                 .collect()
         })
         .unwrap_or_default();
+    let workspace_mounts_json: String = row.get("workspace_mounts_json")?;
+    let workspace_mounts: Vec<WorkspaceMountRecord> =
+        serde_json::from_str(&workspace_mounts_json).map_err(json_error("agents"))?;
     let harness_raw: String = row.get("harness")?;
     Ok(AgentRecord {
         agent_id: row.get("agent_id")?,
@@ -1276,6 +1417,16 @@ fn row_to_agent(row: &Row<'_>) -> Result<AgentRecord, StoreError> {
         skills,
         env_vars: row.get("env_vars")?,
         connection_id: row.get("connection_id")?,
+        workspace_mounts,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+fn row_to_workspace(row: &Row<'_>) -> Result<WorkspaceRecord, StoreError> {
+    Ok(WorkspaceRecord {
+        workspace_id: row.get("workspace_id")?,
+        name: row.get("name")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -1425,8 +1576,9 @@ fn insert_agent(connection: &Connection, agent: &AgentRecord) -> Result<(), Rusq
         "
         INSERT INTO agents (
             agent_id, name, harness, system_prompt,
-            skills_json, env_vars, connection_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            skills_json, env_vars, connection_id, workspace_mounts_json,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             agent.agent_id,
@@ -1436,8 +1588,29 @@ fn insert_agent(connection: &Connection, agent: &AgentRecord) -> Result<(), Rusq
             skills_json(&agent.skills)?,
             agent.env_vars,
             agent.connection_id,
+            workspace_mounts_json(&agent.workspace_mounts)?,
             agent.created_at,
             agent.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_workspace(
+    connection: &Connection,
+    workspace: &WorkspaceRecord,
+) -> Result<(), RusqliteError> {
+    connection.execute(
+        "
+        INSERT INTO workspaces (
+            workspace_id, name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?)
+        ",
+        params![
+            workspace.workspace_id,
+            workspace.name,
+            workspace.created_at,
+            workspace.updated_at,
         ],
     )?;
     Ok(())
@@ -1539,6 +1712,14 @@ fn gateway_exists(connection: &Connection, gateway_id: &str) -> Result<bool, Sto
     )
 }
 
+fn workspace_exists(connection: &Connection, workspace_id: &str) -> Result<bool, StoreError> {
+    exists(
+        connection,
+        "SELECT 1 FROM workspaces WHERE workspace_id = ?",
+        workspace_id,
+    )
+}
+
 fn session_exists(connection: &Connection, session_id: &str) -> Result<bool, StoreError> {
     exists(
         connection,
@@ -1556,6 +1737,10 @@ fn exists(connection: &Connection, sql: &str, id: &str) -> Result<bool, StoreErr
 
 fn skills_json(skills: &[String]) -> Result<String, RusqliteError> {
     serde_json::to_string(skills).map_err(to_sql_conversion_failure)
+}
+
+fn workspace_mounts_json(mounts: &[WorkspaceMountRecord]) -> Result<String, RusqliteError> {
+    serde_json::to_string(mounts).map_err(to_sql_conversion_failure)
 }
 
 fn secrets_json(secrets: &BTreeMap<String, String>) -> Result<String, RusqliteError> {

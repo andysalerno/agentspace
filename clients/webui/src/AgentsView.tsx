@@ -323,6 +323,8 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     }
 
     function startEditingAgent(agent: Agent) {
+        setShowForm(false);
+        setEnvDirty(false);
         setEditingAgentId(agent.agent_id);
         setEditForm(agentToForm(agent));
     }
@@ -372,7 +374,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button onClick={() => { setShowForm(!showForm); if (showForm) setEnvDirty(false); }} type="button">
+                    <button onClick={() => { setShowForm(!showForm); stopEditingAgent(); if (showForm) setEnvDirty(false); }} type="button">
                         {showForm ? "Cancel" : "New Agent"}
                     </button>
                 </div>
@@ -444,9 +446,9 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             height="120px"
                         />
                     </div>
-                                     {skills.length > 0 && (
-                                         <fieldset className="skills-fieldset">
-                                             <legend>Skills</legend>
+                    {skills.length > 0 && (
+                        <fieldset className="skills-fieldset">
+                            <legend>Skills</legend>
                             <div className="checkbox-grid">
                                 {skills.map((skill) => (
                                     <label className="checkbox-label" key={skill.skill_id}>
@@ -488,41 +490,11 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                         </label>
                                     );
                                 })}
-                                             </div>
-                                         </fieldset>
-                                     )}
-                                     {workspaces.length > 0 && (
-                                         <fieldset className="skills-fieldset">
-                                             <legend>Workspaces</legend>
-                                             <span className="field-help">Changes apply to new or restarted sessions.</span>
-                                             <div className="checkbox-grid">
-                                                 {workspaces.map((workspace) => {
-                                                     const mount = editForm?.workspace_mounts.find(
-                                                         (item) => item.workspace_id === workspace.workspace_id,
-                                                     );
-                                                     return (
-                                                         <label className="checkbox-label" key={workspace.workspace_id}>
-                                                             <span>{workspace.name} ({workspace.workspace_id})</span>
-                                                             <select
-                                                                 value={mount?.mode ?? ""}
-                                                                 onChange={(e) =>
-                                                                     setEditWorkspaceMode(
-                                                                         workspace.workspace_id,
-                                                                         e.target.value as WorkspaceMountMode | "",
-                                                                     )}
-                                                             >
-                                                                 <option value="">Not mounted</option>
-                                                                 <option value="rw">Read/write</option>
-                                                                 <option value="ro">Read-only</option>
-                                                             </select>
-                                                         </label>
-                                                     );
-                                                 })}
-                                             </div>
-                                         </fieldset>
-                                     )}
-                                     <div>
-                                         <label>Environment Variables</label>
+                            </div>
+                        </fieldset>
+                    )}
+                    <div>
+                        <label>Environment Variables</label>
                         <CodeEditor
                             value={form.env_vars}
                             onChange={(v) => { setForm({ ...form, env_vars: v }); setEnvDirty(true); }}
@@ -678,6 +650,36 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                         {skill.skill_id}
                                                     </label>
                                                 ))}
+                                            </div>
+                                        </fieldset>
+                                    )}
+                                    {workspaces.length > 0 && (
+                                        <fieldset className="skills-fieldset">
+                                            <legend>Workspaces</legend>
+                                            <span className="field-help">Changes apply to new or restarted sessions.</span>
+                                            <div className="checkbox-grid">
+                                                {workspaces.map((workspace) => {
+                                                    const mount = editForm.workspace_mounts.find(
+                                                        (item) => item.workspace_id === workspace.workspace_id,
+                                                    );
+                                                    return (
+                                                        <label className="checkbox-label" key={workspace.workspace_id}>
+                                                            <span>{workspace.name} ({workspace.workspace_id})</span>
+                                                            <select
+                                                                value={mount?.mode ?? ""}
+                                                                onChange={(e) =>
+                                                                    setEditWorkspaceMode(
+                                                                        workspace.workspace_id,
+                                                                        e.target.value as WorkspaceMountMode | "",
+                                                                    )}
+                                                            >
+                                                                <option value="">Not mounted</option>
+                                                                <option value="rw">Read/write</option>
+                                                                <option value="ro">Read-only</option>
+                                                            </select>
+                                                        </label>
+                                                    );
+                                                })}
                                             </div>
                                         </fieldset>
                                     )}

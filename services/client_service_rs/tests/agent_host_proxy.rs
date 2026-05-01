@@ -491,6 +491,14 @@ async fn create_session_merges_environment_for_agent_host()
     .await?;
     assert_eq!(status, StatusCode::OK);
 
+    let (status, _workspace) = post_json(
+        &app,
+        "/workspaces",
+        json!({ "workspace_id": "todo-list-code", "name": "TodoListCode" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
     let (status, _agent) = post_json(
         &app,
         "/agents",
@@ -500,6 +508,7 @@ async fn create_session_merges_environment_for_agent_host()
             "harness": "acp",
             "system_prompt": "final system prompt",
             "skills": ["skill-a"],
+            "workspace_mounts": [{ "workspace_id": "todo-list-code", "mode": "rw" }],
             "connection_id": "main-connection",
             "env_vars": concat!(
                 "SHARED=agent\n",
@@ -542,7 +551,8 @@ async fn create_session_merges_environment_for_agent_host()
                     "KERNEL_ONLY": "kernel",
                     "KERNEL_SYSTEM_PROMPT": "final system prompt",
                     "SHARED": "agent"
-                }
+                },
+                "workspace_mounts": [{ "workspace_id": "todo-list-code", "mode": "rw" }]
             })),
         }]
     );

@@ -10,7 +10,7 @@ use crate::{
     errors::StoreError,
     models::{
         AgentRecord, ConnectionRecord, GatewayRecord, HarnessName, KernelConfigRecord,
-        MessageRecord, SessionRecord, utc_now,
+        MessageRecord, SessionRecord, WorkspaceRecord, utc_now,
     },
 };
 
@@ -263,6 +263,66 @@ impl InMemoryGatewayStore {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct InMemoryWorkspaceStore {
+    workspaces: Arc<RwLock<BTreeMap<String, WorkspaceRecord>>>,
+}
+
+impl InMemoryWorkspaceStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn list(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+        let mut records = with_read(&self.workspaces, "workspaces", |workspaces| {
+            workspaces.values().cloned().collect::<Vec<_>>()
+        })?;
+        records.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.workspace_id.cmp(&right.workspace_id))
+        });
+        Ok(records)
+    }
+
+    pub fn get(&self, workspace_id: &str) -> Result<Option<WorkspaceRecord>, StoreError> {
+        with_read(&self.workspaces, "workspaces", |workspaces| {
+            workspaces.get(workspace_id).cloned()
+        })
+    }
+
+    pub fn insert(&self, workspace: WorkspaceRecord) -> Result<(), StoreError> {
+        with_write(&self.workspaces, "workspaces", |workspaces| {
+            if workspaces.contains_key(&workspace.workspace_id) {
+                return Err(StoreError::WorkspaceAlreadyExists {
+                    workspace_id: workspace.workspace_id,
+                });
+            }
+            workspaces.insert(workspace.workspace_id.clone(), workspace);
+            Ok(())
+        })?
+    }
+
+    pub fn update(&self, workspace: WorkspaceRecord) -> Result<(), StoreError> {
+        with_write(&self.workspaces, "workspaces", |workspaces| {
+            if !workspaces.contains_key(&workspace.workspace_id) {
+                return Err(StoreError::WorkspaceNotFound {
+                    workspace_id: workspace.workspace_id,
+                });
+            }
+            workspaces.insert(workspace.workspace_id.clone(), workspace);
+            Ok(())
+        })?
+    }
+
+    pub fn delete(&self, workspace_id: &str) -> Result<bool, StoreError> {
+        with_write(&self.workspaces, "workspaces", |workspaces| {
+            workspaces.remove(workspace_id).is_some()
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct InMemorySessionStore {
     sessions: Arc<RwLock<BTreeMap<String, SessionRecord>>>,
 }
@@ -379,6 +439,7 @@ pub struct StoreSet {
     pub(crate) kernel_configs: KernelConfigStore,
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
+    pub(crate) workspaces: WorkspaceStore,
     pub(crate) sessions: SessionStore,
 }
 
@@ -390,6 +451,7 @@ impl StoreSet {
             kernel_configs: KernelConfigStore::in_memory(),
             connections: ConnectionStore::in_memory(),
             gateways: GatewayStore::in_memory(),
+            workspaces: WorkspaceStore::in_memory(),
             sessions: SessionStore::in_memory(),
         }
     }
@@ -405,6 +467,7 @@ impl StoreSet {
             kernel_configs: KernelConfigStore::Sqlite(stores.kernel_configs),
             connections: ConnectionStore::Sqlite(stores.connections),
             gateways: GatewayStore::Sqlite(stores.gateways),
+            workspaces: WorkspaceStore::Sqlite(stores.workspaces),
             sessions: SessionStore::Sqlite(stores.sessions),
         })
     }
@@ -623,6 +686,54 @@ impl GatewayStore {
         match self {
             Self::InMemory(store) => store.delete(gateway_id),
             Self::Sqlite(store) => store.delete(gateway_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum WorkspaceStore {
+    InMemory(InMemoryWorkspaceStore),
+    Sqlite(sqlite::SqliteWorkspaceStore),
+}
+
+impl WorkspaceStore {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self::InMemory(InMemoryWorkspaceStore::new())
+    }
+
+    pub fn list(&self) -> Result<Vec<WorkspaceRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.list(),
+            Self::Sqlite(store) => store.list(),
+        }
+    }
+
+    pub fn get(&self, workspace_id: &str) -> Result<Option<WorkspaceRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.get(workspace_id),
+            Self::Sqlite(store) => store.get(workspace_id),
+        }
+    }
+
+    pub fn insert(&self, workspace: WorkspaceRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.insert(workspace),
+            Self::Sqlite(store) => store.insert(workspace),
+        }
+    }
+
+    pub fn update(&self, workspace: WorkspaceRecord) -> Result<(), StoreError> {
+        match self {
+            Self::InMemory(store) => store.update(workspace),
+            Self::Sqlite(store) => store.update(workspace),
+        }
+    }
+
+    pub fn delete(&self, workspace_id: &str) -> Result<bool, StoreError> {
+        match self {
+            Self::InMemory(store) => store.delete(workspace_id),
+            Self::Sqlite(store) => store.delete(workspace_id),
         }
     }
 }

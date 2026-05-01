@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::{Arc, Mutex},
 };
@@ -24,8 +24,9 @@ use crate::{
     errors::{StoreError, ValidationError},
     models::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
-        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord, parse_env_vars,
-        utc_now, validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+        WorkspaceMountRecord, WorkspaceRecord, parse_env_vars, utc_now, validate_agent_id,
+        validate_connection_id, validate_gateway_id, validate_skill_id, validate_workspace_id,
     },
 };
 
@@ -57,6 +58,13 @@ pub fn router() -> Router<AppState> {
         .route(
             "/agents/{agent_id}",
             get(get_agent).patch(update_agent).delete(delete_agent),
+        )
+        .route("/workspaces", get(list_workspaces).post(create_workspace))
+        .route(
+            "/workspaces/{workspace_id}",
+            get(get_workspace)
+                .patch(update_workspace)
+                .delete(delete_workspace),
         )
         .route("/sessions", get(list_sessions).post(create_session))
         .route(
@@ -409,6 +417,8 @@ async fn create_agent(
     agent.skills = payload.skills;
     agent.env_vars = payload.env_vars;
     agent.connection_id = payload.connection_id;
+    validate_workspace_mounts(&state, &payload.workspace_mounts)?;
+    agent.workspace_mounts = payload.workspace_mounts;
     let value = agent.summary();
     state.agents.insert(agent)?;
     tracing::info!(
@@ -477,6 +487,10 @@ async fn update_agent(
     if let Some(env_vars) = payload.env_vars {
         agent.env_vars = env_vars;
     }
+    if let Some(workspace_mounts) = payload.workspace_mounts {
+        validate_workspace_mounts(&state, &workspace_mounts)?;
+        agent.workspace_mounts = workspace_mounts;
+    }
     match payload.connection_id {
         NullableStringField::Missing => {}
         NullableStringField::Null => {
@@ -537,11 +551,104 @@ async fn delete_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn list_workspaces(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
+    let workspaces = state
+        .workspaces
+        .list()?
+        .into_iter()
+        .map(|workspace| workspace.summary())
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/workspaces",
+        action = "list_workspaces",
+        workspace_count = workspaces.len(),
+        "api handler completed"
+    );
+    Ok(Json(workspaces))
+}
+
+async fn create_workspace(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateWorkspaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    validate_workspace_id(&payload.workspace_id)?;
+    let workspace = WorkspaceRecord::new(payload.workspace_id, payload.name);
+    let value = workspace.summary();
+    state.workspaces.insert(workspace)?;
+    tracing::info!(
+        route = "/workspaces",
+        action = "create_workspace",
+        workspace_id = %value["workspace_id"].as_str().unwrap_or_default(),
+        "api handler completed"
+    );
+    Ok(Json(value))
+}
+
+async fn get_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let workspace = require_workspace(&state, &workspace_id)?;
+    tracing::info!(
+        route = "/workspaces/:workspace_id",
+        action = "get_workspace",
+        workspace_id = %workspace_id,
+        "api handler completed"
+    );
+    Ok(Json(workspace.summary()))
+}
+
+async fn update_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(payload): Json<UpdateWorkspaceRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let mut workspace = require_workspace(&state, &workspace_id)?;
+    if let Some(name) = payload.name {
+        workspace.name = name;
+    }
+    workspace.updated_at = utc_now();
+    let value = workspace.summary();
+    state.workspaces.update(workspace)?;
+    tracing::info!(
+        route = "/workspaces/:workspace_id",
+        action = "update_workspace",
+        workspace_id = %workspace_id,
+        "api handler completed"
+    );
+    Ok(Json(value))
+}
+
+async fn delete_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    if workspace_in_use(&state, &workspace_id)? {
+        return Err(ApiError::conflict(format!(
+            "workspace {workspace_id:?} is mounted by one or more agents"
+        )));
+    }
+    if state.workspaces.delete(&workspace_id)? {
+        tracing::info!(
+            route = "/workspaces/:workspace_id",
+            action = "delete_workspace",
+            workspace_id = %workspace_id,
+            "api handler completed"
+        );
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!(
+            "workspace {workspace_id:?} not found"
+        )))
+    }
+}
+
 async fn create_session(
     State(state): State<AppState>,
     Json(payload): Json<CreateSessionRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let agent = require_agent(&state, &payload.agent_id)?;
+    validate_workspace_mounts(&state, &agent.workspace_mounts)?;
     let env = session_env(&state, &agent)?;
     tracing::info!(
         route = "/sessions",
@@ -555,7 +662,12 @@ async fn create_session(
     );
     let upstream = state
         .agent_host
-        .create_session(agent.harness.as_str(), Some(&agent.skills), Some(&env))
+        .create_session(
+            agent.harness.as_str(),
+            Some(&agent.skills),
+            Some(&env),
+            Some(&agent.workspace_mounts),
+        )
         .await?;
     let upstream_session_id = string_field(&upstream, "session_id")?;
     let status = string_field(&upstream, "status")?;
@@ -2242,11 +2354,45 @@ fn require_gateway(state: &AppState, gateway_id: &str) -> Result<GatewayRecord, 
         .ok_or_else(|| ApiError::not_found(format!("gateway {gateway_id:?} not found")))
 }
 
+fn require_workspace(state: &AppState, workspace_id: &str) -> Result<WorkspaceRecord, ApiError> {
+    state
+        .workspaces
+        .get(workspace_id)?
+        .ok_or_else(|| ApiError::not_found(format!("workspace {workspace_id:?} not found")))
+}
+
 fn require_session(state: &AppState, session_id: &str) -> Result<SessionRecord, ApiError> {
     state
         .sessions
         .get(session_id)?
         .ok_or_else(|| ApiError::not_found(format!("session {session_id:?} not found")))
+}
+
+fn validate_workspace_mounts(
+    state: &AppState,
+    mounts: &[WorkspaceMountRecord],
+) -> Result<(), ApiError> {
+    let mut seen = BTreeSet::new();
+    for mount in mounts {
+        validate_workspace_id(&mount.workspace_id)?;
+        if !seen.insert(mount.workspace_id.as_str()) {
+            return Err(ApiError::unprocessable(format!(
+                "workspace {:?} is mounted more than once",
+                mount.workspace_id
+            )));
+        }
+        require_workspace(state, &mount.workspace_id)?;
+    }
+    Ok(())
+}
+
+fn workspace_in_use(state: &AppState, workspace_id: &str) -> Result<bool, ApiError> {
+    Ok(state.agents.list()?.into_iter().any(|agent| {
+        agent
+            .workspace_mounts
+            .iter()
+            .any(|mount| mount.workspace_id == workspace_id)
+    }))
 }
 
 fn parse_harness(raw: &str) -> Result<HarnessName, ApiError> {
@@ -2312,6 +2458,8 @@ struct CreateAgentRequest {
     #[serde(default)]
     env_vars: String,
     connection_id: Option<String>,
+    #[serde(default)]
+    workspace_mounts: Vec<WorkspaceMountRecord>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2323,6 +2471,18 @@ struct UpdateAgentRequest {
     env_vars: Option<String>,
     #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
     connection_id: NullableStringField,
+    workspace_mounts: Option<Vec<WorkspaceMountRecord>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateWorkspaceRequest {
+    workspace_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateWorkspaceRequest {
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2482,10 +2642,12 @@ impl From<StoreError> for ApiError {
             StoreError::AgentAlreadyExists { .. }
             | StoreError::ConnectionAlreadyExists { .. }
             | StoreError::GatewayAlreadyExists { .. }
+            | StoreError::WorkspaceAlreadyExists { .. }
             | StoreError::SessionAlreadyExists { .. } => Self::conflict(error.to_string()),
             StoreError::AgentNotFound { .. }
             | StoreError::ConnectionNotFound { .. }
             | StoreError::GatewayNotFound { .. }
+            | StoreError::WorkspaceNotFound { .. }
             | StoreError::SessionNotFound { .. } => Self::not_found(error.to_string()),
             StoreError::LockPoisoned { .. } | StoreError::Persistence { .. } => {
                 Self::internal(error.to_string())

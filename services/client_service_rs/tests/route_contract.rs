@@ -390,6 +390,100 @@ async fn agent_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync
 }
 
 #[tokio::test]
+async fn workspace_routes_and_agent_mounts_match_contract()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let app = test_router("http://127.0.0.1:9")?;
+
+    let (status, value) = get_json(app.clone(), "/workspaces").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(value, json!([]));
+
+    let (status, workspace) = request_json(
+        app.clone(),
+        Method::POST,
+        "/workspaces",
+        Some(json!({ "workspace_id": "todo-list-code", "name": "TodoListCode" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workspace["workspace_id"], "todo-list-code");
+    assert_eq!(workspace["mount_path"], "/workspaces/todo-list-code");
+    assert_eq!(
+        workspace["volume_name"],
+        "agentspace-workspace-todo-list-code"
+    );
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::POST,
+        "/workspaces",
+        Some(json!({ "workspace_id": "Bad", "name": "Bad" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_error_detail(&value);
+
+    let (status, renamed) = request_json(
+        app.clone(),
+        Method::PATCH,
+        "/workspaces/todo-list-code",
+        Some(json!({ "name": "RenamedCode" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed["name"], "RenamedCode");
+
+    let (status, agent) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "agent-one",
+            "name": "Agent One",
+            "workspace_mounts": [{ "workspace_id": "todo-list-code", "mode": "ro" }],
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        agent["workspace_mounts"],
+        json!([{ "workspace_id": "todo-list-code", "mode": "ro", "mount_path": "/workspaces/todo-list-code" }])
+    );
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/workspaces/todo-list-code",
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_error_detail(&value);
+
+    let (status, agent) = request_json(
+        app.clone(),
+        Method::PATCH,
+        "/agents/agent-one",
+        Some(json!({ "workspace_mounts": [] })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(agent["workspace_mounts"], json!([]));
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::DELETE,
+        "/workspaces/todo-list-code",
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(value.is_null());
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn stopped_gateway_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync>> {
     let app = test_router("http://127.0.0.1:9")?;
     let (status, _value) = request_json(

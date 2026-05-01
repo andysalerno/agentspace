@@ -258,6 +258,100 @@ impl ToolCallRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkspaceMountRecord {
+    pub workspace_id: String,
+    #[serde(default)]
+    pub mode: WorkspaceMountMode,
+}
+
+impl WorkspaceMountRecord {
+    #[must_use]
+    pub fn new(workspace_id: impl Into<String>, mode: WorkspaceMountMode) -> Self {
+        Self {
+            workspace_id: workspace_id.into(),
+            mode,
+        }
+    }
+
+    #[must_use]
+    pub fn mount_path(&self) -> String {
+        format!("/workspaces/{}", self.workspace_id)
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        json!({
+            "workspace_id": self.workspace_id,
+            "mode": self.mode.as_str(),
+            "mount_path": self.mount_path(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceMountMode {
+    #[serde(rename = "rw")]
+    #[default]
+    ReadWrite,
+    #[serde(rename = "ro")]
+    ReadOnly,
+}
+
+impl WorkspaceMountMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadWrite => "rw",
+            Self::ReadOnly => "ro",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkspaceRecord {
+    pub workspace_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl WorkspaceRecord {
+    #[must_use]
+    pub fn new(workspace_id: impl Into<String>, name: impl Into<String>) -> Self {
+        let now = utc_now();
+        Self {
+            workspace_id: workspace_id.into(),
+            name: name.into(),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[must_use]
+    pub fn volume_name(&self) -> String {
+        format!("agentspace-workspace-{}", self.workspace_id)
+    }
+
+    #[must_use]
+    pub fn mount_path(&self) -> String {
+        format!("/workspaces/{}", self.workspace_id)
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        json!({
+            "workspace_id": self.workspace_id,
+            "name": self.name,
+            "mount_path": self.mount_path(),
+            "volume_name": self.volume_name(),
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentRecord {
     pub agent_id: String,
     pub name: String,
@@ -269,6 +363,8 @@ pub struct AgentRecord {
     pub env_vars: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    #[serde(default)]
+    pub workspace_mounts: Vec<WorkspaceMountRecord>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -290,6 +386,7 @@ impl AgentRecord {
             skills: Vec::new(),
             env_vars: String::new(),
             connection_id: None,
+            workspace_mounts: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
         }
@@ -305,6 +402,7 @@ impl AgentRecord {
             "skills": self.skills,
             "env_vars": self.env_vars,
             "connection_id": self.connection_id,
+            "workspace_mounts": self.workspace_mounts.iter().map(WorkspaceMountRecord::summary).collect::<Vec<_>>(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         })
@@ -641,6 +739,14 @@ pub fn validate_skill_id(skill_id: &str) -> Result<(), ValidationError> {
         })
 }
 
+pub fn validate_workspace_id(workspace_id: &str) -> Result<(), ValidationError> {
+    validate_alphanumeric_dash_id(workspace_id)
+        .then_some(())
+        .ok_or_else(|| ValidationError::InvalidWorkspaceId {
+            value: workspace_id.to_owned(),
+        })
+}
+
 #[must_use]
 fn default_gateway_status() -> String {
     "stopped".to_owned()
@@ -695,7 +801,7 @@ mod tests {
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
         HarnessName, KernelConfigRecord, MessageRecord, MessageRole, ToolCallRecord,
         parse_env_vars, validate_agent_id, validate_connection_id, validate_gateway_id,
-        validate_skill_id,
+        validate_skill_id, validate_workspace_id,
     };
 
     #[test]
@@ -770,6 +876,7 @@ mod tests {
                 "skills": ["skill"],
                 "env_vars": "A=B",
                 "connection_id": "conn",
+                "workspace_mounts": [],
                 "created_at": "c",
                 "updated_at": "u",
             })
@@ -889,6 +996,9 @@ mod tests {
         assert!(validate_skill_id("skill-2").is_ok());
         assert!(validate_skill_id("skill--2").is_err());
         assert!(validate_skill_id("Skill").is_err());
+        assert!(validate_workspace_id("workspace-2").is_ok());
+        assert!(validate_workspace_id("workspace--2").is_err());
+        assert!(validate_workspace_id("Workspace").is_err());
     }
 
     #[test]
