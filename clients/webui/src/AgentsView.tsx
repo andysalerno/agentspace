@@ -466,7 +466,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                     {workspaces.length > 0 && (
                         <fieldset className="skills-fieldset">
                             <legend>Workspaces</legend>
-                            <span className="field-help">Mounted at /workspaces/&lt;workspace-id&gt; when new sessions start.</span>
+                            <span className="field-help">Mounted at /workspace/&lt;workspace-id&gt; when new sessions start.</span>
                             <div className="checkbox-grid">
                                 {workspaces.map((workspace) => {
                                     const mount = form.workspace_mounts.find(

@@ -407,7 +407,7 @@ async fn workspace_routes_and_agent_mounts_match_contract()
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(workspace["workspace_id"], "todo-list-code");
-    assert_eq!(workspace["mount_path"], "/workspaces/todo-list-code");
+    assert_eq!(workspace["mount_path"], "/workspace/todo-list-code");
     assert_eq!(
         workspace["volume_name"],
         "agentspace-workspace-todo-list-code"
@@ -447,7 +447,7 @@ async fn workspace_routes_and_agent_mounts_match_contract()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         agent["workspace_mounts"],
-        json!([{ "workspace_id": "todo-list-code", "mode": "ro", "mount_path": "/workspaces/todo-list-code" }])
+        json!([{ "workspace_id": "todo-list-code", "mode": "ro", "mount_path": "/workspace/todo-list-code" }])
     );
 
     let (status, value) = request_json(

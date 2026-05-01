@@ -266,20 +266,20 @@ async def test_create_session_records_workspace_mounts() -> None:
         WorkspaceMount(workspace_id="todo-list-items", mode="ro"),
     )
     assert runtime.created[0]["additional_paths"] == (
-        "/workspaces/todo-list-code",
-        "/workspaces/todo-list-items",
+        "/workspace/todo-list-code",
+        "/workspace/todo-list-items",
     )
     assert session["workspace_mounts"] == [
         {
             "workspace_id": "todo-list-code",
             "mode": "rw",
-            "mount_path": "/workspaces/todo-list-code",
+            "mount_path": "/workspace/todo-list-code",
             "volume_name": "agentspace-workspace-todo-list-code",
         },
         {
             "workspace_id": "todo-list-items",
             "mode": "ro",
-            "mount_path": "/workspaces/todo-list-items",
+            "mount_path": "/workspace/todo-list-items",
             "volume_name": "agentspace-workspace-todo-list-items",
         },
     ]
@@ -541,11 +541,11 @@ def test_docker_runtime_mounts_workspace_volumes(
     volumes = captured["volumes"]
     assert isinstance(volumes, dict)
     assert volumes["agentspace-workspace-todo-list-code"] == {
-        "bind": "/workspaces/todo-list-code",
+        "bind": "/workspace/todo-list-code",
         "mode": "rw",
     }
     assert volumes["agentspace-workspace-todo-list-items"] == {
-        "bind": "/workspaces/todo-list-items",
+        "bind": "/workspace/todo-list-items",
         "mode": "ro",
     }
     assert captured["created_volumes"] == [

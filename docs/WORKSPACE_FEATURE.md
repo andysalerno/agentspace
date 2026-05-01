@@ -2,7 +2,7 @@
 
 Agent workspaces are named, persistent storage volumes that can be mounted into
 agent kernel containers. A workspace is implemented as a Docker/Podman volume and
-is exposed inside kernels at a stable path under `/workspaces`.
+is exposed inside kernels at a stable path under `/workspace`.
 
 This document describes the current implementation, the important design
 decisions, and the code paths a new developer or agent should understand before
@@ -18,7 +18,7 @@ Example flow:
 2. A user creates or edits an agent and mounts that workspace as `rw`.
 3. When a new session is started for that agent, `agent_host` creates the volume
    if needed and mounts it into the kernel container at
-   `/workspaces/todo-list-code`.
+   `/workspace/todo-list-code`.
 4. The agent can read and write files in that mounted path. The data persists
    across sessions and can be shared with other agents that mount the same
    workspace.
@@ -46,7 +46,7 @@ For `workspace_id = "todo-list-code"`:
 |-------|-------|
 | Display name | Any user-facing string, for example `TodoListCode` |
 | Docker/Podman volume | `agentspace-workspace-todo-list-code` |
-| Kernel mount path | `/workspaces/todo-list-code` |
+| Kernel mount path | `/workspace/todo-list-code` |
 
 Use the workspace ID in prompts and docs when telling agents where to read or
 write files. Display names are only for the UI.
@@ -72,7 +72,7 @@ agent_host (:8001)
   |
   v
 kernel container
-  - sees /workspaces/<workspace_id>
+  - sees /workspace/<workspace_id>
 ```
 
 The Rust `client_service_rs` implementation is the active client service. The
@@ -93,7 +93,7 @@ Workspace API responses have this shape:
 {
   "workspace_id": "todo-list-code",
   "name": "TodoListCode",
-  "mount_path": "/workspaces/todo-list-code",
+  "mount_path": "/workspace/todo-list-code",
   "volume_name": "agentspace-workspace-todo-list-code",
   "created_at": "2026-04-30T00:00:00Z",
   "updated_at": "2026-04-30T00:00:00Z"
@@ -143,12 +143,12 @@ Agent records include `workspace_mounts`:
     {
       "workspace_id": "todo-list-code",
       "mode": "rw",
-      "mount_path": "/workspaces/todo-list-code"
+      "mount_path": "/workspace/todo-list-code"
     },
     {
       "workspace_id": "todo-list-items",
       "mode": "ro",
-      "mount_path": "/workspaces/todo-list-items"
+      "mount_path": "/workspace/todo-list-items"
     }
   ]
 }
@@ -232,7 +232,7 @@ The client-service-to-agent-host boundary sends `workspace_mounts` in
 `agent_host` maps each mount to:
 
 - volume name: `agentspace-workspace-<workspace_id>`;
-- container path: `/workspaces/<workspace_id>`;
+- container path: `/workspace/<workspace_id>`;
 - read/write flag based on `mode`.
 
 Volumes are created lazily if they do not already exist. This makes workspace
@@ -317,7 +317,7 @@ Exercise this flow:
 ```sh
 podman ps --format '{{.ID}} {{.Names}} {{.Image}}'
 podman inspect <kernel-container-id> --format '{{json .Mounts}}' \
-  | jq '[.[] | select(.Destination|startswith("/workspaces")) | {Type,Name,Destination,RW}]'
+  | jq '[.[] | select(.Destination|startswith("/workspace/")) | {Type,Name,Destination,RW}]'
 ```
 
 Expected mount output includes:
@@ -327,13 +327,13 @@ Expected mount output includes:
   {
     "Type": "volume",
     "Name": "agentspace-workspace-todo-list-code",
-    "Destination": "/workspaces/todo-list-code",
+    "Destination": "/workspace/todo-list-code",
     "RW": true
   },
   {
     "Type": "volume",
     "Name": "agentspace-workspace-todo-list-items",
-    "Destination": "/workspaces/todo-list-items",
+    "Destination": "/workspace/todo-list-items",
     "RW": false
   }
 ]
@@ -380,4 +380,3 @@ handling, Docker mount options, Web UI selectors, and tests.
   Docker/Podman volume contents.
 - Running sessions do not update their mounts after agent config changes.
   Restart the session to pick up new workspace configuration.
-
