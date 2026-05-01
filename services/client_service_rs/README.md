@@ -16,6 +16,8 @@ The script runs `cargo run` with the default client-service bind address:
 - `CLIENT_SERVICE_HOST` defaults to `0.0.0.0`
 - `CLIENT_SERVICE_PORT` defaults to `8002`
 - `CLIENT_SERVICE_AGENT_HOST_BASE_URL` defaults to `http://127.0.0.1:8001`
+- `CLIENT_SERVICE_GIT_AGENT_BASE_URL` defaults to `http://127.0.0.1:8004`
+  locally and `http://git-agent:8004` when running in a container
 
 `GET /healthz` works without `agent_host`; session and kernel operations expect
 an `agent_host` instance at `CLIENT_SERVICE_AGENT_HOST_BASE_URL`.
@@ -39,6 +41,7 @@ The container defaults match `run-service.sh`:
 - `CLIENT_SERVICE_HOST=0.0.0.0`
 - `CLIENT_SERVICE_PORT=8002`
 - `CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://127.0.0.1:8001`
+- `CLIENT_SERVICE_GIT_AGENT_BASE_URL=http://git-agent:8004`
 
 The root compose stack builds and runs this Rust service by default:
 

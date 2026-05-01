@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
+export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "git-agent" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
 
 export type Harness = string;
 
@@ -239,3 +239,156 @@ export type Gateway = {
   updated_at: string;
   secret_keys: string[];
 };
+
+export type GitAgentPolicy = {
+  allowed_refs?: string[] | null;
+  allowed_ref_prefixes?: string[] | null;
+  protected_refs?: string[] | null;
+  protected_ref_prefixes?: string[] | null;
+  unprotected_refs?: string[] | null;
+  unprotected_ref_prefixes?: string[] | null;
+  skip_review_refs?: string[] | null;
+  skip_review_ref_prefixes?: string[] | null;
+  skip_validation_refs?: string[] | null;
+  skip_validation_ref_prefixes?: string[] | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentReviewerConfig = {
+  agent_id?: string | null;
+  name?: string | null;
+  harness?: Harness | null;
+  system_prompt?: string | null;
+  skills?: string[] | null;
+  env_vars?: string | null;
+  connection_id?: string | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentConfig = {
+  enabled?: boolean | null;
+  remote_url?: string | null;
+  patch_url?: string | null;
+  default_branch?: string | null;
+  review_agent_id?: string | null;
+  reviewer_agent_id?: string | null;
+  validation_command?: string | null;
+  allowed_refs?: string[] | null;
+  allowed_ref_prefixes?: string[] | null;
+  protected_refs?: string[] | null;
+  protected_ref_prefixes?: string[] | null;
+  unprotected_refs?: string[] | null;
+  unprotected_ref_prefixes?: string[] | null;
+  skip_review_refs?: string[] | null;
+  skip_review_ref_prefixes?: string[] | null;
+  skip_validation_refs?: string[] | null;
+  skip_validation_ref_prefixes?: string[] | null;
+  policy?: GitAgentPolicy | null;
+  reviewer_agent?: GitAgentReviewerConfig | null;
+  review_agent?: GitAgentReviewerConfig | null;
+  updated_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentConfigUpdate = {
+  enabled?: boolean;
+  remote_url?: string;
+  patch_url?: string;
+  default_branch?: string;
+  review_agent_id?: string;
+  validation_command?: string;
+  allowed_refs?: string[];
+  allowed_ref_prefixes?: string[];
+  protected_refs?: string[];
+  protected_ref_prefixes?: string[];
+  unprotected_refs?: string[];
+  unprotected_ref_prefixes?: string[];
+  skip_review_refs?: string[];
+  skip_review_ref_prefixes?: string[];
+  skip_validation_refs?: string[];
+  skip_validation_ref_prefixes?: string[];
+  policy?: GitAgentPolicy;
+  reviewer_agent?: GitAgentReviewerConfig;
+};
+
+export type GitAgentRepoStatus = {
+  default_branch?: string | null;
+  head_sha?: string | null;
+  commit_sha?: string | null;
+  remote_url?: string | null;
+  patch_url?: string | null;
+  initialized?: boolean | null;
+  empty?: boolean | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentStatus = {
+  status?: string | null;
+  service_status?: string | null;
+  state?: string | null;
+  healthy?: boolean | null;
+  repo?: GitAgentRepoStatus | null;
+  repository?: GitAgentRepoStatus | null;
+  remote_url?: string | null;
+  patch_url?: string | null;
+  default_branch?: string | null;
+  head_sha?: string | null;
+  commit_sha?: string | null;
+  last_error?: string | null;
+  updated_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentReviewComment = {
+  path?: string | null;
+  side?: string | null;
+  line?: number | null;
+  severity?: string | null;
+  message?: string | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentReview = {
+  accepted?: boolean | null;
+  summary?: string | null;
+  comments?: GitAgentReviewComment[] | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentRequestSummary = {
+  request_id?: string | null;
+  id?: string | null;
+  status?: string | null;
+  requester?: string | null;
+  requester_agent_id?: string | null;
+  target_ref?: string | null;
+  base_sha?: string | null;
+  head_sha?: string | null;
+  commit_sha?: string | null;
+  reviewer_summary?: string | null;
+  review_summary?: string | null;
+  summary?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  [key: string]: unknown;
+};
+
+export type GitAgentRequestDetail = GitAgentRequestSummary & {
+  raw_patch?: string | null;
+  patch?: string | null;
+  diff?: string | null;
+  unified_diff?: string | null;
+  review?: GitAgentReview | null;
+  reviewer?: GitAgentReview | null;
+  comments?: GitAgentReviewComment[] | null;
+};
+
+export type GitAgentRequestsResponse =
+  | GitAgentRequestSummary[]
+  | {
+      requests?: GitAgentRequestSummary[];
+      patch_requests?: GitAgentRequestSummary[];
+      items?: GitAgentRequestSummary[];
+      data?: GitAgentRequestSummary[];
+      [key: string]: unknown;
+    };

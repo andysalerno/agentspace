@@ -15,6 +15,7 @@ members = [
     "kernels/kernel_host",
     "gateways/*",
     "services/agent_host",
+    "services/git_agent",
     "channels/*",
     "clients/cli_ui",
 ]
@@ -28,6 +29,7 @@ gateway-echo = { workspace = true }
 gateway-discord = { workspace = true }
 gateway-host = { workspace = true }
 agent-host = { workspace = true }
+git-agent = { workspace = true }
 cli-channel = { workspace = true }
 cli-ui = { workspace = true }
 
@@ -81,6 +83,7 @@ extraPaths = [
     "gateways/gateway_discord/src",
     "gateways/gateway_host/src",
     "services/agent_host/src",
+    "services/git_agent/src",
     "channels/cli_channel/src",
     "clients/cli_ui/src",
 ]

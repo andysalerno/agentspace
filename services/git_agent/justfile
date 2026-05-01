@@ -1,0 +1,7 @@
+set shell := ["bash", "-cu"]
+
+validate:
+  uv run --project . ruff format --check .
+  uv run --project . ruff check .
+  uv run --project . pyright
+  uv run --project . pytest

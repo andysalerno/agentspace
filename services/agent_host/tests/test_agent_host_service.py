@@ -619,6 +619,34 @@ def test_docker_runtime_keeps_free_port_when_vscode_disabled(
     assert ports["8081/tcp"] == ("0.0.0.0", 0)  # noqa: S104
 
 
+def test_docker_runtime_passes_configured_gitagent_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "AGENT_HOST_GITAGENT_REMOTE_URL",
+        "http://gitagent:8004/repo.git",
+    )
+    monkeypatch.setenv(
+        "AGENT_HOST_GITAGENT_PATCH_URL",
+        "http://gitagent:8004/PatchRequest",
+    )
+    monkeypatch.setenv("AGENT_HOST_GITAGENT_DEFAULT_BRANCH", "main")
+    runtime, captured = _runtime_with_captured_run(monkeypatch)
+
+    runtime._run_container(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        "agentspace-kernel-test",
+        HarnessName.ECHO,
+        {},
+        (),
+    )
+
+    environment = captured["environment"]
+    assert isinstance(environment, dict)
+    assert environment["GITAGENT_REMOTE_URL"] == "http://gitagent:8004/repo.git"
+    assert environment["GITAGENT_PATCH_URL"] == "http://gitagent:8004/PatchRequest"
+    assert environment["GITAGENT_DEFAULT_BRANCH"] == "main"
+
+
 def test_docker_runtime_mounts_workspace_volumes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

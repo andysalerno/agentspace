@@ -22,6 +22,11 @@ export const queryKeys = {
   gatewaySchema: (gatewayType: string) =>
     ["gateway-types", gatewayType, "schema"] as const,
   gatewayLogs: (gatewayId: string) => ["gateways", gatewayId, "logs"] as const,
+  gitAgentConfig: ["git-agent", "config"] as const,
+  gitAgentStatus: ["git-agent", "status"] as const,
+  gitAgentRequests: ["git-agent", "requests"] as const,
+  gitAgentRequest: (requestId: string) =>
+    ["git-agent", "requests", requestId] as const,
   kernelConfig: (harness: string) => ["kernel-configs", harness] as const,
   connections: ["connections"] as const,
   connectionModels: (connectionId: string) =>
@@ -108,6 +113,36 @@ export const useGatewaySchema = (gatewayType: string | null) =>
     queryFn: () => api.getGatewayTypeSchema(gatewayType as string),
     enabled: gatewayType !== null,
     staleTime: 60_000,
+  });
+
+export const useGitAgentConfig = () =>
+  useQuery({
+    queryKey: queryKeys.gitAgentConfig,
+    queryFn: api.getGitAgentConfig,
+  });
+
+export const useGitAgentStatus = () =>
+  useQuery({
+    queryKey: queryKeys.gitAgentStatus,
+    queryFn: api.getGitAgentStatus,
+    refetchInterval: POLL_MS,
+  });
+
+export const useGitAgentRequests = () =>
+  useQuery({
+    queryKey: queryKeys.gitAgentRequests,
+    queryFn: api.listGitAgentRequests,
+    refetchInterval: POLL_MS,
+  });
+
+export const useGitAgentRequest = (requestId: string | null) =>
+  useQuery({
+    queryKey: requestId
+      ? queryKeys.gitAgentRequest(requestId)
+      : (["git-agent", "requests", "__none__"] as const),
+    queryFn: () => api.getGitAgentRequest(requestId as string),
+    enabled: requestId !== null,
+    refetchInterval: POLL_MS,
   });
 
 export const useKernelConfig = (harness: string | null) =>

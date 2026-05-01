@@ -9,8 +9,8 @@ mod sqlite;
 use crate::{
     errors::StoreError,
     models::{
-        AgentRecord, ConnectionRecord, GatewayRecord, HarnessName, KernelConfigRecord,
-        MessageRecord, SessionRecord, WorkspaceRecord, utc_now,
+        AgentRecord, ConnectionRecord, GatewayRecord, GitAgentConfigRecord, HarnessName,
+        KernelConfigRecord, MessageRecord, SessionRecord, WorkspaceRecord, utc_now,
     },
 };
 
@@ -127,6 +127,29 @@ impl InMemoryKernelConfigStore {
         with_write(&self.configs, "kernel_configs", |configs| {
             configs.remove(&harness).is_some()
         })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryGitAgentConfigStore {
+    config: Arc<RwLock<Option<GitAgentConfigRecord>>>,
+}
+
+impl InMemoryGitAgentConfigStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self) -> Result<Option<GitAgentConfigRecord>, StoreError> {
+        with_read(&self.config, "git_agent_config", Clone::clone)
+    }
+
+    pub fn upsert(&self, config: GitAgentConfigRecord) -> Result<GitAgentConfigRecord, StoreError> {
+        with_write(&self.config, "git_agent_config", |stored| {
+            *stored = Some(config.clone());
+        })?;
+        Ok(config)
     }
 }
 
@@ -436,6 +459,7 @@ impl InMemorySessionStore {
 #[derive(Clone, Debug)]
 pub struct StoreSet {
     pub(crate) agents: AgentStore,
+    pub(crate) git_agent_config: GitAgentConfigStore,
     pub(crate) kernel_configs: KernelConfigStore,
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
@@ -448,6 +472,7 @@ impl StoreSet {
     pub fn in_memory() -> Self {
         Self {
             agents: AgentStore::in_memory(),
+            git_agent_config: GitAgentConfigStore::in_memory(),
             kernel_configs: KernelConfigStore::in_memory(),
             connections: ConnectionStore::in_memory(),
             gateways: GatewayStore::in_memory(),
@@ -464,6 +489,7 @@ impl StoreSet {
         tracing::info!(in_memory, "created sqlite-backed store set");
         Ok(Self {
             agents: AgentStore::Sqlite(stores.agents),
+            git_agent_config: GitAgentConfigStore::Sqlite(stores.git_agent_config),
             kernel_configs: KernelConfigStore::Sqlite(stores.kernel_configs),
             connections: ConnectionStore::Sqlite(stores.connections),
             gateways: GatewayStore::Sqlite(stores.gateways),
@@ -530,6 +556,33 @@ impl AgentStore {
         match self {
             Self::InMemory(store) => store.delete(agent_id),
             Self::Sqlite(store) => store.delete(agent_id),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum GitAgentConfigStore {
+    InMemory(InMemoryGitAgentConfigStore),
+    Sqlite(sqlite::SqliteGitAgentConfigStore),
+}
+
+impl GitAgentConfigStore {
+    #[must_use]
+    pub fn in_memory() -> Self {
+        Self::InMemory(InMemoryGitAgentConfigStore::new())
+    }
+
+    pub fn get(&self) -> Result<Option<GitAgentConfigRecord>, StoreError> {
+        match self {
+            Self::InMemory(store) => store.get(),
+            Self::Sqlite(store) => store.get(),
+        }
+    }
+
+    pub fn upsert(&self, config: GitAgentConfigRecord) -> Result<GitAgentConfigRecord, StoreError> {
+        match self {
+            Self::InMemory(store) => store.upsert(config),
+            Self::Sqlite(store) => store.upsert(config),
         }
     }
 }
@@ -868,13 +921,14 @@ mod tests {
         errors::StoreError,
         models::{
             AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord,
-            GatewayType, HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+            GatewayType, GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole,
+            SessionRecord, ToolCallRecord,
         },
     };
 
     use super::{
         InMemoryAgentStore, InMemoryConnectionStore, InMemoryGatewayStore,
-        InMemoryKernelConfigStore, InMemorySessionStore, StoreSet,
+        InMemoryGitAgentConfigStore, InMemoryKernelConfigStore, InMemorySessionStore, StoreSet,
     };
 
     fn agent(agent_id: &str, created_at: &str) -> AgentRecord {
@@ -1025,6 +1079,33 @@ mod tests {
     }
 
     #[test]
+    fn git_agent_config_store_upserts_singleton() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let store = InMemoryGitAgentConfigStore::new();
+        assert!(store.get()?.is_none());
+
+        let mut config = GitAgentConfigRecord::new_default();
+        config.enabled = false;
+        config.remote_url = "http://gitagent.example/repo.git".to_owned();
+        store.upsert(config)?;
+
+        let mut replacement = GitAgentConfigRecord::new_default();
+        replacement.default_branch = "trunk".to_owned();
+        replacement.allowed_refs = vec!["refs/heads/trunk".to_owned()];
+        replacement.review_agent_id = "reviewer".to_owned();
+        store.upsert(replacement)?;
+
+        assert!(matches!(
+            store.get()?,
+            Some(record)
+                if record.enabled
+                    && record.default_branch == "trunk"
+                    && record.allowed_refs == vec!["refs/heads/trunk".to_owned()]
+                    && record.review_agent_id == "reviewer"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn session_store_persists_updates_and_clears_messages()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let store = InMemorySessionStore::new();
@@ -1086,6 +1167,48 @@ mod tests {
         ));
         assert!(store.delete("session")?);
         assert!(!store.delete("session")?);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_git_agent_config_persists_across_reopen() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let path = sqlite_test_path()?;
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            let mut config = GitAgentConfigRecord::new_default();
+            config.enabled = false;
+            config.default_branch = "trunk".to_owned();
+            config.allowed_ref_prefixes = vec!["refs/heads/dev/".to_owned()];
+            config.allowed_refs = vec!["refs/heads/trunk".to_owned()];
+            config.remote_url = "http://gitagent.example/repo.git".to_owned();
+            config.patch_url = "http://gitagent.example/PatchRequest".to_owned();
+            config.review_agent_id = "reviewer".to_owned();
+            config.validation_command = "just verify".to_owned();
+            stores.git_agent_config.upsert(config)?;
+        }
+
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            let config = stores
+                .git_agent_config
+                .get()?
+                .ok_or_else(|| StoreError::Persistence {
+                    store: "git_agent_config",
+                    detail: "missing git agent config".to_owned(),
+                })?;
+            assert!(!config.enabled);
+            assert_eq!(config.default_branch, "trunk");
+            assert_eq!(
+                config.allowed_ref_prefixes,
+                vec!["refs/heads/dev/".to_owned()]
+            );
+            assert_eq!(config.allowed_refs, vec!["refs/heads/trunk".to_owned()]);
+            assert_eq!(config.review_agent_id, "reviewer");
+            assert_eq!(config.validation_command, "just verify");
+        }
+
+        cleanup_sqlite_path(&path);
         Ok(())
     }
 

@@ -11,6 +11,10 @@ use serde_json::{Map, Value, json};
 use crate::errors::ValidationError;
 
 pub const DEFAULT_CONNECTION_API_FLAVOR: ConnectionApiFlavor = ConnectionApiFlavor::ChatCompletions;
+pub const DEFAULT_GIT_AGENT_REVIEW_AGENT_ID: &str = "git-agent";
+pub const DEFAULT_GIT_AGENT_REMOTE_URL: &str = "http://gitagent:8004/repo.git";
+pub const DEFAULT_GIT_AGENT_PATCH_URL: &str = "http://gitagent:8004/PatchRequest";
+pub const DEFAULT_GIT_AGENT_VALIDATION_COMMAND: &str = "just validate";
 
 #[must_use]
 pub fn utc_now() -> String {
@@ -493,6 +497,58 @@ impl KernelConfigRecord {
         json!({
             "harness": self.harness.as_str(),
             "env_vars": self.env_vars,
+            "updated_at": self.updated_at,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GitAgentConfigRecord {
+    pub enabled: bool,
+    pub default_branch: String,
+    #[serde(default)]
+    pub allowed_ref_prefixes: Vec<String>,
+    #[serde(default)]
+    pub allowed_refs: Vec<String>,
+    pub remote_url: String,
+    pub patch_url: String,
+    pub review_agent_id: String,
+    #[serde(default)]
+    pub validation_command: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl GitAgentConfigRecord {
+    #[must_use]
+    pub fn new_default() -> Self {
+        let now = utc_now();
+        Self {
+            enabled: true,
+            default_branch: "main".to_owned(),
+            allowed_ref_prefixes: vec!["refs/heads/wip/".to_owned()],
+            allowed_refs: vec!["refs/heads/main".to_owned()],
+            remote_url: DEFAULT_GIT_AGENT_REMOTE_URL.to_owned(),
+            patch_url: DEFAULT_GIT_AGENT_PATCH_URL.to_owned(),
+            review_agent_id: DEFAULT_GIT_AGENT_REVIEW_AGENT_ID.to_owned(),
+            validation_command: DEFAULT_GIT_AGENT_VALIDATION_COMMAND.to_owned(),
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[must_use]
+    pub fn summary(&self) -> Value {
+        json!({
+            "enabled": self.enabled,
+            "default_branch": self.default_branch,
+            "allowed_ref_prefixes": self.allowed_ref_prefixes,
+            "allowed_refs": self.allowed_refs,
+            "remote_url": self.remote_url,
+            "patch_url": self.patch_url,
+            "review_agent_id": self.review_agent_id,
+            "validation_command": self.validation_command,
+            "created_at": self.created_at,
             "updated_at": self.updated_at,
         })
     }

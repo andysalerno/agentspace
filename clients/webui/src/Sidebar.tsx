@@ -62,6 +62,15 @@ const navItems: NavItem[] = [
         ),
     },
     {
+        id: "git-agent",
+        label: "Git Agent",
+        icon: (
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+                <path fillRule="evenodd" d="M6 3a2 2 0 11-2 2 2 2 0 012-2zm1 2a1 1 0 10-1 1 1 1 0 001-1zm7-2a2 2 0 11-2 2 2 2 0 012-2zm1 2a1 1 0 10-1 1 1 1 0 001-1zM6 12a2 2 0 11-2 2 2 2 0 012-2zm1 2a1 1 0 10-1 1 1 1 0 001-1zm0-6.732V10a3.99 3.99 0 012 1V8.5A2.5 2.5 0 0111.5 6H12V4h-.5A4.5 4.5 0 007 7.268z" clipRule="evenodd" />
+            </svg>
+        ),
+    },
+    {
         id: "gateways",
         label: "Gateways",
         icon: (
