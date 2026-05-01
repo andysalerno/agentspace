@@ -258,6 +258,40 @@ impl AgentHostClient {
         .await
     }
 
+    pub async fn clone_workspace(
+        &self,
+        source_volume_name: &str,
+        target_workspace_id: &str,
+        target_volume_name: &str,
+    ) -> AgentHostResult<JsonObject> {
+        let mut payload = JsonObject::new();
+        payload.insert("source_volume_name".to_owned(), json!(source_volume_name));
+        payload.insert("target_workspace_id".to_owned(), json!(target_workspace_id));
+        payload.insert("target_volume_name".to_owned(), json!(target_volume_name));
+        self.request_object(
+            Method::POST,
+            self.endpoint(&["workspaces", "clone"])?,
+            Some(payload),
+        )
+        .await
+    }
+
+    pub async fn open_workspace_vscode(
+        &self,
+        workspace_id: &str,
+        volume_name: &str,
+    ) -> AgentHostResult<JsonObject> {
+        let mut payload = JsonObject::new();
+        payload.insert("workspace_id".to_owned(), json!(workspace_id));
+        payload.insert("volume_name".to_owned(), json!(volume_name));
+        self.request_object(
+            Method::POST,
+            self.endpoint(&["workspaces", "vscode"])?,
+            Some(payload),
+        )
+        .await
+    }
+
     pub async fn destroy_session(&self, session_id: &str) -> AgentHostResult<()> {
         let method = Method::DELETE;
         let url = self.endpoint(&["sessions", session_id])?;

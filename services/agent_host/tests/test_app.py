@@ -115,6 +115,32 @@ class StubRuntime:
             "exclude_names": list(exclude_names),
         }
 
+    async def clone_workspace(
+        self,
+        *,
+        source_volume_name: str,
+        target_workspace_id: str,
+        target_volume_name: str,
+    ) -> dict[str, object]:
+        return {
+            "source_volume_name": source_volume_name,
+            "workspace_id": target_workspace_id,
+            "volume_name": target_volume_name,
+        }
+
+    async def open_workspace_vscode(
+        self,
+        *,
+        workspace_id: str,
+        volume_name: str,
+    ) -> dict[str, object]:
+        return {
+            "workspace_id": workspace_id,
+            "volume_name": volume_name,
+            "container_name": f"editor-{workspace_id}",
+            "vscode_url": "http://127.0.0.1:12345",
+        }
+
     async def logs(
         self,
         *,
@@ -243,6 +269,39 @@ def test_snapshot_session_workspace(client: TestClient) -> None:
     assert payload["workspace_id"] == "saved-workspace"
     assert payload["volume_name"] == "agentspace-workspace-saved-workspace"
     assert payload["exclude_names"] == ["mounted-workspace"]
+
+
+def test_clone_workspace(client: TestClient) -> None:
+    response = client.post(
+        "/workspaces/clone",
+        json={
+            "source_volume_name": "agentspace-workspace-source",
+            "target_workspace_id": "cloned-workspace",
+            "target_volume_name": "agentspace-workspace-cloned-workspace",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_volume_name"] == "agentspace-workspace-source"
+    assert payload["workspace_id"] == "cloned-workspace"
+    assert payload["volume_name"] == "agentspace-workspace-cloned-workspace"
+
+
+def test_open_workspace_vscode(client: TestClient) -> None:
+    response = client.post(
+        "/workspaces/vscode",
+        json={
+            "workspace_id": "todo-list-code",
+            "volume_name": "agentspace-workspace-todo-list-code",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workspace_id"] == "todo-list-code"
+    assert payload["container_name"] == "editor-todo-list-code"
+    assert payload["vscode_url"] == "http://127.0.0.1:12345"
 
 
 def test_message_stream_route(client: TestClient) -> None:

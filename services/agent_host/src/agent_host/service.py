@@ -191,6 +191,21 @@ class KernelRuntime(Protocol):
         exclude_names: tuple[str, ...],
     ) -> dict[str, Any]: ...
 
+    async def clone_workspace(
+        self,
+        *,
+        source_volume_name: str,
+        target_workspace_id: str,
+        target_volume_name: str,
+    ) -> dict[str, Any]: ...
+
+    async def open_workspace_vscode(
+        self,
+        *,
+        workspace_id: str,
+        volume_name: str,
+    ) -> dict[str, Any]: ...
+
 
 def _empty_history() -> list[list[KernelEvent]]:
     return []
@@ -232,6 +247,7 @@ class SessionRecord:
 class DockerKernelRuntime:
     def __init__(self) -> None:
         self._client_instance: docker.DockerClient | None = None
+        self._workspace_editor_locks: dict[str, asyncio.Lock] = {}
         self._kernel_image = os.environ.get(
             "AGENT_HOST_KERNEL_IMAGE",
             "agentspace-kernel-kernel:latest",
@@ -499,6 +515,45 @@ class DockerKernelRuntime:
             "volume_name": volume_name,
         }
 
+    async def clone_workspace(
+        self,
+        *,
+        source_volume_name: str,
+        target_workspace_id: str,
+        target_volume_name: str,
+    ) -> dict[str, Any]:
+        await asyncio.to_thread(
+            self._copy_workspace_volume,
+            source_volume_name,
+            target_workspace_id,
+            target_volume_name,
+            (),
+        )
+        return {
+            "workspace_id": target_workspace_id,
+            "volume_name": target_volume_name,
+        }
+
+    async def open_workspace_vscode(
+        self,
+        *,
+        workspace_id: str,
+        volume_name: str,
+    ) -> dict[str, Any]:
+        lock = self._workspace_editor_locks.setdefault(workspace_id, asyncio.Lock())
+        async with lock:
+            container_name, vscode_url = await asyncio.to_thread(
+                self._open_workspace_vscode,
+                workspace_id,
+                volume_name,
+            )
+        return {
+            "workspace_id": workspace_id,
+            "volume_name": volume_name,
+            "container_name": container_name,
+            "vscode_url": vscode_url,
+        }
+
     def _run_container(  # noqa: PLR0913
         self,
         container_name: str,
@@ -643,7 +698,22 @@ class DockerKernelRuntime:
         volume_name: str,
         exclude_names: tuple[str, ...],
     ) -> None:
-        self._ensure_workspace_volume(volume_name)
+        self._copy_workspace_volume(
+            session_workspace_volume_name,
+            workspace_id,
+            volume_name,
+            exclude_names,
+        )
+
+    def _copy_workspace_volume(
+        self,
+        source_volume_name: str,
+        target_workspace_id: str,
+        target_volume_name: str,
+        exclude_names: tuple[str, ...],
+    ) -> None:
+        cast("Any", self._client.volumes).get(source_volume_name)
+        self._ensure_workspace_volume(target_volume_name)
         self._client.containers.run(
             self._kernel_image,
             auto_remove=True,
@@ -654,22 +724,66 @@ class DockerKernelRuntime:
                 WORKSPACE_SNAPSHOT_SCRIPT,
             ],
             environment={
-                "AGENTSPACE_WORKSPACE_ID": workspace_id,
+                "AGENTSPACE_WORKSPACE_ID": target_workspace_id,
                 "AGENTSPACE_WORKSPACE_EXCLUDES": ",".join(exclude_names),
             },
             labels={"agentspace.role": "workspace-snapshot"},
             network_disabled=True,
             volumes={
-                session_workspace_volume_name: {
+                source_volume_name: {
                     "bind": "/workspace-src",
                     "mode": "ro",
                 },
-                volume_name: {
+                target_volume_name: {
                     "bind": "/workspace-dest",
                     "mode": "rw",
                 },
             },
         )
+
+    def _open_workspace_vscode(
+        self,
+        workspace_id: str,
+        volume_name: str,
+    ) -> tuple[str, str | None]:
+        cast("Any", self._client.volumes).get(volume_name)
+        container_name = self._workspace_editor_container_name(workspace_id)
+        if not self._container_is_running(container_name):
+            self._remove_container(container_name)
+            self._client.containers.run(
+                self._kernel_image,
+                auto_remove=True,
+                detach=True,
+                entrypoint=[
+                    "/usr/local/bin/code-server",
+                    "--bind-addr",
+                    f"0.0.0.0:{self._vscode_container_port}",
+                    "--auth",
+                    "none",
+                    "--disable-telemetry",
+                    "/workspace",
+                ],
+                labels={
+                    "agentspace.role": "workspace-editor",
+                    "agentspace.workspace_id": workspace_id,
+                },
+                name=container_name,
+                network=self._kernel_network,
+                ports={
+                    f"{self._vscode_container_port}/tcp": (self._vscode_host_ip, 0),
+                },
+                volumes={
+                    volume_name: {
+                        "bind": "/workspace",
+                        "mode": "rw",
+                    },
+                },
+            )
+        return container_name, self._vscode_url_for_container(container_name)
+
+    @staticmethod
+    def _workspace_editor_container_name(workspace_id: str) -> str:
+        return f"agentspace-workspace-editor-{workspace_id}"
 
     def _docker_session(self, session: KernelRuntimeSession) -> DockerKernelSession:
         if not isinstance(session.value, DockerKernelSession):
@@ -736,6 +850,16 @@ class DockerKernelRuntime:
         except NotFound:
             return
         container.remove(force=True)
+
+    def _container_is_running(self, container_name: str) -> bool:
+        try:
+            container = self._client.containers.get(container_name)
+            container.reload()
+        except (DockerException, NotFound):
+            return False
+        attrs = _as_dict(container.attrs)
+        state = _as_dict(attrs.get("State"))
+        return state.get("Running") is True
 
     def _remove_container_and_session_workspace(
         self,
@@ -977,6 +1101,30 @@ class AgentHost:
             workspace_id=workspace_id,
             volume_name=volume_name,
             exclude_names=exclude_names,
+        )
+
+    async def clone_workspace(
+        self,
+        *,
+        source_volume_name: str,
+        target_workspace_id: str,
+        target_volume_name: str,
+    ) -> dict[str, Any]:
+        return await self._runtime.clone_workspace(
+            source_volume_name=source_volume_name,
+            target_workspace_id=target_workspace_id,
+            target_volume_name=target_volume_name,
+        )
+
+    async def open_workspace_vscode(
+        self,
+        *,
+        workspace_id: str,
+        volume_name: str,
+    ) -> dict[str, Any]:
+        return await self._runtime.open_workspace_vscode(
+            workspace_id=workspace_id,
+            volume_name=volume_name,
         )
 
     async def destroy_all_sessions(self) -> None:

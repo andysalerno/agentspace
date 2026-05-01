@@ -2,8 +2,11 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import { browserReachableLocalUrl } from "./browserUrls";
 import { queryKeys, useAgents, useWorkspaces } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { WORKSPACE_ID_PATTERN, workspaceIdFromName } from "./saveWorkspacePrompt";
+import type { Workspace, WorkspaceVscode } from "./types";
 
 export default function WorkspacesView() {
     const { data: workspaces = [] } = useWorkspaces();
@@ -39,9 +42,25 @@ export default function WorkspacesView() {
         onSuccess: () => invalidateWorkspaces(),
         onError: reportError,
     });
+    const cloneMutation = useMutation({
+        mutationFn: (
+            { id, workspace_id, name }: { id: string; workspace_id: string; name: string },
+        ) =>
+            api.cloneWorkspace(id, { workspace_id, name }),
+        onSuccess: () => invalidateWorkspaces(),
+        onError: reportError,
+    });
+    const vscodeMutation = useMutation({
+        mutationFn: (id: string) => api.openWorkspaceVscode(id),
+        onError: reportError,
+    });
 
     const busy =
-        createMutation.isPending || updateMutation.isPending || deleteMutation.isPending;
+        createMutation.isPending
+        || updateMutation.isPending
+        || deleteMutation.isPending
+        || cloneMutation.isPending
+        || vscodeMutation.isPending;
 
     function mountedAgentCount(targetWorkspaceId: string): number {
         return agents.filter((agent) =>
@@ -71,6 +90,56 @@ export default function WorkspacesView() {
         await updateMutation.mutateAsync({ id, nextName: editName });
         setEditingWorkspaceId(null);
         setEditName("");
+    }
+
+    async function handleClone(workspace: Workspace) {
+        const cloneName = window.prompt(
+            "Clone workspace name",
+            `${workspace.name} Copy`,
+        );
+        if (cloneName === null) return;
+        const trimmedName = cloneName.trim();
+        if (!trimmedName) {
+            window.alert("Workspace name is required.");
+            return;
+        }
+        const cloneId = window.prompt(
+            "Clone workspace ID (lowercase letters, numbers, and single dashes)",
+            workspaceIdFromName(trimmedName),
+        );
+        if (cloneId === null) return;
+        const trimmedId = cloneId.trim();
+        if (!WORKSPACE_ID_PATTERN.test(trimmedId)) {
+            window.alert("Workspace ID must use lowercase letters, numbers, and single dashes.");
+            return;
+        }
+        await cloneMutation.mutateAsync({
+            id: workspace.workspace_id,
+            workspace_id: trimmedId,
+            name: trimmedName,
+        });
+    }
+
+    async function handleOpenVscode(workspace: Workspace) {
+        const editorWindow = window.open("about:blank", "_blank");
+        let result: WorkspaceVscode;
+        try {
+            result = await vscodeMutation.mutateAsync(workspace.workspace_id);
+        } catch {
+            editorWindow?.close();
+            return;
+        }
+        if (result.vscode_url) {
+            const vscodeUrl = browserReachableLocalUrl(result.vscode_url);
+            if (editorWindow) {
+                editorWindow.location.href = vscodeUrl;
+            } else {
+                window.open(vscodeUrl, "_blank", "noopener,noreferrer");
+            }
+        } else {
+            editorWindow?.close();
+            window.alert("VS Code is unavailable for this workspace.");
+        }
     }
 
     return (
@@ -133,6 +202,10 @@ export default function WorkspacesView() {
                                 </div>
                                 <div className="card-meta management-meta">
                                     <div>
+                                        <strong>Status</strong>
+                                        <span className={`status-badge ${workspace.status}`}>{workspace.status}</span>
+                                    </div>
+                                    <div>
                                         <strong>Mount Path</strong>
                                         <span className="mono">{workspace.mount_path}</span>
                                     </div>
@@ -178,14 +251,32 @@ export default function WorkspacesView() {
                                 </span>
                                 <div className="card-footer-actions">
                                     {!editing && (
-                                        <button
-                                            className="secondary-button small"
-                                            disabled={busy}
-                                            onClick={() => startEditing(workspace.workspace_id, workspace.name)}
-                                            type="button"
-                                        >
-                                            Edit
-                                        </button>
+                                        <>
+                                            <button
+                                                className="secondary-button small"
+                                                disabled={busy || workspace.status !== "ready"}
+                                                onClick={() => void handleOpenVscode(workspace)}
+                                                type="button"
+                                            >
+                                                Open in VS Code
+                                            </button>
+                                            <button
+                                                className="secondary-button small"
+                                                disabled={busy || workspace.status !== "ready"}
+                                                onClick={() => void handleClone(workspace)}
+                                                type="button"
+                                            >
+                                                Clone
+                                            </button>
+                                            <button
+                                                className="secondary-button small"
+                                                disabled={busy}
+                                                onClick={() => startEditing(workspace.workspace_id, workspace.name)}
+                                                type="button"
+                                            >
+                                                Edit
+                                            </button>
+                                        </>
                                     )}
                                     <button
                                         className="danger-button small"

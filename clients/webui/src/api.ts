@@ -18,6 +18,7 @@ import type {
   SystemInfo,
   Workspace,
   WorkspaceMount,
+  WorkspaceVscode,
 } from "./types";
 
 const apiBase = "/api";
@@ -129,6 +130,15 @@ export const api = {
     requestJson<Workspace>(`/workspaces/${workspaceId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
+    }),
+  cloneWorkspace: (workspaceId: string, payload: { workspace_id: string; name: string }) =>
+    requestJson<Workspace>(`/workspaces/${workspaceId}/clone`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  openWorkspaceVscode: (workspaceId: string) =>
+    requestJson<WorkspaceVscode>(`/workspaces/${workspaceId}/vscode`, {
+      method: "POST",
     }),
   deleteWorkspace: (workspaceId: string) =>
     requestJson<void>(`/workspaces/${workspaceId}`, { method: "DELETE" }),

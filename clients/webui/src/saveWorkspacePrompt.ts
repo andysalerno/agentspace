@@ -3,9 +3,9 @@ type SaveWorkspaceDecision =
   | { action: "destroy" }
   | { action: "save"; workspace_id: string; name: string };
 
-const WORKSPACE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const WORKSPACE_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
-function workspaceIdFromName(name: string) {
+export function workspaceIdFromName(name: string) {
   return name
     .trim()
     .toLowerCase()
