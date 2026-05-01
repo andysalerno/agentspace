@@ -55,7 +55,7 @@ class WorkspaceMount:
 
     @property
     def mount_path(self) -> str:
-        return f"/workspaces/{self.workspace_id}"
+        return f"/workspace/{self.workspace_id}"
 
     def summary(self) -> dict[str, str]:
         return {

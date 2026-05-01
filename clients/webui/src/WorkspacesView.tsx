@@ -100,7 +100,7 @@ export default function WorkspacesView() {
                             value={workspaceId}
                             onChange={(e) => setWorkspaceId(e.target.value)}
                         />
-                        <span className="muted">Used in the mount path: /workspaces/&lt;id&gt;</span>
+                        <span className="muted">Used in the mount path: /workspace/&lt;id&gt;</span>
                     </label>
                     <label>
                         Display Name

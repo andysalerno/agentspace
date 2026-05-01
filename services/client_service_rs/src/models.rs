@@ -275,7 +275,7 @@ impl WorkspaceMountRecord {
 
     #[must_use]
     pub fn mount_path(&self) -> String {
-        format!("/workspaces/{}", self.workspace_id)
+        format!("/workspace/{}", self.workspace_id)
     }
 
     #[must_use]
@@ -335,7 +335,7 @@ impl WorkspaceRecord {
 
     #[must_use]
     pub fn mount_path(&self) -> String {
-        format!("/workspaces/{}", self.workspace_id)
+        format!("/workspace/{}", self.workspace_id)
     }
 
     #[must_use]
