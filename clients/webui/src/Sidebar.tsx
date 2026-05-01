@@ -114,25 +114,29 @@ const navGroups: NavGroup[] = [
 ];
 
 export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, onToggleCollapse, darkMode, onToggleDarkMode }: SidebarProps) {
-    const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>(() => {
-        const stored = localStorage.getItem("sidebar-expanded-groups");
-        if (stored) {
-            try {
-                return JSON.parse(stored) as Record<string, boolean>;
-            } catch {
-                return {};
-            }
-        }
-        return {};
-    });
+    const [expandedGroups, setExpandedGroups] = useState<Partial<Record<string, ViewId>>>({});
+
+    function collapseGroups() {
+        setExpandedGroups({});
+        localStorage.removeItem("sidebar-expanded-groups");
+    }
+
+    function navigateToTopLevel(view: ViewId) {
+        collapseGroups();
+        onNavigate(view);
+    }
 
     function toggleGroup(groupId: string) {
         if (collapsed) {
             onToggleCollapse();
         }
         setExpandedGroups((prev) => {
-            const next = { ...prev, [groupId]: collapsed ? true : !prev[groupId] };
-            localStorage.setItem("sidebar-expanded-groups", JSON.stringify(next));
+            const next = { ...prev };
+            if (collapsed || prev[groupId] !== activeView) {
+                next[groupId] = activeView;
+            } else {
+                delete next[groupId];
+            }
             return next;
         });
     }
@@ -149,7 +153,7 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                     <li key={item.id}>
                         <button
                             className={`sidebar-nav-item ${activeView === item.id ? "active" : ""}`}
-                            onClick={() => onNavigate(item.id)}
+                            onClick={() => navigateToTopLevel(item.id)}
                             type="button"
                             title={item.label}
                         >
@@ -159,8 +163,8 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                     </li>
                 ))}
                 {navGroups.map((group) => {
-                    const isExpanded = expandedGroups[group.id] ?? false;
                     const groupActive = group.items.some((item) => item.id === activeView);
+                    const isExpanded = groupActive || expandedGroups[group.id] === activeView;
                     return (
                         <li key={group.id}>
                             <button
