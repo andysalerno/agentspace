@@ -374,9 +374,9 @@
   font-size: 0.68rem;
   letter-spacing: 0.06em;
   padding: 7px 10px;
-  position: sticky;
-  top: 42px;
-  z-index: 2;
+  position: static;
+  top: auto;
+  z-index: auto;
 }
 
 .management-table td,
