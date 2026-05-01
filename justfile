@@ -49,7 +49,8 @@ stack-build:
   podman compose -f compose.yaml build
 
 stack-up:
-  podman compose -f compose.yaml up -d --build
+  # podman compose -f compose.yaml up -d --build
+  podman compose --env-file compose.client-service-rs.env -f compose.yaml up -d --build
 
 stack-up-client-service-rs:
   podman compose --env-file compose.client-service-rs.env -f compose.yaml up -d --build
