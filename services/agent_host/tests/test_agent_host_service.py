@@ -363,8 +363,8 @@ async def test_create_session_records_workspace_mounts() -> None:
         WorkspaceMount(workspace_id="todo-list-items", mode="ro"),
     )
     assert runtime.created[0]["additional_paths"] == (
-        "/workspaces/todo-list-code",
-        "/workspaces/todo-list-items",
+        "/workspace/todo-list-code",
+        "/workspace/todo-list-items",
     )
     assert session["workspace_mounts"] == [
         {
@@ -670,16 +670,23 @@ def test_docker_runtime_mounts_workspace_volumes(
         "mode": "rw",
     }
     assert volumes["agentspace-workspace-todo-list-code"] == {
-        "bind": "/workspaces/todo-list-code",
+        "bind": "/workspace/todo-list-code",
         "mode": "rw",
     }
     assert volumes["agentspace-workspace-todo-list-items"] == {
-        "bind": "/workspaces/todo-list-items",
+        "bind": "/workspace/todo-list-items",
         "mode": "ro",
     }
-    assert captured["environment"]["AGENTSPACE_WORKSPACE_LINKS"] == (
-        "todo-list-code,todo-list-items"
-    )
+    assert "AGENTSPACE_WORKSPACE_LINKS" not in captured["environment"]
+    assert captured["entrypoint"] == [
+        "/usr/local/bin/uv",
+        "run",
+        "--no-dev",
+        "--package",
+        "kernel-host",
+        "-m",
+        "kernel_host.api_main",
+    ]
     assert captured["created_volumes"] == [
         {
             "name": "agentspace-session-workspace-test",

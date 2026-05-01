@@ -24,33 +24,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 WORKSPACE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SESSION_WORKSPACE_MOUNT_PATH = "/workspace"
-PERSISTENT_WORKSPACES_MOUNT_ROOT = "/workspaces"
-WORKSPACE_LINKS_ENV = "AGENTSPACE_WORKSPACE_LINKS"
-WORKSPACE_SETUP_SCRIPT = r"""
-from __future__ import annotations
-
-import os
-import pathlib
-import sys
-
-links_env = os.environ.get("AGENTSPACE_WORKSPACE_LINKS", "")
-links = [item for item in links_env.split(",") if item]
-workspace_root = pathlib.Path("/workspace")
-internal_root = pathlib.Path("/workspaces")
-workspace_root.mkdir(parents=True, exist_ok=True)
-internal_root.mkdir(parents=True, exist_ok=True)
-for workspace_id in links:
-    link = workspace_root / workspace_id
-    target = internal_root / workspace_id
-    if link.is_symlink():
-        if os.readlink(link) == str(target):
-            continue
-        raise RuntimeError(f"{link} points to unexpected target {os.readlink(link)!r}")
-    if link.exists():
-        raise RuntimeError(f"{link} already exists and cannot be linked")
-    link.symlink_to(target, target_is_directory=True)
-os.execvp(sys.argv[1], sys.argv[1:])
-"""
 WORKSPACE_SNAPSHOT_SCRIPT = r"""
 from __future__ import annotations
 
@@ -115,10 +88,6 @@ class WorkspaceMount:
     @property
     def mount_path(self) -> str:
         return f"/workspace/{self.workspace_id}"
-
-    @property
-    def internal_mount_path(self) -> str:
-        return f"{PERSISTENT_WORKSPACES_MOUNT_ROOT}/{self.workspace_id}"
 
     def summary(self) -> dict[str, str]:
         return {
@@ -578,9 +547,6 @@ class DockerKernelRuntime:
     ) -> None:
         environment = dict(env)
         environment["KERNEL_HARNESS"] = harness.value
-        environment[WORKSPACE_LINKS_ENV] = ",".join(
-            mount.workspace_id for mount in workspace_mounts
-        )
         if additional_paths:
             environment["KERNEL_ADDITIONAL_PATHS"] = os.pathsep.join(additional_paths)
 
@@ -634,7 +600,7 @@ class DockerKernelRuntime:
         for mount in workspace_mounts:
             self._ensure_workspace_volume(mount.volume_name)
             volumes[mount.volume_name] = {
-                "bind": mount.internal_mount_path,
+                "bind": mount.mount_path,
                 "mode": mount.mode,
             }
 
@@ -643,9 +609,6 @@ class DockerKernelRuntime:
             auto_remove=True,
             detach=True,
             entrypoint=[
-                "/usr/local/bin/python",
-                "-c",
-                WORKSPACE_SETUP_SCRIPT,
                 "/usr/local/bin/uv",
                 "run",
                 "--no-dev",
@@ -982,7 +945,7 @@ class AgentHost:
         workspace_mounts = _validate_workspace_mounts(workspace_mounts)
         effective_additional_paths = _append_unique_paths(
             additional_paths,
-            tuple(mount.internal_mount_path for mount in workspace_mounts),
+            tuple(mount.mount_path for mount in workspace_mounts),
         )
         logger.info(
             "creating session %s: harness=%s caller_env_keys=%s skills=%s"

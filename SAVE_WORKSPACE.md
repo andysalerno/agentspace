@@ -15,7 +15,7 @@ should be removed permanently.
 ## Recommended Filesystem Layout
 
 Use `/workspace` as a per-session scratch volume and mount enabled persistent
-workspaces elsewhere, then symlink them into `/workspace`.
+workspaces directly under `/workspace/<workspace_id>`.
 
 For every kernel session:
 
@@ -27,14 +27,10 @@ For a session with `todo-list-code` and `todo-list-items` enabled:
 
 ```text
 /workspace/                 # per-session scratch volume, cwd
-  todo-list-code -> /workspaces/todo-list-code
-  todo-list-items -> /workspaces/todo-list-items
+  todo-list-code/           # mounted Docker/Podman volume
+  todo-list-items/          # mounted Docker/Podman volume
   app.py                    # scratch/session work
   notes.md                  # scratch/session work
-
-/workspaces/                # internal mount root for persistent workspace volumes
-  todo-list-code/           # actual mounted Docker/Podman volume
-  todo-list-items/          # actual mounted Docker/Podman volume
 ```
 
 Public/user-facing mount paths should still be reported as:
@@ -44,24 +40,22 @@ Public/user-facing mount paths should still be reported as:
 /workspace/todo-list-items
 ```
 
-Internally, those paths are symlinks to actual mounts under `/workspaces`.
-
 ## Why This Layout
 
 Mounting persistent workspaces directly as nested volumes under `/workspace/<id>`
-makes save semantics ambiguous. Docker volume contents mounted inside another
-volume are not really part of the parent volume, but snapshot/copy logic can
-accidentally follow mounts, preserve odd mountpoint directories, or create
-surprising results.
+keeps all agent-accessible content inside the agent's allowed `/workspace` jail.
+Docker volume contents mounted inside another volume are separate from the
+parent volume, so save logic can exclude known mounted workspace names when
+snapshotting the session scratch volume.
 
-With symlinks:
+With direct mounts:
 
 - saving `/workspace` copies normal session files only;
-- mounted workspace data lives in separate volumes under `/workspaces`;
-- save logic can explicitly skip known symlink names;
+- mounted workspace data lives in separate volumes under `/workspace/<id>`;
+- save logic can explicitly skip known mounted workspace names;
 - the agent still sees enabled workspaces in its cwd;
-- `KERNEL_ADDITIONAL_PATHS` can include `/workspaces/<id>` so CLI harnesses can
-  follow symlink targets safely.
+- `KERNEL_ADDITIONAL_PATHS` can include `/workspace/<id>` so CLI harnesses can
+  access mounted workspaces safely.
 
 ## Implementation Plan
 
@@ -89,7 +83,7 @@ agentspace.session_id=<session_id>
 agentspace.managed=true
 ```
 
-### 2. Move Actual Enabled Workspace Mounts Back Under `/workspaces/<id>`
+### 2. Mount Actual Enabled Workspaces Under `/workspace/<id>`
 
 Keep client-visible mount paths as:
 
@@ -97,30 +91,9 @@ Keep client-visible mount paths as:
 /workspace/<workspace_id>
 ```
 
-Add an internal mount target helper:
-
-```text
-/workspaces/<workspace_id>
-```
-
-Mount persistent workspace volumes at the internal path, not directly under the
-scratch volume. Add `/workspaces/<id>` to additional paths for harnesses that
-need explicit filesystem allowlists.
-
-### 3. Create Symlinks Before Starting the Kernel Host Process
-
-Change container startup to run a setup step before `kernel_host.api_main`:
-
-1. Ensure `/workspace` and `/workspaces` exist.
-2. For each enabled workspace, create:
-
-   ```text
-   /workspace/<id> -> /workspaces/<id>
-   ```
-
-3. Fail clearly if `/workspace/<id>` already exists and is not the expected
-   symlink.
-4. `exec uv run --no-dev --package kernel-host -m kernel_host.api_main`.
+Mount persistent workspace volumes directly at the client-visible path. Add
+`/workspace/<id>` to additional paths for harnesses that need explicit
+filesystem allowlists.
 
 Top-level names matching mounted workspace IDs are reserved for that session.
 
@@ -146,7 +119,7 @@ The endpoint should:
 
 1. Create the target persistent workspace volume.
 2. Copy from the session scratch volume to the target volume.
-3. Exclude mounted workspace symlinks.
+3. Exclude mounted workspace names.
 4. Avoid following symlinks.
 
 Use a helper container with the kernel image and a small Python copy script
@@ -156,7 +129,7 @@ targets.
 Suggested copy behavior:
 
 - copy regular files and directories from `/workspace`;
-- skip top-level symlinks for enabled workspace IDs;
+- skip top-level entries for enabled workspace IDs;
 - do not follow symlinks;
 - preserve user-created symlinks if safe, or exclude all top-level symlinks for
   a stricter first implementation.
@@ -275,8 +248,7 @@ known.
 Update `docs/WORKSPACE_FEATURE.md` to describe:
 
 - `/workspace` as the per-session scratch volume and cwd;
-- `/workspaces/<id>` as internal persistent volume mount targets;
-- `/workspace/<id>` symlinks as the user-facing paths;
+- `/workspace/<id>` as persistent volume mount targets;
 - save/discard semantics.
 
 ## Test Plan
@@ -286,12 +258,10 @@ Update `docs/WORKSPACE_FEATURE.md` to describe:
 Add or update tests to verify:
 
 - every kernel container gets a scratch volume mounted at `/workspace`;
-- enabled persistent workspaces mount at `/workspaces/<id>`;
-- container setup creates symlinks under `/workspace/<id>`;
-- `additional_paths` includes symlink targets or otherwise permits symlink
-  access;
+- enabled persistent workspaces mount at `/workspace/<id>`;
+- `additional_paths` includes mounted workspace paths;
 - destroy removes the scratch volume;
-- snapshot copies scratch files but excludes mounted workspace symlinks.
+- snapshot copies scratch files but excludes mounted workspaces.
 
 ### `client_service_rs`
 
@@ -337,6 +307,5 @@ changes:
 
 ```text
 /workspace                 # session scratch cwd
-/workspace/<id>            # user-visible symlink
-/workspaces/<id>           # internal persistent volume mount
+/workspace/<id>            # persistent volume mount
 ```
