@@ -87,7 +87,7 @@ services:
     restart: unless-stopped
     environment:
       - LOG_LEVEL=INFO
-      - GITAGENT_REPO_PATH=/data/repos/main.git
+      - GITAGENT_REPO_PATH=${GITAGENT_REPO_PATH:-/data/repos/repo.git}
       - GITAGENT_DB_PATH=/data/gitagent.sqlite
       - GITAGENT_WORKDIR=/data/worktrees
       - GITAGENT_SCRATCH_PATH=/data/worktrees

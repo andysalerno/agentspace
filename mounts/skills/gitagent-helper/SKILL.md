@@ -24,15 +24,23 @@ EMPTY_TREE_SHA=4b825dc642cb6eb9a060e54bf8d69288fbee4904
 1. Clone when no local GitAgent checkout exists:
 
    ```sh
-   git clone "$GITAGENT_REMOTE_URL" gitagent-repo
+   /builtin-skills/gitagent-helper/gitagent-helper.sh clone gitagent-repo
    cd gitagent-repo
    ```
 
-   Or use the helper:
+   Do **not** stop if the remote has no commits yet. On first run, GitAgent may
+   not have a cloneable `repo.git` until the first patch is accepted. If the
+   helper reports that it initialized an empty local checkout, continue in that
+   directory, create the project, commit locally, and submit. The helper will use
+   the all-zero `base_sha` required for the first accepted commit.
+
+   Manual first-run equivalent:
 
    ```sh
-   /builtin-skills/gitagent-helper/gitagent-helper.sh clone gitagent-repo
+   mkdir gitagent-repo
    cd gitagent-repo
+   git init -b "${GITAGENT_DEFAULT_BRANCH:-main}"
+   git remote add origin "${GITAGENT_REMOTE_URL:-http://gitagent:8004/repo.git}"
    ```
 
 2. Make changes and commit locally. GitAgent accepted changes become a squash
@@ -46,7 +54,8 @@ EMPTY_TREE_SHA=4b825dc642cb6eb9a060e54bf8d69288fbee4904
    ```
 
 3. Before submitting to protected `main`, fetch and rebase onto the latest
-   target:
+   target. If the target has no remote head yet, the helper prints that there is
+   nothing to rebase; keep going.
 
    ```sh
    /builtin-skills/gitagent-helper/gitagent-helper.sh rebase "refs/heads/${GITAGENT_DEFAULT_BRANCH:-main}"
