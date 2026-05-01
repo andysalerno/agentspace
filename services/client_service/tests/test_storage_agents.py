@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from client_service.models import AgentRecord
+from client_service.models import AgentRecord, WorkspaceMountMode, WorkspaceMountRecord
 from client_service.storage import (
     AgentStore,
     Database,
@@ -28,6 +28,16 @@ def _make_agent(agent_id: str = "agent-one", **overrides: object) -> AgentRecord
         "system_prompt": "be helpful",
         "skills": ["alpha", "beta"],
         "env_vars": "FOO=bar\nBAZ=qux",
+        "workspace_mounts": [
+            WorkspaceMountRecord(
+                workspace_id="todo-list-code",
+                mode=WorkspaceMountMode.READ_WRITE,
+            ),
+            WorkspaceMountRecord(
+                workspace_id="todo-list-items",
+                mode=WorkspaceMountMode.READ_ONLY,
+            ),
+        ],
     }
     defaults.update(overrides)
     return AgentRecord(**defaults)  # type: ignore[arg-type]
@@ -70,6 +80,7 @@ async def test_insert_and_get_roundtrip(
         assert fetched.system_prompt == agent.system_prompt
         assert fetched.skills == agent.skills
         assert fetched.env_vars == agent.env_vars
+        assert fetched.workspace_mounts == agent.workspace_mounts
         assert fetched.created_at == agent.created_at
         assert fetched.updated_at == agent.updated_at
 
@@ -181,6 +192,10 @@ async def test_sqlite_persists_across_connections(tmp_path: Path) -> None:
     assert fetched is not None
     assert fetched.agent_id == "durable"
     assert fetched.skills == ["alpha", "beta"]
+    assert [mount.workspace_id for mount in fetched.workspace_mounts] == [
+        "todo-list-code",
+        "todo-list-items",
+    ]
 
 
 async def test_sqlite_initialize_migrates_missing_connection_id(
@@ -212,3 +227,36 @@ async def test_sqlite_initialize_migrates_missing_connection_id(
 
     assert fetched is not None
     assert fetched.connection_id is None
+    assert fetched.workspace_mounts == agent.workspace_mounts
+
+
+async def test_sqlite_initialize_migrates_missing_workspace_mounts(
+    tmp_path: Path,
+) -> None:
+    db = Database(tmp_path / "old-workspace-schema.sqlite")
+    await db.connect()
+    await db.executescript(
+        """
+        CREATE TABLE agents (
+            agent_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            harness TEXT NOT NULL,
+            system_prompt TEXT NOT NULL DEFAULT '',
+            skills_json TEXT NOT NULL DEFAULT '[]',
+            env_vars TEXT NOT NULL DEFAULT '',
+            connection_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """,
+    )
+
+    store = SqliteAgentStore(db)
+    await store.initialize()
+    agent = _make_agent("migrated-mounts")
+    await store.insert(agent)
+    fetched = await store.get("migrated-mounts")
+    await db.close()
+
+    assert fetched is not None
+    assert fetched.workspace_mounts == agent.workspace_mounts

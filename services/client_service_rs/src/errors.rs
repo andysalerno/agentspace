@@ -9,6 +9,7 @@ pub enum ValidationError {
     InvalidConnectionId { value: String },
     InvalidGatewayId { value: String },
     InvalidSkillId { value: String },
+    InvalidWorkspaceId { value: String },
     InvalidConnectionApiFlavor { value: String },
     InvalidHarnessName { value: String },
     InvalidGatewayType { value: String },
@@ -32,6 +33,10 @@ impl Display for ValidationError {
             Self::InvalidSkillId { value } => write!(
                 formatter,
                 "skill_id must use lowercase letters, digits, and single dashes only, got {value:?}"
+            ),
+            Self::InvalidWorkspaceId { value } => write!(
+                formatter,
+                "workspace_id must use lowercase letters, digits, and single dashes only, got {value:?}"
             ),
             Self::InvalidConnectionApiFlavor { value } => write!(
                 formatter,
@@ -57,6 +62,8 @@ pub enum StoreError {
     ConnectionNotFound { connection_id: String },
     GatewayAlreadyExists { gateway_id: String },
     GatewayNotFound { gateway_id: String },
+    WorkspaceAlreadyExists { workspace_id: String },
+    WorkspaceNotFound { workspace_id: String },
     SessionAlreadyExists { session_id: String },
     SessionNotFound { session_id: String },
     LockPoisoned { store: &'static str },
@@ -81,6 +88,12 @@ impl Display for StoreError {
             }
             Self::GatewayNotFound { gateway_id } => {
                 write!(formatter, "gateway {gateway_id:?} not found")
+            }
+            Self::WorkspaceAlreadyExists { workspace_id } => {
+                write!(formatter, "workspace {workspace_id:?} already exists")
+            }
+            Self::WorkspaceNotFound { workspace_id } => {
+                write!(formatter, "workspace {workspace_id:?} not found")
             }
             Self::SessionAlreadyExists { session_id } => {
                 write!(formatter, "session {session_id:?} already exists")

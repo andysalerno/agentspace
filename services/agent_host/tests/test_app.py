@@ -5,7 +5,7 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from agent_host.service import AgentHost, KernelRuntimeSession
+from agent_host.service import AgentHost, KernelRuntimeSession, WorkspaceMount
 from agent_host.skills import SkillsService
 from fastapi.testclient import TestClient
 from kernel.events import (
@@ -28,7 +28,7 @@ class StubRuntime:
         self._summaries: dict[str, dict[str, object]] = {}
         self._histories: dict[str, list[list[KernelEvent]]] = {}
 
-    async def create_session(
+    async def create_session(  # noqa: PLR0913
         self,
         *,
         session_id: str,
@@ -36,8 +36,9 @@ class StubRuntime:
         env: dict[str, str],
         additional_paths: tuple[str, ...],
         skills: tuple[str, ...] = (),
+        workspace_mounts: tuple[WorkspaceMount, ...] = (),
     ) -> KernelRuntimeSession:
-        del harness, env, additional_paths, skills
+        del harness, env, additional_paths, skills, workspace_mounts
         container_name = f"container-{session_id[:8]}"
         self._summaries[container_name] = {
             "status": "idle",

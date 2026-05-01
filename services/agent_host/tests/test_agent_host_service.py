@@ -9,8 +9,10 @@ from agent_host.service import (
     DockerKernelRuntime,
     KernelRuntimeSession,
     SessionNotFoundError,
+    WorkspaceMount,
     _summarize_docker_stats,  # pyright: ignore[reportPrivateUsage]
 )
+from docker.errors import NotFound
 from kernel.events import (
     KernelEvent,
     KernelStatus,
@@ -33,7 +35,7 @@ class StubRuntime:
         self._summaries: dict[str, dict[str, object]] = {}
         self._histories: dict[str, list[list[KernelEvent]]] = {}
 
-    async def create_session(
+    async def create_session(  # noqa: PLR0913
         self,
         *,
         session_id: str,
@@ -41,6 +43,7 @@ class StubRuntime:
         env: dict[str, str],
         additional_paths: tuple[str, ...],
         skills: tuple[str, ...] = (),
+        workspace_mounts: tuple[WorkspaceMount, ...] = (),
     ) -> KernelRuntimeSession:
         del skills
         container_name = f"container-{session_id[:8]}"
@@ -50,6 +53,7 @@ class StubRuntime:
                 "harness": harness,
                 "env": env,
                 "additional_paths": additional_paths,
+                "workspace_mounts": workspace_mounts,
             },
         )
         self._summaries[container_name] = {
@@ -173,6 +177,26 @@ class FakeDockerContainers:
 class FakeDockerClient:
     def __init__(self, captured: dict[str, Any]) -> None:
         self.containers = FakeDockerContainers(captured)
+        self.volumes = FakeDockerVolumes(captured)
+
+
+class FakeDockerVolumes:
+    def __init__(self, captured: dict[str, Any]) -> None:
+        self._captured = captured
+        self._existing: set[str] = set()
+
+    def get(self, name: str) -> object:
+        if name not in self._existing:
+            msg = "missing"
+            raise NotFound(msg)
+        return object()
+
+    def create(self, *, name: str, labels: dict[str, str]) -> object:
+        self._existing.add(name)
+        self._captured.setdefault("created_volumes", []).append(
+            {"name": name, "labels": labels},
+        )
+        return object()
 
 
 def _runtime_with_captured_run(
@@ -222,6 +246,43 @@ async def test_create_send_history_and_destroy() -> None:
 
     await host.destroy_session(session_id)
     assert len(runtime.destroyed) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_session_records_workspace_mounts() -> None:
+    runtime = StubRuntime()
+    host = AgentHost(runtime=runtime)
+
+    session = await host.create_session(
+        harness=HarnessName.COPILOT_CLI,
+        workspace_mounts=(
+            WorkspaceMount(workspace_id="todo-list-code", mode="rw"),
+            WorkspaceMount(workspace_id="todo-list-items", mode="ro"),
+        ),
+    )
+
+    assert runtime.created[0]["workspace_mounts"] == (
+        WorkspaceMount(workspace_id="todo-list-code", mode="rw"),
+        WorkspaceMount(workspace_id="todo-list-items", mode="ro"),
+    )
+    assert runtime.created[0]["additional_paths"] == (
+        "/workspaces/todo-list-code",
+        "/workspaces/todo-list-items",
+    )
+    assert session["workspace_mounts"] == [
+        {
+            "workspace_id": "todo-list-code",
+            "mode": "rw",
+            "mount_path": "/workspaces/todo-list-code",
+            "volume_name": "agentspace-workspace-todo-list-code",
+        },
+        {
+            "workspace_id": "todo-list-items",
+            "mode": "ro",
+            "mount_path": "/workspaces/todo-list-items",
+            "volume_name": "agentspace-workspace-todo-list-items",
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -459,3 +520,47 @@ def test_docker_runtime_keeps_free_port_when_vscode_disabled(
     assert isinstance(ports, dict)
     assert "8080/tcp" not in ports
     assert ports["8081/tcp"] == ("0.0.0.0", 0)  # noqa: S104
+
+
+def test_docker_runtime_mounts_workspace_volumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime, captured = _runtime_with_captured_run(monkeypatch)
+
+    runtime._run_container(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        "agentspace-kernel-test",
+        HarnessName.ECHO,
+        {},
+        (),
+        workspace_mounts=(
+            WorkspaceMount(workspace_id="todo-list-code", mode="rw"),
+            WorkspaceMount(workspace_id="todo-list-items", mode="ro"),
+        ),
+    )
+
+    volumes = captured["volumes"]
+    assert isinstance(volumes, dict)
+    assert volumes["agentspace-workspace-todo-list-code"] == {
+        "bind": "/workspaces/todo-list-code",
+        "mode": "rw",
+    }
+    assert volumes["agentspace-workspace-todo-list-items"] == {
+        "bind": "/workspaces/todo-list-items",
+        "mode": "ro",
+    }
+    assert captured["created_volumes"] == [
+        {
+            "name": "agentspace-workspace-todo-list-code",
+            "labels": {
+                "agentspace.role": "workspace",
+                "agentspace.managed": "true",
+            },
+        },
+        {
+            "name": "agentspace-workspace-todo-list-items",
+            "labels": {
+                "agentspace.role": "workspace",
+                "agentspace.managed": "true",
+            },
+        },
+    ]

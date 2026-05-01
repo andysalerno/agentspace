@@ -23,7 +23,10 @@ use uuid::Uuid;
 
 use crate::{
     agent_host::AgentHostClient,
-    store::{AgentStore, ConnectionStore, GatewayStore, KernelConfigStore, SessionStore, StoreSet},
+    store::{
+        AgentStore, ConnectionStore, GatewayStore, KernelConfigStore, SessionStore, StoreSet,
+        WorkspaceStore,
+    },
 };
 
 pub mod agent_host;
@@ -141,6 +144,7 @@ pub struct AppState {
     pub(crate) kernel_configs: KernelConfigStore,
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
+    pub(crate) workspaces: WorkspaceStore,
     pub(crate) sessions: SessionStore,
     pub(crate) active_turns: Arc<Mutex<BTreeMap<String, ActiveTurnRecord>>>,
     pub(crate) instance_id: Uuid,
@@ -191,6 +195,7 @@ impl AppState {
             kernel_configs: stores.kernel_configs,
             connections: stores.connections,
             gateways: stores.gateways,
+            workspaces: stores.workspaces,
             sessions: stores.sessions,
             active_turns: Arc::new(Mutex::new(BTreeMap::new())),
             instance_id: Uuid::now_v7(),

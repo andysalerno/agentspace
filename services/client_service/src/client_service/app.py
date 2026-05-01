@@ -21,6 +21,8 @@ from client_service.models import (
     DEFAULT_CONNECTION_API_FLAVOR,
     ClientType,
     ConnectionApiFlavor,
+    WorkspaceMountMode,
+    WorkspaceMountRecord,
 )
 from client_service.service import (
     AgentAlreadyExistsError,
@@ -34,8 +36,12 @@ from client_service.service import (
     InvalidAgentIdError,
     InvalidConnectionIdError,
     InvalidGatewayIdError,
+    InvalidWorkspaceIdError,
     KernelNotFoundError,
     SessionNotFoundError,
+    WorkspaceAlreadyExistsError,
+    WorkspaceInUseError,
+    WorkspaceNotFoundError,
 )
 from client_service.storage import (
     Database,
@@ -44,6 +50,7 @@ from client_service.storage import (
     SqliteGatewayStore,
     SqliteKernelConfigStore,
     SqliteSessionStore,
+    SqliteWorkspaceStore,
 )
 
 if TYPE_CHECKING:
@@ -65,6 +72,7 @@ def _build_service() -> tuple[ClientService, Database | None]:
     gateway_store = SqliteGatewayStore(database)
     connection_store = SqliteConnectionStore(database)
     session_store = SqliteSessionStore(database)
+    workspace_store = SqliteWorkspaceStore(database)
     return (
         ClientService(
             agent_store=agent_store,
@@ -72,6 +80,7 @@ def _build_service() -> tuple[ClientService, Database | None]:
             gateway_store=gateway_store,
             connection_store=connection_store,
             session_store=session_store,
+            workspace_store=workspace_store,
         ),
         database,
     )
@@ -89,6 +98,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await SqliteGatewayStore(_database).initialize()
         await SqliteConnectionStore(_database).initialize()
         await SqliteSessionStore(_database).initialize()
+        await SqliteWorkspaceStore(_database).initialize()
     # Run autostart concurrently with serving so a slow agent_host or
     # transient container failure does not block the API from coming up.
     autostart_task = asyncio.create_task(
@@ -116,6 +126,18 @@ app.add_middleware(
 )
 
 
+class WorkspaceMountRequest(BaseModel):
+    workspace_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    mode: WorkspaceMountMode = WorkspaceMountMode.READ_WRITE
+
+    def to_record(self) -> WorkspaceMountRecord:
+        return WorkspaceMountRecord(workspace_id=self.workspace_id, mode=self.mode)
+
+
+def _empty_workspace_mount_requests() -> list[WorkspaceMountRequest]:
+    return []
+
+
 class CreateAgentRequest(BaseModel):
     agent_id: str = Field(pattern=r"^[a-z]+(?:-[a-z]+)*$")
     name: str
@@ -124,6 +146,9 @@ class CreateAgentRequest(BaseModel):
     skills: list[str] = Field(default_factory=list)
     env_vars: str = ""
     connection_id: str | None = None
+    workspace_mounts: list[WorkspaceMountRequest] = Field(
+        default_factory=_empty_workspace_mount_requests,
+    )
 
 
 class UpdateAgentRequest(BaseModel):
@@ -133,6 +158,7 @@ class UpdateAgentRequest(BaseModel):
     skills: list[str] | None = None
     env_vars: str | None = None
     connection_id: str | None = None
+    workspace_mounts: list[WorkspaceMountRequest] | None = None
 
 
 class CreateSessionRequest(BaseModel):
@@ -164,6 +190,15 @@ class UpdateKernelConfigRequest(BaseModel):
     env_vars: str = ""
 
 
+class CreateWorkspaceRequest(BaseModel):
+    workspace_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    name: str
+
+
+class UpdateWorkspaceRequest(BaseModel):
+    name: str | None = None
+
+
 @app.get("/kernel-configs")
 async def list_kernel_configs() -> list[dict[str, object]]:
     return await service.list_kernel_configs()
@@ -180,6 +215,54 @@ async def update_kernel_config(
     payload: UpdateKernelConfigRequest,
 ) -> dict[str, object]:
     return await service.update_kernel_config(harness, payload.env_vars)
+
+
+@app.get("/workspaces")
+async def list_workspaces() -> list[dict[str, object]]:
+    return await service.list_workspaces()
+
+
+@app.post("/workspaces")
+async def create_workspace(payload: CreateWorkspaceRequest) -> dict[str, object]:
+    try:
+        return await service.create_workspace(
+            workspace_id=payload.workspace_id,
+            name=payload.name,
+        )
+    except WorkspaceAlreadyExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidWorkspaceIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/workspaces/{workspace_id}")
+async def get_workspace(workspace_id: str) -> dict[str, object]:
+    try:
+        return await service.get_workspace(workspace_id)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.patch("/workspaces/{workspace_id}")
+async def update_workspace(
+    workspace_id: str,
+    payload: UpdateWorkspaceRequest,
+) -> dict[str, object]:
+    try:
+        changes = payload.model_dump(exclude_unset=True)
+        return await service.update_workspace(workspace_id, **changes)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/workspaces/{workspace_id}", status_code=204)
+async def delete_workspace(workspace_id: str) -> None:
+    try:
+        await service.delete_workspace(workspace_id)
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkspaceInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 # --- Connections ---
@@ -275,6 +358,7 @@ async def create_agent(payload: CreateAgentRequest) -> dict[str, object]:
             skills=payload.skills,
             env_vars=payload.env_vars,
             connection_id=payload.connection_id,
+            workspace_mounts=[mount.to_record() for mount in payload.workspace_mounts],
         )
     except AgentAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -282,6 +366,10 @@ async def create_agent(payload: CreateAgentRequest) -> dict[str, object]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except ConnectionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidWorkspaceIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/agents")
@@ -304,6 +392,10 @@ async def update_agent(
 ) -> dict[str, object]:
     try:
         changes = payload.model_dump(exclude_unset=True)
+        if payload.workspace_mounts is not None:
+            changes["workspace_mounts"] = [
+                mount.to_record() for mount in payload.workspace_mounts
+            ]
         return await service.update_agent(
             agent_id,
             **changes,
@@ -312,6 +404,10 @@ async def update_agent(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ConnectionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except WorkspaceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidWorkspaceIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.delete("/agents/{agent_id}", status_code=204)

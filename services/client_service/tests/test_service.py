@@ -10,6 +10,8 @@ from client_service.models import (
     MessageRecord,
     MessageRole,
     SessionRecord,
+    WorkspaceMountMode,
+    WorkspaceMountRecord,
 )
 from client_service.service import (
     AgentAlreadyExistsError,
@@ -57,10 +59,18 @@ class StubAgentHostClient:
         harness: HarnessName,
         skills: list[str] | None = None,
         env: dict[str, str] | None = None,
+        workspace_mounts: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
         del skills
         session_id = f"host-{len(self.created) + 1}"
-        self.created.append({"harness": harness, "session_id": session_id, "env": env})
+        self.created.append(
+            {
+                "harness": harness,
+                "session_id": session_id,
+                "env": env,
+                "workspace_mounts": workspace_mounts or [],
+            },
+        )
         self._sessions[session_id] = {"session_id": session_id, "status": "idle"}
         session: dict[str, object] = {"session_id": session_id, "status": "idle"}
         return session
@@ -276,6 +286,44 @@ async def test_agent_and_session_lifecycle() -> None:
     assert upstream.destroyed == [str(reset["agent_host_session_id"])]
     with pytest.raises(SessionNotFoundError):
         await service.list_messages(session_id)
+
+
+@pytest.mark.asyncio
+async def test_agent_session_passes_workspace_mounts() -> None:
+    upstream = StubAgentHostClient()
+    service = ClientService(agent_host_client=cast("AgentHostClient", upstream))
+    await service.create_workspace(workspace_id="todo-list-code", name="TodoListCode")
+    await service.create_workspace(workspace_id="todo-list-items", name="TodoListItems")
+    agent = await service.create_agent(
+        agent_id="workspace-agent",
+        name="Workspace Agent",
+        workspace_mounts=[
+            WorkspaceMountRecord(
+                workspace_id="todo-list-code",
+                mode=WorkspaceMountMode.READ_WRITE,
+            ),
+            WorkspaceMountRecord(
+                workspace_id="todo-list-items",
+                mode=WorkspaceMountMode.READ_ONLY,
+            ),
+        ],
+    )
+
+    session = await service.create_session(agent_id=str(agent["agent_id"]))
+
+    assert session["agent_id"] == "workspace-agent"
+    assert upstream.created[0]["workspace_mounts"] == [
+        {
+            "workspace_id": "todo-list-code",
+            "mode": "rw",
+            "mount_path": "/workspaces/todo-list-code",
+        },
+        {
+            "workspace_id": "todo-list-items",
+            "mode": "ro",
+            "mount_path": "/workspaces/todo-list-items",
+        },
+    ]
 
 
 @pytest.mark.asyncio

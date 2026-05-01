@@ -29,6 +29,18 @@ if TYPE_CHECKING:
 _UNSPECIFIED_SENTINEL = object()
 
 
+def _workspace_mount_summary(mount: object) -> dict[str, object]:
+    typed_mount = cast("Any", mount)
+    workspace_id = typed_mount.workspace_id
+    mode = typed_mount.mode
+    mode_value = getattr(mode, "value", mode)
+    return {
+        "workspace_id": workspace_id,
+        "mode": mode_value,
+        "mount_path": f"/workspaces/{workspace_id}",
+    }
+
+
 class StubClientService:
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, object]] = {}
@@ -38,6 +50,7 @@ class StubClientService:
         self.kernel_configs: dict[str, dict[str, object]] = {}
         self.gateways: dict[str, dict[str, object]] = {}
         self.connections: dict[str, dict[str, object]] = {}
+        self.workspaces: dict[str, dict[str, object]] = {}
         self.autostart_called = False
 
     async def create_agent(  # noqa: PLR0913
@@ -50,6 +63,7 @@ class StubClientService:
         skills: list[str] | None = None,
         env_vars: str = "",
         connection_id: str | None = None,
+        workspace_mounts: list[object] | None = None,
     ) -> dict[str, object]:
         agent: dict[str, object] = {
             "agent_id": agent_id,
@@ -59,6 +73,9 @@ class StubClientService:
             "skills": skills or [],
             "env_vars": env_vars,
             "connection_id": connection_id,
+            "workspace_mounts": [
+                _workspace_mount_summary(mount) for mount in (workspace_mounts or [])
+            ],
             "created_at": "now",
             "updated_at": "now",
         }
@@ -84,6 +101,7 @@ class StubClientService:
         skills: list[str] | object = _UNSPECIFIED_SENTINEL,
         env_vars: str | object = _UNSPECIFIED_SENTINEL,
         connection_id: str | None | object = _UNSPECIFIED_SENTINEL,
+        workspace_mounts: list[object] | object = _UNSPECIFIED_SENTINEL,
     ) -> dict[str, object]:
         agent = self.agents[agent_id]
         if name is not None and name is not _UNSPECIFIED_SENTINEL:
@@ -98,7 +116,49 @@ class StubClientService:
             agent["env_vars"] = env_vars
         if connection_id is not _UNSPECIFIED_SENTINEL:
             agent["connection_id"] = connection_id
+        if workspace_mounts is not _UNSPECIFIED_SENTINEL:
+            agent["workspace_mounts"] = [
+                _workspace_mount_summary(mount)
+                for mount in cast("list[object]", workspace_mounts)
+            ]
         return agent
+
+    async def create_workspace(
+        self,
+        *,
+        workspace_id: str,
+        name: str,
+    ) -> dict[str, object]:
+        workspace: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "name": name,
+            "mount_path": f"/workspaces/{workspace_id}",
+            "volume_name": f"agentspace-workspace-{workspace_id}",
+            "created_at": "now",
+            "updated_at": "now",
+        }
+        self.workspaces[workspace_id] = workspace
+        return workspace
+
+    async def list_workspaces(self) -> list[dict[str, object]]:
+        return list(self.workspaces.values())
+
+    async def get_workspace(self, workspace_id: str) -> dict[str, object]:
+        return self.workspaces[workspace_id]
+
+    async def update_workspace(
+        self,
+        workspace_id: str,
+        *,
+        name: str | object = _UNSPECIFIED_SENTINEL,
+    ) -> dict[str, object]:
+        workspace = self.workspaces[workspace_id]
+        if name is not _UNSPECIFIED_SENTINEL and name is not None:
+            workspace["name"] = name
+        return workspace
+
+    async def delete_workspace(self, workspace_id: str) -> None:
+        del self.workspaces[workspace_id]
 
     async def delete_agent(self, agent_id: str) -> None:
         del self.agents[agent_id]
@@ -581,6 +641,41 @@ def test_create_agent_accepts_explicit_harness(client: TestClient) -> None:
 
     assert response.status_code == 200
     assert response.json()["harness"] == "codex"
+
+
+def test_workspace_routes_and_agent_mounts(client: TestClient) -> None:
+    workspace = client.post(
+        "/workspaces",
+        json={"workspace_id": "todo-list-code", "name": "TodoListCode"},
+    )
+    created_agent = client.post(
+        "/agents",
+        json={
+            "agent_id": "agent-one",
+            "name": "Agent One",
+            "workspace_mounts": [
+                {"workspace_id": "todo-list-code", "mode": "ro"},
+            ],
+        },
+    )
+    listed = client.get("/workspaces")
+    deleted_agent = client.delete("/agents/agent-one")
+    deleted_workspace = client.delete("/workspaces/todo-list-code")
+
+    assert workspace.status_code == 200
+    assert workspace.json()["mount_path"] == "/workspaces/todo-list-code"
+    assert created_agent.status_code == 200
+    assert created_agent.json()["workspace_mounts"] == [
+        {
+            "workspace_id": "todo-list-code",
+            "mode": "ro",
+            "mount_path": "/workspaces/todo-list-code",
+        },
+    ]
+    assert listed.status_code == 200
+    assert listed.json()[0]["volume_name"] == "agentspace-workspace-todo-list-code"
+    assert deleted_agent.status_code == 204
+    assert deleted_workspace.status_code == 204
 
 
 def test_patch_agent_preserves_omitted_connection(client: TestClient) -> None:

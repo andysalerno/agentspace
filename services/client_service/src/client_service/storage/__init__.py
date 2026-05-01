@@ -26,6 +26,11 @@ from client_service.storage.sessions import (
     SessionStore,
     SqliteSessionStore,
 )
+from client_service.storage.workspaces import (
+    InMemoryWorkspaceStore,
+    SqliteWorkspaceStore,
+    WorkspaceStore,
+)
 
 __all__ = [
     "AgentStore",
@@ -37,6 +42,7 @@ __all__ = [
     "InMemoryGatewayStore",
     "InMemoryKernelConfigStore",
     "InMemorySessionStore",
+    "InMemoryWorkspaceStore",
     "KernelConfigStore",
     "SessionStore",
     "SqliteAgentStore",
@@ -44,4 +50,6 @@ __all__ = [
     "SqliteGatewayStore",
     "SqliteKernelConfigStore",
     "SqliteSessionStore",
+    "SqliteWorkspaceStore",
+    "WorkspaceStore",
 ]

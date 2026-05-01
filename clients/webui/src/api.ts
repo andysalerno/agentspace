@@ -16,6 +16,8 @@ import type {
   SessionSummary,
   Skill,
   SystemInfo,
+  Workspace,
+  WorkspaceMount,
 } from "./types";
 
 const apiBase = "/api";
@@ -117,6 +119,19 @@ async function consumeMessageStream(
 
 export const api = {
   listHarnesses: () => requestJson<string[]>("/harnesses"),
+  listWorkspaces: () => requestJson<Workspace[]>("/workspaces"),
+  createWorkspace: (payload: { workspace_id: string; name: string }) =>
+    requestJson<Workspace>("/workspaces", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateWorkspace: (workspaceId: string, payload: { name?: string }) =>
+    requestJson<Workspace>(`/workspaces/${workspaceId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteWorkspace: (workspaceId: string) =>
+    requestJson<void>(`/workspaces/${workspaceId}`, { method: "DELETE" }),
   listAgents: () => requestJson<Agent[]>("/agents"),
   createAgent: (payload: {
     agent_id: string;
@@ -126,6 +141,7 @@ export const api = {
     skills?: string[];
     env_vars?: string;
     connection_id?: string | null;
+    workspace_mounts?: Array<Pick<WorkspaceMount, "workspace_id" | "mode">>;
   }) =>
     requestJson<Agent>("/agents", {
       method: "POST",
@@ -138,6 +154,7 @@ export const api = {
     skills?: string[];
     env_vars?: string;
     connection_id?: string | null;
+    workspace_mounts?: Array<Pick<WorkspaceMount, "workspace_id" | "mode">>;
   }) =>
     requestJson<Agent>(`/agents/${agentId}`, {
       method: "PATCH",

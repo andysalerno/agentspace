@@ -1,6 +1,14 @@
-export type ViewId = "chat" | "agents" | "sessions" | "kernels" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
+export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
 
 export type Harness = string;
+
+export type WorkspaceMountMode = "rw" | "ro";
+
+export type WorkspaceMount = {
+  workspace_id: string;
+  mode: WorkspaceMountMode;
+  mount_path: string;
+};
 
 export type Agent = {
   agent_id: string;
@@ -10,6 +18,16 @@ export type Agent = {
   skills: string[];
   env_vars: string;
   connection_id: string | null;
+  workspace_mounts: WorkspaceMount[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type Workspace = {
+  workspace_id: string;
+  name: string;
+  mount_path: string;
+  volume_name: string;
   created_at: string;
   updated_at: string;
 };

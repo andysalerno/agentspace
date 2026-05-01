@@ -27,6 +27,9 @@ from client_service.models import (
     MessageRole,
     SessionRecord,
     ToolCallRecord,
+    WorkspaceMountMode,
+    WorkspaceMountRecord,
+    WorkspaceRecord,
     utc_now,
 )
 from client_service.storage.agents import (
@@ -51,6 +54,12 @@ from client_service.storage.kernel_configs import (
     KernelConfigStore,
 )
 from client_service.storage.sessions import InMemorySessionStore, SessionStore
+from client_service.storage.workspaces import (
+    InMemoryWorkspaceStore,
+    WorkspaceExistsError,
+    WorkspaceMissingError,
+    WorkspaceStore,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
@@ -90,6 +99,7 @@ logger = logging.getLogger(__name__)
 AGENT_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
 CONNECTION_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
 GATEWAY_ID_PATTERN = re.compile(r"^[a-z]+(?:-[a-z]+)*$")
+WORKSPACE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _UNSPECIFIED: object = object()
 CLIENT_SERVICE_ENV_PREFIX = "CLIENT_SERVICE_"
 
@@ -138,6 +148,22 @@ class InvalidConnectionIdError(ValueError):
     pass
 
 
+class WorkspaceNotFoundError(KeyError):
+    pass
+
+
+class WorkspaceAlreadyExistsError(ValueError):
+    pass
+
+
+class WorkspaceInUseError(ValueError):
+    pass
+
+
+class InvalidWorkspaceIdError(ValueError):
+    pass
+
+
 class ConnectionModelsError(RuntimeError):
     pass
 
@@ -164,6 +190,7 @@ class ClientService:
         gateway_store: GatewayStore | None = None,
         connection_store: ConnectionStore | None = None,
         session_store: SessionStore | None = None,
+        workspace_store: WorkspaceStore | None = None,
     ) -> None:
         self._agent_host = agent_host_client or HttpAgentHostClient()
         self._agent_store: AgentStore = agent_store or InMemoryAgentStore()
@@ -175,6 +202,9 @@ class ClientService:
             connection_store or InMemoryConnectionStore()
         )
         self._session_store: SessionStore = session_store or InMemorySessionStore()
+        self._workspace_store: WorkspaceStore = (
+            workspace_store or InMemoryWorkspaceStore()
+        )
         self._turns: dict[str, _ActiveTurn] = {}
         self._session_turns: dict[str, str] = {}
         self._lock = asyncio.Lock()
@@ -191,10 +221,14 @@ class ClientService:
         skills: list[str] | None = None,
         env_vars: str = "",
         connection_id: str | None = None,
+        workspace_mounts: list[WorkspaceMountRecord] | None = None,
     ) -> dict[str, object]:
         _validate_agent_id(agent_id)
         if connection_id is not None:
             await self._require_connection(connection_id)
+        validated_workspace_mounts = await self._validated_workspace_mounts(
+            workspace_mounts or [],
+        )
         agent = AgentRecord(
             agent_id=agent_id,
             name=name,
@@ -203,6 +237,7 @@ class ClientService:
             skills=skills or [],
             env_vars=env_vars,
             connection_id=connection_id,
+            workspace_mounts=validated_workspace_mounts,
         )
         async with self._lock:
             try:
@@ -243,6 +278,75 @@ class ClientService:
         logger.info("updated kernel config for %s", harness.value)
         return record.summary()
 
+    async def create_workspace(
+        self,
+        *,
+        workspace_id: str,
+        name: str,
+    ) -> dict[str, object]:
+        _validate_workspace_id(workspace_id)
+        workspace = WorkspaceRecord(workspace_id=workspace_id, name=name)
+        async with self._lock:
+            try:
+                await self._workspace_store.insert(workspace)
+            except WorkspaceExistsError as exc:
+                raise WorkspaceAlreadyExistsError(workspace_id) from exc
+        logger.info("created workspace %s", workspace_id)
+        return workspace.summary()
+
+    async def list_workspaces(self) -> list[dict[str, object]]:
+        async with self._lock:
+            workspaces = [
+                workspace.summary() for workspace in await self._workspace_store.list()
+            ]
+        return sorted(workspaces, key=lambda item: str(item["created_at"]))
+
+    async def get_workspace(self, workspace_id: str) -> dict[str, object]:
+        workspace = await self._require_workspace(workspace_id)
+        return workspace.summary()
+
+    async def update_workspace(
+        self,
+        workspace_id: str,
+        *,
+        name: str | None | object = _UNSPECIFIED,
+    ) -> dict[str, object]:
+        async with self._lock:
+            workspace = await self._require_workspace(workspace_id)
+            if name is not _UNSPECIFIED and name is not None:
+                workspace.name = str(name)
+            workspace.updated_at = utc_now()
+            try:
+                await self._workspace_store.update(workspace)
+            except WorkspaceMissingError as exc:
+                raise WorkspaceNotFoundError(workspace_id) from exc
+        return workspace.summary()
+
+    async def delete_workspace(self, workspace_id: str) -> None:
+        async with self._lock:
+            workspace = await self._workspace_store.get(workspace_id)
+            if workspace is None:
+                raise WorkspaceNotFoundError(workspace_id)
+            agents = await self._agent_store.list()
+            in_use_by = [
+                agent.agent_id
+                for agent in agents
+                if any(
+                    mount.workspace_id == workspace_id
+                    for mount in agent.workspace_mounts
+                )
+            ]
+            if in_use_by:
+                msg = (
+                    f"workspace {workspace_id!r} is still mounted by agents: "
+                    f"{', '.join(sorted(in_use_by))}"
+                )
+                raise WorkspaceInUseError(msg)
+            removed = await self._workspace_store.delete(workspace_id)
+        if not removed:
+            raise WorkspaceNotFoundError(workspace_id)
+        logger.info("deleted workspace registration %s", workspace_id)
+
     async def get_agent(self, agent_id: str) -> dict[str, object]:
         agent = await self._require_agent(agent_id)
         return agent.summary()
@@ -257,6 +361,7 @@ class ClientService:
         skills: list[str] | None | object = _UNSPECIFIED,
         env_vars: str | None | object = _UNSPECIFIED,
         connection_id: str | None | object = _UNSPECIFIED,
+        workspace_mounts: list[WorkspaceMountRecord] | None | object = _UNSPECIFIED,
     ) -> dict[str, object]:
         async with self._lock:
             agent = await self._require_agent(agent_id)
@@ -275,6 +380,10 @@ class ClientService:
                 if isinstance(cid, str):
                     await self._require_connection(cid)
                 agent.connection_id = cid  # type: ignore[assignment]
+            if workspace_mounts is not _UNSPECIFIED and workspace_mounts is not None:
+                agent.workspace_mounts = await self._validated_workspace_mounts(
+                    list(cast("list[WorkspaceMountRecord]", workspace_mounts)),
+                )
             agent.updated_at = utc_now()
             try:
                 await self._agent_store.update(agent)
@@ -320,6 +429,7 @@ class ClientService:
             harness=agent.harness,
             skills=agent.skills,
             env=env,
+            workspace_mounts=[mount.summary() for mount in agent.workspace_mounts],
         )
         session = SessionRecord(
             session_id=uuid.uuid4().hex,
@@ -727,6 +837,33 @@ class ClientService:
         if agent is None:
             raise AgentNotFoundError(agent_id)
         return agent
+
+    async def _require_workspace(self, workspace_id: str) -> WorkspaceRecord:
+        workspace = await self._workspace_store.get(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(workspace_id)
+        return workspace
+
+    async def _validated_workspace_mounts(
+        self,
+        mounts: list[WorkspaceMountRecord],
+    ) -> list[WorkspaceMountRecord]:
+        validated: list[WorkspaceMountRecord] = []
+        seen: set[str] = set()
+        for mount in mounts:
+            _validate_workspace_id(mount.workspace_id)
+            if mount.workspace_id in seen:
+                msg = f"workspace {mount.workspace_id!r} is mounted more than once"
+                raise InvalidWorkspaceIdError(msg)
+            await self._require_workspace(mount.workspace_id)
+            validated.append(
+                WorkspaceMountRecord(
+                    workspace_id=mount.workspace_id,
+                    mode=WorkspaceMountMode(mount.mode),
+                ),
+            )
+            seen.add(mount.workspace_id)
+        return validated
 
     async def _get_session(self, session_id: str) -> SessionRecord:
         session = await self._session_store.get(session_id)
@@ -1351,6 +1488,12 @@ def _validate_gateway_id(gateway_id: str) -> None:
     if not GATEWAY_ID_PATTERN.fullmatch(gateway_id):
         msg = "gateway_id must use lowercase letters and single dashes only"
         raise InvalidGatewayIdError(msg)
+
+
+def _validate_workspace_id(workspace_id: str) -> None:
+    if not WORKSPACE_ID_PATTERN.fullmatch(workspace_id):
+        msg = "workspace_id must use lowercase letters, digits, and single dashes only"
+        raise InvalidWorkspaceIdError(msg)
 
 
 def parse_env_vars(raw: str) -> dict[str, str]:

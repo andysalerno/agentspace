@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     type AcloseFn = Callable[[], Awaitable[object]]
 
 logger = logging.getLogger(__name__)
+WORKSPACE_ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 # Where each harness expects to find skill directories inside the container.
 SKILLS_MOUNT_PATHS: dict[HarnessName, str] = {
@@ -42,8 +44,30 @@ class KernelRuntimeSession:
     value: object
 
 
+@dataclass(frozen=True, slots=True)
+class WorkspaceMount:
+    workspace_id: str
+    mode: str = "rw"
+
+    @property
+    def volume_name(self) -> str:
+        return f"agentspace-workspace-{self.workspace_id}"
+
+    @property
+    def mount_path(self) -> str:
+        return f"/workspaces/{self.workspace_id}"
+
+    def summary(self) -> dict[str, str]:
+        return {
+            "workspace_id": self.workspace_id,
+            "mode": self.mode,
+            "mount_path": self.mount_path,
+            "volume_name": self.volume_name,
+        }
+
+
 class KernelRuntime(Protocol):
-    async def create_session(
+    async def create_session(  # noqa: PLR0913
         self,
         *,
         session_id: str,
@@ -51,6 +75,7 @@ class KernelRuntime(Protocol):
         env: dict[str, str],
         additional_paths: tuple[str, ...],
         skills: tuple[str, ...] = (),
+        workspace_mounts: tuple[WorkspaceMount, ...] = (),
     ) -> KernelRuntimeSession: ...
 
     async def send_message(
@@ -115,6 +140,7 @@ class SessionRecord:
     env: dict[str, str]
     additional_paths: tuple[str, ...]
     skills: tuple[str, ...] = ()
+    workspace_mounts: tuple[WorkspaceMount, ...] = ()
     history: list[list[KernelEvent]] = field(default_factory=_empty_history)
     status: KernelStatus = KernelStatus.IDLE
     resume_token: str | None = None
@@ -131,6 +157,7 @@ class SessionRecord:
             "turns": len(self.history),
             "resume_token": self.resume_token,
             "additional_paths": list(self.additional_paths),
+            "workspace_mounts": [mount.summary() for mount in self.workspace_mounts],
             "container_name": self.container_name,
             "vscode_url": self.vscode_url,
             "free_port_url": self.free_port_url,
@@ -200,7 +227,7 @@ class DockerKernelRuntime:
             self._client_instance = docker.from_env()
         return self._client_instance
 
-    async def create_session(
+    async def create_session(  # noqa: PLR0913
         self,
         *,
         session_id: str,
@@ -208,17 +235,19 @@ class DockerKernelRuntime:
         env: dict[str, str],
         additional_paths: tuple[str, ...],
         skills: tuple[str, ...] = (),
+        workspace_mounts: tuple[WorkspaceMount, ...] = (),
     ) -> KernelRuntimeSession:
         container_name = f"agentspace-kernel-{session_id[:12]}"
         base_url = self._base_url_template.format(container_name=container_name)
         logger.info(
             "creating kernel container: name=%s harness=%s"
-            " env_keys=%s additional_paths=%s skills=%s",
+            " env_keys=%s additional_paths=%s skills=%s workspace_mounts=%s",
             container_name,
             harness.value,
             sorted(env.keys()),
             additional_paths,
             skills,
+            [mount.summary() for mount in workspace_mounts],
         )
         await asyncio.to_thread(
             self._run_container,
@@ -227,6 +256,7 @@ class DockerKernelRuntime:
             env,
             additional_paths,
             skills,
+            workspace_mounts,
         )
         vscode_url = await asyncio.to_thread(
             self._vscode_url_for_container,
@@ -377,13 +407,14 @@ class DockerKernelRuntime:
         handle = self._docker_session(session)
         await asyncio.to_thread(self._remove_container, handle.container_name)
 
-    def _run_container(
+    def _run_container(  # noqa: PLR0913
         self,
         container_name: str,
         harness: HarnessName,
         env: dict[str, str],
         additional_paths: tuple[str, ...],
         skills: tuple[str, ...] = (),
+        workspace_mounts: tuple[WorkspaceMount, ...] = (),
     ) -> None:
         environment = dict(env)
         environment["KERNEL_HARNESS"] = harness.value
@@ -418,6 +449,23 @@ class DockerKernelRuntime:
             environment,
         )
 
+        volumes = {
+            self._copilot_volume: {
+                "bind": "/root/.copilot",
+                "mode": "rw",
+            },
+            self._skills_volume: {
+                "bind": skills_staging,
+                "mode": "ro",
+            },
+        }
+        for mount in workspace_mounts:
+            self._ensure_workspace_volume(mount.volume_name)
+            volumes[mount.volume_name] = {
+                "bind": mount.mount_path,
+                "mode": mount.mode,
+            }
+
         self._client.containers.run(
             self._kernel_image,
             auto_remove=True,
@@ -436,17 +484,21 @@ class DockerKernelRuntime:
             name=container_name,
             network=self._kernel_network,
             ports=ports,
-            volumes={
-                self._copilot_volume: {
-                    "bind": "/root/.copilot",
-                    "mode": "rw",
-                },
-                self._skills_volume: {
-                    "bind": skills_staging,
-                    "mode": "ro",
-                },
-            },
+            volumes=volumes,
         )
+
+    def _ensure_workspace_volume(self, volume_name: str) -> None:
+        volumes = cast("Any", self._client.volumes)
+        try:
+            volumes.get(volume_name)
+        except NotFound:
+            volumes.create(
+                name=volume_name,
+                labels={
+                    "agentspace.role": "workspace",
+                    "agentspace.managed": "true",
+                },
+            )
 
     def _docker_session(self, session: KernelRuntimeSession) -> DockerKernelSession:
         if not isinstance(session.value, DockerKernelSession):
@@ -597,32 +649,42 @@ class AgentHost:
         env: dict[str, str] | None = None,
         additional_paths: tuple[str, ...] = (),
         skills: tuple[str, ...] = (),
+        workspace_mounts: tuple[WorkspaceMount, ...] = (),
     ) -> dict[str, Any]:
         session_id = uuid.uuid4().hex
         caller_env = env or {}
         merged_env = dict(os.environ)
         merged_env.update(caller_env)
+        workspace_mounts = _validate_workspace_mounts(workspace_mounts)
+        effective_additional_paths = _append_unique_paths(
+            additional_paths,
+            tuple(mount.mount_path for mount in workspace_mounts),
+        )
         logger.info(
-            "creating session %s: harness=%s caller_env_keys=%s skills=%s",
+            "creating session %s: harness=%s caller_env_keys=%s skills=%s"
+            " workspace_mounts=%s",
             session_id,
             harness.value,
             sorted(caller_env.keys()),
             skills,
+            [mount.summary() for mount in workspace_mounts],
         )
         runtime_session = await self._runtime.create_session(
             session_id=session_id,
             harness=harness,
             env=merged_env,
-            additional_paths=additional_paths,
+            additional_paths=effective_additional_paths,
             skills=skills,
+            workspace_mounts=workspace_mounts,
         )
         record = SessionRecord(
             session_id=session_id,
             harness=harness,
             runtime_session=runtime_session,
             env=merged_env,
-            additional_paths=additional_paths,
+            additional_paths=effective_additional_paths,
             skills=skills,
+            workspace_mounts=workspace_mounts,
             container_name=self._runtime.container_name(session=runtime_session),
             vscode_url=self._runtime.vscode_url(session=runtime_session),
             free_port_url=self._runtime.free_port_url(session=runtime_session),
@@ -736,12 +798,14 @@ class AgentHost:
         env = dict(record.env)
         additional_paths = record.additional_paths
         skills = record.skills
+        workspace_mounts = record.workspace_mounts
         await self.destroy_session(session_id)
         return await self.create_session(
             harness=harness,
             env=env,
             additional_paths=additional_paths,
             skills=skills,
+            workspace_mounts=workspace_mounts,
         )
 
     async def get_session(
@@ -861,6 +925,42 @@ def _as_optional_str(value: object, fallback: str | None = None) -> str | None:
     if isinstance(value, str) and value:
         return value
     return fallback
+
+
+def _validate_workspace_mounts(
+    mounts: tuple[WorkspaceMount, ...],
+) -> tuple[WorkspaceMount, ...]:
+    validated: list[WorkspaceMount] = []
+    seen: set[str] = set()
+    for mount in mounts:
+        if not WORKSPACE_ID_PATTERN.fullmatch(mount.workspace_id):
+            msg = (
+                "workspace_id must use lowercase letters, digits, and single "
+                "dashes only"
+            )
+            raise ValueError(msg)
+        if mount.workspace_id in seen:
+            msg = f"workspace {mount.workspace_id!r} is mounted more than once"
+            raise ValueError(msg)
+        if mount.mode not in {"rw", "ro"}:
+            msg = "workspace mount mode must be 'rw' or 'ro'"
+            raise ValueError(msg)
+        validated.append(mount)
+        seen.add(mount.workspace_id)
+    return tuple(validated)
+
+
+def _append_unique_paths(
+    base_paths: tuple[str, ...],
+    extra_paths: tuple[str, ...],
+) -> tuple[str, ...]:
+    result = list(base_paths)
+    seen = set(base_paths)
+    for path in extra_paths:
+        if path not in seen:
+            result.append(path)
+            seen.add(path)
+    return tuple(result)
 
 
 @dataclass(frozen=True, slots=True)

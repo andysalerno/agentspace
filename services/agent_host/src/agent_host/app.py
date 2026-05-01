@@ -19,7 +19,7 @@ from agent_host.gateways import (
     GatewayHost,
     GatewayNotFoundError,
 )
-from agent_host.service import AgentHost, SessionNotFoundError
+from agent_host.service import AgentHost, SessionNotFoundError, WorkspaceMount
 from agent_host.skills import (
     BuiltinSkillReadOnlyError,
     InvalidSkillFilePathError,
@@ -54,11 +54,26 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Agent Host", version="0.1.0", lifespan=lifespan)
 
 
+class WorkspaceMountRequest(BaseModel):
+    workspace_id: str = Field(pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    mode: str = Field(default="rw", pattern=r"^(rw|ro)$")
+
+    def to_record(self) -> WorkspaceMount:
+        return WorkspaceMount(workspace_id=self.workspace_id, mode=self.mode)
+
+
+def _empty_workspace_mount_requests() -> list[WorkspaceMountRequest]:
+    return []
+
+
 class CreateSessionRequest(BaseModel):
     harness: HarnessName = HarnessName.ACP
     env: dict[str, str] = Field(default_factory=dict)
     additional_paths: list[str] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    workspace_mounts: list[WorkspaceMountRequest] = Field(
+        default_factory=_empty_workspace_mount_requests,
+    )
 
 
 class SendMessageRequest(BaseModel):
@@ -84,12 +99,18 @@ async def info() -> dict[str, Any]:
 
 @app.post("/sessions")
 async def create_session(payload: CreateSessionRequest) -> dict[str, Any]:
-    return await host.create_session(
-        harness=payload.harness,
-        env=payload.env,
-        additional_paths=tuple(payload.additional_paths),
-        skills=tuple(payload.skills),
-    )
+    try:
+        return await host.create_session(
+            harness=payload.harness,
+            env=payload.env,
+            additional_paths=tuple(payload.additional_paths),
+            skills=tuple(payload.skills),
+            workspace_mounts=tuple(
+                mount.to_record() for mount in payload.workspace_mounts
+            ),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/sessions")

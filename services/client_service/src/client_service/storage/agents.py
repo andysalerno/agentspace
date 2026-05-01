@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from kernel_host.registry import HarnessName
 
-from client_service.models import AgentRecord
+from client_service.models import AgentRecord, WorkspaceMountMode, WorkspaceMountRecord
 
 if TYPE_CHECKING:
     from client_service.storage.db import Database
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS agents (
     skills_json TEXT NOT NULL DEFAULT '[]',
     env_vars TEXT NOT NULL DEFAULT '',
     connection_id TEXT,
+    workspace_mounts_json TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -75,6 +76,7 @@ class SqliteAgentStore:
     async def initialize(self) -> None:
         await self._db.executescript(AGENTS_SCHEMA)
         await self._ensure_connection_id_column()
+        await self._ensure_workspace_mounts_column()
 
     async def list(self) -> list[AgentRecord]:
         rows = await self._db.fetch_all(
@@ -95,8 +97,9 @@ class SqliteAgentStore:
                 """
                 INSERT INTO agents (
                     agent_id, name, harness, system_prompt,
-                    skills_json, env_vars, connection_id, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    skills_json, env_vars, connection_id, workspace_mounts_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     agent.agent_id,
@@ -106,6 +109,7 @@ class SqliteAgentStore:
                     json.dumps(agent.skills),
                     agent.env_vars,
                     agent.connection_id,
+                    json.dumps([mount.summary() for mount in agent.workspace_mounts]),
                     agent.created_at,
                     agent.updated_at,
                 ),
@@ -128,6 +132,7 @@ class SqliteAgentStore:
                    skills_json = ?,
                    env_vars = ?,
                    connection_id = ?,
+                   workspace_mounts_json = ?,
                    updated_at = ?
              WHERE agent_id = ?
             """,
@@ -138,6 +143,7 @@ class SqliteAgentStore:
                 json.dumps(agent.skills),
                 agent.env_vars,
                 agent.connection_id,
+                json.dumps([mount.summary() for mount in agent.workspace_mounts]),
                 agent.updated_at,
                 agent.agent_id,
             ),
@@ -159,6 +165,15 @@ class SqliteAgentStore:
         if "connection_id" not in columns:
             await self._db.execute("ALTER TABLE agents ADD COLUMN connection_id TEXT")
 
+    async def _ensure_workspace_mounts_column(self) -> None:
+        rows = await self._db.fetch_all("PRAGMA table_info(agents)")
+        columns = {str(row["name"]) for row in rows}
+        if "workspace_mounts_json" not in columns:
+            await self._db.execute(
+                "ALTER TABLE agents ADD COLUMN workspace_mounts_json "
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+
 
 def _row_to_agent(row: object) -> AgentRecord:
     # row is sqlite3.Row, but typed as object to keep this module
@@ -170,6 +185,7 @@ def _row_to_agent(row: object) -> AgentRecord:
     skills: list[str] = [str(item) for item in items]
     raw_connection = mapping["connection_id"]
     connection_id = None if raw_connection is None else str(raw_connection)
+    mounts_raw = mapping.get("workspace_mounts_json", "[]")
     return AgentRecord(
         agent_id=str(mapping["agent_id"]),
         name=str(mapping["name"]),
@@ -178,6 +194,34 @@ def _row_to_agent(row: object) -> AgentRecord:
         skills=skills,
         env_vars=str(mapping["env_vars"]),
         connection_id=connection_id,
+        workspace_mounts=_workspace_mounts_from_json(str(mounts_raw)),
         created_at=str(mapping["created_at"]),
         updated_at=str(mapping["updated_at"]),
     )
+
+
+def _workspace_mounts_from_json(raw: str) -> list[WorkspaceMountRecord]:
+    decoded: object = json.loads(raw) if raw else []
+    items = cast("list[object]", decoded) if isinstance(decoded, list) else []
+    mounts: list[WorkspaceMountRecord] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        mapping = cast("dict[object, object]", item)
+        workspace_id = mapping.get("workspace_id")
+        if (
+            not isinstance(workspace_id, str)
+            or not workspace_id
+            or workspace_id in seen
+        ):
+            continue
+        mode_raw = str(mapping.get("mode") or WorkspaceMountMode.READ_WRITE.value)
+        mode = (
+            WorkspaceMountMode.READ_ONLY
+            if mode_raw == WorkspaceMountMode.READ_ONLY.value
+            else WorkspaceMountMode.READ_WRITE
+        )
+        mounts.append(WorkspaceMountRecord(workspace_id=workspace_id, mode=mode))
+        seen.add(workspace_id)
+    return mounts

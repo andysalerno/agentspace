@@ -10,6 +10,8 @@ use std::{
 use reqwest::{Method, StatusCode, Url};
 use serde_json::{Map, Value, json};
 
+use crate::models::WorkspaceMountRecord;
+
 const BASE_URL_ENV: &str = "CLIENT_SERVICE_AGENT_HOST_BASE_URL";
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8001";
 const TIMEOUT_ENV: &str = "CLIENT_SERVICE_AGENT_HOST_TIMEOUT";
@@ -81,6 +83,7 @@ impl AgentHostClient {
         harness: &str,
         skills: Option<&[String]>,
         env: Option<&BTreeMap<String, String>>,
+        workspace_mounts: Option<&[WorkspaceMountRecord]>,
     ) -> AgentHostResult<JsonObject> {
         let mut payload = JsonObject::new();
         payload.insert("harness".to_owned(), json!(harness));
@@ -89,6 +92,9 @@ impl AgentHostClient {
         }
         if let Some(env) = env.filter(|env| !env.is_empty()) {
             payload.insert("env".to_owned(), json!(env));
+        }
+        if let Some(workspace_mounts) = workspace_mounts.filter(|mounts| !mounts.is_empty()) {
+            payload.insert("workspace_mounts".to_owned(), json!(workspace_mounts));
         }
 
         self.request_object(Method::POST, self.endpoint(&["sessions"])?, Some(payload))
@@ -1915,7 +1921,7 @@ mod tests {
         let env = BTreeMap::from([("KEY".to_owned(), "value".to_owned())]);
 
         let response = client
-            .create_session("copilot", Some(&skills), Some(&env))
+            .create_session("copilot", Some(&skills), Some(&env), None)
             .await?;
 
         assert_eq!(response["session_id"], "session-1");
@@ -1942,7 +1948,9 @@ mod tests {
         let client = server.client()?;
         let env = BTreeMap::new();
 
-        client.create_session("copilot", None, Some(&env)).await?;
+        client
+            .create_session("copilot", None, Some(&env), None)
+            .await?;
 
         assert_eq!(
             server.recorded()?,
