@@ -125,5 +125,13 @@ work before preparing a reviewed `main` submission.
 - `stale_base` or `conflict`: fetch, rebase onto the current target, resolve
   conflicts locally, commit, and resubmit.
 
+## Prototype expectations
+
+GitAgent is used in prototyping mode. Submissions to `main` may be
+non-production-ready, and review should focus on concrete blockers rather than
+polish, hardening, or comprehensive test coverage.
+
 Every new independent subproject should include a `justfile` with a `validate`
-recipe that exits 0 only when tests/static checks pass.
+recipe. If the project has no tests yet, a minimal recipe that runs a smoke
+check, static check, build command, or other deterministic sanity check is
+acceptable.
