@@ -8,6 +8,7 @@ export type WorkspaceMount = {
   workspace_id: string;
   mode: WorkspaceMountMode;
   mount_path: string;
+  volume_name?: string | null;
 };
 
 export type Agent = {
@@ -29,6 +30,7 @@ export type Workspace = {
   status: "creating" | "ready" | "failed";
   mount_path: string;
   volume_name: string;
+  builtin?: boolean | null;
   created_at: string;
   updated_at: string;
 };

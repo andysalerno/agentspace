@@ -3,13 +3,14 @@ use std::{
     error::Error,
     fs,
     path::{Path as FsPath, PathBuf},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::Path,
+    extract::{Path, State},
     http::{Method, Request, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -25,6 +26,43 @@ use tower::ServiceExt;
 struct StubGitAgent {
     base_url: String,
     handle: JoinHandle<Result<(), std::io::Error>>,
+}
+
+struct StubAgentHost {
+    base_url: String,
+    handle: JoinHandle<Result<(), std::io::Error>>,
+    recorded: Arc<Mutex<Vec<Value>>>,
+}
+
+impl StubAgentHost {
+    async fn start() -> Result<Self, Box<dyn Error + Send + Sync>> {
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/sessions", post(stub_create_session))
+            .route("/workspaces/vscode", post(stub_open_workspace_vscode))
+            .with_state(Arc::clone(&recorded));
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let handle = tokio::spawn(axum::serve(listener, app).into_future());
+        Ok(Self {
+            base_url: format!("http://{address}"),
+            handle,
+            recorded,
+        })
+    }
+
+    fn recorded(&self) -> Result<Vec<Value>, Box<dyn Error + Send + Sync>> {
+        self.recorded
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|_error| "recorded request lock poisoned".into())
+    }
+}
+
+impl Drop for StubAgentHost {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 impl StubGitAgent {
@@ -61,9 +99,18 @@ fn test_router_with_stores(
     git_agent_base_url: &str,
     stores: StoreSet,
 ) -> Result<Router, Box<dyn Error + Send + Sync>> {
-    let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", BTreeMap::new())
-        .with_git_agent_base_url(git_agent_base_url);
-    let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(100))?;
+    test_router_with_agent_host_and_stores(git_agent_base_url, "http://127.0.0.1:9", stores)
+}
+
+fn test_router_with_agent_host_and_stores(
+    git_agent_base_url: &str,
+    agent_host_base_url: &str,
+    stores: StoreSet,
+) -> Result<Router, Box<dyn Error + Send + Sync>> {
+    let config = AppConfig::new("127.0.0.1", 0, agent_host_base_url, BTreeMap::new())
+        .with_git_agent_base_url(git_agent_base_url)
+        .with_git_agent_data_volume_name("custom-git-agent-data");
+    let agent_host = AgentHostClient::new(agent_host_base_url, Duration::from_millis(100))?;
     let git_agent = GitAgentClient::new(git_agent_base_url, Duration::from_secs(5));
     Ok(build_router(AppState::with_clients_and_stores(
         config, agent_host, git_agent, stores,
@@ -111,6 +158,36 @@ async fn stub_rerun_review(Path(request_id): Path<String>) -> Json<Value> {
         "status": "reviewing",
         "rerun": true,
     }))
+}
+
+async fn stub_create_session(
+    State(recorded): State<Arc<Mutex<Vec<Value>>>>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    recorded
+        .lock()
+        .map_err(|_error| StatusCode::INTERNAL_SERVER_ERROR)?
+        .push(payload);
+    Ok(Json(json!({
+        "session_id": "agent-host-session",
+        "status": "idle",
+    })))
+}
+
+async fn stub_open_workspace_vscode(
+    State(recorded): State<Arc<Mutex<Vec<Value>>>>,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    recorded
+        .lock()
+        .map_err(|_error| StatusCode::INTERNAL_SERVER_ERROR)?
+        .push(payload.clone());
+    Ok(Json(json!({
+        "workspace_id": payload["workspace_id"],
+        "volume_name": payload["volume_name"],
+        "container_name": "workspace-editor",
+        "vscode_url": "http://127.0.0.1:49152",
+    })))
 }
 
 async fn request_json(
@@ -319,6 +396,115 @@ async fn git_agent_routes_proxy_status_requests_and_failures()
     let (status, missing) = get_json(&app, "/git-agent/requests/missing").await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(missing["detail"], "git_agent returned HTTP 404 Not Found");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_agent_workspace_is_builtin_reserved_and_openable()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let agent_host = StubAgentHost::start().await?;
+    let app = test_router_with_agent_host_and_stores(
+        "http://127.0.0.1:9",
+        &agent_host.base_url,
+        StoreSet::in_memory(),
+    )?;
+
+    let (status, workspaces) = get_json(&app, "/workspaces").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workspaces[0]["workspace_id"], "git-agent");
+    assert_eq!(workspaces[0]["name"], "GitAgent Repository");
+    assert_eq!(workspaces[0]["builtin"], true);
+    assert_eq!(workspaces[0]["volume_name"], "custom-git-agent-data");
+
+    let (status, workspace) = get_json(&app, "/workspaces/git-agent").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workspace, workspaces[0]);
+
+    let (status, error) = request_json(
+        &app,
+        Method::POST,
+        "/workspaces",
+        Some(json!({ "workspace_id": "git-agent", "name": "Override" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("built-in")
+    );
+
+    let (status, vscode) = request_json(
+        &app,
+        Method::POST,
+        "/workspaces/git-agent/vscode",
+        Some(json!({})),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(vscode["workspace_id"], "git-agent");
+    assert_eq!(vscode["volume_name"], "custom-git-agent-data");
+    assert_eq!(
+        agent_host.recorded()?,
+        vec![json!({
+            "workspace_id": "git-agent",
+            "volume_name": "custom-git-agent-data"
+        })],
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn git_agent_workspace_mount_uses_git_agent_volume()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let agent_host = StubAgentHost::start().await?;
+    let app = test_router_with_agent_host_and_stores(
+        "http://127.0.0.1:9",
+        &agent_host.base_url,
+        StoreSet::in_memory(),
+    )?;
+
+    let (status, agent) = request_json(
+        &app,
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "workspace-agent",
+            "name": "Workspace Agent",
+            "workspace_mounts": [
+                { "workspace_id": "git-agent", "mode": "ro" }
+            ]
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(agent["workspace_mounts"][0]["workspace_id"], "git-agent");
+
+    let (status, _session) = request_json(
+        &app,
+        Method::POST,
+        "/sessions",
+        Some(json!({ "agent_id": "workspace-agent" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        agent_host.recorded()?,
+        vec![json!({
+            "harness": "acp",
+            "skills": [],
+            "workspace_mounts": [
+                {
+                    "workspace_id": "git-agent",
+                    "mode": "ro",
+                    "volume_name": "custom-git-agent-data"
+                }
+            ]
+        })],
+    );
 
     Ok(())
 }

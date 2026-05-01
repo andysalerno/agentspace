@@ -190,6 +190,7 @@ export default function WorkspacesView() {
                 {workspaces.map((workspace) => {
                     const mountedCount = mountedAgentCount(workspace.workspace_id);
                     const editing = editingWorkspaceId === workspace.workspace_id;
+                    const isBuiltin = workspace.builtin === true;
                     return (
                         <div className="card management-card" key={workspace.workspace_id}>
                             <div className="card-body">
@@ -198,7 +199,10 @@ export default function WorkspacesView() {
                                         <h3>{workspace.name}</h3>
                                         <code className="management-id">{workspace.workspace_id}</code>
                                     </div>
-                                    <span className="tag">{mountedCount} agent{mountedCount === 1 ? "" : "s"}</span>
+                                    <div className="tag-row">
+                                        {isBuiltin && <span className="tag">Built-in</span>}
+                                        <span className="tag">{mountedCount} agent{mountedCount === 1 ? "" : "s"}</span>
+                                    </div>
                                 </div>
                                 <div className="card-meta management-meta">
                                     <div>
@@ -247,7 +251,9 @@ export default function WorkspacesView() {
                             </div>
                             <div className="card-footer">
                                 <span className="muted">
-                                    Created {new Date(workspace.created_at).toLocaleDateString()}
+                                    {isBuiltin
+                                        ? "Built-in workspace"
+                                        : `Created ${new Date(workspace.created_at).toLocaleDateString()}`}
                                 </span>
                                 <div className="card-footer-actions">
                                     {!editing && (
@@ -260,33 +266,39 @@ export default function WorkspacesView() {
                                             >
                                                 Open in VS Code
                                             </button>
-                                            <button
-                                                className="secondary-button small"
-                                                disabled={busy || workspace.status !== "ready"}
-                                                onClick={() => void handleClone(workspace)}
-                                                type="button"
-                                            >
-                                                Clone
-                                            </button>
-                                            <button
-                                                className="secondary-button small"
-                                                disabled={busy}
-                                                onClick={() => startEditing(workspace.workspace_id, workspace.name)}
-                                                type="button"
-                                            >
-                                                Edit
-                                            </button>
+                                            {!isBuiltin && (
+                                                <>
+                                                    <button
+                                                        className="secondary-button small"
+                                                        disabled={busy || workspace.status !== "ready"}
+                                                        onClick={() => void handleClone(workspace)}
+                                                        type="button"
+                                                    >
+                                                        Clone
+                                                    </button>
+                                                    <button
+                                                        className="secondary-button small"
+                                                        disabled={busy}
+                                                        onClick={() => startEditing(workspace.workspace_id, workspace.name)}
+                                                        type="button"
+                                                    >
+                                                        Edit
+                                                    </button>
+                                                </>
+                                            )}
                                         </>
                                     )}
-                                    <button
-                                        className="danger-button small"
-                                        disabled={busy || mountedCount > 0}
-                                        onClick={() => deleteMutation.mutate(workspace.workspace_id)}
-                                        title={mountedCount > 0 ? "Remove this workspace from agents before deleting it." : undefined}
-                                        type="button"
-                                    >
-                                        Delete
-                                    </button>
+                                    {!isBuiltin && (
+                                        <button
+                                            className="danger-button small"
+                                            disabled={busy || mountedCount > 0}
+                                            onClick={() => deleteMutation.mutate(workspace.workspace_id)}
+                                            title={mountedCount > 0 ? "Remove this workspace from agents before deleting it." : undefined}
+                                            type="button"
+                                        >
+                                            Delete
+                                        </button>
+                                    )}
                                 </div>
                             </div>
                         </div>

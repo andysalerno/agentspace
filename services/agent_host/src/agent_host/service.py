@@ -104,9 +104,12 @@ class KernelRuntimeSession:
 class WorkspaceMount:
     workspace_id: str
     mode: str = "rw"
+    volume_name_override: str | None = None
 
     @property
     def volume_name(self) -> str:
+        if self.volume_name_override is not None:
+            return self.volume_name_override
         return f"agentspace-workspace-{self.workspace_id}"
 
     @property

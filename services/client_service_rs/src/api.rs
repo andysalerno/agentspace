@@ -24,11 +24,11 @@ use crate::{
     errors::{StoreError, ValidationError},
     git_agent::GitAgentError,
     models::{
-        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord,
-        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord, GatewayType, GitAgentConfigRecord,
-        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
-        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        AgentRecord, BUILTIN_GIT_AGENT_WORKSPACE_ID, BUILTIN_GIT_AGENT_WORKSPACE_NAME, ClientType,
+        ConnectionApiFlavor, ConnectionRecord, DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord,
+        GatewayType, GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole, SessionRecord,
+        ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars,
+        utc_now, validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
         validate_workspace_id,
     },
 };
@@ -670,12 +670,15 @@ async fn rerun_git_agent_review(
 }
 
 async fn list_workspaces(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
-    let workspaces = state
-        .workspaces
-        .list()?
-        .into_iter()
-        .map(|workspace| workspace.summary())
-        .collect::<Vec<_>>();
+    let mut workspaces = vec![builtin_git_agent_workspace_summary(&state)];
+    workspaces.extend(
+        state
+            .workspaces
+            .list()?
+            .into_iter()
+            .filter(|workspace| !is_builtin_workspace_id(&workspace.workspace_id))
+            .map(|workspace| workspace.summary()),
+    );
     tracing::info!(
         route = "/workspaces",
         action = "list_workspaces",
@@ -690,6 +693,7 @@ async fn create_workspace(
     Json(payload): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_workspace_id(&payload.workspace_id)?;
+    reject_builtin_workspace_mutation(&payload.workspace_id)?;
     let workspace = WorkspaceRecord::new(payload.workspace_id, payload.name);
     let value = workspace.summary();
     state.workspaces.insert(workspace)?;
@@ -706,6 +710,16 @@ async fn get_workspace(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    if is_builtin_workspace_id(&workspace_id) {
+        tracing::info!(
+            route = "/workspaces/:workspace_id",
+            action = "get_workspace",
+            workspace_id = %workspace_id,
+            builtin = true,
+            "api handler completed"
+        );
+        return Ok(Json(builtin_git_agent_workspace_summary(&state)));
+    }
     let workspace = require_workspace(&state, &workspace_id)?;
     tracing::info!(
         route = "/workspaces/:workspace_id",
@@ -721,6 +735,7 @@ async fn update_workspace(
     Path(workspace_id): Path<String>,
     Json(payload): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    reject_builtin_workspace_mutation(&workspace_id)?;
     let mut workspace = require_workspace(&state, &workspace_id)?;
     if let Some(name) = payload.name {
         workspace.name = name;
@@ -741,6 +756,7 @@ async fn delete_workspace(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    reject_builtin_workspace_mutation(&workspace_id)?;
     if workspace_in_use(&state, &workspace_id)? {
         return Err(ApiError::conflict(format!(
             "workspace {workspace_id:?} is mounted by one or more agents"
@@ -766,7 +782,9 @@ async fn clone_workspace(
     Path(source_workspace_id): Path<String>,
     Json(payload): Json<CloneWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    reject_builtin_workspace_mutation(&source_workspace_id)?;
     validate_workspace_id(&payload.workspace_id)?;
+    reject_builtin_workspace_mutation(&payload.workspace_id)?;
     let source_workspace = require_ready_workspace(&state, &source_workspace_id)?;
     let mut target_workspace = WorkspaceRecord::new_with_status(
         payload.workspace_id,
@@ -808,10 +826,18 @@ async fn open_workspace_vscode(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let workspace = require_ready_workspace(&state, &workspace_id)?;
+    let (workspace_id_for_editor, volume_name) = if is_builtin_workspace_id(&workspace_id) {
+        (
+            BUILTIN_GIT_AGENT_WORKSPACE_ID.to_owned(),
+            state.config.git_agent_data_volume_name().to_owned(),
+        )
+    } else {
+        let workspace = require_ready_workspace(&state, &workspace_id)?;
+        (workspace.workspace_id.clone(), workspace.volume_name())
+    };
     let upstream = state
         .agent_host
-        .open_workspace_vscode(&workspace.workspace_id, &workspace.volume_name())
+        .open_workspace_vscode(&workspace_id_for_editor, &volume_name)
         .await?;
     tracing::info!(
         route = "/workspaces/:workspace_id/vscode",
@@ -839,13 +865,14 @@ async fn create_session(
         has_connection = agent.connection_id.is_some(),
         "creating upstream session"
     );
+    let workspace_mounts = agent_host_workspace_mounts(&state, &agent.workspace_mounts);
     let upstream = state
         .agent_host
         .create_session(
             agent.harness.as_str(),
             Some(&agent.skills),
             Some(&env),
-            Some(&agent.workspace_mounts),
+            Some(&workspace_mounts),
         )
         .await?;
     let upstream_session_id = string_field(&upstream, "session_id")?;
@@ -2570,6 +2597,49 @@ fn active_turn_summary(state: &AppState, session_id: &str) -> Result<Option<Valu
     }))
 }
 
+fn builtin_git_agent_workspace_summary(state: &AppState) -> Value {
+    json!({
+        "workspace_id": BUILTIN_GIT_AGENT_WORKSPACE_ID,
+        "name": BUILTIN_GIT_AGENT_WORKSPACE_NAME,
+        "status": WorkspaceStatus::Ready.as_str(),
+        "mount_path": format!("/workspace/{BUILTIN_GIT_AGENT_WORKSPACE_ID}"),
+        "volume_name": state.config.git_agent_data_volume_name(),
+        "builtin": true,
+        "created_at": "1970-01-01T00:00:00Z",
+        "updated_at": "1970-01-01T00:00:00Z",
+    })
+}
+
+fn is_builtin_workspace_id(workspace_id: &str) -> bool {
+    workspace_id == BUILTIN_GIT_AGENT_WORKSPACE_ID
+}
+
+fn reject_builtin_workspace_mutation(workspace_id: &str) -> Result<(), ApiError> {
+    if is_builtin_workspace_id(workspace_id) {
+        return Err(ApiError::conflict(
+            "git-agent is a built-in workspace and cannot be modified".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn agent_host_workspace_mounts(
+    state: &AppState,
+    mounts: &[WorkspaceMountRecord],
+) -> Vec<WorkspaceMountRecord> {
+    mounts
+        .iter()
+        .map(|mount| {
+            if !is_builtin_workspace_id(&mount.workspace_id) {
+                return mount.clone();
+            }
+            let mut mount = mount.clone();
+            mount.volume_name = Some(state.config.git_agent_data_volume_name().to_owned());
+            mount
+        })
+        .collect()
+}
+
 fn get_or_init_git_agent_config(state: &AppState) -> Result<GitAgentConfigRecord, ApiError> {
     if let Some(config) = state.git_agent_config.get()? {
         return Ok(config);
@@ -2760,7 +2830,9 @@ fn validate_workspace_mounts(
                 mount.workspace_id
             )));
         }
-        require_ready_workspace(state, &mount.workspace_id)?;
+        if !is_builtin_workspace_id(&mount.workspace_id) {
+            require_ready_workspace(state, &mount.workspace_id)?;
+        }
     }
     Ok(())
 }
