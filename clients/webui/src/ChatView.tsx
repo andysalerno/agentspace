@@ -380,6 +380,19 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         onError: reportError,
     });
 
+    const deleteSessionMutation = useMutation({
+        mutationFn: (sessionId: string) => api.deleteSession(sessionId),
+        onSuccess: (_, sessionId) => {
+            queryClient.removeQueries({ queryKey: queryKeys.session(sessionId) });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
+            if (selectedSessionId === sessionId) {
+                onSelectSession(null);
+            }
+        },
+        onError: reportError,
+    });
+
     useEffect(() => {
         if (!newSessionAgentId && agents.length > 0) {
             setNewSessionAgentId(agents[0].agent_id);
@@ -614,9 +627,30 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         resetMutation.mutate(selectedSessionId);
     }
 
+    function handleDeleteSession(sessionId: string) {
+        if (
+            !window.confirm(
+                "Delete this session from history? This cannot be undone.",
+            )
+        ) {
+            return;
+        }
+        if (selectedSessionId === sessionId || streamingSessionIdRef.current === sessionId) {
+            streamControllerRef.current?.abort();
+            streamControllerRef.current = null;
+            streamingSessionIdRef.current = null;
+            streamingTurnIdRef.current = null;
+            setPendingUserMessage(null);
+            setStreamingMessage(null);
+            setStreaming(false);
+        }
+        deleteSessionMutation.mutate(sessionId);
+    }
+
     const activeAssistantMessageId = selectedSession?.active_turn?.assistant_message_id ?? null;
     const busy = streaming || Boolean(selectedSession?.active_turn)
-        || createSessionMutation.isPending || resetMutation.isPending;
+        || createSessionMutation.isPending || resetMutation.isPending
+        || deleteSessionMutation.isPending;
     const transcriptMessages = selectedSession && pendingUserMessage
         && selectedSession.session_id === pendingUserMessage.session_id
         && !hasMessageWithId(selectedSession.messages, pendingUserMessage)
@@ -677,17 +711,31 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 )}
                 <div className="session-list">
                     {sessions.map((session) => (
-                        <button
-                            className={`session-item ${selectedSessionId === session.session_id ? "active" : ""}`}
+                        <div
+                            className={`session-row ${selectedSessionId === session.session_id ? "active" : ""}`}
                             key={session.session_id}
-                            onClick={() => onSelectSession(session.session_id)}
-                            type="button"
                         >
-                            <strong>{session.agent_id}</strong>
-                            <span className="muted">
-                                {session.message_count} messages · {session.status}
-                            </span>
-                        </button>
+                            <button
+                                className="session-item"
+                                onClick={() => onSelectSession(session.session_id)}
+                                type="button"
+                            >
+                                <strong>{session.agent_id}</strong>
+                                <span className="muted">
+                                    {session.message_count} messages · {session.status}
+                                </span>
+                            </button>
+                            <button
+                                aria-label={`Delete session ${session.session_id}`}
+                                className="session-delete-button"
+                                disabled={deleteSessionMutation.isPending}
+                                onClick={() => handleDeleteSession(session.session_id)}
+                                title="Delete session"
+                                type="button"
+                            >
+                                Delete
+                            </button>
+                        </div>
                     ))}
                     {sessions.length === 0 && <div className="empty-state">No sessions yet</div>}
                 </div>
@@ -741,6 +789,18 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     type="button"
                                 >
                                     Reset
+                                </button>
+                                <button
+                                    className="danger-button"
+                                    disabled={deleteSessionMutation.isPending}
+                                    onClick={() => {
+                                        if (selectedSessionId) {
+                                            handleDeleteSession(selectedSessionId);
+                                        }
+                                    }}
+                                    type="button"
+                                >
+                                    Delete
                                 </button>
                             </div>
                         </div>

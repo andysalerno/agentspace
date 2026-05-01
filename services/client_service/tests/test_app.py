@@ -555,11 +555,15 @@ def test_agent_and_session_routes(client: TestClient) -> None:
     )
     session_id = created_session.json()["session_id"]
     listed_messages = client.get(f"/sessions/{session_id}/messages")
+    deleted_session = client.delete(f"/sessions/{session_id}")
+    listed_sessions = client.get("/sessions")
 
     assert created_agent.status_code == 200
     assert created_session.status_code == 200
     assert sent.status_code == 200
     assert listed_messages.status_code == 200
+    assert deleted_session.status_code == 204
+    assert listed_sessions.json() == []
     assert created_session.json()["channel_name"] == "webui"
     assert sent.json()["assistant_message"]["content"] == "hello"
     assert listed_messages.json()["messages"][0]["content"] == "hello"

@@ -234,8 +234,48 @@ impl AgentHostClient {
     }
 
     pub async fn destroy_session(&self, session_id: &str) -> AgentHostResult<()> {
-        self.request_empty(Method::DELETE, self.endpoint(&["sessions", session_id])?)
-            .await
+        let method = Method::DELETE;
+        let url = self.endpoint(&["sessions", session_id])?;
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, None);
+        let payload_trace = JsonPayloadTrace::from_payload(None);
+        let started_at = Instant::now();
+        log_agent_host_request_start(&method, &trace_context, &payload_trace);
+        let response = match self.client.request(method.clone(), url).send().await {
+            Ok(response) => response,
+            Err(source) => {
+                log_agent_host_request_send_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    &source,
+                    started_at.elapsed(),
+                );
+                return Err(AgentHostError::Http { source });
+            }
+        };
+        let status = response.status();
+        if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+            log_agent_host_request_success(
+                &method,
+                &trace_context,
+                &payload_trace,
+                status,
+                started_at.elapsed(),
+                JsonResponseTrace::empty(),
+            );
+            return Ok(());
+        }
+
+        let error = http_status_error(response).await;
+        log_agent_host_request_failure(
+            &method,
+            &trace_context,
+            &payload_trace,
+            status,
+            started_at.elapsed(),
+            &error,
+        );
+        Err(error)
     }
 
     pub async fn create_skill(
@@ -1641,6 +1681,9 @@ mod tests {
             None,
             None,
         )?;
+        if session_id == "missing-session" {
+            return Ok(StatusCode::NOT_FOUND);
+        }
         Ok(StatusCode::NO_CONTENT)
     }
 
@@ -2017,6 +2060,7 @@ mod tests {
         client.get_session("session-1").await?;
         client.reset_session("session-1").await?;
         client.destroy_session("session-1").await?;
+        client.destroy_session("missing-session").await?;
         client.create_skill("skill-1", &files).await?;
         client.get_skill("skill-1").await?;
         client.list_skills().await?;
@@ -2048,6 +2092,12 @@ mod tests {
                 RecordedRequest {
                     method: Method::DELETE,
                     path: "/sessions/session-1".to_owned(),
+                    query: None,
+                    body: None,
+                },
+                RecordedRequest {
+                    method: Method::DELETE,
+                    path: "/sessions/missing-session".to_owned(),
                     query: None,
                     body: None,
                 },

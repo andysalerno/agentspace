@@ -205,7 +205,8 @@ class HttpAgentHostClient:
             timeout=self.timeout,
         ) as client:
             response = await client.delete(f"/sessions/{session_id}")
-        response.raise_for_status()
+        if not response.is_success and response.status_code != 404:
+            response.raise_for_status()
 
     async def create_skill(
         self,
