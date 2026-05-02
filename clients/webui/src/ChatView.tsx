@@ -23,7 +23,7 @@ import {
     useSessions,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
-import { promptSaveWorkspace } from "./saveWorkspacePrompt";
+import { promptSaveWorkspace, promptWorkspaceSaveDetails } from "./saveWorkspacePrompt";
 import "./chat-workspace.css";
 
 type ChatViewProps = {
@@ -766,6 +766,19 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         deleteSessionMutation.mutate(sessionId);
     }
 
+    async function handleSaveWorkspace(sessionId: string) {
+        const details = promptWorkspaceSaveDetails();
+        if (details === null) {
+            return;
+        }
+        try {
+            await saveWorkspaceMutation.mutateAsync({ sessionId, ...details });
+            window.alert(`Workspace "${details.name}" saved.`);
+        } catch {
+            return;
+        }
+    }
+
     const cachedMessages = selectedSession?.messages ?? [];
     const activeAssistantMessageId = selectedSession?.active_turn?.assistant_message_id ?? null;
     const completedAssistantFromCache = selectedSession && pendingUserMessage
@@ -987,6 +1000,14 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                 Service
                                             </a>
                                         ) : null}
+                                        <button
+                                            className="secondary-button"
+                                            disabled={busy}
+                                            onClick={() => void handleSaveWorkspace(selectedSession.session_id)}
+                                            type="button"
+                                        >
+                                            Save workspace
+                                        </button>
                                     </>
                                 ) : null}
                                 <button
