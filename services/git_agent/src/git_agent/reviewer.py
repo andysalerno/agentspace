@@ -326,6 +326,7 @@ def _extract_reviewer_payload(payload: object) -> object:
         for key in (
             "review",
             "decision",
+            "assistant_message",
             "assistant_response",
             "response",
             "content",

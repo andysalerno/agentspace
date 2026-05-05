@@ -266,6 +266,7 @@ class GitBackend:
             raise PatchApplyError(
                 add_result.stderr.strip() or add_result.stdout.strip(),
             )
+        _relativize_worktree_git_metadata(review_worktree)
 
         apply_result = _run_git(
             ["-C", str(review_worktree), "apply", "--index", "--binary", "-"],
@@ -512,6 +513,29 @@ def _remove_registered_worktree(repo_path: Path, worktree: Path) -> None:
         ],
         check=False,
     )
+
+
+def _relativize_worktree_git_metadata(worktree: Path) -> None:
+    git_file = worktree / ".git"
+    prefix = "gitdir: "
+    content = git_file.read_text(encoding="utf-8").strip()
+    if not content.startswith(prefix):
+        return
+
+    git_dir = Path(content.removeprefix(prefix))
+    if not git_dir.is_absolute():
+        return
+
+    relative_git_dir = os.path.relpath(git_dir, start=worktree)
+    git_file.write_text(f"{prefix}{relative_git_dir}\n", encoding="utf-8")
+
+    admin_gitdir_file = git_dir / "gitdir"
+    if admin_gitdir_file.exists():
+        relative_worktree_git_file = os.path.relpath(git_file, start=git_dir)
+        admin_gitdir_file.write_text(
+            f"{relative_worktree_git_file}\n",
+            encoding="utf-8",
+        )
 
 
 def _cleanup_path(path: Path) -> None:

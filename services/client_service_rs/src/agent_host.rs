@@ -57,7 +57,6 @@ impl AgentHostClient {
             message: source.to_string(),
         })?;
         let client = reqwest::Client::builder()
-            .timeout(timeout)
             .build()
             .map_err(|source| AgentHostError::BuildClient { source })?;
 
@@ -142,15 +141,17 @@ impl AgentHostClient {
         let payload_trace = JsonPayloadTrace::from_payload(Some(&payload));
         let started_at = Instant::now();
         log_agent_host_request_start(&method, &trace_context, &payload_trace);
-        let response = match self
-            .client
-            .request(method.clone(), url)
-            .json(&payload)
-            .send()
-            .await
+        let response = match tokio::time::timeout(
+            self.timeout,
+            self.client
+                .request(method.clone(), url)
+                .json(&payload)
+                .send(),
+        )
+        .await
         {
-            Ok(response) => response,
-            Err(source) => {
+            Ok(Ok(response)) => response,
+            Ok(Err(source)) => {
                 log_agent_host_request_send_error(
                     &method,
                     &trace_context,
@@ -159,6 +160,20 @@ impl AgentHostClient {
                     started_at.elapsed(),
                 );
                 return Err(AgentHostError::Http { source });
+            }
+            Err(_elapsed) => {
+                let error = AgentHostError::InitialResponseTimeout {
+                    timeout: self.timeout,
+                };
+                log_agent_host_request_failure(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    StatusCode::REQUEST_TIMEOUT,
+                    started_at.elapsed(),
+                    &error,
+                );
+                return Err(error);
             }
         };
         let status = response.status();
@@ -299,7 +314,13 @@ impl AgentHostClient {
         let payload_trace = JsonPayloadTrace::from_payload(None);
         let started_at = Instant::now();
         log_agent_host_request_start(&method, &trace_context, &payload_trace);
-        let response = match self.client.request(method.clone(), url).send().await {
+        let response = match self
+            .client
+            .request(method.clone(), url)
+            .timeout(self.timeout)
+            .send()
+            .await
+        {
             Ok(response) => response,
             Err(source) => {
                 log_agent_host_request_send_error(
@@ -438,7 +459,13 @@ impl AgentHostClient {
         let payload_trace = JsonPayloadTrace::from_payload(None);
         let started_at = Instant::now();
         log_agent_host_request_start(&method, &trace_context, &payload_trace);
-        let response = match self.client.request(method.clone(), url).send().await {
+        let response = match self
+            .client
+            .request(method.clone(), url)
+            .timeout(self.timeout)
+            .send()
+            .await
+        {
             Ok(response) => response,
             Err(source) => {
                 log_agent_host_request_send_error(
@@ -536,7 +563,13 @@ impl AgentHostClient {
         let payload_trace = JsonPayloadTrace::from_payload(None);
         let started_at = Instant::now();
         log_agent_host_request_start(&method, &trace_context, &payload_trace);
-        let response = match self.client.request(method.clone(), url).send().await {
+        let response = match self
+            .client
+            .request(method.clone(), url)
+            .timeout(self.timeout)
+            .send()
+            .await
+        {
             Ok(response) => response,
             Err(source) => {
                 log_agent_host_request_send_error(
@@ -591,7 +624,7 @@ impl AgentHostClient {
         if let Some(json_payload) = json_payload {
             request = request.json(&json_payload);
         }
-        let response = match request.send().await {
+        let response = match request.timeout(self.timeout).send().await {
             Ok(response) => response,
             Err(source) => {
                 log_agent_host_request_send_error(
@@ -1000,6 +1033,7 @@ fn agent_host_error_kind(error: &AgentHostError) -> &'static str {
     match error {
         AgentHostError::InvalidBaseUrl { .. } => "invalid_base_url",
         AgentHostError::InvalidTimeout { .. } => "invalid_timeout",
+        AgentHostError::InitialResponseTimeout { .. } => "initial_response_timeout",
         AgentHostError::UrlCannotBeBase { .. } => "url_cannot_be_base",
         AgentHostError::BuildClient { .. } => "build_client",
         AgentHostError::Http { source } => reqwest_error_kind(source),
@@ -1018,6 +1052,7 @@ fn agent_host_error_status(error: &AgentHostError) -> u16 {
         AgentHostError::HttpStatus { status, .. } => status.as_u16(),
         AgentHostError::InvalidBaseUrl { .. }
         | AgentHostError::InvalidTimeout { .. }
+        | AgentHostError::InitialResponseTimeout { .. }
         | AgentHostError::UrlCannotBeBase { .. }
         | AgentHostError::BuildClient { .. }
         | AgentHostError::Json { .. }
@@ -1037,6 +1072,9 @@ pub enum AgentHostError {
     InvalidTimeout {
         raw: String,
         message: String,
+    },
+    InitialResponseTimeout {
+        timeout: Duration,
     },
     UrlCannotBeBase {
         base_url: String,
@@ -1080,6 +1118,12 @@ impl Display for AgentHostError {
                 write!(
                     formatter,
                     "invalid {TIMEOUT_ENV} timeout value {raw:?}: {message}"
+                )
+            }
+            Self::InitialResponseTimeout { timeout } => {
+                write!(
+                    formatter,
+                    "agent_host stream did not start within {timeout:?}"
                 )
             }
             Self::UrlCannotBeBase { base_url } => {
@@ -1127,6 +1171,7 @@ impl Error for AgentHostError {
             Self::Utf8 { source } => Some(source),
             Self::InvalidBaseUrl { .. }
             | Self::InvalidTimeout { .. }
+            | Self::InitialResponseTimeout { .. }
             | Self::UrlCannotBeBase { .. }
             | Self::HttpStatus { .. }
             | Self::UnexpectedJson { .. }
@@ -1531,6 +1576,7 @@ fn string_list_field(mut object: JsonObject, field: &'static str) -> AgentHostRe
 mod tests {
     use std::{
         collections::BTreeMap,
+        convert::Infallible,
         error::Error,
         net::SocketAddr,
         sync::{Arc, Mutex},
@@ -1539,14 +1585,15 @@ mod tests {
 
     use axum::{
         Json, Router,
-        body::Body,
+        body::{Body, Bytes},
         extract::{Path, Query, State},
         http::{HeaderMap, Method, StatusCode},
         response::{IntoResponse, Response},
         routing::{get, post},
     };
     use serde_json::{Value, json};
-    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
+    use tokio_stream::wrappers::ReceiverStream;
 
     use super::{AgentHostClient, AgentHostError, JsonObject};
 
@@ -1758,6 +1805,35 @@ mod tests {
             None,
             body,
         )?;
+        if session_id == "never-starts" {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            return Ok((
+                StatusCode::OK,
+                Body::from("{\"type\":\"content\",\"content\":\"late\"}\n"),
+            )
+                .into_response());
+        }
+        if session_id == "slow-session" {
+            let (sender, receiver) = mpsc::channel::<Result<Bytes, Infallible>>(2);
+            tokio::spawn(async move {
+                let _ignored = sender
+                    .send(Ok(Bytes::from_static(
+                        b"{\"type\":\"content\",\"content\":\"started\"}\n",
+                    )))
+                    .await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ignored = sender
+                    .send(Ok(Bytes::from_static(
+                        b"{\"type\":\"content\",\"content\":\"delayed\"}\n",
+                    )))
+                    .await;
+            });
+            return Ok((
+                StatusCode::OK,
+                Body::from_stream(ReceiverStream::new(receiver)),
+            )
+                .into_response());
+        }
         let body = Body::from(
             "\n{\"type\":\"start\"}\n[\"ignored\"]\n{\"type\":\"content\",\"content\":\"hello\"}\n",
         );
@@ -2086,6 +2162,39 @@ mod tests {
             }]
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_message_times_out_before_initial_response()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let server = TestServer::start().await?;
+        let client = AgentHostClient::new(&server.base_url, Duration::from_millis(1))?;
+
+        let error = client.send_message("never-starts", "wait for it").await;
+
+        assert!(matches!(
+            error,
+            Err(AgentHostError::InitialResponseTimeout { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_message_is_not_limited_by_client_timeout()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let server = TestServer::start().await?;
+        let client = AgentHostClient::new(&server.base_url, Duration::from_millis(10))?;
+
+        let events = client.send_message("slow-session", "wait for it").await?;
+
+        assert_eq!(
+            events,
+            vec![
+                object(json!({ "type": "content", "content": "started" }))?,
+                object(json!({ "type": "content", "content": "delayed" }))?,
+            ]
+        );
         Ok(())
     }
 
