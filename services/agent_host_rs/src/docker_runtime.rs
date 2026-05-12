@@ -12,7 +12,7 @@ use bollard::{
     errors::Error as BollardError,
     models::{
         ContainerCreateBody, HostConfig, PortBinding as DockerPortBinding, PortMap,
-        VolumeCreateOptions,
+        VolumeCreateRequest,
     },
     query_parameters::{
         CreateContainerOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
@@ -849,10 +849,10 @@ impl DockerBackend for BollardDockerBackend {
             Ok(_) => Ok(()),
             Err(error) if is_bollard_not_found(&error) => {
                 docker
-                    .create_volume(VolumeCreateOptions {
+                    .create_volume(VolumeCreateRequest {
                         name: Some(volume_name.to_owned()),
                         labels: Some(hash_map_from_btree(&labels)),
-                        ..VolumeCreateOptions::default()
+                        ..VolumeCreateRequest::default()
                     })
                     .await?;
                 Ok(())
@@ -1183,15 +1183,14 @@ fn docker_port_bindings(ports: &[PortBinding]) -> Option<PortMap> {
     Some(bindings)
 }
 
-#[allow(clippy::zero_sized_map_values)]
-fn docker_exposed_ports(ports: &[PortBinding]) -> Option<HashMap<String, HashMap<(), ()>>> {
+fn docker_exposed_ports(ports: &[PortBinding]) -> Option<Vec<String>> {
     if ports.is_empty() {
         return None;
     }
     Some(
         ports
             .iter()
-            .map(|port| (container_port_key(port.container_port), HashMap::new()))
+            .map(|port| container_port_key(port.container_port))
             .collect(),
     )
 }
