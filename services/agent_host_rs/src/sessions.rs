@@ -1022,6 +1022,7 @@ impl IntoResponse for ApiError {
             AgentHostError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AgentHostError::Runtime { .. }
+            | AgentHostError::Docker { .. }
             | AgentHostError::Http { .. }
             | AgentHostError::Io { .. }
             | AgentHostError::Json { .. } => StatusCode::INTERNAL_SERVER_ERROR,

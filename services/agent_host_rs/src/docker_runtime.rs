@@ -1,15 +1,28 @@
 use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex, PoisonError},
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex, OnceLock, PoisonError},
     time::Duration,
 };
 
 use async_stream::try_stream;
 use async_trait::async_trait;
+use bollard::{
+    Docker,
+    container::LogOutput,
+    errors::Error as BollardError,
+    models::{
+        ContainerCreateBody, HostConfig, PortBinding as DockerPortBinding, PortMap,
+        VolumeCreateOptions,
+    },
+    query_parameters::{
+        CreateContainerOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+        RemoveVolumeOptionsBuilder, StatsOptionsBuilder, WaitContainerOptionsBuilder,
+    },
+};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::{process::Command, sync::Mutex as AsyncMutex, time};
+use tokio::{sync::Mutex as AsyncMutex, time};
 
 use crate::{
     errors::AgentHostError,
@@ -68,7 +81,10 @@ impl Default for DockerKernelRuntime {
 impl DockerKernelRuntime {
     #[must_use]
     pub fn from_env() -> Self {
-        Self::new(DockerRuntimeConfig::from_env(), Arc::new(DockerCliBackend))
+        Self::new(
+            DockerRuntimeConfig::from_env(),
+            Arc::new(BollardDockerBackend::default()),
+        )
     }
 
     #[must_use]
@@ -762,32 +778,6 @@ struct KernelLogsResponse {
     lines: Vec<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-struct DockerInspectContainer {
-    #[serde(default, rename = "NetworkSettings")]
-    network_settings: DockerNetworkSettings,
-    #[serde(default, rename = "State")]
-    state: DockerContainerState,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
-struct DockerNetworkSettings {
-    #[serde(default, rename = "Ports")]
-    ports: BTreeMap<String, Option<Vec<DockerInspectPortBinding>>>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
-struct DockerInspectPortBinding {
-    #[serde(rename = "HostPort")]
-    host_port: String,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-struct DockerContainerState {
-    #[serde(default, rename = "Running")]
-    running: bool,
-}
-
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct DockerStats {
     #[serde(default, rename = "cpu_stats")]
@@ -828,84 +818,104 @@ struct DockerMemoryStatDetails {
 }
 
 #[derive(Clone, Default)]
-struct DockerCliBackend;
+struct BollardDockerBackend {
+    docker: Arc<OnceLock<Result<Docker, String>>>,
+}
+
+impl BollardDockerBackend {
+    fn docker(&self) -> Result<Docker, AgentHostError> {
+        let result = self
+            .docker
+            .get_or_init(|| Docker::connect_with_defaults().map_err(|error| error.to_string()));
+
+        match result {
+            Ok(docker) => Ok(docker.clone()),
+            Err(message) => Err(AgentHostError::runtime(format!(
+                "failed to connect to Docker: {message}"
+            ))),
+        }
+    }
+}
 
 #[async_trait]
-impl DockerBackend for DockerCliBackend {
+impl DockerBackend for BollardDockerBackend {
     async fn ensure_volume(
         &self,
         volume_name: &str,
         labels: BTreeMap<String, String>,
     ) -> Result<(), AgentHostError> {
-        if docker_success(["volume", "inspect", volume_name]).await? {
-            return Ok(());
+        let docker = self.docker()?;
+        match docker.inspect_volume(volume_name).await {
+            Ok(_) => Ok(()),
+            Err(error) if is_bollard_not_found(&error) => {
+                docker
+                    .create_volume(VolumeCreateOptions {
+                        name: Some(volume_name.to_owned()),
+                        labels: Some(hash_map_from_btree(&labels)),
+                        ..VolumeCreateOptions::default()
+                    })
+                    .await?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
         }
-        let mut args = vec!["volume".to_owned(), "create".to_owned()];
-        for (key, value) in labels {
-            args.push("--label".to_owned());
-            args.push(format!("{key}={value}"));
-        }
-        args.push(volume_name.to_owned());
-        docker_run(args).await.map(|_| ())
     }
 
     async fn require_volume(&self, volume_name: &str) -> Result<(), AgentHostError> {
-        if docker_success(["volume", "inspect", volume_name]).await? {
-            Ok(())
-        } else {
-            Err(AgentHostError::runtime(format!(
+        let docker = self.docker()?;
+        match docker.inspect_volume(volume_name).await {
+            Ok(_) => Ok(()),
+            Err(error) if is_bollard_not_found(&error) => Err(AgentHostError::runtime(format!(
                 "Docker volume {volume_name:?} does not exist"
-            )))
+            ))),
+            Err(error) => Err(error.into()),
         }
     }
 
     async fn run_container(&self, spec: ContainerRunSpec) -> Result<(), AgentHostError> {
-        let mut args = vec!["run".to_owned()];
-        if spec.auto_remove {
-            args.push("--rm".to_owned());
-        }
-        if spec.detach {
-            args.push("-d".to_owned());
-        }
-        if let Some(name) = spec.name {
-            args.push("--name".to_owned());
-            args.push(name);
-        }
-        if spec.network_disabled {
-            args.push("--network".to_owned());
-            args.push("none".to_owned());
-        } else if let Some(network) = spec.network {
-            args.push("--network".to_owned());
-            args.push(network);
-        }
-        for (key, value) in spec.labels {
-            args.push("--label".to_owned());
-            args.push(format!("{key}={value}"));
-        }
-        for (key, value) in spec.environment {
-            args.push("-e".to_owned());
-            args.push(format!("{key}={value}"));
-        }
-        for port in spec.ports {
-            args.push("-p".to_owned());
-            args.push(format!("{}::{}", port.host_ip, port.container_port));
-        }
-        for volume in spec.volumes {
-            args.push("-v".to_owned());
-            args.push(format!(
-                "{}:{}:{}",
-                volume.volume_name, volume.bind, volume.mode
-            ));
-        }
-        if let Some((entrypoint, command_args)) = spec.entrypoint.split_first() {
-            args.push("--entrypoint".to_owned());
-            args.push(entrypoint.clone());
-            args.push(spec.image);
-            args.extend(command_args.iter().cloned());
+        let docker = self.docker()?;
+        let config = container_create_body(&spec);
+        let response = if let Some(name) = spec.name.as_deref() {
+            let options = CreateContainerOptionsBuilder::default().name(name).build();
+            docker.create_container(Some(options), config).await?
         } else {
-            args.push(spec.image);
-        }
-        docker_run(args).await.map(|_| ())
+            docker
+                .create_container(
+                    None::<bollard::query_parameters::CreateContainerOptions>,
+                    config,
+                )
+                .await?
+        };
+        let container_name = spec.name.as_deref().unwrap_or(&response.id);
+        docker
+            .start_container(
+                container_name,
+                None::<bollard::query_parameters::StartContainerOptions>,
+            )
+            .await?;
+        let wait_result = if spec.detach {
+            Ok(())
+        } else {
+            let options = WaitContainerOptionsBuilder::default()
+                .condition("not-running")
+                .build();
+            let mut stream = docker.wait_container(container_name, Some(options));
+            stream.next().await.map_or_else(
+                || Ok(()),
+                |result| result.map(|_| ()).map_err(AgentHostError::from),
+            )
+        };
+        let remove_result = if !spec.detach && spec.auto_remove {
+            let options = RemoveContainerOptionsBuilder::default().force(true).build();
+            match docker.remove_container(container_name, Some(options)).await {
+                Ok(()) => Ok(()),
+                Err(error) if is_bollard_not_found(&error) => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        } else {
+            Ok(())
+        };
+        wait_result.and(remove_result)
     }
 
     async fn container_host_port(
@@ -913,33 +923,57 @@ impl DockerBackend for DockerCliBackend {
         container_name: &str,
         container_port: u16,
     ) -> Result<Option<u16>, AgentHostError> {
-        let output = docker_output(["inspect", container_name]).await?;
-        if !output.status.success() {
-            return Ok(None);
-        }
-        let payload: Vec<DockerInspectContainer> = serde_json::from_slice(&output.stdout)?;
-        Ok(extract_host_port(&payload, container_port))
+        let docker = self.docker()?;
+        let inspect = match docker
+            .inspect_container(
+                container_name,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(inspect) => inspect,
+            Err(error) if is_bollard_not_found(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(extract_host_port(&inspect, container_port))
     }
 
     async fn container_is_running(&self, container_name: &str) -> Result<bool, AgentHostError> {
-        let output = docker_output(["inspect", container_name]).await?;
-        if !output.status.success() {
-            return Ok(false);
+        let docker = self.docker()?;
+        match docker
+            .inspect_container(
+                container_name,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(inspect) => Ok(inspect
+                .state
+                .and_then(|state| state.running)
+                .unwrap_or(false)),
+            Err(error) if is_bollard_not_found(&error) => Ok(false),
+            Err(error) => Err(error.into()),
         }
-        let payload: Vec<DockerInspectContainer> = serde_json::from_slice(&output.stdout)?;
-        Ok(payload
-            .first()
-            .is_some_and(|container| container.state.running))
     }
 
     async fn remove_container(&self, container_name: &str) -> Result<(), AgentHostError> {
-        let _output = docker_output(["rm", "-f", container_name]).await?;
-        Ok(())
+        let docker = self.docker()?;
+        let options = RemoveContainerOptionsBuilder::default().force(true).build();
+        match docker.remove_container(container_name, Some(options)).await {
+            Ok(()) => Ok(()),
+            Err(error) if is_bollard_not_found(&error) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn remove_volume(&self, volume_name: &str) -> Result<(), AgentHostError> {
-        let _output = docker_output(["volume", "rm", "-f", volume_name]).await?;
-        Ok(())
+        let docker = self.docker()?;
+        let options = RemoveVolumeOptionsBuilder::default().force(true).build();
+        match docker.remove_volume(volume_name, Some(options)).await {
+            Ok(()) => Ok(()),
+            Err(error) if is_bollard_not_found(&error) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     async fn container_logs(
@@ -947,26 +981,44 @@ impl DockerBackend for DockerCliBackend {
         container_name: &str,
         tail: Option<u32>,
     ) -> Result<Vec<String>, AgentHostError> {
-        let mut args = vec!["logs".to_owned()];
+        let docker = self.docker()?;
+        let mut options = LogsOptionsBuilder::default().stdout(true).stderr(true);
         if let Some(tail) = tail {
-            args.push("--tail".to_owned());
-            args.push(tail.to_string());
+            options = options.tail(&tail.to_string());
         }
-        args.push(container_name.to_owned());
-        let output = docker_output(args).await?;
-        if !output.status.success() {
-            return Ok(Vec::new());
+        let mut stream = docker.logs(container_name, Some(options.build()));
+        let mut raw = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(output) => append_log_output(&mut raw, &output),
+                Err(error) if is_bollard_not_found(&error) => return Ok(Vec::new()),
+                Err(error) => return Err(error.into()),
+            }
         }
-        let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-        text.push_str(&String::from_utf8_lossy(&output.stderr));
-        Ok(text.lines().map(ToOwned::to_owned).collect())
+        Ok(String::from_utf8_lossy(&raw)
+            .lines()
+            .map(ToOwned::to_owned)
+            .collect())
     }
 
     async fn container_stats(
         &self,
-        _container_name: &str,
+        container_name: &str,
     ) -> Result<Option<DockerStats>, AgentHostError> {
-        Ok(None)
+        let docker = self.docker()?;
+        let options = StatsOptionsBuilder::default()
+            .stream(false)
+            .one_shot(true)
+            .build();
+        let mut stream = docker.stats(container_name, Some(options));
+        let Some(result) = stream.next().await else {
+            return Ok(None);
+        };
+        match result {
+            Ok(stats) => Ok(Some(serde_json::from_value(serde_json::to_value(stats)?)?)),
+            Err(error) if is_bollard_not_found(&error) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
@@ -1055,18 +1107,136 @@ fn normalize_runtime_summary(mut summary: RuntimeSessionSummary) -> RuntimeSessi
     summary
 }
 
-fn extract_host_port(payload: &[DockerInspectContainer], container_port: u16) -> Option<u16> {
+fn extract_host_port(
+    inspect: &bollard::models::ContainerInspectResponse,
+    container_port: u16,
+) -> Option<u16> {
     let port_key = format!("{container_port}/tcp");
-    payload
-        .first()?
+    inspect
         .network_settings
+        .as_ref()?
         .ports
+        .as_ref()?
         .get(&port_key)?
         .as_ref()?
         .first()?
         .host_port
+        .as_ref()?
         .parse()
         .ok()
+}
+
+fn container_create_body(spec: &ContainerRunSpec) -> ContainerCreateBody {
+    let (entrypoint, cmd) = spec
+        .entrypoint
+        .split_first()
+        .map_or((None, None), |(first, args)| {
+            (
+                Some(vec![first.clone()]),
+                (!args.is_empty()).then(|| args.to_vec()),
+            )
+        });
+
+    ContainerCreateBody {
+        image: Some(spec.image.clone()),
+        env: Some(environment_entries(&spec.environment)),
+        entrypoint,
+        cmd,
+        labels: Some(hash_map_from_btree(&spec.labels)),
+        exposed_ports: docker_exposed_ports(&spec.ports),
+        network_disabled: spec.network_disabled.then_some(true),
+        host_config: Some(HostConfig {
+            auto_remove: Some(spec.auto_remove && spec.detach),
+            network_mode: container_network_mode(spec),
+            port_bindings: docker_port_bindings(&spec.ports),
+            binds: docker_volume_binds(&spec.volumes),
+            ..HostConfig::default()
+        }),
+        ..ContainerCreateBody::default()
+    }
+}
+
+fn container_network_mode(spec: &ContainerRunSpec) -> Option<String> {
+    if spec.network_disabled {
+        Some("none".to_owned())
+    } else {
+        spec.network.clone()
+    }
+}
+
+fn docker_port_bindings(ports: &[PortBinding]) -> Option<PortMap> {
+    if ports.is_empty() {
+        return None;
+    }
+    let mut bindings = PortMap::new();
+    for port in ports {
+        let entry = bindings
+            .entry(container_port_key(port.container_port))
+            .or_insert_with(|| Some(Vec::new()));
+        if let Some(values) = entry {
+            values.push(DockerPortBinding {
+                host_ip: Some(port.host_ip.clone()),
+                host_port: Some(String::new()),
+            });
+        }
+    }
+    Some(bindings)
+}
+
+#[allow(clippy::zero_sized_map_values)]
+fn docker_exposed_ports(ports: &[PortBinding]) -> Option<HashMap<String, HashMap<(), ()>>> {
+    if ports.is_empty() {
+        return None;
+    }
+    Some(
+        ports
+            .iter()
+            .map(|port| (container_port_key(port.container_port), HashMap::new()))
+            .collect(),
+    )
+}
+
+fn docker_volume_binds(volumes: &[VolumeMount]) -> Option<Vec<String>> {
+    if volumes.is_empty() {
+        return None;
+    }
+    Some(
+        volumes
+            .iter()
+            .map(|volume| format!("{}:{}:{}", volume.volume_name, volume.bind, volume.mode))
+            .collect(),
+    )
+}
+
+fn container_port_key(container_port: u16) -> String {
+    format!("{container_port}/tcp")
+}
+
+fn environment_entries(environment: &BTreeMap<String, String>) -> Vec<String> {
+    environment
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect()
+}
+
+fn hash_map_from_btree(map: &BTreeMap<String, String>) -> HashMap<String, String> {
+    map.iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn append_log_output(buffer: &mut Vec<u8>, output: &LogOutput) {
+    buffer.extend_from_slice(output.as_ref());
+}
+
+const fn is_bollard_not_found(error: &BollardError) -> bool {
+    matches!(
+        error,
+        BollardError::DockerResponseServerError {
+            status_code: 404,
+            ..
+        }
+    )
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -1194,34 +1364,6 @@ fn format_runtime_template(
         .replace(CONTAINER_PORT_PLACEHOLDER, &container_port.to_string())
 }
 
-async fn docker_success<const N: usize>(args: [&str; N]) -> Result<bool, AgentHostError> {
-    Ok(docker_output(args).await?.status.success())
-}
-
-async fn docker_run(args: Vec<String>) -> Result<std::process::Output, AgentHostError> {
-    let output = docker_output(args).await?;
-    if output.status.success() {
-        Ok(output)
-    } else {
-        Err(AgentHostError::runtime(format!(
-            "docker command failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )))
-    }
-}
-
-async fn docker_output<I, S>(args: I) -> Result<std::process::Output, AgentHostError>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    Command::new("docker")
-        .args(args)
-        .output()
-        .await
-        .map_err(AgentHostError::from)
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1234,8 +1376,8 @@ mod tests {
 
     use super::{
         ContainerRunSpec, DockerBackend, DockerKernelRuntime, DockerRuntimeConfig, DockerStats,
-        PortBinding, VolumeMount, session_workspace_volume_name_from_container,
-        summarize_docker_stats,
+        PortBinding, VolumeMount, btree_map, container_create_body,
+        session_workspace_volume_name_from_container, summarize_docker_stats,
     };
     use crate::{
         docker_runtime::skills_mount_path,
@@ -1420,6 +1562,73 @@ mod tests {
             );
             drop(state);
         }
+    }
+
+    #[test]
+    fn container_create_body_matches_docker_run_shape() {
+        let spec = ContainerRunSpec {
+            image: "image:latest".to_owned(),
+            auto_remove: true,
+            detach: true,
+            entrypoint: vec!["/bin/echo".to_owned(), "hello".to_owned()],
+            environment: btree_map([("KEY", "value")]),
+            labels: btree_map([("agentspace.role", "test")]),
+            name: Some("container-name".to_owned()),
+            network: Some("agentspace".to_owned()),
+            network_disabled: false,
+            ports: vec![PortBinding {
+                container_port: 8080,
+                host_ip: "127.0.0.1".to_owned(),
+            }],
+            volumes: vec![VolumeMount {
+                volume_name: "volume-name".to_owned(),
+                bind: "/workspace".to_owned(),
+                mode: "ro".to_owned(),
+            }],
+        };
+
+        let body = container_create_body(&spec);
+        assert_eq!(body.image, Some("image:latest".to_owned()));
+        assert_eq!(body.entrypoint, Some(vec!["/bin/echo".to_owned()]));
+        assert_eq!(body.cmd, Some(vec!["hello".to_owned()]));
+        assert_eq!(body.env, Some(vec!["KEY=value".to_owned()]));
+        assert_eq!(
+            body.labels
+                .and_then(|labels| labels.get("agentspace.role").cloned()),
+            Some("test".to_owned())
+        );
+        let Some(host_config) = body.host_config else {
+            panic!("host config should be set");
+        };
+        assert_eq!(host_config.auto_remove, Some(true));
+        assert_eq!(host_config.network_mode, Some("agentspace".to_owned()));
+        assert_eq!(
+            host_config.binds,
+            Some(vec!["volume-name:/workspace:ro".to_owned()])
+        );
+        let binding = host_config
+            .port_bindings
+            .and_then(|bindings| bindings.get("8080/tcp").cloned())
+            .flatten()
+            .and_then(|bindings| bindings.into_iter().next());
+        assert_eq!(
+            binding.as_ref().and_then(|binding| binding.host_ip.clone()),
+            Some("127.0.0.1".to_owned())
+        );
+        assert_eq!(
+            binding.and_then(|binding| binding.host_port),
+            Some(String::new())
+        );
+
+        let mut foreground_spec = spec;
+        foreground_spec.detach = false;
+        let foreground_body = container_create_body(&foreground_spec);
+        assert_eq!(
+            foreground_body
+                .host_config
+                .and_then(|config| config.auto_remove),
+            Some(false)
+        );
     }
 
     #[tokio::test]
