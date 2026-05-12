@@ -26,8 +26,9 @@ use crate::{
     docker_runtime::DockerKernelRuntime,
     errors::AgentHostError,
     models::{
-        DockerStatsSummary, HarnessName, KernelEvent, KernelRuntimeSession, KernelStatus,
-        RuntimeSessionSummary, ServiceSummary, SessionSummary, WorkspaceMount, WorkspaceMountMode,
+        DockerStatsSummary, HarnessName, KernelEvent, KernelEventType, KernelRuntimeSession,
+        KernelStatus, RuntimeSessionSummary, ServiceSummary, SessionSummary, WorkspaceMount,
+        WorkspaceMountMode,
     },
 };
 
@@ -713,7 +714,7 @@ fn derive_status(events: &[KernelEvent], fallback_status: KernelStatus) -> Kerne
         .iter()
         .rev()
         .find_map(|event| {
-            (event.event_type == "session/status")
+            (event.event_type == KernelEventType::SessionStatus)
                 .then_some(event.status)
                 .flatten()
         })
@@ -1020,9 +1021,10 @@ impl IntoResponse for ApiError {
         let status = match self.0 {
             AgentHostError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            AgentHostError::Runtime { .. } | AgentHostError::Io { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            AgentHostError::Runtime { .. }
+            | AgentHostError::Http { .. }
+            | AgentHostError::Io { .. }
+            | AgentHostError::Json { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
         let detail = self.0.to_string();
         (status, Json(json!({ "detail": detail }))).into_response()
@@ -1054,8 +1056,8 @@ mod tests {
         AppConfig, AppState, build_router,
         errors::AgentHostError,
         models::{
-            DockerStatsSummary, HarnessName, KernelEvent, KernelRuntimeSession, KernelStatus,
-            RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
+            DockerStatsSummary, HarnessName, KernelEvent, KernelEventType, KernelRuntimeSession,
+            KernelStatus, RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
         },
     };
 
@@ -1437,7 +1439,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("get failed: {error}"));
 
-        assert_eq!(first.event_type, "session/start");
+        assert_eq!(first.event_type, KernelEventType::SessionStart);
         assert_eq!(fetched.turns, 1);
         assert_eq!(fetched.status, KernelStatus::Done);
     }
@@ -1824,25 +1826,25 @@ mod tests {
     }
 
     fn session_start(session_id: &str, kernel: &str) -> KernelEvent {
-        let mut event = KernelEvent::new("session/start");
+        let mut event = KernelEvent::new(KernelEventType::SessionStart);
         event.session_id = Some(session_id.to_owned());
         event.kernel = Some(kernel.to_owned());
         event
     }
 
     fn status_event(status: KernelStatus) -> KernelEvent {
-        let mut event = KernelEvent::new("session/status");
+        let mut event = KernelEvent::new(KernelEventType::SessionStatus);
         event.status = Some(status);
         event
     }
 
     fn text_delta(content: &str) -> KernelEvent {
-        let mut event = KernelEvent::new("text_delta");
+        let mut event = KernelEvent::new(KernelEventType::TextDelta);
         event.content = Some(content.to_owned());
         event
     }
 
     fn session_end() -> KernelEvent {
-        KernelEvent::new("session/end")
+        KernelEvent::new(KernelEventType::SessionEnd)
     }
 }

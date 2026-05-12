@@ -103,6 +103,117 @@ impl FromStr for KernelStatus {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KernelEventType {
+    SessionStart,
+    SessionStatus,
+    SessionUpdate,
+    SessionPromptResult,
+    SessionError,
+    SessionEnd,
+    Status,
+    TextDelta,
+    ReasoningDelta,
+    ToolCall,
+    ToolResult,
+    Error,
+    LegacySessionStart,
+    LegacySessionEnd,
+    Unknown(String),
+}
+
+impl KernelEventType {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::SessionStart => "session/start",
+            Self::SessionStatus => "session/status",
+            Self::SessionUpdate => "session/update",
+            Self::SessionPromptResult => "session/prompt/result",
+            Self::SessionError => "session/error",
+            Self::SessionEnd => "session/end",
+            Self::Status => "status",
+            Self::TextDelta => "text_delta",
+            Self::ReasoningDelta => "reasoning_delta",
+            Self::ToolCall => "tool_call",
+            Self::ToolResult => "tool_result",
+            Self::Error => "error",
+            Self::LegacySessionStart => "session_start",
+            Self::LegacySessionEnd => "session_end",
+            Self::Unknown(event_type) => event_type,
+        }
+    }
+}
+
+impl Display for KernelEventType {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for KernelEventType {
+    fn from(event_type: &str) -> Self {
+        match event_type {
+            "session/start" => Self::SessionStart,
+            "session/status" => Self::SessionStatus,
+            "session/update" => Self::SessionUpdate,
+            "session/prompt/result" => Self::SessionPromptResult,
+            "session/error" => Self::SessionError,
+            "session/end" => Self::SessionEnd,
+            "status" => Self::Status,
+            "text_delta" => Self::TextDelta,
+            "reasoning_delta" => Self::ReasoningDelta,
+            "tool_call" => Self::ToolCall,
+            "tool_result" => Self::ToolResult,
+            "error" => Self::Error,
+            "session_start" => Self::LegacySessionStart,
+            "session_end" => Self::LegacySessionEnd,
+            unknown => Self::Unknown(unknown.to_owned()),
+        }
+    }
+}
+
+impl From<String> for KernelEventType {
+    fn from(event_type: String) -> Self {
+        match event_type.as_str() {
+            "session/start" => Self::SessionStart,
+            "session/status" => Self::SessionStatus,
+            "session/update" => Self::SessionUpdate,
+            "session/prompt/result" => Self::SessionPromptResult,
+            "session/error" => Self::SessionError,
+            "session/end" => Self::SessionEnd,
+            "status" => Self::Status,
+            "text_delta" => Self::TextDelta,
+            "reasoning_delta" => Self::ReasoningDelta,
+            "tool_call" => Self::ToolCall,
+            "tool_result" => Self::ToolResult,
+            "error" => Self::Error,
+            "session_start" => Self::LegacySessionStart,
+            "session_end" => Self::LegacySessionEnd,
+            _ => Self::Unknown(event_type),
+        }
+    }
+}
+
+impl Serialize for KernelEventType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for KernelEventType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let event_type = String::deserialize(deserializer)?;
+        Ok(Self::from(event_type))
+    }
+}
+
 fn utc_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)
 }
@@ -110,7 +221,7 @@ fn utc_now() -> String {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KernelEvent {
     #[serde(rename = "type")]
-    pub event_type: String,
+    pub event_type: KernelEventType,
     #[serde(default = "utc_now")]
     pub ts: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -143,7 +254,7 @@ pub struct KernelEvent {
 
 impl KernelEvent {
     #[must_use]
-    pub fn new(event_type: impl Into<String>) -> Self {
+    pub fn new(event_type: impl Into<KernelEventType>) -> Self {
         Self {
             event_type: event_type.into(),
             ts: utc_now(),
@@ -164,8 +275,7 @@ impl KernelEvent {
     }
 
     pub fn to_jsonl(&self) -> Result<String, AgentHostError> {
-        serde_json::to_string(self)
-            .map_err(|error| AgentHostError::runtime(format!("serialize event: {error}")))
+        serde_json::to_string(self).map_err(AgentHostError::from)
     }
 }
 
@@ -326,11 +436,11 @@ impl ServiceSummary {
 mod tests {
     use serde_json::json;
 
-    use super::{KernelEvent, KernelStatus, WorkspaceMount, WorkspaceMountMode};
+    use super::{KernelEvent, KernelEventType, KernelStatus, WorkspaceMount, WorkspaceMountMode};
 
     #[test]
     fn kernel_event_serialization_omits_absent_fields() {
-        let mut event = KernelEvent::new("session/status");
+        let mut event = KernelEvent::new(KernelEventType::SessionStatus);
         event.status = Some(KernelStatus::Busy);
 
         let payload = serde_json::to_value(&event)

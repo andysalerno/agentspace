@@ -5,7 +5,7 @@ use std::{
     fmt::{self, Display, Formatter},
     fs, io,
     path::{Path, PathBuf, StripPrefixError},
-    sync::Arc,
+    sync::{Arc, RwLock},
 };
 
 use axum::{
@@ -17,7 +17,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::RwLock;
 
 use crate::{AppState, models::ServiceSummary};
 
@@ -60,18 +59,37 @@ impl SkillRegistry {
     }
 
     pub async fn create_skill(&self, request: CreateSkillRequest) -> Result<Skill, SkillError> {
-        self.service
-            .write()
-            .await
-            .create_skill(&request.skill_id, &request.files)
+        let service = self.service.clone();
+        run_skill_task("create skill", move || {
+            let service = service.write().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for create",
+            })?;
+            service.create_skill(&request.skill_id, &request.files)
+        })
+        .await
     }
 
     pub async fn list_skills(&self) -> Result<Vec<SkillSummary>, SkillError> {
-        self.service.read().await.list_skills()
+        let service = self.service.clone();
+        run_skill_task("list skills", move || {
+            let service = service.read().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for list",
+            })?;
+            service.list_skills()
+        })
+        .await
     }
 
     pub async fn get_skill(&self, skill_id: &str) -> Result<Skill, SkillError> {
-        self.service.read().await.get_skill(skill_id)
+        let service = self.service.clone();
+        let skill_id = skill_id.to_owned();
+        run_skill_task("get skill", move || {
+            let service = service.read().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for get",
+            })?;
+            service.get_skill(&skill_id)
+        })
+        .await
     }
 
     pub async fn update_skill(
@@ -79,14 +97,27 @@ impl SkillRegistry {
         skill_id: &str,
         request: UpdateSkillRequest,
     ) -> Result<Skill, SkillError> {
-        self.service
-            .write()
-            .await
-            .update_skill(skill_id, &request.files)
+        let service = self.service.clone();
+        let skill_id = skill_id.to_owned();
+        run_skill_task("update skill", move || {
+            let service = service.write().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for update",
+            })?;
+            service.update_skill(&skill_id, &request.files)
+        })
+        .await
     }
 
     pub async fn delete_skill(&self, skill_id: &str) -> Result<(), SkillError> {
-        self.service.write().await.delete_skill(skill_id)
+        let service = self.service.clone();
+        let skill_id = skill_id.to_owned();
+        run_skill_task("delete skill", move || {
+            let service = service.write().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for delete",
+            })?;
+            service.delete_skill(&skill_id)
+        })
+        .await
     }
 }
 
@@ -164,6 +195,13 @@ pub enum SkillError {
         base: PathBuf,
         source: StripPrefixError,
     },
+    LockPoisoned {
+        operation: &'static str,
+    },
+    BlockingTaskJoin {
+        operation: &'static str,
+        source: tokio::task::JoinError,
+    },
 }
 
 impl Display for SkillError {
@@ -199,6 +237,15 @@ impl Display for SkillError {
                 path.display(),
                 base.display()
             ),
+            Self::LockPoisoned { operation } => {
+                write!(formatter, "failed to {operation}: lock poisoned")
+            }
+            Self::BlockingTaskJoin { operation, source } => {
+                write!(
+                    formatter,
+                    "failed to {operation}: blocking task failed: {source}"
+                )
+            }
         }
     }
 }
@@ -208,13 +255,27 @@ impl Error for SkillError {
         match self {
             Self::Io { source, .. } => Some(source),
             Self::PathPrefix { source, .. } => Some(source),
+            Self::BlockingTaskJoin { source, .. } => Some(source),
             Self::SkillNotFound { .. }
             | Self::SkillAlreadyExists { .. }
             | Self::InvalidSkillId { .. }
             | Self::InvalidSkillFilePath { .. }
-            | Self::BuiltinSkillReadOnly { .. } => None,
+            | Self::BuiltinSkillReadOnly { .. }
+            | Self::LockPoisoned { .. } => None,
         }
     }
+}
+
+async fn run_skill_task<T>(
+    operation: &'static str,
+    task: impl FnOnce() -> Result<T, SkillError> + Send + 'static,
+) -> Result<T, SkillError>
+where
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|source| SkillError::BlockingTaskJoin { operation, source })?
 }
 
 #[derive(Clone, Debug)]
@@ -709,9 +770,10 @@ impl IntoResponse for SkillHttpError {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             SkillError::BuiltinSkillReadOnly { .. } => StatusCode::FORBIDDEN,
-            SkillError::Io { .. } | SkillError::PathPrefix { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            SkillError::Io { .. }
+            | SkillError::PathPrefix { .. }
+            | SkillError::LockPoisoned { .. }
+            | SkillError::BlockingTaskJoin { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         (status, Json(json!({ "detail": self.0.to_string() }))).into_response()

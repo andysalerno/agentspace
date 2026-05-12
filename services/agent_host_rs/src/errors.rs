@@ -8,7 +8,9 @@ pub enum AgentHostError {
     SessionNotFound { session_id: String },
     Validation { message: String },
     Runtime { message: String },
-    Io { message: String },
+    Http { source: reqwest::Error },
+    Io { source: std::io::Error },
+    Json { source: serde_json::Error },
 }
 
 impl AgentHostError {
@@ -32,42 +34,47 @@ impl AgentHostError {
             message: message.into(),
         }
     }
-
-    #[must_use]
-    pub fn io(message: impl Into<String>) -> Self {
-        Self::Io {
-            message: message.into(),
-        }
-    }
 }
 
 impl Display for AgentHostError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::SessionNotFound { session_id } => write!(formatter, "{session_id}"),
-            Self::Validation { message } | Self::Runtime { message } | Self::Io { message } => {
+            Self::Validation { message } | Self::Runtime { message } => {
                 formatter.write_str(message)
             }
+            Self::Http { source } => write!(formatter, "kernel HTTP request failed: {source}"),
+            Self::Io { source } => write!(formatter, "I/O error: {source}"),
+            Self::Json { source } => write!(formatter, "JSON error: {source}"),
         }
     }
 }
 
-impl Error for AgentHostError {}
+impl Error for AgentHostError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Http { source } => Some(source),
+            Self::Io { source } => Some(source),
+            Self::Json { source } => Some(source),
+            Self::SessionNotFound { .. } | Self::Validation { .. } | Self::Runtime { .. } => None,
+        }
+    }
+}
 
 impl From<reqwest::Error> for AgentHostError {
     fn from(error: reqwest::Error) -> Self {
-        Self::runtime(format!("kernel HTTP request failed: {error}"))
+        Self::Http { source: error }
     }
 }
 
 impl From<std::io::Error> for AgentHostError {
     fn from(error: std::io::Error) -> Self {
-        Self::io(format!("I/O error: {error}"))
+        Self::Io { source: error }
     }
 }
 
 impl From<serde_json::Error> for AgentHostError {
     fn from(error: serde_json::Error) -> Self {
-        Self::runtime(format!("JSON error: {error}"))
+        Self::Json { source: error }
     }
 }

@@ -779,7 +779,8 @@ pub enum GatewayError {
     AlreadyExists { gateway_id: String },
     InvalidGatewayId { gateway_id: String },
     Runtime { message: String },
-    Http { message: String },
+    Docker { source: BollardError },
+    Http { source: reqwest::Error },
 }
 
 impl Display for GatewayError {
@@ -794,26 +795,34 @@ impl Display for GatewayError {
                 "invalid gateway_id {gateway_id:?}; expected lower-case hyphenated letters"
             ),
             Self::Runtime { message } => write!(formatter, "gateway runtime error: {message}"),
-            Self::Http { message } => write!(formatter, "gateway HTTP error: {message}"),
+            Self::Docker { source } => write!(formatter, "gateway Docker error: {source}"),
+            Self::Http { source } => write!(formatter, "gateway HTTP error: {source}"),
         }
     }
 }
 
-impl Error for GatewayError {}
+impl Error for GatewayError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Docker { source } => Some(source),
+            Self::Http { source } => Some(source),
+            Self::NotFound { .. }
+            | Self::AlreadyExists { .. }
+            | Self::InvalidGatewayId { .. }
+            | Self::Runtime { .. } => None,
+        }
+    }
+}
 
 impl From<BollardError> for GatewayError {
     fn from(error: BollardError) -> Self {
-        Self::Runtime {
-            message: error.to_string(),
-        }
+        Self::Docker { source: error }
     }
 }
 
 impl From<reqwest::Error> for GatewayError {
     fn from(error: reqwest::Error) -> Self {
-        Self::Http {
-            message: error.to_string(),
-        }
+        Self::Http { source: error }
     }
 }
 
@@ -888,7 +897,9 @@ impl IntoResponse for GatewayHttpError {
             GatewayError::NotFound { .. } => StatusCode::NOT_FOUND,
             GatewayError::AlreadyExists { .. } => StatusCode::CONFLICT,
             GatewayError::InvalidGatewayId { .. } => StatusCode::UNPROCESSABLE_ENTITY,
-            GatewayError::Runtime { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            GatewayError::Runtime { .. } | GatewayError::Docker { .. } => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             GatewayError::Http { .. } => StatusCode::BAD_GATEWAY,
         };
 
