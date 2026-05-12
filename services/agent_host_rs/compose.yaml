@@ -1,7 +1,7 @@
 services:
   agent-host:
     build:
-      context: ../agent_host_rs
+      context: .
       dockerfile: Dockerfile
     env_file:
       - .env

@@ -283,7 +283,7 @@ be opened after the feature is added.
 
 ## Runtime Mounting
 
-Runtime mounting is handled by `services/agent_host`.
+Runtime mounting is handled by `services/agent_host_rs`.
 
 The client-service-to-agent-host boundary sends `workspace_mounts` in
 `POST /sessions`:
@@ -498,8 +498,8 @@ When adding or changing workspace behavior, check all of these layers:
 4. **Agent-host client boundary** —
    `services/client_service_rs/src/agent_host.rs`
 5. **Runtime mounting** —
-   `services/agent_host/src/agent_host/service.py` and
-   `services/agent_host/src/agent_host/app.py`
+   `services/agent_host_rs/src/docker_runtime.rs` and
+   `services/agent_host_rs/src/sessions.rs`
 6. **Web UI** — `clients/webui/src/WorkspacesView.tsx`,
    `clients/webui/src/AgentsView.tsx`, `api.ts`, `queries.ts`, and `types.ts`
 7. **Tests** — route contract, proxy, storage, and runtime mount tests

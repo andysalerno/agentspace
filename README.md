@@ -50,18 +50,18 @@ To resume a previous Copilot session, set `COPILOT_SESSION_ID` in [kernels/kerne
 
 ## Agent Host
 
-The Dockerized `agent_host` service builds from `services/agent_host_rs` and manages sessions by spawning one `kernel_host` container per session. The Python FastAPI service remains under `services/agent_host` as transition reference code.
+The Dockerized `agent_host` service builds from `services/agent_host_rs` and manages sessions by spawning one `kernel_host` container per session.
 
 Start it with:
 
 ```powershell
-.\services\agent_host\run-service.ps1 start
+.\services\agent_host_rs\run-service.ps1 start
 ```
 
 Stop it with:
 
 ```powershell
-.\services\agent_host\run-service.ps1 stop
+.\services\agent_host_rs\run-service.ps1 stop
 ```
 
 Default endpoint: `http://127.0.0.1:8001`

@@ -257,11 +257,12 @@ Kernel containers are not defined in Compose — they are created dynamically by
 
 ### Workspace
 
-The repo is a `uv` workspace for Python packages. The Rust client service is a
-separate Cargo crate under `services/client_service_rs`.
+The repo is a `uv` workspace for Python packages. Rust services live in
+separate Cargo crates under `services/client_service_rs` and
+`services/agent_host_rs`.
 
 ```
-kernels/*  services/agent_host  channels/*  clients/cli_ui
+kernels/*  services/git_agent  channels/*  clients/cli_ui
 ```
 
 ### Commands

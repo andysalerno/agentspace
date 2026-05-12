@@ -112,9 +112,11 @@ Three additions needed:
 
 ### 6. Register in the agent host
 
-**`services/agent_host/src/agent_host/service.py`** — add entry to `SKILLS_MOUNT_PATHS`:
-```python
-HarnessName.<NAME>: "/skills",  # or a custom path if the CLI expects skills elsewhere
+**`services/agent_host_rs/src/models.rs`** — add the harness variant to `HarnessName`.
+
+**`services/agent_host_rs/src/docker_runtime.rs`** — add the harness to `skills_mount_path`:
+```rust
+HarnessName::<Name> => "/skills", // or a custom path if the CLI expects skills elsewhere
 ```
 
 ### 7. Update all Dockerfiles that copy kernel packages
@@ -122,8 +124,6 @@ HarnessName.<NAME>: "/skills",  # or a custom path if the CLI expects skills els
 These Dockerfiles copy the root `pyproject.toml` which references all workspace members, so every kernel dir must be present:
 
 - `kernels/kernel_host/Dockerfile` — add `COPY kernels/kernel_<name> kernels/kernel_<name>`
-- `services/agent_host/Dockerfile` — add `COPY kernels/kernel_<name> kernels/kernel_<name>`
-- `services/client_service_rs/Dockerfile` — add `COPY kernels/kernel_<name> kernels/kernel_<name>`
 
 If the CLI tool needs to be installed in the kernel_host container, also add an install command to `kernels/kernel_host/Dockerfile` (in the `RUN apt-get update` block).
 
@@ -131,7 +131,7 @@ If the CLI tool needs to be installed in the kernel_host container, also add an 
 
 Check and update any tests that assert on the full list of harnesses, e.g.:
 - `services/client_service_rs/tests/route_contract.rs` — route tests that assert harness lists or session creation behavior
-- `services/agent_host/tests/test_agent_host_service.py` — `test_skills_mount_paths_covers_all_harnesses`
+- `services/agent_host_rs/src/docker_runtime.rs` — `skills_mount_paths_cover_harnesses`
 
 ### 9. Verify
 

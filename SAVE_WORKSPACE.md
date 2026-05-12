@@ -61,7 +61,7 @@ With direct mounts:
 
 ### 1. Always Create a Session Scratch Volume in `agent_host`
 
-Add a scratch volume concept to `services/agent_host/src/agent_host/service.py`.
+Add a scratch volume concept to `services/agent_host_rs/src/docker_runtime.rs`.
 
 Suggested volume name:
 
@@ -287,7 +287,7 @@ Run:
 
 ```sh
 just client-service-rs-check
-uv run pytest services/agent_host/tests/test_agent_host_service.py services/agent_host/tests/test_app.py
+just agent-host-rs-check
 npm --prefix clients/webui run lint
 npm --prefix clients/webui run build
 just check

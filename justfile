@@ -1,7 +1,7 @@
 set shell := ["bash", "-cu"]
 set windows-shell := ["bash", "-cu"]
 
-agent_host_script := "services/agent_host/run-service.sh"
+agent_host_script := "services/agent_host_rs/run-service.sh"
 client_service_script := "services/client_service_rs/run-service.sh"
 webui_script := "clients/webui/run-service.sh"
 kernel_host_script := "kernels/kernel_host/spawn-kernel.sh"
@@ -22,6 +22,9 @@ check:
   uv run ruff check .
   uv run pyright
   uv run --all-packages pytest
+  cargo fmt --check --manifest-path services/agent_host_rs/Cargo.toml
+  cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
+  cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
   npm --prefix clients/webui run lint
   npm --prefix clients/webui run test --if-present
   npm --prefix clients/webui run build
@@ -34,8 +37,16 @@ client-service-rs-check:
   cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
   cargo clippy --manifest-path services/client_service_rs/Cargo.toml --all-targets --all-features
 
+agent-host-rs-check:
+  cargo fmt --check --manifest-path services/agent_host_rs/Cargo.toml
+  cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
+  cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
+
 client-service-rs-image:
   runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest services/client_service_rs
+
+agent-host-rs-image:
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/agent_host_rs/Dockerfile -t agentspace-agent-host-agent-host:latest services/agent_host_rs
 
 webui-outdated:
   npm --prefix clients/webui outdated

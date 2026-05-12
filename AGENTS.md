@@ -13,7 +13,7 @@ Rust client service managed by Cargo under `services/client_service_rs`.
   - `kernel_copilot`: Primary kernel path (uses `copilot-cli`).
   - `kernel_host`: Runner for kernel containers.
 - **Services** (`services/`):
-  - `agent_host`: Rust service that manages sessions by spawning `kernel_host` containers; the Python service remains as transition reference code.
+  - `agent_host_rs`: Rust service that manages sessions by spawning `kernel_host` containers.
   - `client_service_rs`: Rust implementation of the public backend API. Clients should talk to this, not `agent_host` directly.
 - **Clients** (`clients/`, `channels/`):
   - `webui`: TypeScript dashboard.
