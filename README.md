@@ -50,7 +50,7 @@ To resume a previous Copilot session, set `COPILOT_SESSION_ID` in [kernels/kerne
 
 ## Agent Host
 
-The current `agent_host` slice is a containerized FastAPI service that manages sessions by spawning one `kernel_host` container per session.
+The Dockerized `agent_host` service builds from `services/agent_host_rs` and manages sessions by spawning one `kernel_host` container per session. The Python FastAPI service remains under `services/agent_host` as transition reference code.
 
 Start it with:
 

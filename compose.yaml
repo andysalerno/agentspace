@@ -20,8 +20,8 @@ services:
   agent-host:
     image: agentspace-agent-host-agent-host:latest
     build:
-      context: .
-      dockerfile: services/agent_host/Dockerfile
+      context: services/agent_host_rs
+      dockerfile: Dockerfile
     depends_on:
       kernel-host-image:
         condition: service_completed_successfully

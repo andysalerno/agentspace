@@ -1,8 +1,8 @@
 services:
   agent-host:
     build:
-      context: ../..
-      dockerfile: services/agent_host/Dockerfile
+      context: ../agent_host_rs
+      dockerfile: Dockerfile
     env_file:
       - .env
     environment:
@@ -18,6 +18,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - skills:/skills
+      - ../../mounts/skills:/builtin-skills:ro
 
 volumes:
   skills:
