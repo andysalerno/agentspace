@@ -35,8 +35,8 @@ A shared todo list for multiple agents to read and select tasks from:
 
 *These are final Rust-idiom cleanup items from the Python-to-Rust port review.*
 
-- [ ] CLEANUP: Replace `GatewayRuntimeSession`'s `Arc<dyn Any>` plus downcasting with a typed Rust shape, such as an enum like `KernelRuntimeSession` or a `GatewayRuntime` associated session type. This is the strongest remaining Python-like dynamic handle pattern in the port.
-- [ ] CLEANUP: Replace ad hoc `serde_json::Value` response parsing with typed serde response structs/enums. Start with kernel `/session`, `/history`, and `/logs` responses in `docker_runtime.rs`, Docker `inspect` port extraction, and gateway status parsing in `gateways.rs`.
+- [x] CLEANUP: Replace `GatewayRuntimeSession`'s `Arc<dyn Any>` plus downcasting with a typed Rust shape, such as an enum like `KernelRuntimeSession` or a `GatewayRuntime` associated session type. This is the strongest remaining Python-like dynamic handle pattern in the port.
+- [x] CLEANUP: Replace ad hoc `serde_json::Value` response parsing with typed serde response structs/enums. Start with kernel `/session`, `/history`, and `/logs` responses in `docker_runtime.rs`, Docker `inspect` port extraction, and gateway status parsing in `gateways.rs`.
 - [ ] CLEANUP: Avoid blocking filesystem work under async locks in `SkillRegistry`. The service currently wraps synchronous `std::fs` operations in `tokio::RwLock` and calls them from async handlers; consider `spawn_blocking`, `tokio::fs`, or a clearer synchronous service boundary.
 - [ ] CLEANUP: Preserve underlying error sources instead of converting them into strings in `AgentHostError` and `GatewayError`. Prefer variants that hold source errors directly, or use `thiserror`, so callers and logs retain structured error chains.
 - [ ] CLEANUP: Reduce stringly typed kernel event handling. `KernelEvent.event_type` is a raw `String`, and status derivation checks the literal `"session/status"`; add known event constants/helpers or an enum with an `Unknown(String)` escape hatch.

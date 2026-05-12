@@ -7,6 +7,7 @@ use std::{
 use async_stream::try_stream;
 use async_trait::async_trait;
 use futures_util::StreamExt;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{process::Command, sync::Mutex as AsyncMutex, time};
 
@@ -14,7 +15,7 @@ use crate::{
     errors::AgentHostError,
     models::{
         DockerKernelSession, DockerStatsSummary, HarnessName, KernelEvent, KernelRuntimeSession,
-        KernelStatus, RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
+        RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
     },
     sessions::{EventStream, KernelRuntime, RuntimeCreateSession},
 };
@@ -450,15 +451,15 @@ impl KernelRuntime for DockerKernelRuntime {
         session: &KernelRuntimeSession,
     ) -> Result<RuntimeSessionSummary, AgentHostError> {
         let handle = Self::docker_session(session)?;
-        let payload = self
+        let summary = self
             .client
             .get(format!("{}/session", handle.base_url))
             .send()
             .await?
             .error_for_status()?
-            .json::<Value>()
+            .json::<RuntimeSessionSummary>()
             .await?;
-        Ok(runtime_summary_from_value(&payload))
+        Ok(normalize_runtime_summary(summary))
     }
 
     async fn history(
@@ -472,10 +473,9 @@ impl KernelRuntime for DockerKernelRuntime {
             .send()
             .await?
             .error_for_status()?
-            .json::<Value>()
+            .json::<KernelHistoryResponse>()
             .await?;
-        serde_json::from_value(payload.get("history").cloned().unwrap_or_else(|| json!([])))
-            .map_err(AgentHostError::from)
+        Ok(payload.history)
     }
 
     async fn logs(&self, session: &KernelRuntimeSession) -> Result<Vec<String>, AgentHostError> {
@@ -486,10 +486,9 @@ impl KernelRuntime for DockerKernelRuntime {
             .send()
             .await?
             .error_for_status()?
-            .json::<Value>()
+            .json::<KernelLogsResponse>()
             .await?;
-        serde_json::from_value(payload.get("lines").cloned().unwrap_or_else(|| json!([])))
-            .map_err(AgentHostError::from)
+        Ok(payload.lines)
     }
 
     async fn container_logs(
@@ -717,7 +716,10 @@ pub trait DockerBackend: Send + Sync {
         tail: Option<u32>,
     ) -> Result<Vec<String>, AgentHostError>;
 
-    async fn container_stats(&self, container_name: &str) -> Result<Option<Value>, AgentHostError>;
+    async fn container_stats(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<DockerStats>, AgentHostError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -746,6 +748,83 @@ pub struct VolumeMount {
     pub volume_name: String,
     pub bind: String,
     pub mode: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+struct KernelHistoryResponse {
+    #[serde(default)]
+    history: Vec<Vec<KernelEvent>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+struct KernelLogsResponse {
+    #[serde(default)]
+    lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+struct DockerInspectContainer {
+    #[serde(default, rename = "NetworkSettings")]
+    network_settings: DockerNetworkSettings,
+    #[serde(default, rename = "State")]
+    state: DockerContainerState,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+struct DockerNetworkSettings {
+    #[serde(default, rename = "Ports")]
+    ports: BTreeMap<String, Option<Vec<DockerInspectPortBinding>>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct DockerInspectPortBinding {
+    #[serde(rename = "HostPort")]
+    host_port: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+struct DockerContainerState {
+    #[serde(default, rename = "Running")]
+    running: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct DockerStats {
+    #[serde(default, rename = "cpu_stats")]
+    cpu: DockerCpuStats,
+    #[serde(default, rename = "precpu_stats")]
+    precpu: DockerCpuStats,
+    #[serde(default, rename = "memory_stats")]
+    memory: DockerMemoryStats,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+struct DockerCpuStats {
+    #[serde(default)]
+    cpu_usage: DockerCpuUsage,
+    system_cpu_usage: Option<u64>,
+    online_cpus: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+struct DockerCpuUsage {
+    total_usage: Option<u64>,
+    #[serde(default)]
+    percpu_usage: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+struct DockerMemoryStats {
+    usage: Option<u64>,
+    limit: Option<u64>,
+    #[serde(default)]
+    stats: DockerMemoryStatDetails,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq)]
+struct DockerMemoryStatDetails {
+    cache: Option<u64>,
+    inactive_file: Option<u64>,
 }
 
 #[derive(Clone, Default)]
@@ -838,7 +917,7 @@ impl DockerBackend for DockerCliBackend {
         if !output.status.success() {
             return Ok(None);
         }
-        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        let payload: Vec<DockerInspectContainer> = serde_json::from_slice(&output.stdout)?;
         Ok(extract_host_port(&payload, container_port))
     }
 
@@ -847,14 +926,10 @@ impl DockerBackend for DockerCliBackend {
         if !output.status.success() {
             return Ok(false);
         }
-        let payload: Value = serde_json::from_slice(&output.stdout)?;
+        let payload: Vec<DockerInspectContainer> = serde_json::from_slice(&output.stdout)?;
         Ok(payload
-            .as_array()
-            .and_then(|items| items.first())
-            .and_then(|container| container.get("State"))
-            .and_then(|state| state.get("Running"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false))
+            .first()
+            .is_some_and(|container| container.state.running))
     }
 
     async fn remove_container(&self, container_name: &str) -> Result<(), AgentHostError> {
@@ -890,19 +965,16 @@ impl DockerBackend for DockerCliBackend {
     async fn container_stats(
         &self,
         _container_name: &str,
-    ) -> Result<Option<Value>, AgentHostError> {
+    ) -> Result<Option<DockerStats>, AgentHostError> {
         Ok(None)
     }
 }
 
-pub fn summarize_docker_stats(raw: &Value) -> Option<DockerStatsSummary> {
-    let cpu_stats = raw.get("cpu_stats").unwrap_or(&Value::Null);
-    let precpu_stats = raw.get("precpu_stats").unwrap_or(&Value::Null);
-    let memory_stats = raw.get("memory_stats").unwrap_or(&Value::Null);
-
-    let cpu_percent = compute_cpu_percent(cpu_stats, precpu_stats);
-    let memory_usage = compute_memory_usage(memory_stats);
-    let memory_limit = memory_stats.get("limit").and_then(Value::as_u64);
+#[must_use]
+pub fn summarize_docker_stats(raw: &DockerStats) -> Option<DockerStatsSummary> {
+    let cpu_percent = compute_cpu_percent(&raw.cpu, &raw.precpu);
+    let memory_usage = compute_memory_usage(&raw.memory);
+    let memory_limit = raw.memory.limit;
     let memory_percent = memory_usage
         .zip(memory_limit)
         .and_then(|(usage, limit)| (limit > 0).then_some(percent(usage, limit, 1)));
@@ -919,27 +991,22 @@ pub fn summarize_docker_stats(raw: &Value) -> Option<DockerStatsSummary> {
     })
 }
 
-fn compute_cpu_percent(cpu_stats: &Value, precpu_stats: &Value) -> Option<f64> {
-    let cpu_usage = cpu_stats.get("cpu_usage")?;
-    let precpu_usage = precpu_stats.get("cpu_usage")?;
-    let total = cpu_usage.get("total_usage")?.as_u64()?;
-    let pre_total = precpu_usage.get("total_usage")?.as_u64()?;
-    let system = cpu_stats.get("system_cpu_usage")?.as_u64()?;
-    let pre_system = precpu_stats.get("system_cpu_usage")?.as_u64()?;
+fn compute_cpu_percent(cpu_stats: &DockerCpuStats, precpu_stats: &DockerCpuStats) -> Option<f64> {
+    let total = cpu_stats.cpu_usage.total_usage?;
+    let pre_total = precpu_stats.cpu_usage.total_usage?;
+    let system = cpu_stats.system_cpu_usage?;
+    let pre_system = precpu_stats.system_cpu_usage?;
     let cpu_delta = total.checked_sub(pre_total)?;
     let system_delta = system.checked_sub(pre_system)?;
     if system_delta == 0 {
         return None;
     }
     let online_cpus = cpu_stats
-        .get("online_cpus")
-        .and_then(Value::as_u64)
+        .online_cpus
         .filter(|value| *value > 0)
         .or_else(|| {
-            cpu_usage
-                .get("percpu_usage")
-                .and_then(Value::as_array)
-                .map(|values| u64::try_from(values.len()).unwrap_or(1))
+            (!cpu_stats.cpu_usage.percpu_usage.is_empty())
+                .then(|| u64::try_from(cpu_stats.cpu_usage.percpu_usage.len()).unwrap_or(1))
                 .filter(|value| *value > 0)
         })
         .unwrap_or(1);
@@ -951,13 +1018,12 @@ fn percent(numerator: u64, denominator: u64, multiplier: u64) -> f64 {
     (numerator as f64 / denominator as f64) * multiplier as f64 * 100.0
 }
 
-fn compute_memory_usage(memory_stats: &Value) -> Option<u64> {
-    let usage = memory_stats.get("usage")?.as_u64()?;
-    let stats = memory_stats.get("stats").unwrap_or(&Value::Null);
-    let cache = stats
-        .get("cache")
-        .and_then(Value::as_u64)
-        .or_else(|| stats.get("inactive_file").and_then(Value::as_u64));
+fn compute_memory_usage(memory_stats: &DockerMemoryStats) -> Option<u64> {
+    let usage = memory_stats.usage?;
+    let cache = memory_stats
+        .stats
+        .cache
+        .or(memory_stats.stats.inactive_file);
     match cache {
         Some(cache) if cache <= usage => Some(usage - cache),
         _ => Some(usage),
@@ -982,42 +1048,29 @@ fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-fn runtime_summary_from_value(value: &Value) -> RuntimeSessionSummary {
-    RuntimeSessionSummary {
-        status: value
-            .get("status")
-            .and_then(Value::as_str)
-            .and_then(|status| status.parse::<KernelStatus>().ok()),
-        resume_token: value
-            .get("resume_token")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        vscode_url: value
-            .get("vscode_url")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-        free_port_url: value
-            .get("free_port_url")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-    }
+fn normalize_runtime_summary(mut summary: RuntimeSessionSummary) -> RuntimeSessionSummary {
+    summary.resume_token = non_empty(summary.resume_token);
+    summary.vscode_url = non_empty(summary.vscode_url);
+    summary.free_port_url = non_empty(summary.free_port_url);
+    summary
 }
 
-fn extract_host_port(payload: &Value, container_port: u16) -> Option<u16> {
+fn extract_host_port(payload: &[DockerInspectContainer], container_port: u16) -> Option<u16> {
+    let port_key = format!("{container_port}/tcp");
     payload
-        .as_array()
-        .and_then(|items| items.first())
-        .and_then(|container| container.get("NetworkSettings"))
-        .and_then(|settings| settings.get("Ports"))
-        .and_then(|ports| ports.get(format!("{container_port}/tcp")))
-        .and_then(Value::as_array)
-        .and_then(|bindings| bindings.first())
-        .and_then(|binding| binding.get("HostPort"))
-        .and_then(Value::as_str)
-        .and_then(|host_port| host_port.parse().ok())
+        .first()?
+        .network_settings
+        .ports
+        .get(&port_key)?
+        .as_ref()?
+        .first()?
+        .host_port
+        .parse()
+        .ok()
+}
+
+fn non_empty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }
 
 fn btree_map<const N: usize>(entries: [(&str, &str); N]) -> BTreeMap<String, String> {
@@ -1180,8 +1233,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ContainerRunSpec, DockerBackend, DockerKernelRuntime, DockerRuntimeConfig, PortBinding,
-        VolumeMount, session_workspace_volume_name_from_container, summarize_docker_stats,
+        ContainerRunSpec, DockerBackend, DockerKernelRuntime, DockerRuntimeConfig, DockerStats,
+        PortBinding, VolumeMount, session_workspace_volume_name_from_container,
+        summarize_docker_stats,
     };
     use crate::{
         docker_runtime::skills_mount_path,
@@ -1288,7 +1342,7 @@ mod tests {
         async fn container_stats(
             &self,
             _container_name: &str,
-        ) -> Result<Option<serde_json::Value>, AgentHostError> {
+        ) -> Result<Option<DockerStats>, AgentHostError> {
             Ok(None)
         }
     }
@@ -1526,7 +1580,7 @@ mod tests {
             }
         });
 
-        let summary = summarize_docker_stats(&raw)
+        let summary = summarize_docker_stats(&docker_stats(raw))
             .unwrap_or_else(|| panic!("stats summary should be present"));
 
         assert_eq!(summary.cpu_percent, Some(40.0));
@@ -1537,18 +1591,18 @@ mod tests {
 
     #[test]
     fn summarize_docker_stats_handles_missing_fields() {
-        assert!(summarize_docker_stats(&json!({})).is_none());
+        assert!(summarize_docker_stats(&docker_stats(json!({}))).is_none());
     }
 
     #[test]
     fn summarize_docker_stats_uses_cgroup_v2_inactive_file() {
-        let summary = summarize_docker_stats(&json!({
+        let summary = summarize_docker_stats(&docker_stats(json!({
             "memory_stats": {
                 "usage": 200,
                 "limit": 1000,
                 "stats": { "inactive_file": 75 }
             }
-        }))
+        })))
         .unwrap_or_else(|| panic!("stats summary should be present"));
 
         assert_eq!(summary.memory_usage_bytes, Some(125));
@@ -1580,5 +1634,10 @@ mod tests {
             .unwrap_or_else(|error| panic!("volume failed: {error}"));
 
         assert_eq!(volume, "agentspace-session-workspace-test");
+    }
+
+    fn docker_stats(payload: serde_json::Value) -> DockerStats {
+        serde_json::from_value(payload)
+            .unwrap_or_else(|error| panic!("failed to parse docker stats fixture: {error}"))
     }
 }

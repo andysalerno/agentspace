@@ -1,5 +1,4 @@
 use std::{
-    any::Any,
     collections::{BTreeMap, HashMap},
     env,
     error::Error,
@@ -27,7 +26,7 @@ use bollard::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::{sync::Mutex, time::Instant};
 
 use crate::{AppState, models::ServiceSummary};
@@ -256,21 +255,21 @@ pub struct GatewaySummary {
     #[serde(rename = "type")]
     pub gateway_type: String,
     pub agent_id: String,
-    pub status: String,
+    pub status: GatewayStatus,
     pub last_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayRuntimeStatus {
-    pub status: String,
+    pub status: GatewayStatus,
     pub last_error: Option<String>,
 }
 
 impl GatewayRuntimeStatus {
     #[must_use]
-    pub fn running() -> Self {
+    pub const fn running() -> Self {
         Self {
-            status: "running".to_owned(),
+            status: GatewayStatus::Running,
             last_error: None,
         }
     }
@@ -278,60 +277,94 @@ impl GatewayRuntimeStatus {
     #[must_use]
     pub fn error(message: impl Into<String>) -> Self {
         Self {
-            status: "error".to_owned(),
+            status: GatewayStatus::Error,
             last_error: Some(message.into()),
         }
     }
 
-    #[must_use]
-    pub fn from_json(payload: &Value) -> Self {
-        let status = payload
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_owned();
-        let last_error = payload.get("last_error").and_then(json_value_to_string);
-
-        Self { status, last_error }
+    fn from_response(response: GatewayStatusResponse) -> Self {
+        Self {
+            status: response.status,
+            last_error: response.last_error,
+        }
     }
 }
 
-#[derive(Clone)]
-pub struct GatewayRuntimeSession {
-    value: Arc<dyn Any + Send + Sync>,
-    debug_label: String,
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum GatewayStatus {
+    Running,
+    Error,
+    #[default]
+    Unknown,
+    Other(String),
+}
+
+impl GatewayStatus {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Running => "running",
+            Self::Error => "error",
+            Self::Unknown => "unknown",
+            Self::Other(status) => status,
+        }
+    }
+}
+
+impl Display for GatewayStatus {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for GatewayStatus {
+    fn from(status: &str) -> Self {
+        match status {
+            "running" => Self::Running,
+            "error" => Self::Error,
+            "unknown" => Self::Unknown,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl Serialize for GatewayStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for GatewayStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let status = String::deserialize(deserializer)?;
+        Ok(Self::from(status.as_str()))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GatewayStatusResponse {
+    #[serde(default)]
+    status: GatewayStatus,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GatewayRuntimeSession {
+    Docker(DockerGatewaySession),
+    Opaque(String),
 }
 
 impl GatewayRuntimeSession {
     #[must_use]
-    pub fn new<T>(value: T) -> Self
-    where
-        T: Any + Debug + Send + Sync,
-    {
-        let debug_label = format!("{value:?}");
-        Self {
-            value: Arc::new(value),
-            debug_label,
-        }
-    }
-
-    #[must_use]
-    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
-        self.value.as_ref().downcast_ref::<T>()
-    }
-
-    #[must_use]
-    pub fn debug_label(&self) -> &str {
-        &self.debug_label
-    }
-}
-
-impl Debug for GatewayRuntimeSession {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("GatewayRuntimeSession")
-            .field("value", &self.debug_label)
-            .finish()
+    pub fn opaque(value: impl Into<String>) -> Self {
+        Self::Opaque(value.into())
     }
 }
 
@@ -470,14 +503,12 @@ where
     fn docker_session(
         session: &GatewayRuntimeSession,
     ) -> Result<&DockerGatewaySession, GatewayError> {
-        session
-            .downcast_ref::<DockerGatewaySession>()
-            .ok_or_else(|| GatewayError::Runtime {
-                message: format!(
-                    "unsupported gateway session handle: {}",
-                    session.debug_label()
-                ),
-            })
+        match session {
+            GatewayRuntimeSession::Docker(handle) => Ok(handle),
+            GatewayRuntimeSession::Opaque(_) => Err(GatewayError::Runtime {
+                message: format!("unsupported gateway session handle: {session:?}"),
+            }),
+        }
     }
 }
 
@@ -506,7 +537,7 @@ where
         self.docker.create_container(&spec).await?;
         self.wait_until_ready(&base_url).await?;
 
-        Ok(GatewayRuntimeSession::new(DockerGatewaySession {
+        Ok(GatewayRuntimeSession::Docker(DockerGatewaySession {
             container_name,
             base_url,
         }))
@@ -543,8 +574,8 @@ where
             )));
         }
 
-        let payload = response.json::<Value>().await?;
-        Ok(GatewayRuntimeStatus::from_json(&payload))
+        let payload = response.json::<GatewayStatusResponse>().await?;
+        Ok(GatewayRuntimeStatus::from_response(payload))
     }
 
     async fn logs(&self, session: &GatewayRuntimeSession) -> Result<Vec<String>, GatewayError> {
@@ -886,14 +917,6 @@ fn validate_gateway_id(gateway_id: &str) -> Result<(), GatewayError> {
     }
 }
 
-fn json_value_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::Null => None,
-        Value::String(message) => Some(message.clone()),
-        other => Some(other.to_string()),
-    }
-}
-
 fn environment_entries(environment: &BTreeMap<String, String>) -> Vec<String> {
     environment
         .iter()
@@ -938,7 +961,7 @@ mod tests {
     use super::{
         DockerGatewayClient, DockerGatewayConfig, DockerGatewayContainerSpec, DockerGatewayRuntime,
         GATEWAY_ENTRYPOINT, GatewayError, GatewayHost, GatewayRegistry, GatewayRuntime,
-        GatewayRuntimeCreateRequest, GatewayRuntimeSession, GatewayRuntimeStatus,
+        GatewayRuntimeCreateRequest, GatewayRuntimeSession, GatewayRuntimeStatus, GatewayStatus,
     };
     use crate::{AppConfig, AppState, build_router};
 
@@ -963,16 +986,16 @@ mod tests {
             state.created.push(request);
             let handle = format!("container-{}", state.created.len());
             drop(state);
-            Ok(GatewayRuntimeSession::new(handle))
+            Ok(GatewayRuntimeSession::opaque(handle))
         }
 
         async fn destroy_gateway(
             &self,
             session: &GatewayRuntimeSession,
         ) -> Result<(), GatewayError> {
-            let handle = session
-                .downcast_ref::<String>()
-                .unwrap_or_else(|| panic!("fake runtime received unsupported session"));
+            let GatewayRuntimeSession::Opaque(handle) = session else {
+                panic!("fake runtime received unsupported session");
+            };
             self.state.lock().await.destroyed.push(handle.clone());
             Ok(())
         }
@@ -1042,7 +1065,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("failed to create gateway: {error}"));
 
         assert_eq!(summary.gateway_id, "echo-one");
-        assert_eq!(summary.status, "running");
+        assert_eq!(summary.status, GatewayStatus::Running);
         assert_eq!(summary.last_error, None);
         assert_eq!(
             runtime.state.lock().await.created[0].env,
