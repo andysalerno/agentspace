@@ -30,3 +30,13 @@ A shared todo list for multiple agents to read and select tasks from:
 - [ ] CLEANUP: in `KernelsView.tsx`, `loadingLogs = logsQuery.isFetching && logsQuery.isLoading` is redundant — `isLoading` already implies `isFetching` in TanStack Query v5. Simplify to `loadingLogs = logsQuery.isLoading`.
 - [ ] CLEANUP: `ErrorContext` exposes `setError` in the public context value but no caller uses it (everyone goes through `reportError` for `unknown → string` normalization). Remove `setError` from `ErrorContextValue` to tighten the API surface.
 - [ ] BUG: when an agent is deleted from `AgentsView`, the agent's sessions are not invalidated. The currently-selected chat session can then become stale and 404 on its next refetch. Fix: in `AgentsView.deleteMutation.onSuccess`, also invalidate `queryKeys.sessions`; if the deleted agent owns the currently-selected session, clear `selectedSessionId` (raise via callback prop or move the cleanup to `App`, which owns that state).
+
+## agent_host_rs port finishing touches
+
+*These are final Rust-idiom cleanup items from the Python-to-Rust port review.*
+
+- [ ] CLEANUP: Replace `GatewayRuntimeSession`'s `Arc<dyn Any>` plus downcasting with a typed Rust shape, such as an enum like `KernelRuntimeSession` or a `GatewayRuntime` associated session type. This is the strongest remaining Python-like dynamic handle pattern in the port.
+- [ ] CLEANUP: Replace ad hoc `serde_json::Value` response parsing with typed serde response structs/enums. Start with kernel `/session`, `/history`, and `/logs` responses in `docker_runtime.rs`, Docker `inspect` port extraction, and gateway status parsing in `gateways.rs`.
+- [ ] CLEANUP: Avoid blocking filesystem work under async locks in `SkillRegistry`. The service currently wraps synchronous `std::fs` operations in `tokio::RwLock` and calls them from async handlers; consider `spawn_blocking`, `tokio::fs`, or a clearer synchronous service boundary.
+- [ ] CLEANUP: Preserve underlying error sources instead of converting them into strings in `AgentHostError` and `GatewayError`. Prefer variants that hold source errors directly, or use `thiserror`, so callers and logs retain structured error chains.
+- [ ] CLEANUP: Reduce stringly typed kernel event handling. `KernelEvent.event_type` is a raw `String`, and status derivation checks the literal `"session/status"`; add known event constants/helpers or an enum with an `Unknown(String)` escape hatch.
