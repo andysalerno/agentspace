@@ -3553,7 +3553,10 @@ mod tests {
         .await?;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["harness"], "acp");
-        assert_eq!(value["system_prompt"], "");
+        assert_eq!(
+            value["system_prompt"],
+            crate::models::DEFAULT_AGENT_SYSTEM_PROMPT
+        );
         assert_eq!(value["skills"], json!([]));
 
         let (status, value) = request_json(
