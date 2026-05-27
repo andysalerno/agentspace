@@ -495,6 +495,26 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         },
         onError: reportError,
     });
+    const deleteAllSessionsMutation = useMutation({
+        mutationFn: async (sessionIds: string[]) => {
+            for (const sessionId of sessionIds) {
+                await api.deleteSession(sessionId);
+            }
+        },
+        onSuccess: (_, sessionIds) => {
+            for (const sessionId of sessionIds) {
+                queryClient.removeQueries({ queryKey: queryKeys.session(sessionId) });
+            }
+            if (selectedSessionId !== null && sessionIds.includes(selectedSessionId)) {
+                onSelectSession(null);
+            }
+        },
+        onError: reportError,
+        onSettled: () => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
+        },
+    });
     const saveWorkspaceMutation = useMutation({
         mutationFn: ({ sessionId, workspace_id, name }: { sessionId: string; workspace_id: string; name: string }) =>
             api.saveSessionWorkspace(sessionId, { workspace_id, name }),
@@ -766,6 +786,30 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         deleteSessionMutation.mutate(sessionId);
     }
 
+    function handleDeleteAllSessions() {
+        const sessionIds = sessions.map((session) => session.session_id);
+        if (sessionIds.length === 0) {
+            return;
+        }
+        const targetLabel = sessionIds.length === 1
+            ? "the only workspace session"
+            : `all ${sessionIds.length} workspace sessions`;
+        const confirmed = window.confirm(
+            `Delete ${targetLabel}? This will destroy unsaved workspaces forever and cannot be undone.`,
+        );
+        if (!confirmed) {
+            return;
+        }
+        streamControllerRef.current?.abort();
+        streamControllerRef.current = null;
+        streamingSessionIdRef.current = null;
+        streamingTurnIdRef.current = null;
+        setPendingUserMessage(null);
+        setStreamingMessage(null);
+        setStreaming(false);
+        deleteAllSessionsMutation.mutate(sessionIds);
+    }
+
     async function handleSaveWorkspace(sessionId: string) {
         const details = promptWorkspaceSaveDetails();
         if (details === null) {
@@ -796,9 +840,10 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
             ? mergeAssistantProgress(streamingMessage, persistedStreamingAssistant)
             : streamingMessage);
     const effectiveStreaming = streaming && !streamCompletedFromCache;
+    const deletingSessions = deleteSessionMutation.isPending || deleteAllSessionsMutation.isPending;
     const busy = effectiveStreaming || Boolean(selectedSession?.active_turn)
         || createSessionMutation.isPending || resetMutation.isPending
-        || deleteSessionMutation.isPending || saveWorkspaceMutation.isPending;
+        || deletingSessions || saveWorkspaceMutation.isPending;
     const visibleCachedMessages = displayedStreamingMessage && activeAssistantMessageId
         ? cachedMessages.filter((message) => message.message_id !== activeAssistantMessageId)
         : cachedMessages;
@@ -847,15 +892,27 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                             <span className="rail-count">{sessions.length}</span>
                         </h3>
                     </div>
-                    <button
-                        className="icon-button new-session-button"
-                        onClick={() => setShowNewSession(!showNewSession)}
-                        type="button"
-                        title="New session"
-                        aria-expanded={showNewSession}
-                    >
-                        {showNewSession ? "×" : "+"}
-                    </button>
+                    <div className="rail-heading-actions">
+                        <button
+                            aria-label="Delete all workspace sessions"
+                            className="secondary-button rail-delete-all-button"
+                            disabled={sessions.length === 0 || deletingSessions || saveWorkspaceMutation.isPending}
+                            onClick={handleDeleteAllSessions}
+                            title="Delete all workspace sessions"
+                            type="button"
+                        >
+                            {deleteAllSessionsMutation.isPending ? "Deleting..." : "Delete all"}
+                        </button>
+                        <button
+                            className="icon-button new-session-button"
+                            onClick={() => setShowNewSession(!showNewSession)}
+                            type="button"
+                            title="New session"
+                            aria-expanded={showNewSession}
+                        >
+                            {showNewSession ? "×" : "+"}
+                        </button>
+                    </div>
                 </div>
                 {showNewSession && (
                     <form className="compact-form new-session-form" onSubmit={(e) => { void handleCreateSession(e); }}>
@@ -917,7 +974,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 <button
                                     aria-label={`Delete session ${session.session_id}`}
                                     className="session-delete-button"
-                                    disabled={deleteSessionMutation.isPending || saveWorkspaceMutation.isPending}
+                                    disabled={deletingSessions || saveWorkspaceMutation.isPending}
                                     onClick={() => void handleDeleteSession(session.session_id)}
                                     title="Delete session"
                                     type="button"
@@ -1020,7 +1077,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 </button>
                                 <button
                                     className="danger-button"
-                                    disabled={deleteSessionMutation.isPending || saveWorkspaceMutation.isPending}
+                                    disabled={deletingSessions || saveWorkspaceMutation.isPending}
                                     onClick={() => {
                                         if (selectedSessionId) {
                                             void handleDeleteSession(selectedSessionId);

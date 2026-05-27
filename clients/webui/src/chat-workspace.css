@@ -111,6 +111,30 @@
   background: var(--chat-hover);
 }
 
+.rail-heading-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.rail-delete-all-button {
+  min-height: 30px;
+  padding: 5px 8px;
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--chat-line));
+  background: var(--chat-surface);
+  color: var(--danger);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.rail-delete-all-button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--chat-line));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
 .new-session-form {
   gap: 10px;
   padding: 10px;
@@ -187,6 +211,7 @@
 
 .chat-session-card:focus-visible,
 .session-delete-button:focus-visible,
+.rail-delete-all-button:focus-visible,
 .chat-header-actions a:focus-visible,
 .chat-header-actions button:focus-visible,
 .composer-send-button:focus-visible {
