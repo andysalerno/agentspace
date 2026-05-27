@@ -32,7 +32,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends nodejs && \
     curl -fsSL https://gh.io/copilot-install | bash && \
     curl -fsSL https://claude.ai/install.sh | bash && \
-    curl -fsSL https://opencode.ai/install | bash -s -- --version 1.15.5 && \
+    curl -fsSL https://opencode.ai/install | bash -s -- --version 1.15.11 && \
     npm install -g firecrawl-cli && \
     curl -fsSL https://code-server.dev/install.sh | \
         sh -s -- --method=standalone --prefix=/usr/local && \
