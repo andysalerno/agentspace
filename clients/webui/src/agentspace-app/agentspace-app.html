@@ -1,4 +1,4 @@
-<fluent-design-system-provider class="provider">
+<fluent-design-system-provider class="provider" data-theme="{{theme}}">
   <div class="app-shell" data-theme="{{theme}}">
     <aside class="navigation" ?data-collapsed="{{sidebarCollapsed}}">
       <div class="brand">
@@ -17,8 +17,11 @@
           <for each="item in navItems">
             <if condition="item.group == 'workspace'">
               <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
-                <span class="nav-label">{{item.label}}</span>
-                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+                <span class="nav-icon icon-{{item.id}}" aria-hidden="true"></span>
+                <span class="nav-text">
+                  <span class="nav-label">{{item.label}}</span>
+                  <span class="nav-description">{{item.description}}</span>
+                </span>
               </fluent-button>
             </if>
           </for>
@@ -29,8 +32,11 @@
           <for each="item in navItems">
             <if condition="item.group == 'operations'">
               <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
-                <span class="nav-label">{{item.label}}</span>
-                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+                <span class="nav-icon icon-{{item.id}}" aria-hidden="true"></span>
+                <span class="nav-text">
+                  <span class="nav-label">{{item.label}}</span>
+                  <span class="nav-description">{{item.description}}</span>
+                </span>
               </fluent-button>
             </if>
           </for>
@@ -41,8 +47,11 @@
           <for each="item in navItems">
             <if condition="item.group == 'configuration'">
               <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
-                <span class="nav-label">{{item.label}}</span>
-                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+                <span class="nav-icon icon-{{item.id}}" aria-hidden="true"></span>
+                <span class="nav-text">
+                  <span class="nav-label">{{item.label}}</span>
+                  <span class="nav-description">{{item.description}}</span>
+                </span>
               </fluent-button>
             </if>
           </for>
@@ -53,8 +62,11 @@
           <for each="item in navItems">
             <if condition="item.group == 'system'">
               <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
-                <span class="nav-label">{{item.label}}</span>
-                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+                <span class="nav-icon icon-{{item.id}}" aria-hidden="true"></span>
+                <span class="nav-text">
+                  <span class="nav-label">{{item.label}}</span>
+                  <span class="nav-description">{{item.description}}</span>
+                </span>
               </fluent-button>
             </if>
           </for>
@@ -63,8 +75,14 @@
 
       <div class="nav-footer">
         <fluent-button appearance="stealth" @click="{toggleSidebar()}">
-          <if condition="sidebarCollapsed">Expand</if>
-          <if condition="!sidebarCollapsed">Collapse</if>
+          <if condition="sidebarCollapsed">
+            <span class="nav-icon icon-sidebar-expand" aria-hidden="true"></span>
+            <span class="nav-footer-label">Expand</span>
+          </if>
+          <if condition="!sidebarCollapsed">
+            <span class="nav-icon icon-sidebar-collapse" aria-hidden="true"></span>
+            <span class="nav-footer-label">Collapse</span>
+          </if>
         </fluent-button>
       </div>
     </aside>
@@ -72,7 +90,6 @@
     <main class="workspace">
       <header class="command-bar">
         <div>
-          <p class="eyebrow">Microsoft WebUI SSR + Fluent UI</p>
           <h1>{{currentViewTitle}}</h1>
           <p>{{currentViewDescription}}</p>
         </div>
@@ -223,19 +240,25 @@
                   <label>Agent ID<fluent-text-field w-ref="{agentIdInput}" value="{{agentForm.agent_id}}" ?disabled="{{isEditingAgent}}"></fluent-text-field></label>
                   <label>Name<fluent-text-field w-ref="{agentNameInput}" value="{{agentForm.name}}"></fluent-text-field></label>
                   <label>Harness
-                    <fluent-select w-ref="{agentHarnessSelect}" value="{{agentForm.harness}}">
+                    <fluent-select w-ref="{agentHarnessSelect}" value="{{agentForm.harness}}" @change="{refreshAgentModelOptions()}">
                       <for each="harness in harnesses"><fluent-option value="{{harness}}">{{harness}}</fluent-option></for>
                     </fluent-select>
                   </label>
                   <label>Connection
-                    <fluent-select w-ref="{agentConnectionSelect}" value="{{agentForm.connection_id}}">
+                    <fluent-select w-ref="{agentConnectionSelect}" value="{{agentForm.connection_id}}" @change="{refreshAgentModelOptions()}">
                       <fluent-option value="">Default</fluent-option>
                       <for each="connection in connections"><fluent-option value="{{connection.connection_id}}">{{connection.name}}</fluent-option></for>
                     </fluent-select>
                   </label>
+                  <label class="span-2">Model
+                    <fluent-select w-ref="{agentModelSelect}" value="{{agentForm.model}}">
+                      <fluent-option value="">Use configured default</fluent-option>
+                      <for each="model in agentModelOptions"><fluent-option value="{{model}}">{{model}}</fluent-option></for>
+                    </fluent-select>
+                  </label>
                   <label class="span-2">System prompt<fluent-text-area w-ref="{agentPromptInput}" rows="5" value="{{agentForm.system_prompt}}"></fluent-text-area></label>
                   <label>Skills, comma separated<fluent-text-field w-ref="{agentSkillsInput}" value="{{agentForm.skills_text}}"></fluent-text-field></label>
-                  <label class="span-2">Environment variables<fluent-text-area w-ref="{agentEnvInput}" rows="6" value="{{agentForm.env_vars}}"></fluent-text-area></label>
+                  <label class="span-2">Advanced environment variables<fluent-text-area w-ref="{agentEnvInput}" rows="6" value="{{agentForm.env_vars}}"></fluent-text-area></label>
                   <label class="span-2">Workspace mounts JSON<fluent-text-area w-ref="{agentMountsInput}" rows="4" value="{{agentForm.workspace_mounts_json}}"></fluent-text-area></label>
                 </div>
                 <div class="form-actions">
@@ -256,6 +279,7 @@
                     <span>Skills</span><strong>{{agent.skills.length}}</strong>
                     <span>Mounts</span><strong>{{agent.workspace_mounts.length}}</strong>
                     <span>Connection</span><strong>{{agent.connection_id}}</strong>
+                    <span>Model</span><strong>{{agent.model_label}}</strong>
                   </div>
                   <div class="card-actions">
                     <fluent-button appearance="accent" @click="{startAgentSession(agent.agent_id)}">New session</fluent-button>

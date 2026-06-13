@@ -68,6 +68,8 @@ export type Agent = {
   skills: string[];
   env_vars: string;
   connection_id: string | null;
+  model?: string;
+  model_label?: string;
   workspace_mounts: WorkspaceMount[];
   created_at: string;
   updated_at: string;
@@ -471,6 +473,7 @@ export type AgentFormState = {
   skills_text: string;
   env_vars: string;
   connection_id: string;
+  model: string;
   workspace_mounts_json: string;
 };
 

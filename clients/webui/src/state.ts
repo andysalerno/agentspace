@@ -155,6 +155,7 @@ export function emptyAgentForm(harness = DEFAULT_HARNESS): AgentFormState {
     skills_text: "",
     env_vars: "",
     connection_id: "",
+    model: "",
     workspace_mounts_json: "[]",
   };
 }

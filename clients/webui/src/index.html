@@ -6,6 +6,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light dark">
     <title>{{title}}</title>
+    <script>
+      (() => {
+        let initialTheme = "light";
+        try {
+          const storedTheme = window.localStorage.getItem("theme");
+          const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+          initialTheme = storedTheme === "dark" || storedTheme === "light"
+            ? storedTheme
+            : prefersDark ? "dark" : "light";
+        } catch {
+          initialTheme = "light";
+        }
+        document.documentElement.dataset.theme = initialTheme;
+        document.documentElement.style.colorScheme = initialTheme;
+      })();
+    </script>
     <style>
       :root {
         --font-family-base: "Segoe UI", "Segoe UI Variable", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
@@ -27,10 +43,36 @@
         --colorStatusWarningForeground1: #8a3707;
         --colorStatusDangerBackground1: #fdf3f4;
         --colorStatusDangerForeground1: #b10e1c;
+        --shadow4: 0 2px 4px rgba(0, 0, 0, 0.10), 0 0 2px rgba(0, 0, 0, 0.08);
         --shadow8: 0 2px 4px rgba(0, 0, 0, 0.14), 0 0 2px rgba(0, 0, 0, 0.12);
         --shadow16: 0 8px 16px rgba(0, 0, 0, 0.14), 0 0 2px rgba(0, 0, 0, 0.12);
         --borderRadiusMedium: 6px;
         --borderRadiusLarge: 10px;
+        --borderRadiusXLarge: 16px;
+      }
+
+      :root[data-theme="dark"] {
+        --colorBrandBackground: #2899f5;
+        --colorBrandBackgroundHover: #3aa0f3;
+        --colorBrandForeground1: #7cc7ff;
+        --colorNeutralBackground1: #1b1a19;
+        --colorNeutralBackground2: #11100f;
+        --colorNeutralBackground3: #252423;
+        --colorNeutralBackground4: #323130;
+        --colorNeutralForeground1: #f3f2f1;
+        --colorNeutralForeground2: #edebe9;
+        --colorNeutralForeground3: #c8c6c4;
+        --colorNeutralStroke1: #484644;
+        --colorNeutralStroke2: #3b3a39;
+        --colorStatusSuccessBackground1: #052505;
+        --colorStatusSuccessForeground1: #92c353;
+        --colorStatusWarningBackground1: #3b2e09;
+        --colorStatusWarningForeground1: #fce100;
+        --colorStatusDangerBackground1: #3b0509;
+        --colorStatusDangerForeground1: #ff99a4;
+        --shadow4: 0 2px 4px rgba(0, 0, 0, 0.36), 0 0 2px rgba(0, 0, 0, 0.24);
+        --shadow8: 0 4px 10px rgba(0, 0, 0, 0.44), 0 0 2px rgba(0, 0, 0, 0.28);
+        --shadow16: 0 10px 24px rgba(0, 0, 0, 0.52), 0 0 2px rgba(0, 0, 0, 0.32);
       }
 
       * {

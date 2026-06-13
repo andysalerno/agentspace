@@ -28,6 +28,7 @@ import type {
   ChatMessage,
   Connection,
   ConnectionFormState,
+  ConnectionModels,
   Gateway,
   GatewayFormState,
   GatewayType,
@@ -98,6 +99,7 @@ class AgentspaceApp extends WebUIElement {
   @observable showAgentForm = false;
   @observable isEditingAgent = false;
   @observable agentForm = emptyAgentForm();
+  @observable agentModelOptions: string[] = [];
   @observable workspaceForm = emptyWorkspaceForm();
   @observable showWorkspaceForm = false;
   @observable showLogs = false;
@@ -127,6 +129,7 @@ class AgentspaceApp extends WebUIElement {
   agentNameInput!: ValueControl;
   agentHarnessSelect!: ValueControl;
   agentConnectionSelect!: ValueControl;
+  agentModelSelect!: ValueControl;
   agentPromptInput!: ValueControl;
   agentSkillsInput!: ValueControl;
   agentEnvInput!: ValueControl;
@@ -200,13 +203,14 @@ class AgentspaceApp extends WebUIElement {
 
   toggleSidebar(): void {
     this.sidebarCollapsed = !this.sidebarCollapsed;
-    localStorage.setItem("sidebar-collapsed", String(this.sidebarCollapsed));
+    storageSet("sidebar-collapsed", String(this.sidebarCollapsed));
   }
 
   toggleTheme(): void {
     this.darkMode = !this.darkMode;
     this.theme = this.darkMode ? "dark" : "light";
-    localStorage.setItem("theme", this.theme);
+    this.applyDocumentTheme();
+    storageSet("theme", this.theme);
   }
 
   clearError(): void {
@@ -242,10 +246,11 @@ class AgentspaceApp extends WebUIElement {
         this.loadOrDefault<ServiceInfoSection | null>("webui info", api.getWebuiInfo(), null),
       ]);
 
+      const normalizedAgents = normalizeAgents(agents);
       this.harnesses = harnesses;
-      this.agents = agents;
+      this.agents = normalizedAgents;
       this.workspaces = workspaces;
-      this.sessions = normalizeSessions(sessions, agents);
+      this.sessions = normalizeSessions(sessions, normalizedAgents);
       this.kernels = normalizeKernels(kernels);
       this.skills = skills;
       this.connections = connections;
@@ -383,7 +388,11 @@ class AgentspaceApp extends WebUIElement {
   showCreateAgent(): void {
     this.isEditingAgent = false;
     this.agentForm = emptyAgentForm(this.harnesses[0] ?? DEFAULT_HARNESS);
+    this.agentModelOptions = [];
     this.showAgentForm = true;
+    queueMicrotask(() => {
+      void this.refreshAgentModelOptions();
+    });
   }
 
   editAgent(agentId: string): void {
@@ -393,14 +402,16 @@ class AgentspaceApp extends WebUIElement {
       return;
     }
     this.isEditingAgent = true;
+    const model = agentModelValue(agent);
     this.agentForm = {
       agent_id: agent.agent_id,
       name: agent.name,
       harness: agent.harness,
       system_prompt: agent.system_prompt,
       skills_text: agent.skills.join(", "),
-      env_vars: agent.env_vars,
+      env_vars: stripAgentModelEnvVars(agent.env_vars),
       connection_id: agent.connection_id ?? "",
+      model,
       workspace_mounts_json: JSON.stringify(
         agent.workspace_mounts.map((mount) => ({
           workspace_id: mount.workspace_id,
@@ -410,11 +421,34 @@ class AgentspaceApp extends WebUIElement {
         2,
       ),
     };
+    this.agentModelOptions = model ? [model] : [];
     this.showAgentForm = true;
+    queueMicrotask(() => {
+      void this.refreshAgentModelOptions();
+    });
   }
 
   cancelAgentForm(): void {
     this.showAgentForm = false;
+  }
+
+  async refreshAgentModelOptions(): Promise<void> {
+    const selectedModel = controlValue(this.agentModelSelect) || this.agentForm.model;
+    const connectionId = controlValue(this.agentConnectionSelect) || this.agentForm.connection_id;
+    if (!connectionId) {
+      this.agentModelOptions = selectedModel ? [selectedModel] : [];
+      return;
+    }
+    try {
+      const models = await api.listConnectionModels(connectionId);
+      this.agentModelOptions = uniqueStrings([
+        selectedModel,
+        ...connectionModelIds(models),
+      ]);
+    } catch (error) {
+      this.agentModelOptions = selectedModel ? [selectedModel] : [];
+      this.reportError(`models for ${connectionId}: ${toErrorMessage(error)}`);
+    }
   }
 
   async saveAgent(): Promise<void> {
@@ -424,6 +458,7 @@ class AgentspaceApp extends WebUIElement {
       this.reportError(mounts.error);
       return;
     }
+    const envVars = withAgentModelEnv(form.harness, form.env_vars, form.model);
     try {
       if (this.isEditingAgent) {
         await api.updateAgent(form.agent_id, {
@@ -431,7 +466,7 @@ class AgentspaceApp extends WebUIElement {
           harness: form.harness,
           system_prompt: form.system_prompt,
           skills: parseList(form.skills_text),
-          env_vars: form.env_vars,
+          env_vars: envVars,
           connection_id: form.connection_id || null,
           workspace_mounts: mounts.value,
         });
@@ -442,7 +477,7 @@ class AgentspaceApp extends WebUIElement {
           harness: form.harness,
           system_prompt: form.system_prompt,
           skills: parseList(form.skills_text),
-          env_vars: form.env_vars,
+          env_vars: envVars,
           connection_id: form.connection_id || null,
           workspace_mounts: mounts.value,
         });
@@ -923,11 +958,12 @@ class AgentspaceApp extends WebUIElement {
   }
 
   private startClientRuntime(): void {
-    const storedTheme = localStorage.getItem("theme");
+    const storedTheme = storageGet("theme");
     const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     this.darkMode = storedTheme ? storedTheme === "dark" : prefersDark;
     this.theme = this.darkMode ? "dark" : "light";
-    this.sidebarCollapsed = localStorage.getItem("sidebar-collapsed") === "true";
+    this.applyDocumentTheme();
+    this.sidebarCollapsed = storageGet("sidebar-collapsed") === "true";
     this.ensureHarnessDefaults();
     this.updateSummaryCards();
 
@@ -960,7 +996,7 @@ class AgentspaceApp extends WebUIElement {
 
   private async refreshAgents(): Promise<void> {
     const agents = await this.loadOrDefault("agents", api.listAgents(), this.agents);
-    this.agents = agents;
+    this.agents = normalizeAgents(agents);
     await this.refreshSessions();
     this.updateSummaryCards();
   }
@@ -1101,6 +1137,7 @@ class AgentspaceApp extends WebUIElement {
       skills_text: controlValue(this.agentSkillsInput),
       env_vars: controlValue(this.agentEnvInput),
       connection_id: controlValue(this.agentConnectionSelect),
+      model: controlValue(this.agentModelSelect).trim(),
       workspace_mounts_json: controlValue(this.agentMountsInput) || "[]",
     };
   }
@@ -1182,6 +1219,13 @@ class AgentspaceApp extends WebUIElement {
   private reportError(error: unknown): void {
     this.error = toErrorMessage(error);
   }
+
+  private applyDocumentTheme(): void {
+    document.documentElement.dataset.theme = this.theme;
+    document.documentElement.style.colorScheme = this.theme;
+    document.body.dataset.theme = this.theme;
+    document.body.style.colorScheme = this.theme;
+  }
 }
 
 AgentspaceApp.define("agentspace-app");
@@ -1194,6 +1238,138 @@ function setControlValue(control: ValueControl | undefined, value: string): void
   if (control) {
     control.value = value;
   }
+}
+
+function storageGet(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storageSet(key: string, value: string): void {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // The visible theme/sidebar state still updates even when storage is unavailable.
+  }
+}
+
+const MODEL_ENV_KEYS_BY_HARNESS: Record<string, readonly string[]> = {
+  acp: ["KERNEL_ACP_MODEL_NAME", "KERNEL_OPENCODE_MODEL_NAME"],
+  "copilot-cli": ["COPILOT_MODEL"],
+  codex: ["CODEX_MODEL"],
+  opencode: ["KERNEL_OPENCODE_MODEL_NAME", "OPENCODE_MODEL"],
+  "claude-code": ["CLAUDE_MODEL"],
+};
+
+const ALL_MODEL_ENV_KEYS = uniqueStrings(Object.values(MODEL_ENV_KEYS_BY_HARNESS).flat());
+
+function normalizeAgents(agents: Agent[]): Agent[] {
+  return agents.map((agent) => {
+    const model = agentModelValue(agent);
+    return {
+      ...agent,
+      model,
+      model_label: model || "Default",
+    };
+  });
+}
+
+function agentModelValue(agent: Agent): string {
+  return agent.model ?? modelFromEnv(agent.harness, agent.env_vars);
+}
+
+function modelFromEnv(harness: string, envVars: string): string {
+  const keys = modelEnvKeys(harness);
+  for (const line of envVars.split(/\r?\n/)) {
+    const assignment = readEnvAssignment(line);
+    if (assignment && keys.includes(assignment.key)) {
+      return unquoteEnvValue(assignment.value);
+    }
+  }
+  for (const line of envVars.split(/\r?\n/)) {
+    const assignment = readEnvAssignment(line);
+    if (assignment && ALL_MODEL_ENV_KEYS.includes(assignment.key)) {
+      return unquoteEnvValue(assignment.value);
+    }
+  }
+  return "";
+}
+
+function stripAgentModelEnvVars(envVars: string): string {
+  return envVars
+    .split(/\r?\n/)
+    .filter((line) => {
+      const assignment = readEnvAssignment(line);
+      return !assignment || !ALL_MODEL_ENV_KEYS.includes(assignment.key);
+    })
+    .join("\n")
+    .trim();
+}
+
+function withAgentModelEnv(harness: string, envVars: string, model: string): string {
+  const baseEnv = stripAgentModelEnvVars(envVars);
+  const trimmedModel = model.trim();
+  if (!trimmedModel) {
+    return baseEnv;
+  }
+  const modelLine = `${preferredModelEnvKey(harness)}=${formatEnvValue(trimmedModel)}`;
+  return baseEnv ? `${baseEnv}\n${modelLine}` : modelLine;
+}
+
+function preferredModelEnvKey(harness: string): string {
+  return modelEnvKeys(harness)[0] ?? "KERNEL_MODEL";
+}
+
+function modelEnvKeys(harness: string): readonly string[] {
+  return MODEL_ENV_KEYS_BY_HARNESS[harness] ?? [];
+}
+
+function readEnvAssignment(line: string): { key: string; value: string } | null {
+  const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line.trim());
+  if (!match) {
+    return null;
+  }
+  return { key: match[1], value: match[2] };
+}
+
+function unquoteEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\""))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function formatEnvValue(value: string): string {
+  if (/[\s"'#]/.test(value)) {
+    return JSON.stringify(value);
+  }
+  return value;
+}
+
+function connectionModelIds(models: ConnectionModels): string[] {
+  if (!Array.isArray(models.data)) {
+    return [];
+  }
+  return models.data
+    .map((model) => model.id)
+    .filter((model): model is string => typeof model === "string" && model.length > 0);
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  const result: string[] = [];
+  for (const value of values) {
+    if (value && !result.includes(value)) {
+      result.push(value);
+    }
+  }
+  return result;
 }
 
 function parseList(value: string): string[] {
