@@ -24,7 +24,7 @@ Rust client service managed by Cargo under `services/client_service_rs`.
 ### Commands
 
 Use `just` for common tasks:
-- `just bootstrap`: Install all dependencies (`uv sync` and `npm install`).
+- `just bootstrap`: Install all dependencies (`uv sync` and `pnpm install`).
 - `just check`: Run the full repo verification suite before finishing work.
 - `just test`: Run all Python tests via `uv run pytest`.
 - `just stack-up`: Start the full stack using Docker Compose.

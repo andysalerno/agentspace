@@ -26,14 +26,15 @@ Do not switch the Docker image back to Alpine. The WebUI native CLI/runtime bina
 The production build is:
 
 ```sh
-npm --prefix clients/webui run build
+pnpm --dir clients/webui run build
 ```
 
 That script does three things:
 
 1. `webui build ./src --out ./dist --plugin=webui --css style` compiles WebUI templates into `dist/protocol.bin`.
 2. `esbuild ./src/index.ts --bundle --outfile=./dist/index.js --format=esm --target=es2022` bundles the hydrated browser island and Fluent UI registrations.
-3. `tsc -p tsconfig.server.json` compiles the Node SSR server into `dist/server.js`.
+3. Monaco editor assets are copied into `dist/monaco/vs` for runtime loading.
+4. `tsc -p tsconfig.server.json` compiles the Node SSR server into `dist/server.js`.
 
 The container runs:
 
@@ -131,7 +132,7 @@ Useful constraints:
 - Every SSR binding should exist in the state shape from `AppState`.
 - Prefer simple template expressions; compute complex derived state in `state.ts` or `agentspace-app.ts`.
 
-Run `npm --prefix clients/webui run build` after template changes. WebUI build diagnostics are usually precise and include the source location.
+Run `pnpm --dir clients/webui run build` after template changes. WebUI build diagnostics are usually precise and include the source location.
 
 ## API contract
 
@@ -165,11 +166,11 @@ The normal repository gate is:
 just check
 ```
 
-If the host does not have `npm`, validate the web UI in a Node container:
+If the host does not have `pnpm`, validate the web UI in a Node container:
 
 ```sh
 podman run --rm -v "$PWD/clients/webui:/src:ro" -w /tmp docker.io/library/node:20-slim \
-  sh -c 'mkdir app && cd app && cp -R /src/. . && npm install --quiet >/dev/null && npm run lint && npm run build'
+  sh -c 'corepack enable && mkdir app && cd app && cp -R /src/. . && pnpm install --quiet >/dev/null && pnpm run lint && pnpm run build'
 ```
 
 For end-to-end browser validation, use `playwright-cli`. A useful scenario is:

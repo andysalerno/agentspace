@@ -288,8 +288,8 @@ Run:
 ```sh
 just client-service-rs-check
 just agent-host-rs-check
-npm --prefix clients/webui run lint
-npm --prefix clients/webui run build
+pnpm --dir clients/webui run lint
+pnpm --dir clients/webui run build
 just check
 ```
 

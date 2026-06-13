@@ -1,0 +1,3 @@
+allowBuilds:
+  "@microsoft/webui": true
+  esbuild: true

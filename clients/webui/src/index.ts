@@ -15,6 +15,7 @@ import {
 } from "@fluentui/web-components";
 
 import "./agentspace-app/agentspace-app";
+import "./monaco-text-editor";
 
 provideFluentDesignSystem().register(
   fluentDesignSystemProvider(),

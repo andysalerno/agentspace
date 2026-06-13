@@ -42,6 +42,7 @@ import type {
   MessageStreamFinalChunk,
   ServiceInfoSection,
   Skill,
+  SkillFormState,
   SkillVersion,
   SystemInfo,
   UiChatMessage,
@@ -63,6 +64,7 @@ type ValueControl = HTMLElement & {
 type WorkspaceMountInput = Pick<WorkspaceMount, "workspace_id" | "mode">;
 
 const emptyState = createEmptyAppState();
+const SKILL_CONTENT_FILE = "SKILL.md";
 
 class AgentspaceApp extends WebUIElement {
   @observable title = emptyState.title;
@@ -137,7 +139,7 @@ class AgentspaceApp extends WebUIElement {
   workspaceIdInput!: ValueControl;
   workspaceNameInput!: ValueControl;
   skillIdInput!: ValueControl;
-  skillFilesInput!: ValueControl;
+  skillContentInput!: ValueControl;
   connectionIdInput!: ValueControl;
   connectionNameInput!: ValueControl;
   connectionUrlInput!: ValueControl;
@@ -160,15 +162,16 @@ class AgentspaceApp extends WebUIElement {
   gitAgentValidationInput!: ValueControl;
 
   private started = false;
-  private readonly intervals: Array<ReturnType<typeof window.setInterval>> = [];
-  private logInterval: ReturnType<typeof window.setInterval> | null = null;
-  private gatewayLogInterval: ReturnType<typeof window.setInterval> | null = null;
+  private readonly intervals: number[] = [];
+  private logInterval: number | null = null;
+  private gatewayLogInterval: number | null = null;
   private streamAbort: AbortController | null = null;
   private logSessionId = "";
   private gatewayLogId = "";
 
   connectedCallback(): void {
     super.connectedCallback();
+    this.addEventListener("editor-error", this.handleEditorError);
     if (this.started) {
       return;
     }
@@ -183,6 +186,7 @@ class AgentspaceApp extends WebUIElement {
   }
 
   disconnectedCallback(): void {
+    this.removeEventListener("editor-error", this.handleEditorError);
     this.stopClientRuntime();
     super.disconnectedCallback();
   }
@@ -654,10 +658,7 @@ class AgentspaceApp extends WebUIElement {
         api.listSkillVersions(skillId),
       ]);
       this.selectedSkillId = skillId;
-      this.skillForm = {
-        skill_id: skill.skill_id,
-        files_json: JSON.stringify(skill.files ?? {}, null, 2),
-      };
+      this.skillForm = toSkillForm(skill);
       this.skillVersions = versions;
       this.showSkillForm = true;
     } catch (error) {
@@ -667,20 +668,19 @@ class AgentspaceApp extends WebUIElement {
 
   async saveSkill(): Promise<void> {
     const skillId = controlValue(this.skillIdInput).trim();
-    const filesResult = parseJsonRecord(controlValue(this.skillFilesInput));
     if (!skillId) {
       this.reportError("Skill ID is required.");
       return;
     }
-    if (!filesResult.ok) {
-      this.reportError(filesResult.error);
-      return;
-    }
+    const content = this.skillContentInput
+      ? controlValue(this.skillContentInput)
+      : this.skillForm.content;
+    const files = skillFilesWithContent(this.skillForm.files, content);
     try {
       if (this.selectedSkillId) {
-        await api.updateSkill(skillId, filesResult.value);
+        await api.updateSkill(skillId, files);
       } else {
-        await api.createSkill({ skill_id: skillId, files: filesResult.value });
+        await api.createSkill({ skill_id: skillId, files });
       }
       await this.refreshSkills();
       await this.selectSkill(skillId);
@@ -1220,6 +1220,14 @@ class AgentspaceApp extends WebUIElement {
     this.error = toErrorMessage(error);
   }
 
+  private readonly handleEditorError = (event: Event): void => {
+    this.reportError(
+      event instanceof CustomEvent && typeof event.detail === "string"
+        ? event.detail
+        : "Monaco editor failed to load.",
+    );
+  };
+
   private applyDocumentTheme(): void {
     document.documentElement.dataset.theme = this.theme;
     document.documentElement.style.colorScheme = this.theme;
@@ -1413,6 +1421,23 @@ function parseJsonRecord(value: string): { ok: true; value: Record<string, strin
   } catch (error) {
     return { ok: false, error: `Invalid JSON: ${toErrorMessage(error)}` };
   }
+}
+
+function toSkillForm(skill: Skill): SkillFormState {
+  const files = { ...(skill.files ?? {}) };
+  return {
+    skill_id: skill.skill_id,
+    content: files[SKILL_CONTENT_FILE] ?? "",
+    files,
+    extra_file_count: Object.keys(files).filter((fileName) => fileName !== SKILL_CONTENT_FILE).length,
+  };
+}
+
+function skillFilesWithContent(files: Record<string, string>, content: string): Record<string, string> {
+  return {
+    ...files,
+    [SKILL_CONTENT_FILE]: content,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

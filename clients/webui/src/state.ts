@@ -170,7 +170,9 @@ export function emptyWorkspaceForm(): WorkspaceFormState {
 export function emptySkillForm(): SkillFormState {
   return {
     skill_id: "",
-    files_json: "{\n  \"SKILL.md\": \"# Skill\\n\\nDescribe what this skill does.\"\n}",
+    content: "# Skill\n\nDescribe what this skill does.",
+    files: {},
+    extra_file_count: 0,
   };
 }
 

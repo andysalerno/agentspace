@@ -3,8 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.6.0",
   "scripts": {
-    "build": "webui build ./src --out ./dist --plugin=webui --css style && esbuild ./src/index.ts --bundle --outfile=./dist/index.js --format=esm --target=es2022 && tsc -p tsconfig.server.json",
+    "build": "webui build ./src --out ./dist --plugin=webui --css style && esbuild ./src/index.ts --bundle --outfile=./dist/index.js --format=esm --target=es2022 && rm -rf ./dist/monaco/vs && mkdir -p ./dist/monaco && cp -R ./node_modules/monaco-editor/min/vs ./dist/monaco/vs && tsc -p tsconfig.server.json",
     "lint": "eslint . && knip",
     "lint:eslint": "eslint .",
     "lint:knip": "knip",
@@ -13,7 +14,8 @@
   "dependencies": {
     "@fluentui/web-components": "^2.6.1",
     "@microsoft/webui": "^0.0.15",
-    "@microsoft/webui-framework": "^0.0.15"
+    "@microsoft/webui-framework": "^0.0.15",
+    "monaco-editor": "^0.55.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
@@ -21,7 +23,7 @@
     "esbuild": "^0.28.1",
     "eslint": "^9.39.4",
     "globals": "^17.5.0",
-    "knip": "^6.4.1",
+    "knip": "6.4.1",
     "typescript": "^6.0.2",
     "typescript-eslint": "^8.58.2"
   }

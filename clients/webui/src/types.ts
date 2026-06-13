@@ -484,7 +484,9 @@ export type WorkspaceFormState = {
 
 export type SkillFormState = {
   skill_id: string;
-  files_json: string;
+  content: string;
+  files: Record<string, string>;
+  extra_file_count: number;
 };
 
 export type ConnectionFormState = {

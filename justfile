@@ -15,7 +15,7 @@ help:
 # Workspace setup and validation
 bootstrap:
   uv sync --all-packages --dev
-  npm --prefix clients/webui install
+  pnpm --dir clients/webui install
 
 check:
   uv run ruff format --check .
@@ -24,9 +24,9 @@ check:
   uv run --all-packages pytest
   just client-service-rs-check
   just agent-host-rs-check
-  npm --prefix clients/webui run lint
-  npm --prefix clients/webui run test --if-present
-  npm --prefix clients/webui run build
+  pnpm --dir clients/webui run lint
+  pnpm --dir clients/webui run --if-present test
+  pnpm --dir clients/webui run build
 
 test:
   uv run --all-packages pytest
@@ -50,11 +50,11 @@ agent-host-rs-image:
   runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/agent_host_rs/Dockerfile -t agentspace-agent-host-agent-host:latest services/agent_host_rs
 
 webui-outdated:
-  npm --prefix clients/webui outdated
+  pnpm --dir clients/webui outdated
 
 # Static analysis for the webui (knip: unused/unlisted deps, dead exports)
 webui-lint:
-  npm --prefix clients/webui run lint
+  pnpm --dir clients/webui run lint
 
 # Full stack compose workflow
 stack-build:

@@ -258,8 +258,8 @@
                   </label>
                   <label class="span-2">System prompt<fluent-text-area w-ref="{agentPromptInput}" rows="5" value="{{agentForm.system_prompt}}"></fluent-text-area></label>
                   <label>Skills, comma separated<fluent-text-field w-ref="{agentSkillsInput}" value="{{agentForm.skills_text}}"></fluent-text-field></label>
-                  <label class="span-2">Advanced environment variables<fluent-text-area w-ref="{agentEnvInput}" rows="6" value="{{agentForm.env_vars}}"></fluent-text-area></label>
-                  <label class="span-2">Workspace mounts JSON<fluent-text-area w-ref="{agentMountsInput}" rows="4" value="{{agentForm.workspace_mounts_json}}"></fluent-text-area></label>
+                  <label class="span-2">Advanced environment variables<monaco-text-editor class="config-editor" w-ref="{agentEnvInput}" language="ini" theme="{{theme}}" value="{{agentForm.env_vars}}"></monaco-text-editor></label>
+                  <label class="span-2">Workspace mounts JSON<monaco-text-editor class="json-editor" w-ref="{agentMountsInput}" language="json" theme="{{theme}}" value="{{agentForm.workspace_mounts_json}}"></monaco-text-editor></label>
                 </div>
                 <div class="form-actions">
                   <fluent-button appearance="accent" @click="{saveAgent()}">Save agent</fluent-button>
@@ -452,9 +452,12 @@
             </section>
             <section class="panel">
               <if condition="showSkillForm">
-                <h2>Skill files</h2>
+                <h2>Skill content</h2>
                 <label>Skill ID<fluent-text-field w-ref="{skillIdInput}" value="{{skillForm.skill_id}}"></fluent-text-field></label>
-                <label>Files JSON<fluent-text-area w-ref="{skillFilesInput}" rows="16" value="{{skillForm.files_json}}"></fluent-text-area></label>
+                <label>SKILL.md<monaco-text-editor class="skill-content-editor" w-ref="{skillContentInput}" language="markdown" theme="{{theme}}" value="{{skillForm.content}}"></monaco-text-editor></label>
+                <if condition="skillForm.extra_file_count">
+                  <p class="muted">Preserving {{skillForm.extra_file_count}} additional skill file(s). This editor updates SKILL.md.</p>
+                </if>
                 <div class="form-actions">
                   <fluent-button appearance="accent" @click="{saveSkill()}">Save skill</fluent-button>
                   <fluent-button appearance="stealth" @click="{deleteSkill()}">Delete</fluent-button>
@@ -534,8 +537,8 @@
                     </fluent-select>
                   </label>
                   <label>Enabled<fluent-checkbox w-ref="{gatewayEnabledInput}" ?checked="{{gatewayForm.enabled}}"></fluent-checkbox></label>
-                  <label class="span-2">Environment variables<fluent-text-area w-ref="{gatewayEnvInput}" rows="5" value="{{gatewayForm.env_vars}}"></fluent-text-area></label>
-                  <label class="span-2">Secrets JSON<fluent-text-area w-ref="{gatewaySecretsInput}" rows="4" value="{{gatewayForm.secrets_json}}"></fluent-text-area></label>
+                  <label class="span-2">Environment variables<monaco-text-editor class="config-editor" w-ref="{gatewayEnvInput}" language="ini" theme="{{theme}}" value="{{gatewayForm.env_vars}}"></monaco-text-editor></label>
+                  <label class="span-2">Secrets JSON<monaco-text-editor class="json-editor" w-ref="{gatewaySecretsInput}" language="json" theme="{{theme}}" value="{{gatewayForm.secrets_json}}"></monaco-text-editor></label>
                 </div>
                 <div class="form-actions"><fluent-button appearance="accent" @click="{saveGateway()}">Save</fluent-button><fluent-button appearance="stealth" @click="{cancelGatewayForm()}">Cancel</fluent-button></div>
               </fluent-card>
@@ -572,7 +575,7 @@
                 <for each="harness in harnesses"><fluent-option value="{{harness}}">{{harness}}</fluent-option></for>
               </fluent-select>
             </label>
-            <label>Environment defaults<fluent-text-area w-ref="{kernelConfigEnvInput}" rows="18" value="{{kernelConfigEnv}}"></fluent-text-area></label>
+            <label>Environment defaults<monaco-text-editor class="kernel-config-editor" w-ref="{kernelConfigEnvInput}" language="ini" theme="{{theme}}" value="{{kernelConfigEnv}}"></monaco-text-editor></label>
             <fluent-button appearance="accent" @click="{saveKernelConfig()}">Save kernel config</fluent-button>
           </div>
         </if>

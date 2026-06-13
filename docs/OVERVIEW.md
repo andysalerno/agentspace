@@ -268,7 +268,7 @@ kernels/*  services/git_agent  channels/*  clients/cli_ui
 ### Commands
 
 ```bash
-just bootstrap       # uv sync + npm install
+just bootstrap       # uv sync + pnpm install
 just stack-up        # docker compose up -d --build
 just stack-down      # docker compose down + cleanup
 just stack-logs      # tail logs
