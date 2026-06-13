@@ -425,6 +425,51 @@
   max-height: 260px;
 }
 
+.management-view .skill-version-history {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.management-view .skill-version-history-header,
+.management-view .skill-version-entry summary {
+  align-items: center;
+  color: var(--mgmt-muted);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.management-view .skill-version-history-header strong,
+.management-view .skill-version-entry summary span {
+  color: var(--mgmt-text);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.management-view .skill-version-history-header span,
+.management-view .skill-version-entry time {
+  color: var(--mgmt-muted);
+  font-size: 0.74rem;
+}
+
+.management-view .skill-version-entry {
+  background: var(--mgmt-panel-subtle);
+  border: 1px solid var(--mgmt-border);
+  border-radius: var(--mgmt-radius);
+  padding: 8px;
+}
+
+.management-view .skill-version-entry summary {
+  cursor: pointer;
+}
+
+.management-view .skill-version-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
 .management-view .info-sections {
   gap: 10px;
 }

@@ -48,6 +48,13 @@ export type Skill = {
   source?: "builtin" | "user";
 };
 
+export type SkillVersion = {
+  skill_id: string;
+  version: number;
+  created_at: string;
+  files: Record<string, string>;
+};
+
 export type SessionSummary = {
   session_id: string;
   agent_id: string;

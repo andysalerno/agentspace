@@ -381,6 +381,53 @@ impl SqliteAgentStore {
         })
     }
 
+    pub fn add_skill(&self, agent_id: &str, skill_id: &str) -> Result<bool, StoreError> {
+        self.database.with_connection("agents", |connection| {
+            let mut statement = connection.prepare("SELECT * FROM agents WHERE agent_id = ?")?;
+            let mut rows = statement.query_and_then(params![agent_id], row_to_agent)?;
+            let Some(mut agent) = rows.next().transpose()? else {
+                debug!(
+                    store = "agents",
+                    agent_id, skill_id, "agent add skill missed existing record"
+                );
+                return Err(StoreError::AgentNotFound {
+                    agent_id: agent_id.to_owned(),
+                });
+            };
+            if agent.skills.iter().any(|skill| skill == skill_id) {
+                debug!(
+                    store = "agents",
+                    agent_id, skill_id, "agent skill already present"
+                );
+                return Ok(false);
+            }
+
+            agent.skills.push(skill_id.to_owned());
+            agent.updated_at = utc_now();
+            connection.execute(
+                "
+                UPDATE agents
+                   SET skills_json = ?,
+                       updated_at = ?
+                 WHERE agent_id = ?
+                ",
+                params![
+                    skills_json(&agent.skills)?,
+                    agent.updated_at,
+                    agent.agent_id
+                ],
+            )?;
+            debug!(
+                store = "agents",
+                agent_id,
+                skill_id,
+                skills_count = agent.skills.len(),
+                "added agent skill"
+            );
+            Ok(true)
+        })
+    }
+
     #[allow(clippy::needless_pass_by_value)]
     pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
         let agent_id = agent.agent_id.clone();

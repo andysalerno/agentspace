@@ -20,6 +20,7 @@ import type {
   SessionDetail,
   SessionSummary,
   Skill,
+  SkillVersion,
   SystemInfo,
   Workspace,
   WorkspaceMount,
@@ -279,6 +280,12 @@ export const api = {
     requestJson<Skill>(`/skills/${skillId}`, {
       method: "PUT",
       body: JSON.stringify({ files }),
+    }),
+  listSkillVersions: (skillId: string) =>
+    requestJson<SkillVersion[]>(`/skills/${skillId}/versions`),
+  rollbackSkillVersion: (skillId: string, version: number) =>
+    requestJson<Skill>(`/skills/${skillId}/versions/${version}/rollback`, {
+      method: "POST",
     }),
   deleteSkill: (skillId: string) =>
     requestJson<void>(`/skills/${skillId}`, { method: "DELETE" }),

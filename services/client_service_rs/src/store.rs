@@ -69,6 +69,22 @@ impl InMemoryAgentStore {
         })?
     }
 
+    pub fn add_skill(&self, agent_id: &str, skill_id: &str) -> Result<bool, StoreError> {
+        with_write(&self.agents, "agents", |agents| {
+            let agent = agents
+                .get_mut(agent_id)
+                .ok_or_else(|| StoreError::AgentNotFound {
+                    agent_id: agent_id.to_owned(),
+                })?;
+            if agent.skills.iter().any(|skill| skill == skill_id) {
+                return Ok(false);
+            }
+            agent.skills.push(skill_id.to_owned());
+            agent.updated_at = utc_now();
+            Ok(true)
+        })?
+    }
+
     pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
         with_write(&self.agents, "agents", |agents| {
             agents.insert(agent.agent_id.clone(), agent);
@@ -545,6 +561,13 @@ impl AgentStore {
         }
     }
 
+    pub fn add_skill(&self, agent_id: &str, skill_id: &str) -> Result<bool, StoreError> {
+        match self {
+            Self::InMemory(store) => store.add_skill(agent_id, skill_id),
+            Self::Sqlite(store) => store.add_skill(agent_id, skill_id),
+        }
+    }
+
     pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
         match self {
             Self::InMemory(store) => store.upsert(agent),
@@ -1011,6 +1034,33 @@ mod tests {
     }
 
     #[test]
+    fn agent_store_add_skill_preserves_other_fields_and_deduplicates()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let store = InMemoryAgentStore::new();
+        let mut record = agent("agent", "2024-01-01");
+        record.name = "Original Name".to_owned();
+        record.env_vars = "A=B".to_owned();
+        store.insert(record)?;
+
+        assert!(store.add_skill("agent", "new-skill")?);
+        assert!(!store.add_skill("agent", "new-skill")?);
+        let updated = store
+            .get("agent")?
+            .ok_or_else(|| StoreError::AgentNotFound {
+                agent_id: "agent".to_owned(),
+            })?;
+
+        assert_eq!(updated.name, "Original Name");
+        assert_eq!(updated.env_vars, "A=B");
+        assert_eq!(updated.skills, vec!["new-skill".to_owned()]);
+        assert!(matches!(
+            store.add_skill("missing", "new-skill"),
+            Err(StoreError::AgentNotFound { agent_id }) if agent_id == "missing"
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn connection_store_duplicate_missing_and_upsert() -> Result<(), Box<dyn Error + Send + Sync>> {
         let store = InMemoryConnectionStore::new();
         store.insert(connection("conn", "2024-01-01"))?;
@@ -1323,6 +1373,42 @@ mod tests {
             assert_eq!(message.tool_calls.len(), 1);
             assert_eq!(message.tool_calls[0].tool, "shell");
             assert_eq!(message.tool_calls[0].content_offset, Some(3));
+        }
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_agent_store_add_skill_preserves_current_fields()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = sqlite_test_path()?;
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            stores.agents.insert(agent("agent", "2024-01-01"))?;
+
+            let mut changed =
+                stores
+                    .agents
+                    .get("agent")?
+                    .ok_or_else(|| StoreError::AgentNotFound {
+                        agent_id: "agent".to_owned(),
+                    })?;
+            changed.name = "Renamed Agent".to_owned();
+            changed.env_vars = "SHARED=updated".to_owned();
+            stores.agents.update(changed)?;
+
+            assert!(stores.agents.add_skill("agent", "new-skill")?);
+            assert!(!stores.agents.add_skill("agent", "new-skill")?);
+            let updated = stores
+                .agents
+                .get("agent")?
+                .ok_or_else(|| StoreError::AgentNotFound {
+                    agent_id: "agent".to_owned(),
+                })?;
+            assert_eq!(updated.name, "Renamed Agent");
+            assert_eq!(updated.env_vars, "SHARED=updated");
+            assert_eq!(updated.skills, vec!["new-skill".to_owned()]);
         }
 
         cleanup_sqlite_path(&path);

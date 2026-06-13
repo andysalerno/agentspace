@@ -398,6 +398,29 @@ impl AgentHostClient {
         .await
     }
 
+    pub async fn list_skill_versions(&self, skill_id: &str) -> AgentHostResult<JsonArray> {
+        self.request_array(
+            Method::GET,
+            self.endpoint(&["skills", skill_id, "versions"])?,
+            None,
+        )
+        .await
+    }
+
+    pub async fn rollback_skill_version(
+        &self,
+        skill_id: &str,
+        version: u64,
+    ) -> AgentHostResult<JsonObject> {
+        let version = version.to_string();
+        self.request_object(
+            Method::POST,
+            self.endpoint(&["skills", skill_id, "versions", &version, "rollback"])?,
+            None,
+        )
+        .await
+    }
+
     pub async fn delete_skill(&self, skill_id: &str) -> AgentHostResult<()> {
         self.request_empty(Method::DELETE, self.endpoint(&["skills", skill_id])?)
             .await

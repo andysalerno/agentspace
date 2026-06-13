@@ -121,6 +121,11 @@ fn stub_router(state: StubState) -> Router {
             get(host_container_logs),
         )
         .route("/skills", post(create_host_skill).get(list_host_skills))
+        .route("/skills/{skill_id}/versions", get(list_host_skill_versions))
+        .route(
+            "/skills/{skill_id}/versions/{version}/rollback",
+            post(rollback_host_skill_version),
+        )
         .route(
             "/skills/{skill_id}",
             get(get_host_skill)
@@ -284,6 +289,42 @@ async fn update_host_skill(
         "files": body["files"]
     }))
     .into_response()
+}
+
+async fn list_host_skill_versions(
+    State(state): State<StubState>,
+    Path(skill_id): Path<String>,
+) -> Result<Json<Value>, StatusCode> {
+    state.record(
+        Method::GET,
+        format!("/skills/{skill_id}/versions"),
+        None,
+        None,
+    )?;
+    Ok(Json(json!([
+        {
+            "skill_id": skill_id,
+            "version": 1,
+            "created_at": "2026-01-01T00:00:00.000000Z",
+            "files": { "SKILL.md": "# Version 1" }
+        }
+    ])))
+}
+
+async fn rollback_host_skill_version(
+    State(state): State<StubState>,
+    Path((skill_id, version)): Path<(String, u64)>,
+) -> Result<Json<Value>, StatusCode> {
+    state.record(
+        Method::POST,
+        format!("/skills/{skill_id}/versions/{version}/rollback"),
+        None,
+        None,
+    )?;
+    Ok(Json(json!({
+        "skill_id": skill_id,
+        "files": { "SKILL.md": "# Version 1" }
+    })))
 }
 
 async fn delete_host_skill(
@@ -544,6 +585,8 @@ async fn create_session_merges_environment_for_agent_host()
                 "harness": "acp",
                 "skills": ["skill-a"],
                 "env": {
+                    "AGENTSPACE_AGENT_ID": "stub-agent",
+                    "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
                     "AGENT_ONLY": "agent",
                     "CONNECTION_API_FLAVOR": "responses",
                     "CONNECTION_API_KEY": "agent-secret",
@@ -555,6 +598,69 @@ async fn create_session_merges_environment_for_agent_host()
                 "workspace_mounts": [{ "workspace_id": "todo-list-code", "mode": "rw" }]
             })),
         }]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn skill_routes_proxy_versions_and_auto_enable_creator()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    create_basic_agent(&app).await?;
+
+    let (status, created) = post_json(
+        &app,
+        "/skills",
+        json!({
+            "skill_id": "agent-skill",
+            "creator_agent_id": "stub-agent",
+            "files": { "SKILL.md": "# Agent Skill" }
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["skill_id"], "agent-skill");
+
+    let (status, agent) = get_json(&app, "/agents/stub-agent").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(agent["skills"], json!(["agent-skill"]));
+
+    let (status, versions) = get_json(&app, "/skills/agent-skill/versions").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(versions[0]["version"], 1);
+
+    let (status, rolled_back) =
+        post_json(&app, "/skills/agent-skill/versions/1/rollback", json!({})).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rolled_back["files"]["SKILL.md"], "# Version 1");
+
+    assert_eq!(
+        server.recorded()?,
+        vec![
+            RecordedRequest {
+                method: Method::POST,
+                path: "/skills".to_owned(),
+                query: None,
+                body: Some(json!({
+                    "skill_id": "agent-skill",
+                    "files": { "SKILL.md": "# Agent Skill" }
+                })),
+            },
+            RecordedRequest {
+                method: Method::GET,
+                path: "/skills/agent-skill/versions".to_owned(),
+                query: None,
+                body: None,
+            },
+            RecordedRequest {
+                method: Method::POST,
+                path: "/skills/agent-skill/versions/1/rollback".to_owned(),
+                query: None,
+                body: None,
+            },
+        ]
     );
 
     Ok(())
@@ -619,7 +725,11 @@ async fn send_message_proxies_to_stream_and_persists_messages()
                 query: None,
                 body: Some(json!({
                     "harness": "acp",
-                    "env": { "KERNEL_SYSTEM_PROMPT": "Be helpful" },
+                    "env": {
+                        "AGENTSPACE_AGENT_ID": "stub-agent",
+                        "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                        "KERNEL_SYSTEM_PROMPT": "Be helpful"
+                    },
                     "skills": []
                 })),
             },

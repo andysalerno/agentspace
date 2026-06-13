@@ -15,6 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -24,6 +25,7 @@ const ENV_SKILLS_DIR: &str = "AGENT_HOST_SKILLS_DIR";
 const ENV_BUILTIN_SKILLS_DIR: &str = "AGENT_HOST_BUILTIN_SKILLS_DIR";
 const DEFAULT_SKILLS_DIR: &str = "/skills";
 const DEFAULT_BUILTIN_SKILLS_DIR: &str = "/builtin-skills";
+const SKILL_VERSIONS_DIR: &str = ".skill-versions";
 
 #[derive(Clone)]
 pub struct SkillRegistry {
@@ -92,6 +94,21 @@ impl SkillRegistry {
         .await
     }
 
+    pub async fn list_skill_versions(
+        &self,
+        skill_id: &str,
+    ) -> Result<Vec<SkillVersion>, SkillError> {
+        let service = self.service.clone();
+        let skill_id = skill_id.to_owned();
+        run_skill_task("list skill versions", move || {
+            let service = service.read().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for list versions",
+            })?;
+            service.list_skill_versions(&skill_id)
+        })
+        .await
+    }
+
     pub async fn update_skill(
         &self,
         skill_id: &str,
@@ -104,6 +121,22 @@ impl SkillRegistry {
                 operation: "lock skill service for update",
             })?;
             service.update_skill(&skill_id, &request.files)
+        })
+        .await
+    }
+
+    pub async fn rollback_skill_version(
+        &self,
+        skill_id: &str,
+        version: u64,
+    ) -> Result<Skill, SkillError> {
+        let service = self.service.clone();
+        let skill_id = skill_id.to_owned();
+        run_skill_task("rollback skill version", move || {
+            let service = service.write().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for rollback",
+            })?;
+            service.rollback_skill_version(&skill_id, version)
         })
         .await
     }
@@ -132,6 +165,14 @@ pub struct Skill {
 pub struct SkillSummary {
     pub skill_id: String,
     pub source: SkillSource,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SkillVersion {
+    pub skill_id: String,
+    pub version: u64,
+    pub created_at: String,
+    pub files: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -185,10 +226,19 @@ pub enum SkillError {
     BuiltinSkillReadOnly {
         skill_id: String,
     },
+    SkillVersionNotFound {
+        skill_id: String,
+        version: u64,
+    },
     Io {
         operation: &'static str,
         path: PathBuf,
         source: io::Error,
+    },
+    Json {
+        operation: &'static str,
+        path: PathBuf,
+        source: serde_json::Error,
     },
     PathPrefix {
         path: PathBuf,
@@ -222,7 +272,19 @@ impl Display for SkillError {
             Self::BuiltinSkillReadOnly { skill_id } => {
                 write!(formatter, "builtin skill '{skill_id}' is read-only")
             }
+            Self::SkillVersionNotFound { skill_id, version } => {
+                write!(formatter, "skill version not found: {skill_id}@{version}")
+            }
             Self::Io {
+                operation,
+                path,
+                source,
+            } => write!(
+                formatter,
+                "failed to {operation} at {}: {source}",
+                path.display()
+            ),
+            Self::Json {
                 operation,
                 path,
                 source,
@@ -254,6 +316,7 @@ impl Error for SkillError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Io { source, .. } => Some(source),
+            Self::Json { source, .. } => Some(source),
             Self::PathPrefix { source, .. } => Some(source),
             Self::BlockingTaskJoin { source, .. } => Some(source),
             Self::SkillNotFound { .. }
@@ -261,6 +324,7 @@ impl Error for SkillError {
             | Self::InvalidSkillId { .. }
             | Self::InvalidSkillFilePath { .. }
             | Self::BuiltinSkillReadOnly { .. }
+            | Self::SkillVersionNotFound { .. }
             | Self::LockPoisoned { .. } => None,
         }
     }
@@ -350,6 +414,10 @@ impl SkillsService {
             let destination = self.skill_path(&skill_id);
             remove_existing_path(&destination, "remove existing builtin skill")?;
             copy_dir_all(&entry.path(), &destination)?;
+            remove_existing_path(
+                &self.skill_versions_dir(&skill_id),
+                "remove builtin skill versions",
+            )?;
             self.builtin_ids.insert(skill_id.clone());
             synced.push(skill_id);
         }
@@ -391,6 +459,7 @@ impl SkillsService {
         fs::create_dir(&skill_dir)
             .map_err(|source| io_error("create skill dir", &skill_dir, source))?;
         write_skill_files(&skill_dir, files)?;
+        self.save_skill_version(skill_id, files)?;
 
         tracing::info!(%skill_id, file_count = files.len(), "created skill");
         Ok(Skill {
@@ -440,31 +509,53 @@ impl SkillsService {
         Ok(skills)
     }
 
+    pub fn list_skill_versions(&self, skill_id: &str) -> Result<Vec<SkillVersion>, SkillError> {
+        validate_skill_id(skill_id)?;
+        self.ensure_user_skill_exists(skill_id)?;
+        let versions_dir = self.skill_versions_dir(skill_id);
+        if !versions_dir.is_dir() {
+            return Ok(Vec::new());
+        }
+
+        let mut versions = Vec::new();
+        for entry in read_dir_sorted(&versions_dir, "read skill versions dir")? {
+            let path = entry.path();
+            if !entry
+                .file_type()
+                .map_err(|source| io_error("inspect skill version file", &path, source))?
+                .is_file()
+            {
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            versions.push(read_skill_version(&path)?);
+        }
+        versions.sort_by_key(|version| version.version);
+        Ok(versions)
+    }
+
     pub fn update_skill(
         &self,
         skill_id: &str,
         files: &BTreeMap<String, String>,
     ) -> Result<Skill, SkillError> {
         validate_skill_id(skill_id)?;
-        if self.is_builtin(skill_id) {
-            return Err(SkillError::BuiltinSkillReadOnly {
-                skill_id: skill_id.to_owned(),
-            });
-        }
+        self.ensure_user_skill_exists(skill_id)?;
 
         let skill_dir = self.skill_path(skill_id);
-        if !skill_dir.is_dir() {
-            return Err(SkillError::SkillNotFound {
-                skill_id: skill_id.to_owned(),
-            });
-        }
-
         validate_file_paths(files.keys().map(String::as_str))?;
+        if self.list_skill_versions(skill_id)?.is_empty() {
+            let existing_files = read_skill_files(&skill_dir)?;
+            self.save_skill_version(skill_id, &existing_files)?;
+        }
         fs::remove_dir_all(&skill_dir)
             .map_err(|source| io_error("remove skill dir", &skill_dir, source))?;
         fs::create_dir_all(&skill_dir)
             .map_err(|source| io_error("create skill dir", &skill_dir, source))?;
         write_skill_files(&skill_dir, files)?;
+        self.save_skill_version(skill_id, files)?;
 
         tracing::info!(%skill_id, file_count = files.len(), "updated skill");
         Ok(Skill {
@@ -472,6 +563,24 @@ impl SkillsService {
             files: read_skill_files(&skill_dir)?,
             source: SkillSource::User,
         })
+    }
+
+    pub fn rollback_skill_version(
+        &self,
+        skill_id: &str,
+        version: u64,
+    ) -> Result<Skill, SkillError> {
+        validate_skill_id(skill_id)?;
+        self.ensure_user_skill_exists(skill_id)?;
+        let snapshot_path = self.skill_version_path(skill_id, version);
+        if !snapshot_path.is_file() {
+            return Err(SkillError::SkillVersionNotFound {
+                skill_id: skill_id.to_owned(),
+                version,
+            });
+        }
+        let snapshot = read_skill_version(&snapshot_path)?;
+        self.update_skill(skill_id, &snapshot.files)
     }
 
     pub fn delete_skill(&self, skill_id: &str) -> Result<(), SkillError> {
@@ -491,6 +600,10 @@ impl SkillsService {
 
         fs::remove_dir_all(&skill_dir)
             .map_err(|source| io_error("remove skill dir", &skill_dir, source))?;
+        remove_existing_path(
+            &self.skill_versions_dir(skill_id),
+            "remove skill version history",
+        )?;
         tracing::info!(%skill_id, "deleted skill");
         Ok(())
     }
@@ -504,6 +617,53 @@ impl SkillsService {
         self.skills_dir.join(skill_id)
     }
 
+    fn skill_versions_dir(&self, skill_id: &str) -> PathBuf {
+        self.skills_dir.join(SKILL_VERSIONS_DIR).join(skill_id)
+    }
+
+    fn skill_version_path(&self, skill_id: &str, version: u64) -> PathBuf {
+        self.skill_versions_dir(skill_id)
+            .join(format!("{version:020}.json"))
+    }
+
+    fn ensure_user_skill_exists(&self, skill_id: &str) -> Result<(), SkillError> {
+        if self.is_builtin(skill_id) {
+            return Err(SkillError::BuiltinSkillReadOnly {
+                skill_id: skill_id.to_owned(),
+            });
+        }
+        let skill_dir = self.skill_path(skill_id);
+        if !skill_dir.is_dir() {
+            return Err(SkillError::SkillNotFound {
+                skill_id: skill_id.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn save_skill_version(
+        &self,
+        skill_id: &str,
+        files: &BTreeMap<String, String>,
+    ) -> Result<SkillVersion, SkillError> {
+        let versions_dir = self.skill_versions_dir(skill_id);
+        fs::create_dir_all(&versions_dir)
+            .map_err(|source| io_error("create skill versions dir", &versions_dir, source))?;
+        let version = next_skill_version(&versions_dir)?;
+        let snapshot = SkillVersion {
+            skill_id: skill_id.to_owned(),
+            version,
+            created_at: utc_now(),
+            files: files.clone(),
+        };
+        let path = self.skill_version_path(skill_id, version);
+        let content = serde_json::to_vec_pretty(&snapshot)
+            .map_err(|source| json_error("serialize skill version", &path, source))?;
+        fs::write(&path, content)
+            .map_err(|source| io_error("write skill version", &path, source))?;
+        Ok(snapshot)
+    }
+
     fn source_for(&self, skill_id: &str) -> SkillSource {
         if self.builtin_ids.contains(skill_id) {
             SkillSource::Builtin
@@ -511,6 +671,10 @@ impl SkillsService {
             SkillSource::User
         }
     }
+}
+
+fn utc_now() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
 fn validate_skill_id(skill_id: &str) -> Result<(), SkillError> {
@@ -589,6 +753,33 @@ fn read_skill_files(skill_dir: &Path) -> Result<BTreeMap<String, String>, SkillE
     let mut files = BTreeMap::new();
     collect_skill_files(skill_dir, skill_dir, &mut files)?;
     Ok(files)
+}
+
+fn next_skill_version(versions_dir: &Path) -> Result<u64, SkillError> {
+    let mut latest = 0;
+    for entry in read_dir_sorted(versions_dir, "read skill versions dir")? {
+        let path = entry.path();
+        if !entry
+            .file_type()
+            .map_err(|source| io_error("inspect skill version file", &path, source))?
+            .is_file()
+        {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if let Ok(version) = stem.parse::<u64>() {
+            latest = latest.max(version);
+        }
+    }
+    Ok(latest + 1)
+}
+
+fn read_skill_version(path: &Path) -> Result<SkillVersion, SkillError> {
+    let content =
+        fs::read_to_string(path).map_err(|source| io_error("read skill version", path, source))?;
+    serde_json::from_str(&content).map_err(|source| json_error("parse skill version", path, source))
 }
 
 fn collect_skill_files(
@@ -689,9 +880,22 @@ fn io_error(operation: &'static str, path: &Path, source: io::Error) -> SkillErr
     }
 }
 
+fn json_error(operation: &'static str, path: &Path, source: serde_json::Error) -> SkillError {
+    SkillError::Json {
+        operation,
+        path: path.to_path_buf(),
+        source,
+    }
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/skills", post(create_skill).get(list_skills))
+        .route("/skills/{skill_id}/versions", get(list_skill_versions))
+        .route(
+            "/skills/{skill_id}/versions/{version}/rollback",
+            post(rollback_skill_version),
+        )
         .route(
             "/skills/{skill_id}",
             get(get_skill).put(update_skill).delete(delete_skill),
@@ -733,6 +937,18 @@ async fn get_skill(
         .map_err(SkillHttpError)
 }
 
+async fn list_skill_versions(
+    State(state): State<AppState>,
+    AxumPath(skill_id): AxumPath<String>,
+) -> Result<Json<Vec<SkillVersion>>, SkillHttpError> {
+    state
+        .skills
+        .list_skill_versions(&skill_id)
+        .await
+        .map(Json)
+        .map_err(SkillHttpError)
+}
+
 async fn update_skill(
     State(state): State<AppState>,
     AxumPath(skill_id): AxumPath<String>,
@@ -741,6 +957,18 @@ async fn update_skill(
     state
         .skills
         .update_skill(&skill_id, payload)
+        .await
+        .map(Json)
+        .map_err(SkillHttpError)
+}
+
+async fn rollback_skill_version(
+    State(state): State<AppState>,
+    AxumPath((skill_id, version)): AxumPath<(String, u64)>,
+) -> Result<Json<Skill>, SkillHttpError> {
+    state
+        .skills
+        .rollback_skill_version(&skill_id, version)
         .await
         .map(Json)
         .map_err(SkillHttpError)
@@ -764,13 +992,16 @@ struct SkillHttpError(SkillError);
 impl IntoResponse for SkillHttpError {
     fn into_response(self) -> Response {
         let status = match &self.0 {
-            SkillError::SkillNotFound { .. } => StatusCode::NOT_FOUND,
+            SkillError::SkillNotFound { .. } | SkillError::SkillVersionNotFound { .. } => {
+                StatusCode::NOT_FOUND
+            }
             SkillError::SkillAlreadyExists { .. } => StatusCode::CONFLICT,
             SkillError::InvalidSkillId { .. } | SkillError::InvalidSkillFilePath { .. } => {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             SkillError::BuiltinSkillReadOnly { .. } => StatusCode::FORBIDDEN,
             SkillError::Io { .. }
+            | SkillError::Json { .. }
             | SkillError::PathPrefix { .. }
             | SkillError::LockPoisoned { .. }
             | SkillError::BlockingTaskJoin { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1000,6 +1231,130 @@ mod tests {
     }
 
     #[test]
+    fn user_skill_versions_are_recorded_and_rollback_creates_new_version() {
+        let root = TestDir::new("versioned-skill");
+        let service = service(&root);
+        service
+            .create_skill("my-skill", &files(&[("SKILL.md", "# V1")]))
+            .unwrap_or_else(|error| panic!("failed to create skill: {error}"));
+        service
+            .update_skill(
+                "my-skill",
+                &files(&[("SKILL.md", "# V2"), ("notes.md", "second")]),
+            )
+            .unwrap_or_else(|error| panic!("failed to update skill: {error}"));
+
+        let versions = service
+            .list_skill_versions("my-skill")
+            .unwrap_or_else(|error| panic!("failed to list versions: {error}"));
+        assert_eq!(
+            versions
+                .iter()
+                .map(|version| version.version)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            versions[0].files.get("SKILL.md").map(String::as_str),
+            Some("# V1")
+        );
+        assert_eq!(
+            versions[1].files.get("notes.md").map(String::as_str),
+            Some("second")
+        );
+
+        let rolled_back = service
+            .rollback_skill_version("my-skill", 1)
+            .unwrap_or_else(|error| panic!("failed to rollback skill: {error}"));
+        assert_eq!(
+            rolled_back.files.get("SKILL.md").map(String::as_str),
+            Some("# V1")
+        );
+        assert!(!rolled_back.files.contains_key("notes.md"));
+
+        let versions = service
+            .list_skill_versions("my-skill")
+            .unwrap_or_else(|error| panic!("failed to list versions after rollback: {error}"));
+        assert_eq!(versions.len(), 3);
+        assert_eq!(versions[2].version, 3);
+        assert_eq!(
+            versions[2].files.get("SKILL.md").map(String::as_str),
+            Some("# V1")
+        );
+    }
+
+    #[test]
+    fn first_update_of_legacy_user_skill_snapshots_existing_files() {
+        let root = TestDir::new("legacy-versioned-skill");
+        let service = service(&root);
+        write_file(
+            &service.skills_dir().join("legacy-skill/SKILL.md"),
+            "# Legacy",
+        );
+        write_file(
+            &service.skills_dir().join("legacy-skill/notes.md"),
+            "old notes",
+        );
+        assert!(
+            service
+                .list_skill_versions("legacy-skill")
+                .unwrap_or_else(|error| panic!("failed to list initial versions: {error}"))
+                .is_empty()
+        );
+
+        service
+            .update_skill("legacy-skill", &files(&[("SKILL.md", "# Updated")]))
+            .unwrap_or_else(|error| panic!("failed to update legacy skill: {error}"));
+
+        let versions = service
+            .list_skill_versions("legacy-skill")
+            .unwrap_or_else(|error| panic!("failed to list versions: {error}"));
+        assert_eq!(versions.len(), 2);
+        assert_eq!(
+            versions[0].files.get("SKILL.md").map(String::as_str),
+            Some("# Legacy")
+        );
+        assert_eq!(
+            versions[0].files.get("notes.md").map(String::as_str),
+            Some("old notes")
+        );
+        assert_eq!(
+            versions[1].files.get("SKILL.md").map(String::as_str),
+            Some("# Updated")
+        );
+
+        let rolled_back = service
+            .rollback_skill_version("legacy-skill", 1)
+            .unwrap_or_else(|error| panic!("failed to rollback legacy skill: {error}"));
+        assert_eq!(
+            rolled_back.files.get("SKILL.md").map(String::as_str),
+            Some("# Legacy")
+        );
+        assert_eq!(
+            rolled_back.files.get("notes.md").map(String::as_str),
+            Some("old notes")
+        );
+    }
+
+    #[test]
+    fn builtin_skills_do_not_expose_versions() {
+        let root = TestDir::new("builtin-version-history");
+        let mut service = service(&root);
+        write_file(
+            &service.builtin_skills_dir().join("websearch/SKILL.md"),
+            "# Websearch",
+        );
+        service
+            .sync_builtin_skills()
+            .unwrap_or_else(|error| panic!("failed to sync builtins: {error}"));
+
+        assert!(matches!(
+            service.list_skill_versions("websearch"),
+            Err(SkillError::BuiltinSkillReadOnly { .. })
+        ));
+    }
+
+    #[test]
     fn delete_skill_removes_skill() {
         let root = TestDir::new("delete-skill");
         let service = service(&root);
@@ -1111,6 +1466,10 @@ mod tests {
             json!({"files": {"SKILL.md": "# Updated"}}),
         )
         .await;
+        let (versions_status, versions) =
+            empty_request(&app, Method::GET, "/skills/my-skill/versions").await;
+        let (rollback_status, rollback) =
+            empty_request(&app, Method::POST, "/skills/my-skill/versions/1/rollback").await;
         let deleted_status = status_request(&app, Method::DELETE, "/skills/my-skill").await;
         let after_status = status_request(&app, Method::GET, "/skills/my-skill").await;
 
@@ -1123,6 +1482,11 @@ mod tests {
         assert_eq!(fetched["files"]["SKILL.md"], "# My Skill");
         assert_eq!(updated_status, StatusCode::OK);
         assert_eq!(updated["files"]["SKILL.md"], "# Updated");
+        assert_eq!(versions_status, StatusCode::OK);
+        assert_eq!(versions.as_array().map_or(0, Vec::len), 2);
+        assert_eq!(versions[0]["files"]["SKILL.md"], "# My Skill");
+        assert_eq!(rollback_status, StatusCode::OK);
+        assert_eq!(rollback["files"]["SKILL.md"], "# My Skill");
         assert_eq!(deleted_status, StatusCode::NO_CONTENT);
         assert_eq!(after_status, StatusCode::NOT_FOUND);
     }

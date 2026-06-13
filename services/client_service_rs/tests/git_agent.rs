@@ -495,6 +495,8 @@ async fn git_agent_workspace_mount_uses_git_agent_volume()
         agent_host.recorded()?,
         vec![json!({
             "env": {
+                "AGENTSPACE_AGENT_ID": "workspace-agent",
+                "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
                 "KERNEL_SYSTEM_PROMPT": DEFAULT_AGENT_SYSTEM_PROMPT
             },
             "harness": "acp",
@@ -541,6 +543,8 @@ async fn session_request_can_add_git_agent_workspace_mount()
         agent_host.recorded()?,
         vec![json!({
             "env": {
+                "AGENTSPACE_AGENT_ID": "git-agent",
+                "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
                 "KERNEL_SYSTEM_PROMPT": "Review submitted patches for correctness, safety, and repository policy before GitAgent commits them."
             },
             "harness": "acp",
