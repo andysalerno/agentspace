@@ -313,8 +313,7 @@ export const api = {
       body: JSON.stringify({ env_vars: envVars }),
     }),
 
-  // Webui-local config: served as a static file at /info.json by the
-  // webui's nginx, generated at container start from WEBUI_CLIENT* env vars.
+  // Webui-local config: served by the WebUI SSR server from WEBUI_CLIENT* env vars.
   getWebuiInfo: async (): Promise<ServiceInfoSection> => {
     const response = await fetch("/info.json");
     if (!response.ok) {

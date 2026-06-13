@@ -1,4 +1,53 @@
-export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "git-agent" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
+export type ViewId =
+  | "chat"
+  | "agents"
+  | "workspaces"
+  | "sessions"
+  | "kernels"
+  | "git-agent"
+  | "skills"
+  | "connections"
+  | "gateways"
+  | "info"
+  | "config-kernels";
+
+export type NavGroup = "workspace" | "operations" | "configuration" | "system";
+
+export type NavItem = {
+  id: ViewId;
+  label: string;
+  description: string;
+  group: NavGroup;
+};
+
+export type ViewMeta = {
+  title: string;
+  description: string;
+};
+
+export type SummaryCard = {
+  label: string;
+  value: string;
+  caption: string;
+  tone: "brand" | "success" | "warning" | "danger" | "neutral";
+};
+
+export type EnvEntry = {
+  name: string;
+  value: string;
+};
+
+export type InfoSection = {
+  title: string;
+  env_prefix: string;
+  error: string;
+  entries: EnvEntry[];
+};
+
+export type KeyValueRow = {
+  name: string;
+  value: string;
+};
 
 export type Harness = string;
 
@@ -85,6 +134,12 @@ export type ToolCall = {
   content_offset?: number;
 };
 
+export type UiToolCall = ToolCall & {
+  input_text: string;
+  output_text: string;
+  status_label: string;
+};
+
 export type AcpSessionUpdate = Record<string, unknown> & {
   sessionUpdate?: string;
   content?: unknown;
@@ -105,6 +160,12 @@ export type ChatMessage = {
   created_at: string;
   tool_calls?: ToolCall[];
   reasoning?: string;
+};
+
+export type UiChatMessage = ChatMessage & {
+  role_label: string;
+  created_label: string;
+  tool_calls: UiToolCall[];
 };
 
 export type SessionDetail = SessionSummary & {
@@ -401,3 +462,143 @@ export type GitAgentRequestsResponse =
       data?: GitAgentRequestSummary[];
       [key: string]: unknown;
     };
+
+export type AgentFormState = {
+  agent_id: string;
+  name: string;
+  harness: string;
+  system_prompt: string;
+  skills_text: string;
+  env_vars: string;
+  connection_id: string;
+  workspace_mounts_json: string;
+};
+
+export type WorkspaceFormState = {
+  workspace_id: string;
+  name: string;
+};
+
+export type SkillFormState = {
+  skill_id: string;
+  files_json: string;
+};
+
+export type ConnectionFormState = {
+  connection_id: string;
+  name: string;
+  url: string;
+  api_flavor: "chat_completions" | "responses";
+  api_key: string;
+};
+
+export type GatewayFormState = {
+  gateway_id: string;
+  name: string;
+  gateway_type: string;
+  agent_id: string;
+  enabled: boolean;
+  env_vars: string;
+  secrets_json: string;
+};
+
+export type GitAgentConfigFormState = {
+  enabled: boolean;
+  remote_url: string;
+  patch_url: string;
+  default_branch: string;
+  review_agent_id: string;
+  validation_command: string;
+  allowed_refs: string;
+  allowed_ref_prefixes: string;
+  protected_refs: string;
+  protected_ref_prefixes: string;
+  skip_review_refs: string;
+  skip_validation_refs: string;
+};
+
+export type UiSessionSummary = SessionSummary & {
+  agent_name: string;
+  status_tone: SummaryCard["tone"];
+  created_label: string;
+  updated_label: string;
+};
+
+export type UiKernelSummary = KernelSummary & {
+  status_tone: SummaryCard["tone"];
+  cpu_label: string;
+  memory_label: string;
+  primary_url: string;
+};
+
+export type UiGitAgentRequest = GitAgentRequestSummary & {
+  request_key: string;
+  status_tone: SummaryCard["tone"];
+  created_label: string;
+};
+
+export type UiGitAgentRequestDetail = GitAgentRequestDetail & {
+  request_key: string;
+  review_summary: string;
+  patch_text: string;
+  review_comments: GitAgentReviewComment[];
+};
+
+export type AppState = {
+  title: string;
+  textdirection: "ltr" | "rtl";
+  theme: "light" | "dark";
+  darkMode: boolean;
+  sidebarCollapsed: boolean;
+  generatedAtLabel: string;
+  currentView: ViewId;
+  currentViewTitle: string;
+  currentViewDescription: string;
+  navItems: NavItem[];
+  summaryCards: SummaryCard[];
+  harnesses: Harness[];
+  agents: Agent[];
+  workspaces: Workspace[];
+  sessions: UiSessionSummary[];
+  kernels: UiKernelSummary[];
+  skills: Skill[];
+  skillVersions: SkillVersion[];
+  connections: Connection[];
+  gateways: Gateway[];
+  gatewayTypes: GatewayType[];
+  gitAgentStatusRows: KeyValueRow[];
+  gitAgentRequests: UiGitAgentRequest[];
+  selectedGitRequest: UiGitAgentRequestDetail;
+  systemSections: InfoSection[];
+  error: string;
+  isRefreshing: boolean;
+  selectedSessionId: string;
+  selectedSessionTitle: string;
+  chatMessages: UiChatMessage[];
+  isStreaming: boolean;
+  showAgentForm: boolean;
+  isEditingAgent: boolean;
+  agentForm: AgentFormState;
+  workspaceForm: WorkspaceFormState;
+  showWorkspaceForm: boolean;
+  showLogs: boolean;
+  logsTitle: string;
+  logSource: "harness" | "container";
+  logLines: string[];
+  showSkillForm: boolean;
+  selectedSkillId: string;
+  skillForm: SkillFormState;
+  showConnectionForm: boolean;
+  isEditingConnection: boolean;
+  connectionForm: ConnectionFormState;
+  selectedConnectionModelsText: string;
+  showGatewayForm: boolean;
+  isEditingGateway: boolean;
+  gatewayForm: GatewayFormState;
+  showGatewayLogs: boolean;
+  gatewayLogsTitle: string;
+  gatewayLogLines: string[];
+  selectedKernelConfigHarness: string;
+  kernelConfigEnv: string;
+  gitAgentConfig: GitAgentConfigFormState;
+};

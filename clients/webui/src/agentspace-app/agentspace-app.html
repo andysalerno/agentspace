@@ -1,0 +1,575 @@
+<fluent-design-system-provider class="provider">
+  <div class="app-shell" data-theme="{{theme}}">
+    <aside class="navigation" ?data-collapsed="{{sidebarCollapsed}}">
+      <div class="brand">
+        <div class="brand-mark">AS</div>
+        <if condition="!sidebarCollapsed">
+          <div>
+            <strong>AgentSpace</strong>
+            <span>AI operations workspace</span>
+          </div>
+        </if>
+      </div>
+
+      <div class="nav-scroll">
+        <section class="nav-group">
+          <if condition="!sidebarCollapsed"><h2>Workspace</h2></if>
+          <for each="item in navItems">
+            <if condition="item.group == 'workspace'">
+              <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
+                <span class="nav-label">{{item.label}}</span>
+                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+              </fluent-button>
+            </if>
+          </for>
+        </section>
+
+        <section class="nav-group">
+          <if condition="!sidebarCollapsed"><h2>Operations</h2></if>
+          <for each="item in navItems">
+            <if condition="item.group == 'operations'">
+              <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
+                <span class="nav-label">{{item.label}}</span>
+                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+              </fluent-button>
+            </if>
+          </for>
+        </section>
+
+        <section class="nav-group">
+          <if condition="!sidebarCollapsed"><h2>Configuration</h2></if>
+          <for each="item in navItems">
+            <if condition="item.group == 'configuration'">
+              <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
+                <span class="nav-label">{{item.label}}</span>
+                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+              </fluent-button>
+            </if>
+          </for>
+        </section>
+
+        <section class="nav-group">
+          <if condition="!sidebarCollapsed"><h2>System</h2></if>
+          <for each="item in navItems">
+            <if condition="item.group == 'system'">
+              <fluent-button class="nav-item" appearance="stealth" ?current="{{item.id == currentView}}" @click="{navigate(item.id)}">
+                <span class="nav-label">{{item.label}}</span>
+                <if condition="!sidebarCollapsed"><span class="nav-description">{{item.description}}</span></if>
+              </fluent-button>
+            </if>
+          </for>
+        </section>
+      </div>
+
+      <div class="nav-footer">
+        <fluent-button appearance="stealth" @click="{toggleSidebar()}">
+          <if condition="sidebarCollapsed">Expand</if>
+          <if condition="!sidebarCollapsed">Collapse</if>
+        </fluent-button>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="command-bar">
+        <div>
+          <p class="eyebrow">Microsoft WebUI SSR + Fluent UI</p>
+          <h1>{{currentViewTitle}}</h1>
+          <p>{{currentViewDescription}}</p>
+        </div>
+        <div class="command-actions">
+          <span class="generated">Rendered {{generatedAtLabel}}</span>
+          <fluent-switch ?checked="{{darkMode}}" @change="{toggleTheme()}">Dark</fluent-switch>
+          <fluent-button appearance="outline" ?disabled="{{isRefreshing}}" @click="{refreshAll()}">
+            <if condition="isRefreshing">Refreshing...</if>
+            <if condition="!isRefreshing">Refresh</if>
+          </fluent-button>
+        </div>
+      </header>
+
+      <if condition="error">
+        <div class="error-banner">
+          <span>{{error}}</span>
+          <fluent-button appearance="stealth" @click="{clearError()}">Dismiss</fluent-button>
+        </div>
+      </if>
+
+      <section class="metrics" aria-label="AgentSpace summary">
+        <fluent-card class="metric-card tone-brand">
+          <span>Agents</span>
+          <strong>{{agents.length}}</strong>
+          <small>Reusable definitions</small>
+        </fluent-card>
+        <fluent-card class="metric-card tone-success">
+          <span>Sessions</span>
+          <strong>{{sessions.length}}</strong>
+          <small>Saved conversations</small>
+        </fluent-card>
+        <fluent-card class="metric-card tone-warning">
+          <span>Kernels</span>
+          <strong>{{kernels.length}}</strong>
+          <small>Live harness containers</small>
+        </fluent-card>
+        <fluent-card class="metric-card tone-brand">
+          <span>Workspaces</span>
+          <strong>{{workspaces.length}}</strong>
+          <small>Persistent volumes</small>
+        </fluent-card>
+        <fluent-card class="metric-card tone-success">
+          <span>Gateways</span>
+          <strong>{{gateways.length}}</strong>
+          <small>Channel bridges</small>
+        </fluent-card>
+      </section>
+
+      <section class="content-frame">
+        <if condition="currentView == 'chat'">
+          <div class="split-view chat-view">
+            <section class="panel list-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>Sessions</h2>
+                  <p>{{sessions.length}} saved conversations</p>
+                </div>
+              </div>
+              <div class="inline-form">
+                <fluent-select w-ref="{newSessionAgentSelect}" aria-label="Agent for new session">
+                  <fluent-option value="">Select agent</fluent-option>
+                  <for each="agent in agents">
+                    <fluent-option value="{{agent.agent_id}}">{{agent.name}}</fluent-option>
+                  </for>
+                </fluent-select>
+                <fluent-button appearance="accent" @click="{createSession()}">New chat</fluent-button>
+              </div>
+              <div class="item-list">
+                <for each="session in sessions">
+                  <fluent-button class="list-row" appearance="stealth" ?current="{{session.session_id == selectedSessionId}}" @click="{selectSession(session.session_id)}">
+                    <span class="row-title">{{session.agent_name}}</span>
+                    <span class="row-subtitle">{{session.session_id}}</span>
+                    <span class="row-meta">{{session.message_count}} messages</span>
+                  </fluent-button>
+                </for>
+              </div>
+            </section>
+
+            <section class="panel conversation-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>{{selectedSessionTitle}}</h2>
+                  <p>{{selectedSessionId}}</p>
+                </div>
+                <div class="panel-actions">
+                  <fluent-button appearance="outline" ?disabled="{{!selectedSessionId}}" @click="{resetSelectedSession()}">Reset</fluent-button>
+                  <fluent-button appearance="outline" ?disabled="{{!selectedSessionId}}" @click="{saveSelectedWorkspace()}">Save workspace</fluent-button>
+                </div>
+              </div>
+
+              <if condition="!selectedSessionId">
+                <div class="empty-state">
+                  <h3>Select a session or start a new chat</h3>
+                  <p>Server-rendered sessions appear immediately, and the hydrated WebUI island streams responses after you send a message.</p>
+                </div>
+              </if>
+
+              <if condition="selectedSessionId">
+                <div class="messages">
+                  <for each="message in chatMessages">
+                    <article class="message message-{{message.role}}">
+                      <header>
+                        <fluent-badge appearance="lightweight">{{message.role_label}}</fluent-badge>
+                        <span>{{message.created_label}}</span>
+                      </header>
+                      <pre>{{message.content}}</pre>
+                      <if condition="message.reasoning">
+                        <details>
+                          <summary>Reasoning</summary>
+                          <pre>{{message.reasoning}}</pre>
+                        </details>
+                      </if>
+                      <if condition="message.tool_calls.length">
+                        <div class="tool-list">
+                          <for each="tool in message.tool_calls">
+                            <details class="tool-card">
+                              <summary>{{tool.tool}} <span>{{tool.status_label}}</span></summary>
+                              <if condition="tool.input_text"><pre>{{tool.input_text}}</pre></if>
+                              <if condition="tool.output_text"><pre>{{tool.output_text}}</pre></if>
+                            </details>
+                          </for>
+                        </div>
+                      </if>
+                    </article>
+                  </for>
+                </div>
+                <div class="composer">
+                  <fluent-text-area w-ref="{composerInput}" rows="4" resize="vertical" placeholder="Message the selected agent. Press Ctrl+Enter to send."></fluent-text-area>
+                  <fluent-button appearance="accent" ?disabled="{{isStreaming}}" @click="{sendMessage()}">
+                    <if condition="isStreaming">Streaming...</if>
+                    <if condition="!isStreaming">Send</if>
+                  </fluent-button>
+                </div>
+              </if>
+            </section>
+          </div>
+        </if>
+
+        <if condition="currentView == 'agents'">
+          <div class="management-view">
+            <div class="view-toolbar">
+              <fluent-button appearance="accent" @click="{showCreateAgent()}">New agent</fluent-button>
+            </div>
+            <if condition="showAgentForm">
+              <fluent-card class="form-card">
+                <h2><if condition="isEditingAgent">Edit agent</if><if condition="!isEditingAgent">Create agent</if></h2>
+                <div class="form-grid">
+                  <label>Agent ID<fluent-text-field w-ref="{agentIdInput}" value="{{agentForm.agent_id}}" ?disabled="{{isEditingAgent}}"></fluent-text-field></label>
+                  <label>Name<fluent-text-field w-ref="{agentNameInput}" value="{{agentForm.name}}"></fluent-text-field></label>
+                  <label>Harness
+                    <fluent-select w-ref="{agentHarnessSelect}" value="{{agentForm.harness}}">
+                      <for each="harness in harnesses"><fluent-option value="{{harness}}">{{harness}}</fluent-option></for>
+                    </fluent-select>
+                  </label>
+                  <label>Connection
+                    <fluent-select w-ref="{agentConnectionSelect}" value="{{agentForm.connection_id}}">
+                      <fluent-option value="">Default</fluent-option>
+                      <for each="connection in connections"><fluent-option value="{{connection.connection_id}}">{{connection.name}}</fluent-option></for>
+                    </fluent-select>
+                  </label>
+                  <label class="span-2">System prompt<fluent-text-area w-ref="{agentPromptInput}" rows="5" value="{{agentForm.system_prompt}}"></fluent-text-area></label>
+                  <label>Skills, comma separated<fluent-text-field w-ref="{agentSkillsInput}" value="{{agentForm.skills_text}}"></fluent-text-field></label>
+                  <label class="span-2">Environment variables<fluent-text-area w-ref="{agentEnvInput}" rows="6" value="{{agentForm.env_vars}}"></fluent-text-area></label>
+                  <label class="span-2">Workspace mounts JSON<fluent-text-area w-ref="{agentMountsInput}" rows="4" value="{{agentForm.workspace_mounts_json}}"></fluent-text-area></label>
+                </div>
+                <div class="form-actions">
+                  <fluent-button appearance="accent" @click="{saveAgent()}">Save agent</fluent-button>
+                  <fluent-button appearance="stealth" @click="{cancelAgentForm()}">Cancel</fluent-button>
+                </div>
+              </fluent-card>
+            </if>
+            <div class="card-grid">
+              <for each="agent in agents">
+                <fluent-card class="resource-card">
+                  <div class="card-title-row">
+                    <div><h3>{{agent.name}}</h3><p>{{agent.agent_id}}</p></div>
+                    <fluent-badge appearance="accent">{{agent.harness}}</fluent-badge>
+                  </div>
+                  <p class="clamp">{{agent.system_prompt}}</p>
+                  <div class="meta-grid">
+                    <span>Skills</span><strong>{{agent.skills.length}}</strong>
+                    <span>Mounts</span><strong>{{agent.workspace_mounts.length}}</strong>
+                    <span>Connection</span><strong>{{agent.connection_id}}</strong>
+                  </div>
+                  <div class="card-actions">
+                    <fluent-button appearance="accent" @click="{startAgentSession(agent.agent_id)}">New session</fluent-button>
+                    <fluent-button appearance="outline" @click="{editAgent(agent.agent_id)}">Edit</fluent-button>
+                    <fluent-button appearance="stealth" @click="{deleteAgent(agent.agent_id)}">Delete</fluent-button>
+                  </div>
+                </fluent-card>
+              </for>
+            </div>
+          </div>
+        </if>
+
+        <if condition="currentView == 'workspaces'">
+          <div class="management-view">
+            <div class="view-toolbar">
+              <fluent-button appearance="accent" @click="{toggleWorkspaceForm()}">New workspace</fluent-button>
+            </div>
+            <if condition="showWorkspaceForm">
+              <fluent-card class="form-card compact-form">
+                <label>Workspace ID<fluent-text-field w-ref="{workspaceIdInput}" value="{{workspaceForm.workspace_id}}"></fluent-text-field></label>
+                <label>Name<fluent-text-field w-ref="{workspaceNameInput}" value="{{workspaceForm.name}}"></fluent-text-field></label>
+                <fluent-button appearance="accent" @click="{createWorkspace()}">Create</fluent-button>
+              </fluent-card>
+            </if>
+            <div class="card-grid">
+              <for each="workspace in workspaces">
+                <fluent-card class="resource-card">
+                  <div class="card-title-row">
+                    <div><h3>{{workspace.name}}</h3><p>{{workspace.workspace_id}}</p></div>
+                    <fluent-badge>{{workspace.status}}</fluent-badge>
+                  </div>
+                  <p>{{workspace.mount_path}}</p>
+                  <p class="muted">{{workspace.volume_name}}</p>
+                  <div class="card-actions">
+                    <fluent-button appearance="outline" @click="{renameWorkspace(workspace.workspace_id)}">Rename</fluent-button>
+                    <fluent-button appearance="outline" @click="{cloneWorkspace(workspace.workspace_id)}">Clone</fluent-button>
+                    <fluent-button appearance="outline" @click="{openWorkspace(workspace.workspace_id)}">VS Code</fluent-button>
+                    <fluent-button appearance="stealth" @click="{deleteWorkspace(workspace.workspace_id)}">Delete</fluent-button>
+                  </div>
+                </fluent-card>
+              </for>
+            </div>
+          </div>
+        </if>
+
+        <if condition="currentView == 'sessions'">
+          <div class="table-view">
+            <table>
+              <thead><tr><th>Agent</th><th>Status</th><th>Messages</th><th>Channel</th><th>Updated</th><th></th></tr></thead>
+              <tbody>
+                <for each="session in sessions">
+                  <tr>
+                    <td><strong>{{session.agent_name}}</strong><span>{{session.session_id}}</span></td>
+                    <td><fluent-badge class="tone-{{session.status_tone}}">{{session.status}}</fluent-badge></td>
+                    <td>{{session.message_count}}</td>
+                    <td>{{session.channel_name}}</td>
+                    <td>{{session.updated_label}}</td>
+                    <td class="row-actions">
+                      <fluent-button appearance="outline" @click="{selectSession(session.session_id)}">Open</fluent-button>
+                      <fluent-button appearance="stealth" @click="{deleteSession(session.session_id)}">Delete</fluent-button>
+                    </td>
+                  </tr>
+                </for>
+              </tbody>
+            </table>
+          </div>
+        </if>
+
+        <if condition="currentView == 'kernels'">
+          <div class="card-grid">
+            <for each="kernel in kernels">
+              <fluent-card class="resource-card wide-card">
+                <div class="card-title-row">
+                  <div><h3>{{kernel.harness}}</h3><p>{{kernel.session_id}}</p></div>
+                  <fluent-badge class="tone-{{kernel.status_tone}}">{{kernel.status}}</fluent-badge>
+                </div>
+                <div class="meta-grid">
+                  <span>Turns</span><strong>{{kernel.turns}}</strong>
+                  <span>CPU</span><strong>{{kernel.cpu_label}}</strong>
+                  <span>Memory</span><strong>{{kernel.memory_label}}</strong>
+                  <span>Container</span><strong>{{kernel.container_name}}</strong>
+                </div>
+                <div class="card-actions">
+                  <fluent-button appearance="outline" @click="{openKernelLogs(kernel.session_id, 'harness')}">Harness logs</fluent-button>
+                  <fluent-button appearance="outline" @click="{openKernelLogs(kernel.session_id, 'container')}">Container logs</fluent-button>
+                  <fluent-button appearance="outline" @click="{openKernelUrl(kernel.primary_url)}">Open URL</fluent-button>
+                  <fluent-button appearance="stealth" @click="{killKernel(kernel.session_id)}">Stop</fluent-button>
+                </div>
+              </fluent-card>
+            </for>
+          </div>
+          <if condition="showLogs">
+            <div class="modal-backdrop">
+              <fluent-card class="modal-card">
+                <div class="modal-header">
+                  <div><h2>{{logsTitle}}</h2><p>{{logSource}}</p></div>
+                  <div class="panel-actions">
+                    <fluent-button appearance="outline" @click="{downloadLogs()}">Download</fluent-button>
+                    <fluent-button appearance="stealth" @click="{closeLogs()}">Close</fluent-button>
+                  </div>
+                </div>
+                <pre class="log-output"><for each="line in logLines">{{line}}
+</for></pre>
+              </fluent-card>
+            </div>
+          </if>
+        </if>
+
+        <if condition="currentView == 'git-agent'">
+          <div class="split-view">
+            <section class="panel">
+              <h2>Status</h2>
+              <div class="key-values">
+                <for each="row in gitAgentStatusRows">
+                  <span>{{row.name}}</span><strong>{{row.value}}</strong>
+                </for>
+              </div>
+              <fluent-divider></fluent-divider>
+              <h2>Configuration</h2>
+              <div class="form-grid">
+                <label>Enabled<fluent-checkbox w-ref="{gitAgentEnabledInput}" ?checked="{{gitAgentConfig.enabled}}"></fluent-checkbox></label>
+                <label>Remote URL<fluent-text-field w-ref="{gitAgentRemoteInput}" value="{{gitAgentConfig.remote_url}}"></fluent-text-field></label>
+                <label>Patch URL<fluent-text-field w-ref="{gitAgentPatchInput}" value="{{gitAgentConfig.patch_url}}"></fluent-text-field></label>
+                <label>Default branch<fluent-text-field w-ref="{gitAgentDefaultBranchInput}" value="{{gitAgentConfig.default_branch}}"></fluent-text-field></label>
+                <label>Reviewer agent<fluent-text-field w-ref="{gitAgentReviewerInput}" value="{{gitAgentConfig.review_agent_id}}"></fluent-text-field></label>
+                <label>Validation command<fluent-text-field w-ref="{gitAgentValidationInput}" value="{{gitAgentConfig.validation_command}}"></fluent-text-field></label>
+              </div>
+              <fluent-button appearance="accent" @click="{saveGitAgentConfig()}">Save configuration</fluent-button>
+            </section>
+            <section class="panel">
+              <h2>Patch requests</h2>
+              <div class="item-list">
+                <for each="request in gitAgentRequests">
+                  <fluent-button class="list-row" appearance="stealth" @click="{selectGitRequest(request.request_key)}">
+                    <span class="row-title">{{request.request_key}}</span>
+                    <span class="row-subtitle">{{request.summary}}</span>
+                    <fluent-badge class="tone-{{request.status_tone}}">{{request.status}}</fluent-badge>
+                  </fluent-button>
+                </for>
+              </div>
+              <if condition="selectedGitRequest.request_key">
+                <fluent-divider></fluent-divider>
+                <h3>{{selectedGitRequest.request_key}}</h3>
+                <p>{{selectedGitRequest.review_summary}}</p>
+                <if condition="selectedGitRequest.review_comments.length">
+                  <div class="comment-list">
+                    <for each="comment in selectedGitRequest.review_comments">
+                      <article><strong>{{comment.path}}</strong><span>{{comment.line}}</span><p>{{comment.message}}</p></article>
+                    </for>
+                  </div>
+                </if>
+                <pre class="patch-output">{{selectedGitRequest.patch_text}}</pre>
+              </if>
+            </section>
+          </div>
+        </if>
+
+        <if condition="currentView == 'skills'">
+          <div class="split-view">
+            <section class="panel list-panel">
+              <div class="panel-header"><h2>Skills</h2><fluent-button appearance="accent" @click="{newSkill()}">New</fluent-button></div>
+              <div class="item-list">
+                <for each="skill in skills">
+                  <fluent-button class="list-row" appearance="stealth" ?current="{{skill.skill_id == selectedSkillId}}" @click="{selectSkill(skill.skill_id)}">
+                    <span class="row-title">{{skill.skill_id}}</span>
+                    <span class="row-subtitle">{{skill.source}}</span>
+                  </fluent-button>
+                </for>
+              </div>
+            </section>
+            <section class="panel">
+              <if condition="showSkillForm">
+                <h2>Skill files</h2>
+                <label>Skill ID<fluent-text-field w-ref="{skillIdInput}" value="{{skillForm.skill_id}}"></fluent-text-field></label>
+                <label>Files JSON<fluent-text-area w-ref="{skillFilesInput}" rows="16" value="{{skillForm.files_json}}"></fluent-text-area></label>
+                <div class="form-actions">
+                  <fluent-button appearance="accent" @click="{saveSkill()}">Save skill</fluent-button>
+                  <fluent-button appearance="stealth" @click="{deleteSkill()}">Delete</fluent-button>
+                </div>
+                <if condition="skillVersions.length">
+                  <h3>Versions</h3>
+                  <div class="item-list compact">
+                    <for each="version in skillVersions">
+                      <fluent-button class="list-row" appearance="stealth" @click="{rollbackSkillVersion(version.version)}">
+                        <span class="row-title">Version {{version.version}}</span>
+                        <span class="row-subtitle">{{version.created_at}}</span>
+                      </fluent-button>
+                    </for>
+                  </div>
+                </if>
+              </if>
+              <if condition="!showSkillForm"><div class="empty-state"><h3>Select a skill</h3><p>Choose a skill to edit its files or create a new one.</p></div></if>
+            </section>
+          </div>
+        </if>
+
+        <if condition="currentView == 'connections'">
+          <div class="management-view">
+            <div class="view-toolbar"><fluent-button appearance="accent" @click="{showCreateConnection()}">New connection</fluent-button></div>
+            <if condition="showConnectionForm">
+              <fluent-card class="form-card">
+                <h2><if condition="isEditingConnection">Edit connection</if><if condition="!isEditingConnection">Create connection</if></h2>
+                <div class="form-grid">
+                  <label>Connection ID<fluent-text-field w-ref="{connectionIdInput}" value="{{connectionForm.connection_id}}" ?disabled="{{isEditingConnection}}"></fluent-text-field></label>
+                  <label>Name<fluent-text-field w-ref="{connectionNameInput}" value="{{connectionForm.name}}"></fluent-text-field></label>
+                  <label>URL<fluent-text-field w-ref="{connectionUrlInput}" value="{{connectionForm.url}}"></fluent-text-field></label>
+                  <label>API flavor
+                    <fluent-select w-ref="{connectionFlavorSelect}" value="{{connectionForm.api_flavor}}">
+                      <fluent-option value="chat_completions">Chat completions</fluent-option>
+                      <fluent-option value="responses">Responses</fluent-option>
+                    </fluent-select>
+                  </label>
+                  <label>API key<fluent-text-field w-ref="{connectionApiKeyInput}" type="password" value="{{connectionForm.api_key}}"></fluent-text-field></label>
+                </div>
+                <div class="form-actions"><fluent-button appearance="accent" @click="{saveConnection()}">Save</fluent-button><fluent-button appearance="stealth" @click="{cancelConnectionForm()}">Cancel</fluent-button></div>
+              </fluent-card>
+            </if>
+            <div class="card-grid">
+              <for each="connection in connections">
+                <fluent-card class="resource-card">
+                  <div class="card-title-row"><div><h3>{{connection.name}}</h3><p>{{connection.connection_id}}</p></div><fluent-badge>{{connection.api_flavor}}</fluent-badge></div>
+                  <p>{{connection.url}}</p>
+                  <div class="card-actions">
+                    <fluent-button appearance="outline" @click="{loadConnectionModels(connection.connection_id)}">Models</fluent-button>
+                    <fluent-button appearance="outline" @click="{editConnection(connection.connection_id)}">Edit</fluent-button>
+                    <fluent-button appearance="stealth" @click="{deleteConnection(connection.connection_id)}">Delete</fluent-button>
+                  </div>
+                </fluent-card>
+              </for>
+            </div>
+            <if condition="selectedConnectionModelsText"><pre class="json-output">{{selectedConnectionModelsText}}</pre></if>
+          </div>
+        </if>
+
+        <if condition="currentView == 'gateways'">
+          <div class="management-view">
+            <div class="view-toolbar"><fluent-button appearance="accent" @click="{showCreateGateway()}">New gateway</fluent-button></div>
+            <if condition="showGatewayForm">
+              <fluent-card class="form-card">
+                <h2><if condition="isEditingGateway">Edit gateway</if><if condition="!isEditingGateway">Create gateway</if></h2>
+                <div class="form-grid">
+                  <label>Gateway ID<fluent-text-field w-ref="{gatewayIdInput}" value="{{gatewayForm.gateway_id}}" ?disabled="{{isEditingGateway}}"></fluent-text-field></label>
+                  <label>Name<fluent-text-field w-ref="{gatewayNameInput}" value="{{gatewayForm.name}}"></fluent-text-field></label>
+                  <label>Type
+                    <fluent-select w-ref="{gatewayTypeSelect}" value="{{gatewayForm.gateway_type}}">
+                      <for each="type in gatewayTypes"><fluent-option value="{{type}}">{{type}}</fluent-option></for>
+                    </fluent-select>
+                  </label>
+                  <label>Agent
+                    <fluent-select w-ref="{gatewayAgentSelect}" value="{{gatewayForm.agent_id}}">
+                      <for each="agent in agents"><fluent-option value="{{agent.agent_id}}">{{agent.name}}</fluent-option></for>
+                    </fluent-select>
+                  </label>
+                  <label>Enabled<fluent-checkbox w-ref="{gatewayEnabledInput}" ?checked="{{gatewayForm.enabled}}"></fluent-checkbox></label>
+                  <label class="span-2">Environment variables<fluent-text-area w-ref="{gatewayEnvInput}" rows="5" value="{{gatewayForm.env_vars}}"></fluent-text-area></label>
+                  <label class="span-2">Secrets JSON<fluent-text-area w-ref="{gatewaySecretsInput}" rows="4" value="{{gatewayForm.secrets_json}}"></fluent-text-area></label>
+                </div>
+                <div class="form-actions"><fluent-button appearance="accent" @click="{saveGateway()}">Save</fluent-button><fluent-button appearance="stealth" @click="{cancelGatewayForm()}">Cancel</fluent-button></div>
+              </fluent-card>
+            </if>
+            <div class="card-grid">
+              <for each="gateway in gateways">
+                <fluent-card class="resource-card">
+                  <div class="card-title-row"><div><h3>{{gateway.name}}</h3><p>{{gateway.gateway_id}}</p></div><fluent-badge>{{gateway.status}}</fluent-badge></div>
+                  <p>{{gateway.gateway_type}} -> {{gateway.agent_id}}</p>
+                  <div class="card-actions">
+                    <fluent-button appearance="outline" @click="{startGateway(gateway.gateway_id)}">Start</fluent-button>
+                    <fluent-button appearance="outline" @click="{stopGateway(gateway.gateway_id)}">Stop</fluent-button>
+                    <fluent-button appearance="outline" @click="{openGatewayLogs(gateway.gateway_id)}">Logs</fluent-button>
+                    <fluent-button appearance="outline" @click="{editGateway(gateway.gateway_id)}">Edit</fluent-button>
+                    <fluent-button appearance="stealth" @click="{deleteGateway(gateway.gateway_id)}">Delete</fluent-button>
+                  </div>
+                </fluent-card>
+              </for>
+            </div>
+            <if condition="showGatewayLogs">
+              <fluent-card class="log-card">
+                <div class="panel-header"><h2>{{gatewayLogsTitle}}</h2><fluent-button appearance="stealth" @click="{closeGatewayLogs()}">Close</fluent-button></div>
+                <pre class="log-output"><for each="line in gatewayLogLines">{{line}}
+</for></pre>
+              </fluent-card>
+            </if>
+          </div>
+        </if>
+
+        <if condition="currentView == 'config-kernels'">
+          <div class="panel config-panel">
+            <label>Harness
+              <fluent-select w-ref="{kernelConfigHarnessSelect}" value="{{selectedKernelConfigHarness}}" @change="{selectKernelConfigHarness()}">
+                <for each="harness in harnesses"><fluent-option value="{{harness}}">{{harness}}</fluent-option></for>
+              </fluent-select>
+            </label>
+            <label>Environment defaults<fluent-text-area w-ref="{kernelConfigEnvInput}" rows="18" value="{{kernelConfigEnv}}"></fluent-text-area></label>
+            <fluent-button appearance="accent" @click="{saveKernelConfig()}">Save kernel config</fluent-button>
+          </div>
+        </if>
+
+        <if condition="currentView == 'info'">
+          <div class="card-grid">
+            <for each="section in systemSections">
+              <fluent-card class="resource-card wide-card">
+                <h2>{{section.title}}</h2>
+                <if condition="section.env_prefix"><p class="muted">{{section.env_prefix}}*</p></if>
+                <if condition="section.error"><p class="danger-text">{{section.error}}</p></if>
+                <div class="key-values">
+                  <for each="entry in section.entries">
+                    <span>{{entry.name}}</span><strong>{{entry.value}}</strong>
+                  </for>
+                </div>
+              </fluent-card>
+            </for>
+          </div>
+        </if>
+      </section>
+    </main>
+  </div>
+</fluent-design-system-provider>

@@ -1,24 +1,31 @@
-FROM docker.io/library/node:20-alpine AS build
+FROM docker.io/library/node:20-slim AS build
 
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
 RUN npm install
 
-COPY index.html ./
 COPY tsconfig.json ./
-COPY tsconfig.node.json ./
-COPY vite.config.ts ./
+COPY tsconfig.server.json ./
+COPY eslint.config.js ./
+COPY knip.json ./
 COPY src ./src
 
 RUN npm run build
 
-FROM docker.io/library/nginx:1.27-alpine
+FROM docker.io/library/node:20-slim
 
-COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf.template /etc/nginx/templates/default.conf.template
-COPY docker-entrypoint.sh /docker-entrypoint.d/40-webui-config.sh
+WORKDIR /app
 
-RUN chmod +x /docker-entrypoint.d/40-webui-config.sh
+ENV NODE_ENV=production
+ENV PORT=8003
+ENV WEBUI_CLIENT_SERVICE_BASE_URL=http://client-service:8002
+
+COPY package.json package-lock.json* ./
+RUN npm install --omit=dev
+
+COPY --from=build /app/dist ./dist
 
 EXPOSE 8003
+
+CMD ["node", "dist/server.js"]
