@@ -1,6 +1,6 @@
 ---
 name: manage-skills
-description: Use this skill when the user asks you to create, persist, update, version, inspect, or roll back AgentSpace skills.
+description: Use this skill when the user asks you to create, persist, update, version, inspect, or roll back skills.
 ---
 
 # Manage AgentSpace skills
