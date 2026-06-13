@@ -7,6 +7,7 @@ external system.
 
 from __future__ import annotations
 
+import json as jsonlib
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
@@ -14,7 +15,7 @@ from typing import TYPE_CHECKING, cast
 import httpx
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Mapping
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,47 @@ class ClientServiceClient:
             f"/sessions/{session_id}/messages",
             json={"message": message},
         )
+
+    def stream_message(
+        self,
+        *,
+        session_id: str,
+        message: str,
+    ) -> AsyncIterator[dict[str, object]]:
+        async def iterator() -> AsyncIterator[dict[str, object]]:
+            path = f"/sessions/{session_id}/messages/stream"
+            logger.info("gateway -> client_service POST %s", path)
+            try:
+                async with (
+                    httpx.AsyncClient(
+                        base_url=self.base_url,
+                        timeout=self._httpx_timeout(),
+                    ) as client,
+                    client.stream(
+                        "POST",
+                        path,
+                        json={"message": message},
+                    ) as response,
+                ):
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line:
+                            continue
+                        data = jsonlib.loads(line)
+                        if not isinstance(data, dict):
+                            msg = (
+                                f"unexpected stream item shape from {path}: "
+                                f"{type(data).__name__}"
+                            )
+                            raise ClientServiceError(msg)
+                        yield cast("dict[str, object]", data)
+            except jsonlib.JSONDecodeError as exc:
+                msg = f"invalid JSON stream item from {path}: {exc}"
+                raise ClientServiceError(msg) from exc
+            except httpx.HTTPError as exc:
+                raise ClientServiceError(str(exc)) from exc
+
+        return iterator()
 
     async def delete_session(self, *, session_id: str) -> None:
         async with httpx.AsyncClient(

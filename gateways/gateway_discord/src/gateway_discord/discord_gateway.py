@@ -16,6 +16,7 @@ import contextlib
 import json
 import logging
 from collections import deque
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, cast
 
 import discord
@@ -130,6 +131,13 @@ class _MessageLike(Protocol):
 #   * CHECK MARK replaces EYES once the assistant reply has been delivered.
 _PROCESSING_REACTION = "\N{EYES}"
 _DONE_REACTION = "\N{WHITE HEAVY CHECK MARK}"
+
+
+@dataclass(frozen=True, slots=True)
+class _ToolInvocation:
+    key: str | None
+    tool: str
+    input: object
 
 
 class DiscordGateway:
@@ -306,7 +314,7 @@ class DiscordGateway:
 
         _ = (on_ready, on_message)
 
-    async def _on_message(self, message: discord.Message) -> None:  # noqa: C901, PLR0911
+    async def _on_message(self, message: discord.Message) -> None:  # noqa: PLR0911
         if self._config is None:
             return
         # ERROR is terminal until the gateway is restarted (see DISCORD_PLAN.md).
@@ -370,23 +378,13 @@ class DiscordGateway:
                 )
                 return
 
-            # Wrap *only* the agent call in the typing indicator.  This is
-            # the part of the turn the user is genuinely waiting on; the
-            # reaction swap and message send afterwards are sub-second
-            # operations and don't deserve a typing indicator.
-            #
-            # Keeping typing() narrow also avoids a real artefact: discord.py
-            # auto-refreshes typing on a timer, and Discord clears typing on
-            # the next message we send.  If we held typing() open across
-            # _send_chunked, the background refresh task could re-assert
-            # typing right after the reply landed, so the user would see the
-            # indicator briefly reappear after the response.
             try:
-                async with self._typing_indicator(channel):
-                    response = await self._config.client.send_message(
-                        session_id=session_id,
-                        message=text,
-                    )
+                delivered = await self._deliver_streamed_response(
+                    channel,
+                    session_id=session_id,
+                    message=text,
+                    sender=str(author.id),
+                )
             except Exception as exc:  # noqa: BLE001 - any failure should ERROR the gateway
                 await self._handle_send_failure(
                     message.channel,
@@ -396,75 +394,16 @@ class DiscordGateway:
                 )
                 return
 
-            tool_call_messages = _extract_tool_call_messages(response)
-            try:
-                for tool_call_message in tool_call_messages:
-                    await self._send_chunked(channel, tool_call_message)
-                    self._record_event(
-                        GatewayEvent(
-                            type=GatewayEventType.OUTBOUND,
-                            sender=str(author.id),
-                            content=tool_call_message,
-                            session_id=session_id,
-                        ),
-                    )
-            except Exception as exc:  # noqa: BLE001 - keep gateway alive
-                logger.warning("discord send failed: %s", exc)
-                self._record_event(
-                    GatewayEvent(
-                        type=GatewayEventType.ERROR,
-                        sender=str(author.id),
-                        message=f"discord send failed: {exc}",
-                        session_id=session_id,
-                    ),
-                )
+            if not delivered:
                 return
 
-            reply = _extract_assistant_text(response)
-            if not reply:
-                # Agent produced no assistant text — don't ghost the user.
-                self._record_event(
-                    GatewayEvent(
-                        type=GatewayEventType.STATUS,
-                        sender=str(author.id),
-                        message="agent returned empty assistant reply",
-                        session_id=session_id,
-                    ),
-                )
-                with contextlib.suppress(Exception):
-                    await channel.send("(agent produced no reply)")
-                return
-
-            try:
-                await self._deliver_reply(channel, reply)
-            except Exception as exc:  # noqa: BLE001 - keep gateway alive
-                logger.warning("discord send failed: %s", exc)
-                self._record_event(
-                    GatewayEvent(
-                        type=GatewayEventType.ERROR,
-                        sender=str(author.id),
-                        message=f"discord send failed: {exc}",
-                        session_id=session_id,
-                    ),
-                )
-                return
-
-            # Reply delivered: swap the in-flight EYES for a CHECK MARK so
+            # Turn delivered: swap the in-flight EYES for a CHECK MARK so
             # the user can see at a glance which past messages have been
             # answered (and which are still pending behind the lock).
             await self._swap_reaction(
                 message,
                 from_emoji=_PROCESSING_REACTION,
                 to_emoji=_DONE_REACTION,
-            )
-
-            self._record_event(
-                GatewayEvent(
-                    type=GatewayEventType.OUTBOUND,
-                    sender=str(author.id),
-                    content=reply,
-                    session_id=session_id,
-                ),
             )
 
     @contextlib.asynccontextmanager
@@ -536,6 +475,170 @@ class DiscordGateway:
         )
         self._session_id = str(session["session_id"])
         return self._session_id
+
+    async def _deliver_streamed_response(  # noqa: C901, PLR0912, PLR0915
+        self,
+        channel: _ChannelLike,
+        *,
+        session_id: str,
+        message: str,
+        sender: str,
+    ) -> bool:
+        assert self._config is not None  # noqa: S101 - invariant
+        pending_text: list[str] = []
+        sent_assistant_text = False
+        sent_any_message = False
+        sent_tool_call_count = 0
+        sent_tool_call_keys: set[str] = set()
+        final_reply = ""
+        final_item: dict[str, object] | None = None
+        final_received = False
+        typing_cm = self._typing_indicator(channel)
+        typing_open = False
+
+        async def close_typing() -> None:
+            nonlocal typing_open
+            if not typing_open:
+                return
+            await typing_cm.__aexit__(None, None, None)
+            typing_open = False
+
+        async def send_outbound(
+            content: str,
+            *,
+            assistant_text: bool,
+            use_simulated_typing: bool = False,
+        ) -> bool:
+            nonlocal sent_any_message, sent_assistant_text
+            if not content.strip():
+                return True
+            await close_typing()
+            try:
+                if use_simulated_typing:
+                    await self._deliver_reply(channel, content)
+                else:
+                    await self._send_chunked(channel, content)
+            except Exception as exc:  # noqa: BLE001 - keep gateway alive
+                logger.warning("discord send failed: %s", exc)
+                self._record_event(
+                    GatewayEvent(
+                        type=GatewayEventType.ERROR,
+                        sender=sender,
+                        message=f"discord send failed: {exc}",
+                        session_id=session_id,
+                    ),
+                )
+                return False
+            self._record_event(
+                GatewayEvent(
+                    type=GatewayEventType.OUTBOUND,
+                    sender=sender,
+                    content=content,
+                    session_id=session_id,
+                ),
+            )
+            sent_any_message = True
+            if assistant_text:
+                sent_assistant_text = True
+            return True
+
+        async def flush_pending_text() -> bool:
+            if not pending_text:
+                return True
+            content = "".join(pending_text)
+            pending_text.clear()
+            return await send_outbound(content, assistant_text=True)
+
+        async def send_tool_invocation(invocation: _ToolInvocation) -> bool:
+            nonlocal sent_tool_call_count
+            if invocation.key is not None:
+                if invocation.key in sent_tool_call_keys:
+                    return True
+                sent_tool_call_keys.add(invocation.key)
+            sent_tool_call_count += 1
+            return await send_outbound(
+                _format_tool_call_message(invocation.tool, invocation.input),
+                assistant_text=False,
+            )
+
+        await typing_cm.__aenter__()
+        typing_open = True
+        try:
+            async for item in self._config.client.stream_message(
+                session_id=session_id,
+                message=message,
+            ):
+                item_type = item.get("type")
+                if item_type == "event":
+                    raw_event = item.get("event")
+                    if not isinstance(raw_event, dict):
+                        continue
+                    event = cast("dict[str, object]", raw_event)
+                    text_delta = _stream_event_text(event)
+                    if text_delta:
+                        pending_text.append(text_delta)
+                    tool_invocation = _tool_invocation_from_event(event)
+                    if tool_invocation is not None:
+                        if not await flush_pending_text():
+                            return False
+                        if not await send_tool_invocation(tool_invocation):
+                            return False
+                    continue
+
+                if item_type == "final":
+                    final_received = True
+                    final_item = item
+                    if item.get("completed") is False:
+                        error = item.get("error")
+                        msg = error if isinstance(error, str) else "agent stream failed"
+                        raise RuntimeError(msg)
+                    final_reply = _extract_assistant_text(item)
+                    break
+
+            if not final_received:
+                msg = "client_service stream ended without final payload"
+                raise RuntimeError(msg)
+
+            if not await flush_pending_text():
+                return False
+
+            if sent_tool_call_count == 0:
+                assert final_item is not None  # noqa: S101 - final_received invariant
+                for tool_call_message in _extract_tool_call_messages(final_item):
+                    if not await send_outbound(
+                        tool_call_message,
+                        assistant_text=False,
+                    ):
+                        return False
+
+            if (
+                not sent_assistant_text
+                and final_reply
+                and not await send_outbound(
+                    final_reply,
+                    assistant_text=True,
+                    use_simulated_typing=True,
+                )
+            ):
+                return False
+
+            if not sent_any_message:
+                # Agent produced no assistant text — don't ghost the user.
+                self._record_event(
+                    GatewayEvent(
+                        type=GatewayEventType.STATUS,
+                        sender=sender,
+                        message="agent returned empty assistant reply",
+                        session_id=session_id,
+                    ),
+                )
+                await close_typing()
+                with contextlib.suppress(Exception):
+                    await channel.send("(agent produced no reply)")
+
+            return True
+        finally:
+            await close_typing()
 
     async def _deliver_reply(self, channel: _ChannelLike, reply: str) -> None:
         """Deliver an assistant reply, optionally with simulated typing.
@@ -669,6 +772,87 @@ def _extract_tool_call_messages(response: dict[str, object]) -> list[str]:
             continue
         messages.append(_format_tool_call_message(tool, tool_call.get("input")))
     return messages
+
+
+def _stream_event_text(event: dict[str, object]) -> str:
+    event_type = event.get("type")
+    if event_type == "text_delta":
+        content = event.get("content")
+        return content if isinstance(content, str) else ""
+    if event_type != "session/update":
+        return ""
+    update = event.get("update")
+    if not isinstance(update, dict):
+        return ""
+    update_dict = cast("dict[str, object]", update)
+    if update_dict.get("sessionUpdate") != "agent_message_chunk":
+        return ""
+    return _content_text(update_dict.get("content"))
+
+
+def _tool_invocation_from_event(event: dict[str, object]) -> _ToolInvocation | None:
+    event_type = event.get("type")
+    if event_type == "tool_call":
+        return _legacy_tool_invocation(event)
+    if event_type == "session/update":
+        return _acp_tool_invocation(event)
+    return None
+
+
+def _legacy_tool_invocation(event: dict[str, object]) -> _ToolInvocation | None:
+    tool = event.get("tool")
+    if not isinstance(tool, str) or not tool:
+        return None
+    return _ToolInvocation(key=None, tool=tool, input=event.get("input"))
+
+
+def _acp_tool_invocation(event: dict[str, object]) -> _ToolInvocation | None:
+    update = event.get("update")
+    if not isinstance(update, dict):
+        return None
+    update_dict = cast("dict[str, object]", update)
+    update_type = update_dict.get("sessionUpdate")
+    tool_call_id = _optional_non_empty_string(update_dict.get("toolCallId"))
+    if not _should_send_acp_tool_invocation(update_dict, update_type, tool_call_id):
+        return None
+    tool = (
+        _optional_non_empty_string(update_dict.get("title")) or tool_call_id or "tool"
+    )
+    tool_input = update_dict.get("rawInput") if "rawInput" in update_dict else None
+    return _ToolInvocation(key=tool_call_id, tool=tool, input=tool_input)
+
+
+def _should_send_acp_tool_invocation(
+    update: dict[str, object],
+    update_type: object,
+    tool_call_id: str | None,
+) -> bool:
+    if update_type == "tool_call":
+        return True
+    if update_type != "tool_call_update":
+        return False
+    return tool_call_id is not None and "rawInput" in update
+
+
+def _optional_non_empty_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _content_text(content: object) -> str:
+    if isinstance(content, list):
+        return "".join(_content_text(item) for item in cast("list[object]", content))
+    if content is None:
+        return ""
+    if not isinstance(content, dict):
+        return str(content)
+    content_dict = cast("dict[str, object]", content)
+    content_type = content_dict.get("type")
+    if content_type == "text":
+        text = content_dict.get("text")
+        return text if isinstance(text, str) else ""
+    if content_type == "content":
+        return _content_text(content_dict.get("content"))
+    return json.dumps(content_dict, separators=(",", ":"))
 
 
 def _format_tool_call_message(tool: str, tool_input: object) -> str:
