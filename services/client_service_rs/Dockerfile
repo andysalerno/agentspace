@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM docker.io/library/rust:1.95-slim-bookworm AS builder
+FROM docker.io/library/rust:1.96-slim-bookworm AS builder
 
 WORKDIR /usr/src/client_service_rs
 
