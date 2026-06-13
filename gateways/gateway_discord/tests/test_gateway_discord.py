@@ -147,6 +147,7 @@ class FakeClient:
     fail_send: bool = False
     next_session_id: int = 0
     reply: str = "hello back"
+    tool_calls: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
 
     async def create_session(
         self,
@@ -168,7 +169,10 @@ class FakeClient:
         if self.fail_send:
             msg = "boom"
             raise RuntimeError(msg)
-        return {"assistant_message": {"content": self.reply}}
+        assistant_message: dict[str, object] = {"content": self.reply}
+        if self.tool_calls:
+            assistant_message["tool_calls"] = self.tool_calls
+        return {"assistant_message": assistant_message}
 
     async def delete_session(self, *, session_id: str) -> None:
         del session_id
@@ -350,6 +354,37 @@ async def test_owner_dm_reuses_session_across_messages() -> None:
 
     assert len(fake.sessions_created) == 1
     assert [s for s, _ in fake.sent_messages] == ["sess-1", "sess-1", "sess-1"]
+
+
+@pytest.mark.asyncio
+async def test_owner_dm_sends_tool_call_before_reply() -> None:
+    fake = FakeClient(
+        reply="sunny and 72",
+        tool_calls=[
+            {
+                "tool": "get_weather",
+                "input": '{\n  "location": "LA"\n}',
+            },
+        ],
+    )
+    gateway = _ready_gateway(fake, DISCORD_CHUNK_MAX_CHARS="1900")
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="what's the weather in LA right now?",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert channel.sent == [
+        (
+            "Invoking tool `get_weather` with input:\n"
+            '```json\n{\n  "location": "LA"\n}\n```'
+        ),
+        "sunny and 72",
+    ]
+    assert channel.typing_active_at_send == [0, 0]
 
 
 @pytest.mark.asyncio

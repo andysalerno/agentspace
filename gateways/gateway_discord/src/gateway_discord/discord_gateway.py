@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 from collections import deque
 from typing import TYPE_CHECKING, Protocol, cast
@@ -395,6 +396,30 @@ class DiscordGateway:
                 )
                 return
 
+            tool_call_messages = _extract_tool_call_messages(response)
+            try:
+                for tool_call_message in tool_call_messages:
+                    await self._send_chunked(channel, tool_call_message)
+                    self._record_event(
+                        GatewayEvent(
+                            type=GatewayEventType.OUTBOUND,
+                            sender=str(author.id),
+                            content=tool_call_message,
+                            session_id=session_id,
+                        ),
+                    )
+            except Exception as exc:  # noqa: BLE001 - keep gateway alive
+                logger.warning("discord send failed: %s", exc)
+                self._record_event(
+                    GatewayEvent(
+                        type=GatewayEventType.ERROR,
+                        sender=str(author.id),
+                        message=f"discord send failed: {exc}",
+                        session_id=session_id,
+                    ),
+                )
+                return
+
             reply = _extract_assistant_text(response)
             if not reply:
                 # Agent produced no assistant text — don't ghost the user.
@@ -624,3 +649,41 @@ def _extract_assistant_text(response: dict[str, object]) -> str:
         if isinstance(content, str):
             return content
     return ""
+
+
+def _extract_tool_call_messages(response: dict[str, object]) -> list[str]:
+    assistant = response.get("assistant_message")
+    if not isinstance(assistant, dict):
+        return []
+    tool_calls = cast("dict[str, object]", assistant).get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return []
+
+    messages: list[str] = []
+    for raw_tool_call in cast("list[object]", tool_calls):
+        if not isinstance(raw_tool_call, dict):
+            continue
+        tool_call = cast("dict[str, object]", raw_tool_call)
+        tool = tool_call.get("tool")
+        if not isinstance(tool, str) or not tool:
+            continue
+        messages.append(_format_tool_call_message(tool, tool_call.get("input")))
+    return messages
+
+
+def _format_tool_call_message(tool: str, tool_input: object) -> str:
+    tool_name = tool.replace("`", "\\`")
+    input_text, language = _tool_input_text(tool_input)
+    if not input_text:
+        return f"Invoking tool `{tool_name}` with no input."
+    return f"Invoking tool `{tool_name}` with input:\n```{language}\n{input_text}\n```"
+
+
+def _tool_input_text(tool_input: object) -> tuple[str, str]:
+    if tool_input is None:
+        return "", ""
+    if isinstance(tool_input, str):
+        text = tool_input.strip()
+        language = "json" if text.startswith(("{", "[")) else ""
+        return text, language
+    return json.dumps(tool_input, indent=2), "json"
