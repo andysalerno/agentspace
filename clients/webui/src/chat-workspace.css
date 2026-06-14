@@ -10,7 +10,7 @@
   --chat-line: var(--colorNeutralStroke2, #e0e0e0);
   --chat-line-strong: var(--colorNeutralStroke1, #d1d1d1);
   --chat-code-bg: var(--colorNeutralBackground2, #f5f5f5);
-  --chat-shadow: var(--shadow8, 0 12px 32px rgba(15, 23, 42, 0.08));
+  --chat-shadow: none;
   --chat-status-neutral: var(--colorNeutralForeground3, #616161);
   --chat-status-active: var(--colorStatusSuccessForeground1, #107c10);
   --chat-status-busy: var(--colorStatusWarningForeground1, #817400);
@@ -38,9 +38,7 @@
 
 .chat-layout {
   min-width: 0;
-  background:
-    linear-gradient(90deg, var(--chat-rail-bg) 0, var(--chat-rail-bg) 312px, transparent 312px),
-    var(--chat-workspace-bg);
+  background: var(--chat-workspace-bg);
   color: var(--text-primary);
 }
 
@@ -53,7 +51,7 @@
 
 .chat-sessions-heading {
   min-height: 57px;
-  padding: 8px 10px 8px 12px;
+  padding: 10px 12px 10px 14px;
   background: var(--chat-rail-header-bg);
   border-bottom-color: var(--chat-line);
 }
@@ -121,8 +119,8 @@
 .rail-delete-all-button {
   min-height: 30px;
   padding: 5px 8px;
-  border-color: color-mix(in srgb, var(--danger) 35%, var(--chat-line));
-  background: var(--chat-surface);
+  border-color: transparent;
+  background: transparent;
   color: var(--danger);
   border-radius: 6px;
   font-size: 0.72rem;
@@ -167,16 +165,16 @@
 }
 
 .session-list {
-  padding: 6px;
+  padding: 8px;
   scrollbar-gutter: stable;
 }
 
 .chat-session-row {
   position: relative;
   min-width: 0;
-  margin-bottom: 3px;
+  margin-bottom: 4px;
   border: 1px solid transparent;
-  border-radius: 7px;
+  border-radius: 8px;
 }
 
 .chat-session-row:hover {
@@ -186,7 +184,7 @@
 
 .chat-session-row.active {
   background: var(--chat-active);
-  border-color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--chat-line));
 }
 
 .chat-session-row.active::before {
@@ -204,9 +202,16 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
-  min-height: 68px;
-  padding: 8px 8px 8px 10px;
+  min-height: 72px;
+  padding: 10px 10px 10px 12px;
+  border: 0;
+  background: transparent !important;
   color: var(--text-primary);
+  text-align: left;
+}
+
+.chat-session-card:hover:not(:disabled) {
+  background: transparent !important;
 }
 
 .chat-session-card:focus-visible,
@@ -328,7 +333,7 @@
 
 .session-delete-button {
   align-self: stretch;
-  margin: 4px 4px 4px 0;
+  margin: 6px 6px 6px 0;
   padding: 0 7px;
   border: 1px solid transparent;
   background: transparent;
@@ -466,11 +471,7 @@
 .chat-transcript {
   gap: 10px;
   padding: 14px clamp(12px, 2vw, 28px);
-  background:
-    linear-gradient(var(--chat-line) 1px, transparent 1px),
-    linear-gradient(90deg, color-mix(in srgb, var(--chat-line) 42%, transparent) 1px, transparent 1px),
-    var(--chat-workspace-bg);
-  background-size: 100% 28px, 28px 100%, auto;
+  background: var(--chat-workspace-bg);
 }
 
 .chat-message {
@@ -603,7 +604,7 @@
   width: min(440px, calc(100% - 48px));
   max-width: 440px;
   margin: auto;
-  padding: 24px 28px;
+  padding: 28px 32px;
   border: 1px solid color-mix(in srgb, var(--chat-line) 72%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--chat-surface) 68%, transparent);
@@ -625,22 +626,24 @@
   line-height: 1.45;
 }
 
-.chat-empty-workspace {
+.chat-empty-state.chat-empty-workspace {
   align-items: center;
   flex: 0 1 auto;
-  width: min(420px, calc(100% - 48px));
-  max-width: 420px;
-  padding: 0;
-  border: 0;
-  background: transparent;
+  width: min(460px, calc(100% - 48px));
+  max-width: 460px;
+  padding: 32px;
+  border: 1px solid var(--chat-line);
+  border-style: solid;
+  background: var(--chat-surface);
+  box-shadow: var(--shadow-card);
   text-align: center;
 }
 
-.chat-empty-workspace button {
+.chat-empty-state.chat-empty-workspace button {
   align-self: center;
 }
 
-.chat-empty-workspace p {
+.chat-empty-state.chat-empty-workspace p {
   max-width: 360px;
 }
 

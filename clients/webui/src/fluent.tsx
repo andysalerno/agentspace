@@ -28,9 +28,16 @@ function classText(className: unknown): string {
 function buttonAppearance(className: string): ButtonProps["appearance"] {
     if (
         className.includes("secondary-button")
-        || className.includes("session-delete-button")
+        || className.includes("danger-button")
+        || className.includes("dismiss-button")
         || className.includes("icon-button")
         || className.includes("kebab-button")
+        || className.includes("rail-delete-all-button")
+        || className.includes("session-delete-button")
+        || className.includes("session-item")
+        || className.includes("chat-session-card")
+        || className.includes("tool-call-tag")
+        || className.includes("inline-tool-call")
         || className.includes("list-item")
         || className.includes("sidebar")
     ) {

@@ -1178,11 +1178,11 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                         </form>
                     </>
                 ) : (
-                    <div className="empty-state centered full-height chat-empty-state chat-empty-workspace">
+                    <div className="empty-state centered chat-empty-state chat-empty-workspace">
                         <div className="empty-state-kicker">AgentSpace chat</div>
                         <h3>Select a session to enter the workspace</h3>
                         <p>Create a fresh channel or jump back into an existing session from the rail.</p>
-                        <Button className="secondary-button" onClick={() => setShowNewSession(true)} type="button">
+                        <Button onClick={() => setShowNewSession(true)} type="button">
                             New session
                         </Button>
                     </div>

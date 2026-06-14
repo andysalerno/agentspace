@@ -5,7 +5,7 @@
   --font-sans: "Segoe UI", -apple-system, BlinkMacSystemFont, "Inter", "Helvetica Neue", Arial, sans-serif;
   --font-mono: "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 
-  --sidebar-width: 232px;
+  --sidebar-width: 244px;
   --sidebar-collapsed-width: 48px;
 
   --app-bg: var(--colorNeutralBackground2, #fafafa);
@@ -47,6 +47,7 @@
 
   --shadow-dropdown: var(--shadow8, 0 8px 20px rgba(31, 35, 40, 0.16));
   --shadow-modal: var(--shadow28, 0 18px 48px rgba(31, 35, 40, 0.22));
+  --shadow-card: var(--shadow4, 0 2px 8px rgba(15, 23, 42, 0.08));
 
   --user-msg-bg: var(--colorBrandBackground2, #ebf3fc);
   --user-msg-border: var(--colorBrandStroke2, #b4d6fa);
@@ -114,6 +115,7 @@
 
   --shadow-dropdown: var(--shadow8, 0 8px 22px rgba(0, 0, 0, 0.38));
   --shadow-modal: var(--shadow28, 0 20px 56px rgba(0, 0, 0, 0.5));
+  --shadow-card: none;
 
   --user-msg-bg: var(--colorBrandBackground2, #082338);
   --user-msg-border: var(--colorBrandStroke2, #004e8c);
@@ -151,7 +153,7 @@ body,
 
 body {
   margin: 0;
-  background: var(--content-bg);
+  background: var(--app-bg);
   color: var(--text-primary);
   overflow: hidden;
 }
@@ -229,7 +231,7 @@ summary:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--content-bg);
+  background: var(--app-bg);
 }
 
 /* Sidebar / app shell */
@@ -248,8 +250,8 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 35px;
-  padding: 0 12px;
+  min-height: 48px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border-color);
   background: var(--sidebar-bg);
 }
@@ -260,6 +262,9 @@ summary:focus-visible {
   justify-content: center;
   width: 20px;
   height: 20px;
+  border: 1px solid color-mix(in srgb, var(--sidebar-accent) 42%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--sidebar-accent) 8%, transparent);
   color: var(--sidebar-accent);
   font-size: 1rem;
   line-height: 1;
@@ -269,7 +274,7 @@ summary:focus-visible {
   min-width: 0;
   overflow: hidden;
   color: var(--sidebar-text);
-  font-size: 0.78rem;
+  font-size: 0.76rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -280,7 +285,7 @@ summary:focus-visible {
 .sidebar-nav {
   list-style: none;
   margin: 0;
-  padding: 6px;
+  padding: 10px 8px;
   flex: 1;
   overflow-y: auto;
 }
@@ -291,7 +296,7 @@ summary:focus-visible {
 }
 
 .sidebar-nav-section-label {
-  padding: 10px 8px 4px;
+  padding: 12px 8px 6px;
   color: var(--sidebar-text-muted);
   font-size: 0.68rem;
   font-weight: 700;
@@ -309,8 +314,8 @@ summary:focus-visible {
   width: 100%;
   min-width: 0 !important;
   max-width: 100%;
-  min-height: 30px;
-  padding: 5px 8px;
+  min-height: 32px;
+  padding: 6px 10px;
   background: transparent;
   color: var(--sidebar-text-muted);
   border: 1px solid transparent;
@@ -375,6 +380,7 @@ summary:focus-visible {
 .sidebar-nav-item.active {
   background: var(--sidebar-active);
   color: var(--sidebar-text);
+  font-weight: 600;
 }
 
 .sidebar-nav li .sidebar-nav-item.active::before {
@@ -388,7 +394,7 @@ summary:focus-visible {
 }
 
 .sidebar-footer {
-  padding: 6px;
+  padding: 8px;
   border-top: 1px solid var(--border-color);
 }
 
@@ -524,7 +530,7 @@ summary:focus-visible {
 .view-content {
   flex: 1;
   min-width: 0;
-  padding: 16px 20px;
+  padding: 20px 24px 24px;
   overflow-y: auto;
 }
 
@@ -602,11 +608,12 @@ summary:focus-visible {
   background: var(--card-bg);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 
 .card-body {
-  padding: 12px 14px;
+  padding: 16px;
 }
 
 .card-body h3 {
@@ -619,8 +626,8 @@ summary:focus-visible {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 12px;
+  padding: 12px 16px;
   background: var(--card-footer-bg);
   border-top: 1px solid var(--border-color);
 }
@@ -628,7 +635,7 @@ summary:focus-visible {
 .card-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 12px;
+  gap: 16px;
 }
 
 /* Forms */
@@ -739,7 +746,7 @@ button:not(.fui-Button) {
   background: var(--accent);
   color: var(--text-inverse);
   border: 1px solid transparent;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-size: 0.86rem;
   font-weight: 500;
@@ -768,15 +775,15 @@ button:not(.fui-Button):disabled {
 }
 
 .danger-button {
-  background: var(--danger);
-  border-color: var(--danger);
-  color: var(--text-inverse);
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 44%, var(--border-color));
+  color: var(--danger);
 }
 
 .danger-button:hover:not(:disabled) {
-  background: var(--danger-hover);
-  border-color: var(--danger-hover);
-  color: var(--text-inverse);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 66%, var(--border-color));
+  color: var(--danger-hover);
 }
 
 .small {
@@ -1552,9 +1559,12 @@ button:not(.fui-Button):disabled {
 }
 
 .empty-state {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: 0.86rem;
-  padding: 18px 0;
+  padding: 20px;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--card-bg) 72%, transparent);
 }
 
 .empty-state.centered {
@@ -1621,9 +1631,10 @@ button:not(.fui-Button):disabled {
 
 .skills-edit-actions,
 .card-footer-actions {
+  align-items: center;
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .skills-edit-actions {
