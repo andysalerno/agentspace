@@ -24,7 +24,7 @@ Rust client service managed by Cargo under `services/client_service_rs`.
 ### Commands
 
 Use `just` for common tasks:
-- `just bootstrap`: Install all dependencies (`uv sync` and `npm install`).
+- `just bootstrap`: Install all dependencies (`uv sync` and `pnpm install`).
 - `just check`: Run the full repo verification suite before finishing work.
 - `just test`: Run all Python tests via `uv run pytest`.
 - `just stack-up`: Start the full stack using Docker Compose.
@@ -32,7 +32,7 @@ Use `just` for common tasks:
 - `just copilot-setup`: Run `kernels/kernel_host/spawn-kernel.sh setup` to authenticate Copilot.
 
 Run `just check` after completing any code or documentation change. It covers
-Python formatting, linting, type-checking, tests, web linting, npm tests when
+Python formatting, linting, type-checking, tests, web linting, pnpm tests when
 present, and the web build.
 
 ### Python Standards

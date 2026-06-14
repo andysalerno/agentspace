@@ -1,9 +1,11 @@
-FROM docker.io/library/node:20-alpine AS build
+FROM docker.io/library/node:22-alpine AS build
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm install
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY index.html ./
 COPY tsconfig.json ./
@@ -11,7 +13,7 @@ COPY tsconfig.node.json ./
 COPY vite.config.ts ./
 COPY src ./src
 
-RUN npm run build
+RUN pnpm run build
 
 FROM docker.io/library/nginx:1.27-alpine
 

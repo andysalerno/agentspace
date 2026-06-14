@@ -19,7 +19,7 @@ just webui-lint
 
 This runs **two tools** in sequence against the webui workspace:
 
-### 1. ESLint (`npm run lint:eslint`)
+### 1. ESLint (`pnpm run lint:eslint`)
 
 Configured with the `typescript-eslint` `recommendedTypeChecked` baseline plus
 `eslint-plugin-react`, `eslint-plugin-react-hooks`, and
@@ -34,9 +34,9 @@ Configured with the `typescript-eslint` `recommendedTypeChecked` baseline plus
 ESLint must produce **zero errors**. Warnings are allowed (currently the React
 19 `react-hooks/set-state-in-effect` advisory).
 
-Auto-fix what you can with `npx eslint . --fix` (run from `clients/webui/`).
+Auto-fix what you can with `pnpm exec eslint . --fix` (run from `clients/webui/`).
 
-### 2. Knip (`npm run lint:knip`)
+### 2. Knip (`pnpm run lint:knip`)
 
 [`knip`](https://knip.dev) catches:
 
@@ -46,7 +46,7 @@ Auto-fix what you can with `npx eslint . --fix` (run from `clients/webui/`).
 - **Unresolved imports** — typos in import specifiers.
 
 `just webui-lint` must exit cleanly before committing. The repo-wide
-`just check` recipe includes this webui lint pass, npm tests when present, and
+`just check` recipe includes this webui lint pass, pnpm tests when present, and
 the production build.
 
 ## Adding a new runtime dependency
@@ -56,7 +56,7 @@ If your change introduces a new `import "some-package"` in webui source, you mus
 1. Add the package to the appropriate field in [clients/webui/package.json](clients/webui/package.json):
    - `dependencies` for runtime imports.
    - `devDependencies` for build-time-only or type-only imports.
-2. Run `npm --prefix clients/webui install` so `package-lock.json` is updated.
+2. Run `pnpm --dir clients/webui install` so `pnpm-lock.yaml` is updated.
 3. Re-run `just check` to confirm a clean pass.
 
 Never rely on a package being available transitively through another dependency. If you import it, declare it.
