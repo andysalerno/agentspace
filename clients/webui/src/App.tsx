@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { webDarkTheme, webLightTheme } from "@fluentui/react-components";
 import type { ViewId } from "./types";
 import Sidebar from "./Sidebar";
 import ChatView from "./ChatView";
@@ -14,6 +15,7 @@ import GatewaysView from "./GatewaysView";
 import InfoView from "./InfoView";
 import ConfigKernelsView from "./ConfigKernelsView";
 import { useErrorContext } from "./ErrorContext";
+import { Button, FluentProvider } from "./fluent";
 
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
@@ -81,6 +83,10 @@ export default function App() {
   }
 
   return (
+    <FluentProvider
+      className="fluent-root"
+      theme={darkMode ? webDarkTheme : webLightTheme}
+    >
     <div className="app-shell">
       <Sidebar
         activeView={viewId}
@@ -95,17 +101,18 @@ export default function App() {
         {error && (
           <div className="error-banner">
             <span>{error}</span>
-            <button
+            <Button
               className="dismiss-button"
               onClick={clearError}
               type="button"
             >
               ×
-            </button>
+            </Button>
           </div>
         )}
         {renderView()}
       </div>
     </div>
+    </FluentProvider>
   );
 }

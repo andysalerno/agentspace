@@ -1,4 +1,4 @@
-/* Shared AgentSpace UI foundation: dense, VS Code-inspired workspace */
+/* Shared AgentSpace UI foundation using Fluent UI theme tokens. */
 :root {
   color-scheme: light;
 
@@ -8,67 +8,67 @@
   --sidebar-width: 232px;
   --sidebar-collapsed-width: 48px;
 
-  --app-bg: #f3f3f3;
-  --content-bg: #f8f8f8;
-  --card-bg: #ffffff;
-  --card-footer-bg: #f6f8fa;
-  --bg-tertiary: #eef1f4;
-  --input-bg: #ffffff;
+  --app-bg: var(--colorNeutralBackground2, #fafafa);
+  --content-bg: var(--colorNeutralBackground1, #ffffff);
+  --card-bg: var(--colorNeutralBackground1, #ffffff);
+  --card-footer-bg: var(--colorNeutralBackground2, #f5f5f5);
+  --bg-tertiary: var(--colorNeutralBackground3, #f0f0f0);
+  --input-bg: var(--colorNeutralBackground1, #ffffff);
   --overlay-bg: rgba(31, 35, 40, 0.36);
 
-  --sidebar-bg: #f3f3f3;
-  --sidebar-text: #24292f;
-  --sidebar-text-muted: #57606a;
-  --sidebar-hover: #e8ebef;
-  --sidebar-active: #dde6f3;
-  --sidebar-accent: #0969da;
+  --sidebar-bg: var(--colorNeutralBackground2, #fafafa);
+  --sidebar-text: var(--colorNeutralForeground1, #242424);
+  --sidebar-text-muted: var(--colorNeutralForeground3, #616161);
+  --sidebar-hover: var(--colorNeutralBackground2Hover, #f5f5f5);
+  --sidebar-active: var(--colorBrandBackground2, #ebf3fc);
+  --sidebar-accent: var(--colorBrandForeground1, #0f6cbd);
 
-  --border-color: #d0d7de;
-  --border-subtle: #eaeef2;
-  --focus-ring: rgba(9, 105, 218, 0.28);
+  --border-color: var(--colorNeutralStroke2, #e0e0e0);
+  --border-subtle: var(--colorNeutralStroke3, #f0f0f0);
+  --focus-ring: color-mix(in srgb, var(--colorBrandStroke1, #0f6cbd) 34%, transparent);
 
-  --text-primary: #1f2328;
-  --text-secondary: #57606a;
-  --text-muted: #8c959f;
+  --text-primary: var(--colorNeutralForeground1, #242424);
+  --text-secondary: var(--colorNeutralForeground2, #424242);
+  --text-muted: var(--colorNeutralForeground3, #616161);
   --text-inverse: #ffffff;
 
-  --accent: #0969da;
-  --accent-hover: #0757b8;
-  --accent-muted: #ddf4ff;
-  --danger: #cf222e;
-  --danger-hover: #a40e26;
+  --accent: var(--colorBrandBackground, #0f6cbd);
+  --accent-hover: var(--colorBrandBackgroundHover, #115ea3);
+  --accent-muted: var(--colorBrandBackground2, #ebf3fc);
+  --danger: var(--colorStatusDangerForeground1, #b10e1c);
+  --danger-hover: var(--colorPaletteRedForeground1, #a4262c);
   --danger-color: var(--danger);
-  --success: #1a7f37;
-  --warning: #9a6700;
+  --success: var(--colorStatusSuccessForeground1, #107c10);
+  --warning: var(--colorStatusWarningForeground1, #817400);
 
-  --radius-sm: 3px;
-  --radius-md: 5px;
-  --radius-lg: 6px;
+  --radius-sm: var(--borderRadiusSmall, 4px);
+  --radius-md: var(--borderRadiusMedium, 6px);
+  --radius-lg: var(--borderRadiusLarge, 8px);
 
-  --shadow-dropdown: 0 8px 20px rgba(31, 35, 40, 0.16);
-  --shadow-modal: 0 18px 48px rgba(31, 35, 40, 0.22);
+  --shadow-dropdown: var(--shadow8, 0 8px 20px rgba(31, 35, 40, 0.16));
+  --shadow-modal: var(--shadow28, 0 18px 48px rgba(31, 35, 40, 0.22));
 
-  --user-msg-bg: #ddf4ff;
-  --user-msg-border: #b6e3ff;
-  --session-active-bg: #ddf4ff;
-  --session-hover-bg: #eef1f4;
-  --tool-tag-bg: #dafbe1;
-  --tool-tag-border: #aceebb;
-  --tool-tag-color: #1a7f37;
-  --tag-bg: #eef1f4;
-  --status-active-bg: #dafbe1;
-  --status-active-color: #116329;
-  --status-busy-bg: #fff8c5;
-  --status-busy-color: #7d4e00;
-  --status-error-bg: #ffebe9;
-  --status-error-color: #a40e26;
-  --error-banner-bg: #ffebe9;
-  --error-banner-color: #a40e26;
-  --error-banner-border: #ffcecb;
-  --skill-file-bg: #f6f8fa;
-  --secondary-hover-bg: #eef1f4;
-  --table-header-bg: #f6f8fa;
-  --table-hover-bg: #f6f8fa;
+  --user-msg-bg: var(--colorBrandBackground2, #ebf3fc);
+  --user-msg-border: var(--colorBrandStroke2, #b4d6fa);
+  --session-active-bg: var(--colorBrandBackground2, #ebf3fc);
+  --session-hover-bg: var(--colorNeutralBackground2Hover, #f5f5f5);
+  --tool-tag-bg: var(--colorStatusSuccessBackground1, #f1faf1);
+  --tool-tag-border: var(--colorStatusSuccessBorder1, #9fd89f);
+  --tool-tag-color: var(--colorStatusSuccessForeground1, #107c10);
+  --tag-bg: var(--colorNeutralBackground3, #f0f0f0);
+  --status-active-bg: var(--colorStatusSuccessBackground1, #f1faf1);
+  --status-active-color: var(--colorStatusSuccessForeground1, #107c10);
+  --status-busy-bg: var(--colorStatusWarningBackground1, #fff9e5);
+  --status-busy-color: var(--colorStatusWarningForeground1, #817400);
+  --status-error-bg: var(--colorStatusDangerBackground1, #fdf3f4);
+  --status-error-color: var(--colorStatusDangerForeground1, #b10e1c);
+  --error-banner-bg: var(--colorStatusDangerBackground1, #fdf3f4);
+  --error-banner-color: var(--colorStatusDangerForeground1, #b10e1c);
+  --error-banner-border: var(--colorStatusDangerBorder1, #eeacb2);
+  --skill-file-bg: var(--colorNeutralBackground2, #f5f5f5);
+  --secondary-hover-bg: var(--colorNeutralBackground2Hover, #f5f5f5);
+  --table-header-bg: var(--colorNeutralBackground2, #f5f5f5);
+  --table-hover-bg: var(--colorNeutralBackground1Hover, #fafafa);
 
   font-family: var(--font-sans);
   color: var(--text-primary);
@@ -79,63 +79,63 @@
 [data-theme="dark"] {
   color-scheme: dark;
 
-  --app-bg: #181818;
-  --content-bg: #1e1e1e;
-  --card-bg: #252526;
-  --card-footer-bg: #2a2d2e;
-  --bg-tertiary: #333638;
-  --input-bg: #1f1f1f;
+  --app-bg: var(--colorNeutralBackground2, #1f1f1f);
+  --content-bg: var(--colorNeutralBackground1, #292929);
+  --card-bg: var(--colorNeutralBackground1, #292929);
+  --card-footer-bg: var(--colorNeutralBackground2, #1f1f1f);
+  --bg-tertiary: var(--colorNeutralBackground3, #141414);
+  --input-bg: var(--colorNeutralBackground1, #292929);
   --overlay-bg: rgba(0, 0, 0, 0.54);
 
-  --sidebar-bg: #181818;
-  --sidebar-text: #cccccc;
-  --sidebar-text-muted: #969696;
-  --sidebar-hover: #2a2d2e;
-  --sidebar-active: #37373d;
-  --sidebar-accent: #007acc;
+  --sidebar-bg: var(--colorNeutralBackground2, #1f1f1f);
+  --sidebar-text: var(--colorNeutralForeground1, #ffffff);
+  --sidebar-text-muted: var(--colorNeutralForeground3, #adadad);
+  --sidebar-hover: var(--colorNeutralBackground2Hover, #333333);
+  --sidebar-active: var(--colorBrandBackground2, #082338);
+  --sidebar-accent: var(--colorBrandForeground1, #479ef5);
 
-  --border-color: #3c3c3c;
-  --border-subtle: #2f2f2f;
-  --focus-ring: rgba(0, 122, 204, 0.38);
+  --border-color: var(--colorNeutralStroke2, #525252);
+  --border-subtle: var(--colorNeutralStroke3, #3d3d3d);
+  --focus-ring: color-mix(in srgb, var(--colorBrandStroke1, #479ef5) 42%, transparent);
 
-  --text-primary: #d4d4d4;
-  --text-secondary: #b0b0b0;
-  --text-muted: #858585;
+  --text-primary: var(--colorNeutralForeground1, #ffffff);
+  --text-secondary: var(--colorNeutralForeground2, #d6d6d6);
+  --text-muted: var(--colorNeutralForeground3, #adadad);
   --text-inverse: #ffffff;
 
-  --accent: #2f81f7;
-  --accent-hover: #58a6ff;
-  --accent-muted: #16324f;
-  --danger: #f85149;
-  --danger-hover: #ff7b72;
+  --accent: var(--colorBrandBackground, #115ea3);
+  --accent-hover: var(--colorBrandBackgroundHover, #0f6cbd);
+  --accent-muted: var(--colorBrandBackground2, #082338);
+  --danger: var(--colorStatusDangerForeground1, #ff99a4);
+  --danger-hover: var(--colorPaletteRedForeground1, #ff99a4);
   --danger-color: var(--danger);
-  --success: #3fb950;
-  --warning: #d29922;
+  --success: var(--colorStatusSuccessForeground1, #54b054);
+  --warning: var(--colorStatusWarningForeground1, #fce100);
 
-  --shadow-dropdown: 0 8px 22px rgba(0, 0, 0, 0.38);
-  --shadow-modal: 0 20px 56px rgba(0, 0, 0, 0.5);
+  --shadow-dropdown: var(--shadow8, 0 8px 22px rgba(0, 0, 0, 0.38));
+  --shadow-modal: var(--shadow28, 0 20px 56px rgba(0, 0, 0, 0.5));
 
-  --user-msg-bg: #16324f;
-  --user-msg-border: #264f78;
-  --session-active-bg: #16324f;
-  --session-hover-bg: #2a2d2e;
-  --tool-tag-bg: #12351d;
-  --tool-tag-border: #2f6f3e;
-  --tool-tag-color: #7ee787;
-  --tag-bg: #333638;
-  --status-active-bg: #12351d;
-  --status-active-color: #7ee787;
-  --status-busy-bg: #3d2f14;
-  --status-busy-color: #e3b341;
-  --status-error-bg: #3d171a;
-  --status-error-color: #ff7b72;
-  --error-banner-bg: #3d171a;
-  --error-banner-color: #ffb3ad;
-  --error-banner-border: #6e2c31;
-  --skill-file-bg: #1f1f1f;
-  --secondary-hover-bg: #2a2d2e;
-  --table-header-bg: #2a2d2e;
-  --table-hover-bg: #2a2d2e;
+  --user-msg-bg: var(--colorBrandBackground2, #082338);
+  --user-msg-border: var(--colorBrandStroke2, #004e8c);
+  --session-active-bg: var(--colorBrandBackground2, #082338);
+  --session-hover-bg: var(--colorNeutralBackground2Hover, #333333);
+  --tool-tag-bg: var(--colorStatusSuccessBackground1, #052505);
+  --tool-tag-border: var(--colorStatusSuccessBorder1, #0e700e);
+  --tool-tag-color: var(--colorStatusSuccessForeground1, #54b054);
+  --tag-bg: var(--colorNeutralBackground3, #141414);
+  --status-active-bg: var(--colorStatusSuccessBackground1, #052505);
+  --status-active-color: var(--colorStatusSuccessForeground1, #54b054);
+  --status-busy-bg: var(--colorStatusWarningBackground1, #4c4400);
+  --status-busy-color: var(--colorStatusWarningForeground1, #fce100);
+  --status-error-bg: var(--colorStatusDangerBackground1, #3f1011);
+  --status-error-color: var(--colorStatusDangerForeground1, #ff99a4);
+  --error-banner-bg: var(--colorStatusDangerBackground1, #3f1011);
+  --error-banner-color: var(--colorStatusDangerForeground1, #ff99a4);
+  --error-banner-border: var(--colorStatusDangerBorder1, #c50f1f);
+  --skill-file-bg: var(--colorNeutralBackground2, #1f1f1f);
+  --secondary-hover-bg: var(--colorNeutralBackground2Hover, #333333);
+  --table-header-bg: var(--colorNeutralBackground2, #1f1f1f);
+  --table-hover-bg: var(--colorNeutralBackground1Hover, #3d3d3d);
 }
 
 * {
@@ -156,27 +156,27 @@ body {
   overflow: hidden;
 }
 
-button,
-input,
-select,
-textarea {
+button:not(.fui-Button),
+input:not([class*="fui-"]),
+select:not([class*="fui-"]),
+textarea:not([class*="fui-"]) {
   font: inherit;
 }
 
-button,
+button:not(.fui-Button),
 a,
-input,
-select,
-textarea,
+input:not([class*="fui-"]),
+select:not([class*="fui-"]),
+textarea:not([class*="fui-"]),
 summary {
   outline: none;
 }
 
-button:focus-visible,
+button:not(.fui-Button):focus-visible,
 a:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
+input:not([class*="fui-"]):focus-visible,
+select:not([class*="fui-"]):focus-visible,
+textarea:not([class*="fui-"]):focus-visible,
 summary:focus-visible {
   box-shadow: 0 0 0 2px var(--focus-ring);
 }
@@ -205,6 +205,14 @@ summary:focus-visible {
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+.fluent-root {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--app-bg);
+  color: var(--text-primary);
 }
 
 .app-shell {
@@ -608,9 +616,16 @@ label {
   font-weight: 500;
 }
 
-input,
-select,
-textarea {
+.fui-Input,
+.fui-Select,
+.fui-Textarea {
+  width: 100%;
+  max-width: 100%;
+}
+
+input:not([class*="fui-"]),
+select:not([class*="fui-"]),
+textarea:not([class*="fui-"]) {
   width: 100%;
   min-height: 30px;
   padding: 5px 8px;
@@ -621,31 +636,31 @@ textarea {
   font-size: 0.86rem;
 }
 
-input:hover,
-select:hover,
-textarea:hover {
+input:not([class*="fui-"]):hover,
+select:not([class*="fui-"]):hover,
+textarea:not([class*="fui-"]):hover {
   border-color: color-mix(in srgb, var(--border-color) 70%, var(--text-muted));
 }
 
-input:focus,
-select:focus,
-textarea:focus {
+input:not([class*="fui-"]):focus,
+select:not([class*="fui-"]):focus,
+textarea:not([class*="fui-"]):focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--focus-ring);
 }
 
-textarea {
+textarea:not([class*="fui-"]) {
   resize: vertical;
 }
 
-input[type="checkbox"] {
+input[type="checkbox"]:not([class*="fui-"]) {
   width: auto;
   min-height: 0;
   accent-color: var(--accent);
 }
 
 /* Buttons */
-button {
+button:not(.fui-Button) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -663,11 +678,11 @@ button {
   transition: background-color 80ms linear, border-color 80ms linear, color 80ms linear;
 }
 
-button:hover:not(:disabled) {
+button:not(.fui-Button):hover:not(:disabled) {
   background: var(--accent-hover);
 }
 
-button:disabled {
+button:not(.fui-Button):disabled {
   cursor: not-allowed;
   opacity: 0.5;
 }
@@ -685,10 +700,14 @@ button:disabled {
 
 .danger-button {
   background: var(--danger);
+  border-color: var(--danger);
+  color: var(--text-inverse);
 }
 
 .danger-button:hover:not(:disabled) {
   background: var(--danger-hover);
+  border-color: var(--danger-hover);
+  color: var(--text-inverse);
 }
 
 .small {
@@ -698,6 +717,7 @@ button:disabled {
 }
 
 .icon-button {
+  min-width: 30px;
   width: 30px;
   padding: 0;
   font-size: 1rem;

@@ -1,16 +1,16 @@
 .management-view {
-  --mgmt-bg: #f7f7f8;
-  --mgmt-panel: #ffffff;
-  --mgmt-panel-subtle: #fbfbfc;
-  --mgmt-border: #d9d9df;
-  --mgmt-border-strong: #c7c7d1;
-  --mgmt-text: #1f2328;
-  --mgmt-muted: #626c76;
-  --mgmt-accent: #0969da;
-  --mgmt-accent-hover: #0759ba;
-  --mgmt-code-bg: #f1f4f8;
-  --mgmt-shadow: 0 1px 2px rgba(31, 35, 40, 0.06);
-  --mgmt-radius: 6px;
+  --mgmt-bg: var(--colorNeutralBackground2, #fafafa);
+  --mgmt-panel: var(--colorNeutralBackground1, #ffffff);
+  --mgmt-panel-subtle: var(--colorNeutralBackground2, #f5f5f5);
+  --mgmt-border: var(--colorNeutralStroke2, #e0e0e0);
+  --mgmt-border-strong: var(--colorNeutralStroke1, #d1d1d1);
+  --mgmt-text: var(--colorNeutralForeground1, #242424);
+  --mgmt-muted: var(--colorNeutralForeground3, #616161);
+  --mgmt-accent: var(--colorBrandBackground, #0f6cbd);
+  --mgmt-accent-hover: var(--colorBrandBackgroundHover, #115ea3);
+  --mgmt-code-bg: var(--colorNeutralBackground3, #f0f0f0);
+  --mgmt-shadow: var(--shadow4, 0 1px 2px rgba(31, 35, 40, 0.06));
+  --mgmt-radius: var(--borderRadiusLarge, 8px);
 
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.58), transparent 180px),
@@ -20,16 +20,16 @@
 }
 
 [data-theme="dark"] .management-view {
-  --mgmt-bg: #1e1e1e;
-  --mgmt-panel: #252526;
-  --mgmt-panel-subtle: #2d2d30;
-  --mgmt-border: #3c3c3c;
-  --mgmt-border-strong: #565656;
-  --mgmt-text: #cccccc;
-  --mgmt-muted: #9d9d9d;
-  --mgmt-accent: #3794ff;
-  --mgmt-accent-hover: #4ba1ff;
-  --mgmt-code-bg: #1b1b1c;
+  --mgmt-bg: var(--colorNeutralBackground2, #1f1f1f);
+  --mgmt-panel: var(--colorNeutralBackground1, #292929);
+  --mgmt-panel-subtle: var(--colorNeutralBackground2, #1f1f1f);
+  --mgmt-border: var(--colorNeutralStroke2, #525252);
+  --mgmt-border-strong: var(--colorNeutralStroke1, #666666);
+  --mgmt-text: var(--colorNeutralForeground1, #ffffff);
+  --mgmt-muted: var(--colorNeutralForeground3, #adadad);
+  --mgmt-accent: var(--colorBrandBackground, #115ea3);
+  --mgmt-accent-hover: var(--colorBrandBackgroundHover, #0f6cbd);
+  --mgmt-code-bg: var(--colorNeutralBackground3, #141414);
   --mgmt-shadow: none;
 
   background:
@@ -83,17 +83,17 @@
   margin: 0 0 12px;
 }
 
-.management-view button {
+.management-view .fui-Button {
   border-radius: var(--mgmt-radius);
   min-height: 28px;
   padding: 5px 10px;
 }
 
-.management-view button:not(.secondary-button):not(.danger-button):not(.kebab-button):not(.icon-button):not(.list-item) {
+.management-view .fui-Button:not(.secondary-button):not(.danger-button):not(.kebab-button):not(.icon-button):not(.list-item) {
   background: var(--mgmt-accent);
 }
 
-.management-view button:not(.secondary-button):not(.danger-button):not(.kebab-button):not(.icon-button):not(.list-item):hover:not(:disabled) {
+.management-view .fui-Button:not(.secondary-button):not(.danger-button):not(.kebab-button):not(.icon-button):not(.list-item):hover:not(:disabled) {
   background: var(--mgmt-accent-hover);
 }
 
@@ -305,9 +305,9 @@
   gap: 4px;
 }
 
-.management-view input,
-.management-view select,
-.management-view textarea {
+.management-view .fui-Input,
+.management-view .fui-Select,
+.management-view .fui-Textarea {
   background: var(--mgmt-panel-subtle);
   border-color: var(--mgmt-border);
   border-radius: 4px;
@@ -317,14 +317,14 @@
   padding: 5px 8px;
 }
 
-.management-view input:focus,
-.management-view select:focus,
-.management-view textarea:focus {
+.management-view .fui-Input:focus-within,
+.management-view .fui-Select:focus,
+.management-view .fui-Textarea:focus-within {
   border-color: var(--mgmt-accent);
   box-shadow: 0 0 0 1px var(--mgmt-accent);
 }
 
-.management-view textarea {
+.management-view .fui-Textarea {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
@@ -334,6 +334,10 @@
   flex-direction: row;
   font-size: 0.8rem;
   font-weight: 500;
+}
+
+.management-view .fui-Checkbox.checkbox-label {
+  justify-content: flex-start;
 }
 
 .management-view .skills-fieldset,

@@ -6,6 +6,7 @@ import type { Skill, SkillVersion } from "./types";
 import CodeEditor from "./CodeEditor";
 import { queryKeys, useSkills } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { Button, Input } from "./fluent";
 
 type FileEntry = { path: string; content: string };
 
@@ -235,9 +236,9 @@ export default function SkillsView() {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button onClick={() => setShowForm(!showForm)} type="button">
+                    <Button onClick={() => setShowForm(!showForm)} type="button">
                         {showForm ? "Cancel" : "New Skill"}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -245,7 +246,7 @@ export default function SkillsView() {
                 <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Skill ID
-                        <input
+                        <Input
                             pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
                             placeholder="code-review"
                             required
@@ -256,18 +257,18 @@ export default function SkillsView() {
                     <div className="skill-files-section">
                         <div className="skill-files-header">
                             <span className="skill-files-label">Files</span>
-                            <button
+                            <Button
                                 className="secondary-button small"
                                 onClick={addNewFile}
                                 type="button"
                             >
                                 + Add File
-                            </button>
+                            </Button>
                         </div>
                         {newFiles.map((file, index) => (
                             <div className="skill-file-entry" key={index}>
                                 <div className="skill-file-entry-header">
-                                    <input
+                                    <Input
                                         className="skill-file-path-input"
                                         placeholder="path/to/file.md"
                                         required
@@ -275,14 +276,14 @@ export default function SkillsView() {
                                         onChange={(e) => updateNewFile(index, "path", e.target.value)}
                                     />
                                     {newFiles.length > 1 && (
-                                        <button
+                                        <Button
                                             className="icon-button danger-button"
                                             onClick={() => removeNewFile(index)}
                                             type="button"
                                             title="Remove file"
                                         >
                                             ×
-                                        </button>
+                                        </Button>
                                     )}
                                 </div>
                                 <CodeEditor
@@ -294,9 +295,9 @@ export default function SkillsView() {
                             </div>
                         ))}
                     </div>
-                    <button disabled={busy} type="submit">
+                    <Button disabled={busy} type="submit">
                         Create Skill
-                    </button>
+                    </Button>
                 </form>
             )}
 
@@ -349,18 +350,18 @@ export default function SkillsView() {
                                 <div className="skill-files-section">
                                     <div className="skill-files-header">
                                         <span className="skill-files-label">Edit Files</span>
-                                        <button
+                                        <Button
                                             className="secondary-button small"
                                             onClick={addEditFile}
                                             type="button"
                                         >
                                             + Add File
-                                        </button>
+                                        </Button>
                                     </div>
                                     {editFiles.map((file, index) => (
                                         <div className="skill-file-entry" key={index}>
                                             <div className="skill-file-entry-header">
-                                                <input
+                                                <Input
                                                     className="skill-file-path-input"
                                                     placeholder="path/to/file.md"
                                                     value={file.path}
@@ -369,14 +370,14 @@ export default function SkillsView() {
                                                     }
                                                 />
                                                 {editFiles.length > 1 && (
-                                                    <button
+                                                    <Button
                                                         className="icon-button danger-button"
                                                         onClick={() => removeEditFile(index)}
                                                         type="button"
                                                         title="Remove file"
                                                     >
                                                         ×
-                                                    </button>
+                                                    </Button>
                                                 )}
                                             </div>
                                             <CodeEditor
@@ -388,21 +389,21 @@ export default function SkillsView() {
                                         </div>
                                     ))}
                                     <div className="skills-edit-actions">
-                                        <button
+                                        <Button
                                             className="small"
                                             disabled={busy}
                                             onClick={() => { void handleSaveEdit(skill.skill_id); }}
                                             type="button"
                                         >
                                             Save
-                                        </button>
-                                        <button
+                                        </Button>
+                                        <Button
                                             className="secondary-button small"
                                             onClick={() => setEditingSkillId(null)}
                                             type="button"
                                         >
                                             Cancel
-                                        </button>
+                                        </Button>
                                     </div>
                                 </div>
                             )}
@@ -426,7 +427,7 @@ export default function SkillsView() {
                                                     </time>
                                                 </summary>
                                                 <div className="skill-version-actions">
-                                                    <button
+                                                    <Button
                                                         className="secondary-button small"
                                                         disabled={busy}
                                                         onClick={() => {
@@ -435,7 +436,7 @@ export default function SkillsView() {
                                                         type="button"
                                                     >
                                                         Roll back to this version
-                                                    </button>
+                                                    </Button>
                                                 </div>
                                                 <div className="skill-file-preview">
                                                     {Object.entries(version.files).map(([filename, content]) => (
@@ -452,27 +453,27 @@ export default function SkillsView() {
                             )}
                         </div>
                         <div className="card-footer">
-                            <button
+                            <Button
                                 className="secondary-button small"
                                 disabled={loading}
                                 onClick={() => { void handleToggleExpand(skill); }}
                                 type="button"
                             >
                                 {expandedSkillId === skill.skill_id ? "Collapse" : "View Files"}
-                            </button>
+                            </Button>
                             <div className="card-footer-actions">
                                 {skill.source !== "builtin" && (
-                                    <button
+                                    <Button
                                         className="secondary-button small"
                                         disabled={historyLoading}
                                         onClick={() => { void handleToggleHistory(skill); }}
                                         type="button"
                                     >
                                         {historySkillId === skill.skill_id ? "Hide History" : "History"}
-                                    </button>
+                                    </Button>
                                 )}
                                 {editingSkillId !== skill.skill_id && skill.source !== "builtin" && (
-                                    <button
+                                    <Button
                                         className="secondary-button small"
                                         disabled={busy}
                                         onClick={() => {
@@ -485,17 +486,17 @@ export default function SkillsView() {
                                         type="button"
                                     >
                                         Edit
-                                    </button>
+                                    </Button>
                                 )}
                                 {skill.source !== "builtin" && (
-                                    <button
+                                    <Button
                                         className="danger-button small"
                                         disabled={busy}
                                         onClick={() => deleteMutation.mutate(skill.skill_id)}
                                         type="button"
                                     >
                                         Delete
-                                    </button>
+                                    </Button>
                                 )}
                             </div>
                         </div>

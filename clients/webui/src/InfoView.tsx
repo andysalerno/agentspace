@@ -1,16 +1,25 @@
 import { useQueryClient } from "@tanstack/react-query";
 import type { ServiceInfoSection } from "./types";
 import { queryKeys, useSystemInfo, useWebuiInfo } from "./queries";
+import {
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableHeader,
+  TableHeaderCell,
+  TableRow,
+} from "./fluent";
 
 function Section({ title, section }: { title: string; section: ServiceInfoSection | undefined }) {
   if (!section) {
     return (
-      <section className="info-section card management-card">
+      <div className="info-section card management-card">
         <div className="card-body">
           <h3>{title}</h3>
           <p className="muted">No data.</p>
         </div>
-      </section>
+      </div>
     );
   }
 
@@ -18,7 +27,7 @@ function Section({ title, section }: { title: string; section: ServiceInfoSectio
   const entries = Object.entries(env).sort(([a], [b]) => a.localeCompare(b));
 
   return (
-    <section className="info-section card management-card">
+    <div className="info-section card management-card">
       <div className="card-body">
         <h3>{title}</h3>
         {section.env_prefix && (
@@ -30,25 +39,25 @@ function Section({ title, section }: { title: string; section: ServiceInfoSectio
         {entries.length === 0 && !section.error ? (
           <p className="muted">No matching environment variables.</p>
         ) : (
-          <table className="info-table management-table">
-            <thead>
-              <tr>
-                <th>Variable</th>
-                <th>Value</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table className="info-table management-table">
+            <TableHeader>
+              <TableRow>
+                <TableHeaderCell>Variable</TableHeaderCell>
+                <TableHeaderCell>Value</TableHeaderCell>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {entries.map(([name, value]) => (
-                <tr key={name}>
-                  <td><code>{name}</code></td>
-                  <td><code>{value}</code></td>
-                </tr>
+                <TableRow key={name}>
+                  <TableCell><code>{name}</code></TableCell>
+                  <TableCell><code>{value}</code></TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
       </div>
-    </section>
+    </div>
   );
 }
 
@@ -85,14 +94,14 @@ export default function InfoView() {
           <span className="muted">Runtime environment across AgentSpace services</span>
         </div>
         <div className="view-header-actions">
-          <button
+          <Button
             className="secondary-button small"
             onClick={refresh}
             type="button"
             disabled={loading}
           >
             {loading ? "Refreshing…" : "Refresh"}
-          </button>
+          </Button>
         </div>
       </div>
       {error && (

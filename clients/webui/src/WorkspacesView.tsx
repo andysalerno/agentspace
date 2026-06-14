@@ -7,6 +7,7 @@ import { queryKeys, useAgents, useWorkspaces } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 import { WORKSPACE_ID_PATTERN, workspaceIdFromName } from "./saveWorkspacePrompt";
 import type { Workspace, WorkspaceVscode } from "./types";
+import { Button, Input } from "./fluent";
 
 export default function WorkspacesView() {
     const { data: workspaces = [] } = useWorkspaces();
@@ -152,9 +153,9 @@ export default function WorkspacesView() {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button onClick={() => setShowForm(!showForm)} type="button">
+                    <Button onClick={() => setShowForm(!showForm)} type="button">
                         {showForm ? "Cancel" : "New Workspace"}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -162,7 +163,7 @@ export default function WorkspacesView() {
                 <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Workspace ID
-                        <input
+                        <Input
                             pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
                             placeholder="todo-list-code"
                             required
@@ -173,16 +174,16 @@ export default function WorkspacesView() {
                     </label>
                     <label>
                         Display Name
-                        <input
+                        <Input
                             placeholder="TodoListCode"
                             required
                             value={name}
                             onChange={(e) => setName(e.target.value)}
                         />
                     </label>
-                    <button disabled={busy} type="submit">
+                    <Button disabled={busy} type="submit">
                         Create Workspace
-                    </button>
+                    </Button>
                 </form>
             )}
 
@@ -228,23 +229,23 @@ export default function WorkspacesView() {
                                     >
                                         <label>
                                             Display Name
-                                            <input
+                                            <Input
                                                 required
                                                 value={editName}
                                                 onChange={(e) => setEditName(e.target.value)}
                                             />
                                         </label>
                                         <div className="skills-edit-actions">
-                                            <button className="small" disabled={busy} type="submit">
+                                            <Button className="small" disabled={busy} type="submit">
                                                 Save
-                                            </button>
-                                            <button
+                                            </Button>
+                                            <Button
                                                 className="secondary-button small"
                                                 onClick={() => setEditingWorkspaceId(null)}
                                                 type="button"
                                             >
                                                 Cancel
-                                            </button>
+                                            </Button>
                                         </div>
                                     </form>
                                 )}
@@ -258,38 +259,38 @@ export default function WorkspacesView() {
                                 <div className="card-footer-actions">
                                     {!editing && (
                                         <>
-                                            <button
+                                            <Button
                                                 className="secondary-button small"
                                                 disabled={busy || workspace.status !== "ready"}
                                                 onClick={() => void handleOpenVscode(workspace)}
                                                 type="button"
                                             >
                                                 Open in VS Code
-                                            </button>
+                                            </Button>
                                             {!isBuiltin && (
                                                 <>
-                                                    <button
+                                                    <Button
                                                         className="secondary-button small"
                                                         disabled={busy || workspace.status !== "ready"}
                                                         onClick={() => void handleClone(workspace)}
                                                         type="button"
                                                     >
                                                         Clone
-                                                    </button>
-                                                    <button
+                                                    </Button>
+                                                    <Button
                                                         className="secondary-button small"
                                                         disabled={busy}
                                                         onClick={() => startEditing(workspace.workspace_id, workspace.name)}
                                                         type="button"
                                                     >
                                                         Edit
-                                                    </button>
+                                                    </Button>
                                                 </>
                                             )}
                                         </>
                                     )}
                                     {!isBuiltin && (
-                                        <button
+                                        <Button
                                             className="danger-button small"
                                             disabled={busy || mountedCount > 0}
                                             onClick={() => deleteMutation.mutate(workspace.workspace_id)}
@@ -297,7 +298,7 @@ export default function WorkspacesView() {
                                             type="button"
                                         >
                                             Delete
-                                        </button>
+                                        </Button>
                                     )}
                                 </div>
                             </div>

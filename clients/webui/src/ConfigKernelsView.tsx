@@ -5,6 +5,7 @@ import CodeEditor from "./CodeEditor";
 import { withRequiredEnvKeys } from "./envPrefill";
 import { queryKeys, useHarnesses, useKernelConfig } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { Button } from "./fluent";
 
 const CONFIGURABLE_HARNESSES = new Set(["opencode"]);
 
@@ -113,12 +114,12 @@ export default function ConfigKernelsView() {
             </p>
 
             <div className="config-kernels-layout">
-                <aside className="config-kernels-list card management-card">
+                <div className="config-kernels-list card management-card">
                     <h3>Kernels</h3>
                     <ul className="plain-list">
                         {harnesses.map((harness) => (
                             <li key={harness}>
-                                <button
+                                <Button
                                     className={`list-item ${effectiveSelected === harness ? "active" : ""}`}
                                     onClick={() => setSelected(harness)}
                                     type="button"
@@ -127,16 +128,16 @@ export default function ConfigKernelsView() {
                                     {CONFIGURABLE_HARNESSES.has(harness) ? null : (
                                         <span className="tag muted-tag">WIP</span>
                                     )}
-                                </button>
+                                </Button>
                             </li>
                         ))}
                         {harnesses.length === 0 && (
                             <li className="empty-state">No kernels available.</li>
                         )}
                     </ul>
-                </aside>
+                </div>
 
-                <section className="config-kernels-detail card management-card">
+                <div className="config-kernels-detail card management-card">
                     {effectiveSelected === null && (
                         <div className="empty-state">Select a kernel.</div>
                     )}
@@ -169,13 +170,13 @@ export default function ConfigKernelsView() {
                             />
                             <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
                             <div className="form-actions" style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
-                                <button
+                                <Button
                                     disabled={saveMutation.isPending || loading || !dirty}
                                     onClick={handleSave}
                                     type="button"
                                 >
                                     {saveMutation.isPending ? "Saving…" : "Save"}
-                                </button>
+                                </Button>
                                 {updatedAt !== null && (
                                     <span className="muted">
                                         Last saved {new Date(updatedAt).toLocaleString()}
@@ -185,7 +186,7 @@ export default function ConfigKernelsView() {
                             </div>
                         </div>
                     )}
-                </section>
+                </div>
             </div>
         </div>
     );
