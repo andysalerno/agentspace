@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { ReactNode } from "react";
+import type { ReactElement } from "react";
 import {
     Apps20Regular,
     ArrowClockwise20Regular,
@@ -33,8 +33,8 @@ type SidebarProps = {
     onToggleDarkMode: () => void;
 };
 
-type NavItem = { id: ViewId; label: string; icon: ReactNode };
-type NavGroup = { id: string; label: string; icon: ReactNode; items: NavItem[] };
+type NavItem = { id: ViewId; label: string; icon: ReactElement };
+type NavGroup = { id: string; label: string; icon: ReactElement; items: NavItem[] };
 
 const navItems: NavItem[] = [
     { id: "chat", label: "Chat", icon: <Chat20Regular /> },
@@ -108,12 +108,12 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                     <li key={item.id}>
                         <Button
                             className={`sidebar-nav-item ${activeView === item.id ? "active" : ""}`}
+                            icon={item.icon}
                             onClick={() => navigateToTopLevel(item.id)}
                             type="button"
                             title={item.label}
                         >
-                            {item.icon}
-                            <span>{item.label}</span>
+                            <span className="sidebar-nav-label">{item.label}</span>
                         </Button>
                     </li>
                 ))}
@@ -124,12 +124,12 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                         <li key={group.id}>
                             <Button
                                 className={`sidebar-nav-item ${groupActive ? "active" : ""}`}
+                                icon={group.icon}
                                 onClick={() => toggleGroup(group.id)}
                                 type="button"
                                 title={group.label}
                             >
-                                {group.icon}
-                                <span>{group.label}</span>
+                                <span className="sidebar-nav-label">{group.label}</span>
                                 <ChevronRight12Regular
                                     className="sidebar-group-chevron"
                                     style={{ transform: isExpanded ? "rotate(90deg)" : "none" }}
@@ -141,12 +141,12 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                                         <li key={item.id}>
                                             <Button
                                                 className={`sidebar-nav-item sidebar-nav-subitem ${activeView === item.id ? "active" : ""}`}
+                                                icon={item.icon}
                                                 onClick={() => onNavigate(item.id)}
                                                 type="button"
                                                 title={item.label}
                                             >
-                                                {item.icon}
-                                                <span>{item.label}</span>
+                                                <span className="sidebar-nav-label">{item.label}</span>
                                             </Button>
                                         </li>
                                     ))}
@@ -158,17 +158,32 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
             </ul>
             <div className="sidebar-footer">
                 <div className="sidebar-nav-section-label">Controls</div>
-                <Button className="sidebar-nav-item" onClick={onToggleDarkMode} type="button" title={darkMode ? "Light mode" : "Dark mode"}>
-                    {darkMode ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />}
-                    <span>{darkMode ? "Light" : "Dark"}</span>
+                <Button
+                    className="sidebar-nav-item"
+                    icon={darkMode ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />}
+                    onClick={onToggleDarkMode}
+                    type="button"
+                    title={darkMode ? "Light mode" : "Dark mode"}
+                >
+                    <span className="sidebar-nav-label">{darkMode ? "Light" : "Dark"}</span>
                 </Button>
-                <Button className="sidebar-nav-item" onClick={onRefresh} type="button">
-                    <ArrowClockwise20Regular />
-                    <span>Refresh</span>
+                <Button
+                    className="sidebar-nav-item"
+                    icon={<ArrowClockwise20Regular />}
+                    onClick={onRefresh}
+                    type="button"
+                    title="Refresh"
+                >
+                    <span className="sidebar-nav-label">Refresh</span>
                 </Button>
-                <Button className="sidebar-collapse-btn" onClick={onToggleCollapse} type="button" title={collapsed ? "Expand sidebar" : "Collapse sidebar"}>
-                    {collapsed ? <PanelLeftExpand20Regular /> : <PanelLeftContract20Regular />}
-                    <span>Collapse</span>
+                <Button
+                    className="sidebar-collapse-btn"
+                    icon={collapsed ? <PanelLeftExpand20Regular /> : <PanelLeftContract20Regular />}
+                    onClick={onToggleCollapse}
+                    type="button"
+                    title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                >
+                    <span className="sidebar-nav-label">Collapse</span>
                 </Button>
             </div>
         </nav>

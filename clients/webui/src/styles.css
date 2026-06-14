@@ -307,6 +307,8 @@ summary:focus-visible {
   justify-content: flex-start;
   gap: 9px;
   width: 100%;
+  min-width: 0 !important;
+  max-width: 100%;
   min-height: 30px;
   padding: 5px 8px;
   background: transparent;
@@ -322,15 +324,42 @@ summary:focus-visible {
   transition: background-color 80ms linear, border-color 80ms linear, color 80ms linear;
 }
 
-.sidebar-nav-item svg,
-.sidebar-collapse-btn svg {
+.sidebar-nav-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.sidebar-nav-icon svg {
   flex: 0 0 auto;
   width: 16px;
   height: 16px;
 }
 
-.sidebar-nav-item span,
-.sidebar-collapse-btn span {
+.sidebar-nav-item .fui-Button__icon,
+.sidebar-collapse-btn .fui-Button__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.sidebar-nav-item .fui-Button__icon svg,
+.sidebar-collapse-btn .fui-Button__icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sidebar-nav-label {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -396,8 +425,7 @@ summary:focus-visible {
 }
 
 .sidebar.collapsed .sidebar-title,
-.sidebar.collapsed .sidebar-nav-item span,
-.sidebar.collapsed .sidebar-collapse-btn span,
+.sidebar.collapsed .sidebar-nav-label,
 .sidebar.collapsed .sidebar-nav-section-label {
   display: none;
 }
@@ -413,8 +441,49 @@ summary:focus-visible {
 
 .sidebar.collapsed .sidebar-nav-item,
 .sidebar.collapsed .sidebar-collapse-btn {
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: 100%;
   justify-content: center;
   padding: 5px;
+  overflow: hidden;
+  font-size: 0 !important;
+  color: transparent !important;
+}
+
+.sidebar.collapsed .sidebar-nav-icon {
+  display: inline-flex;
+  font-size: 16px;
+}
+
+.sidebar.collapsed .sidebar-nav-item .fui-Button__icon,
+.sidebar.collapsed .sidebar-collapse-btn .fui-Button__icon {
+  display: inline-flex !important;
+  width: 16px;
+  height: 16px;
+  font-size: 16px !important;
+  color: var(--sidebar-text-muted) !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+.sidebar.collapsed .sidebar-nav-item svg,
+.sidebar.collapsed .sidebar-collapse-btn svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  color: var(--sidebar-text-muted) !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
+.sidebar.collapsed .sidebar-nav-item:hover svg,
+.sidebar.collapsed .sidebar-collapse-btn:hover svg,
+.sidebar.collapsed .sidebar-nav-item.active svg,
+.sidebar.collapsed .sidebar-nav-item:hover .fui-Button__icon,
+.sidebar.collapsed .sidebar-collapse-btn:hover .fui-Button__icon,
+.sidebar.collapsed .sidebar-nav-item.active .fui-Button__icon {
+  color: var(--sidebar-text) !important;
 }
 
 .sidebar.collapsed .sidebar-nav-sub,
@@ -1673,8 +1742,7 @@ button:not(.fui-Button):disabled {
   }
 
   .sidebar-title,
-  .sidebar-nav-item span,
-  .sidebar-collapse-btn span,
+  .sidebar-nav-label,
   .sidebar-nav-section-label,
   .sidebar-group-chevron {
     display: none;
@@ -1691,8 +1759,49 @@ button:not(.fui-Button):disabled {
 
   .sidebar-nav-item,
   .sidebar-collapse-btn {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100%;
     justify-content: center;
     padding: 5px;
+    overflow: hidden;
+    font-size: 0 !important;
+    color: transparent !important;
+  }
+
+  .sidebar-nav-icon {
+    display: inline-flex;
+    font-size: 16px;
+  }
+
+  .sidebar-nav-item .fui-Button__icon,
+  .sidebar-collapse-btn .fui-Button__icon {
+    display: inline-flex !important;
+    width: 16px;
+    height: 16px;
+    font-size: 16px !important;
+    color: var(--sidebar-text-muted) !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+  }
+
+  .sidebar-nav-item svg,
+  .sidebar-collapse-btn svg {
+    display: block;
+    width: 16px;
+    height: 16px;
+    color: var(--sidebar-text-muted) !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+  }
+
+  .sidebar-nav-item:hover svg,
+  .sidebar-collapse-btn:hover svg,
+  .sidebar-nav-item.active svg,
+  .sidebar-nav-item:hover .fui-Button__icon,
+  .sidebar-collapse-btn:hover .fui-Button__icon,
+  .sidebar-nav-item.active .fui-Button__icon {
+    color: var(--sidebar-text) !important;
   }
 
   .sidebar-nav-sub {
