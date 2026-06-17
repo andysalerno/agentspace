@@ -28,7 +28,7 @@ an `agent_host` instance at `CLIENT_SERVICE_AGENT_HOST_BASE_URL`.
 Build the Rust service image from the repository root:
 
 ```sh
-podman build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest services/client_service_rs
+podman build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest .
 ```
 
 Use `CONTAINER_RUNTIME=docker` with the `just` recipe if you prefer Docker:

@@ -4,8 +4,8 @@ AgentSpace is a system for defining, interacting with, and observing AI agents.
 
 ## System Architecture
 
-The repository is a monorepo managed by `uv` for Python packages, with the
-Rust client service managed by Cargo under `services/client_service_rs`.
+The repository is a monorepo managed by `uv` for Python packages, with Rust
+services managed by the Cargo workspace at the repository root.
 
 ### Key Components
 

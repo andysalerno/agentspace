@@ -44,10 +44,10 @@ agent-host-rs-check:
   cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
 
 client-service-rs-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest services/client_service_rs
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest .
 
 agent-host-rs-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/agent_host_rs/Dockerfile -t agentspace-agent-host-agent-host:latest services/agent_host_rs
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/agent_host_rs/Dockerfile -t agentspace-agent-host-agent-host:latest .
 
 webui-outdated:
   pnpm --dir clients/webui outdated
