@@ -330,6 +330,7 @@
 }
 
 .management-view .fui-Input,
+.management-view .fui-Combobox,
 .management-view .fui-Select,
 .management-view .fui-Textarea {
   background: var(--mgmt-panel-subtle);
@@ -342,6 +343,7 @@
 }
 
 .management-view .fui-Input:focus-within,
+.management-view .fui-Combobox:focus-within,
 .management-view .fui-Select:focus,
 .management-view .fui-Textarea:focus-within {
   border-color: var(--mgmt-accent);

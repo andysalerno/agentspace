@@ -693,6 +693,7 @@ label {
 }
 
 .fui-Input,
+.fui-Combobox,
 .fui-Select,
 .fui-Textarea {
   width: 100%;

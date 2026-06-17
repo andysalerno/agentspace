@@ -48,6 +48,7 @@ const DEFAULT_AGENT_HOST_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_GIT_AGENT_CONTAINER_BASE_URL: &str = "http://git-agent:8004";
 const DEFAULT_GIT_AGENT_LOCAL_BASE_URL: &str = "http://127.0.0.1:8004";
 const DEFAULT_GIT_AGENT_TIMEOUT_SECONDS: u64 = 60;
+const DEFAULT_CONNECTION_MODELS_TIMEOUT_SECONDS: u64 = 15;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppConfig {
@@ -56,6 +57,7 @@ pub struct AppConfig {
     agent_host_base_url: String,
     git_agent_base_url: String,
     git_agent_data_volume_name: String,
+    connection_models_timeout: Duration,
     pub(crate) client_service_env: BTreeMap<String, String>,
 }
 
@@ -70,6 +72,10 @@ impl AppConfig {
             .unwrap_or_else(|_| default_git_agent_base_url());
         let git_agent_data_volume_name = env::var("CLIENT_SERVICE_GIT_AGENT_DATA_VOLUME")
             .unwrap_or_else(|_| DEFAULT_GIT_AGENT_DATA_VOLUME.to_owned());
+        let connection_models_timeout = parse_duration_seconds_env(
+            "CLIENT_SERVICE_CONNECTION_MODELS_TIMEOUT",
+            DEFAULT_CONNECTION_MODELS_TIMEOUT_SECONDS,
+        )?;
         let client_service_env = env::vars()
             .filter(|(key, _value)| key.starts_with(ENV_PREFIX))
             .collect();
@@ -80,6 +86,7 @@ impl AppConfig {
             agent_host_base_url,
             git_agent_base_url,
             git_agent_data_volume_name,
+            connection_models_timeout,
             client_service_env,
         })
     }
@@ -97,6 +104,9 @@ impl AppConfig {
             agent_host_base_url: agent_host_base_url.into(),
             git_agent_base_url: default_git_agent_base_url(),
             git_agent_data_volume_name: DEFAULT_GIT_AGENT_DATA_VOLUME.to_owned(),
+            connection_models_timeout: Duration::from_secs(
+                DEFAULT_CONNECTION_MODELS_TIMEOUT_SECONDS,
+            ),
             client_service_env,
         }
     }
@@ -113,6 +123,12 @@ impl AppConfig {
         git_agent_data_volume_name: impl Into<String>,
     ) -> Self {
         self.git_agent_data_volume_name = git_agent_data_volume_name.into();
+        self
+    }
+
+    #[must_use]
+    pub const fn with_connection_models_timeout(mut self, timeout: Duration) -> Self {
+        self.connection_models_timeout = timeout;
         self
     }
 
@@ -142,6 +158,11 @@ impl AppConfig {
     }
 
     #[must_use]
+    pub const fn connection_models_timeout(&self) -> Duration {
+        self.connection_models_timeout
+    }
+
+    #[must_use]
     pub fn db_path(&self) -> Option<&str> {
         self.client_service_env
             .get("CLIENT_SERVICE_DB_PATH")
@@ -152,7 +173,15 @@ impl AppConfig {
 
 #[derive(Debug)]
 pub enum ConfigError {
-    InvalidPort { raw: String, source: ParseIntError },
+    InvalidPort {
+        raw: String,
+        source: ParseIntError,
+    },
+    InvalidDuration {
+        name: &'static str,
+        raw: String,
+        source: ParseIntError,
+    },
 }
 
 impl Display for ConfigError {
@@ -164,6 +193,9 @@ impl Display for ConfigError {
                     "CLIENT_SERVICE_PORT must be a valid TCP port, got {raw:?}: {source}"
                 )
             }
+            Self::InvalidDuration { name, raw, source } => {
+                write!(formatter, "{name} must be seconds, got {raw:?}: {source}")
+            }
         }
     }
 }
@@ -171,7 +203,7 @@ impl Display for ConfigError {
 impl Error for ConfigError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::InvalidPort { source, .. } => Some(source),
+            Self::InvalidPort { source, .. } | Self::InvalidDuration { source, .. } => Some(source),
         }
     }
 }
@@ -330,6 +362,21 @@ fn matched_route<B>(request: &Request<B>) -> &str {
 
 fn duration_millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn parse_duration_seconds_env(
+    name: &'static str,
+    default_seconds: u64,
+) -> Result<Duration, ConfigError> {
+    let raw = env::var(name).unwrap_or_else(|_| default_seconds.to_string());
+    let seconds = raw
+        .parse::<u64>()
+        .map_err(|source| ConfigError::InvalidDuration {
+            name,
+            raw: raw.clone(),
+            source,
+        })?;
+    Ok(Duration::from_secs(seconds))
 }
 
 fn parse_port() -> Result<u16, ConfigError> {

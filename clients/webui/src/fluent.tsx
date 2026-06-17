@@ -1,8 +1,10 @@
 import {
     Button as FluentButton,
     Checkbox as FluentCheckbox,
+    Combobox as FluentCombobox,
     FluentProvider,
     Input as FluentInput,
+    Option as FluentOption,
     Select as FluentSelect,
     Table,
     TableBody,
@@ -16,7 +18,9 @@ import { forwardRef } from "react";
 import type {
     ButtonProps,
     CheckboxProps,
+    ComboboxProps,
     InputProps,
+    OptionProps,
     SelectProps,
     TextareaProps,
 } from "@fluentui/react-components";
@@ -74,6 +78,14 @@ export function Input({ appearance, ...props }: InputProps) {
 
 export function Select({ appearance, ...props }: SelectProps) {
     return <FluentSelect appearance={appearance ?? "outline"} {...props} />;
+}
+
+export function Combobox({ appearance, ...props }: ComboboxProps) {
+    return <FluentCombobox appearance={appearance ?? "outline"} {...props} />;
+}
+
+export function Option(props: OptionProps) {
+    return <FluentOption {...props} />;
 }
 
 export function Textarea({ appearance, ...props }: TextareaProps) {

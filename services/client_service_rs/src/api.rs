@@ -309,7 +309,10 @@ async fn list_connection_models(
         "fetching connection models"
     );
     let url = format!("{}/models", connection.url.trim_end_matches('/'));
-    let mut request = state.http_client.get(url);
+    let mut request = state
+        .http_client
+        .get(url)
+        .timeout(state.config.connection_models_timeout());
     if !connection.api_key.is_empty() {
         request = request.bearer_auth(&connection.api_key);
     }
@@ -3313,6 +3316,17 @@ mod tests {
         Ok(build_router(AppState::with_agent_host(config, agent_host)))
     }
 
+    fn test_router_with_connection_models_timeout(
+        timeout: Duration,
+    ) -> Result<Router, Box<dyn Error + Send + Sync>> {
+        let mut env = BTreeMap::new();
+        env.insert("CLIENT_SERVICE_TEST".to_owned(), "enabled".to_owned());
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env)
+            .with_connection_models_timeout(timeout);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        Ok(build_router(AppState::with_agent_host(config, agent_host)))
+    }
+
     struct StreamingUpstream {
         base_url: String,
         handle: JoinHandle<Result<(), std::io::Error>>,
@@ -3323,6 +3337,7 @@ mod tests {
             let app = Router::new()
                 .route("/sessions", post(upstream_create_session))
                 .route("/sessions/{session_id}", get(upstream_get_session))
+                .route("/models", get(upstream_models))
                 .route(
                     "/sessions/{session_id}/messages/stream",
                     post(upstream_stream_message),
@@ -3355,6 +3370,11 @@ mod tests {
 
     async fn upstream_get_session(Path(session_id): Path<String>) -> Json<Value> {
         Json(json!({ "session_id": session_id, "status": "idle" }))
+    }
+
+    async fn upstream_models(State(final_delay): State<Duration>) -> Json<Value> {
+        sleep(final_delay).await;
+        Json(json!({ "data": [{ "id": "slow-model" }], "object": "list" }))
     }
 
     async fn upstream_stream_message(
@@ -3589,6 +3609,30 @@ mod tests {
         let (status, value) = get_json(app, "/connections/main").await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_models_route_times_out_slow_upstreams()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = StreamingUpstream::start(Duration::from_millis(200)).await?;
+        let app = test_router_with_connection_models_timeout(Duration::from_millis(50))?;
+        let payload = json!({
+            "connection_id": "main",
+            "name": "Main",
+            "url": upstream.base_url,
+        });
+        let (status, _value) =
+            request_json(app.clone(), Method::POST, "/connections", Some(payload)).await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let start = Instant::now();
+        let (status, value) = get_json(app, "/connections/main/models").await?;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(value["detail"].is_string());
+        assert!(start.elapsed() < Duration::from_millis(500));
 
         Ok(())
     }

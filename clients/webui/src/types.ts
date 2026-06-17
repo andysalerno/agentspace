@@ -206,7 +206,7 @@ export type Connection = {
 
 export type ConnectionModels = {
   object?: string;
-  data?: Array<{
+  data?: Array<string | {
     id?: string;
     object?: string;
     [key: string]: unknown;

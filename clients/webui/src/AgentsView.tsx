@@ -1,7 +1,7 @@
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, WorkspaceMountMode } from "./types";
+import type { Agent, ConnectionModels, WorkspaceMountMode } from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import {
@@ -21,7 +21,7 @@ import {
     useWorkspaces,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
-import { Button, Checkbox, Input, Select } from "./fluent";
+import { Button, Checkbox, Combobox, Input, Option, Select } from "./fluent";
 
 type AgentsViewProps = {
     onSessionCreated: (sessionId: string) => void;
@@ -110,13 +110,17 @@ type ModelNameFieldProps = {
     onEnvVarsChange: (envVars: string) => void;
 };
 
-function modelIdsFromResponse(response: { data?: Array<{ id?: string }> } | undefined): string[] {
+function modelIdsFromResponse(response: ConnectionModels | undefined): string[] {
     if (!response?.data) {
         return [];
     }
-    return response.data
-        .map((model) => model.id)
-        .filter((id): id is string => typeof id === "string" && id.length > 0);
+    return Array.from(
+        new Set(
+            response.data
+                .map((model) => (typeof model === "string" ? model : model.id))
+                .filter((id): id is string => typeof id === "string" && id.length > 0),
+        ),
+    );
 }
 
 function ModelNameField({
@@ -132,31 +136,80 @@ function ModelNameField({
     }
 
     const modelIds = modelIdsFromResponse(modelsQuery.data);
-    const datalistId = `models-${harness}-${connectionId ?? "none"}`;
     const value = getEnvValue(envVars, modelKey);
+    const normalizedValue = value.trim().toLocaleLowerCase();
+    const visibleModelIds = normalizedValue === ""
+        ? modelIds
+        : modelIds.filter((modelId) => modelId.toLocaleLowerCase().includes(normalizedValue));
+    const selectedOptions = modelIds.includes(value) ? [value] : [];
     const placeholder = connectionId === null
         ? "Select a connection or type a model name"
         : modelsQuery.isError
             ? "Model list unavailable; type a model name"
             : "Select or type a model name";
+    const modelHelp = connectionId === null
+        ? modelKey
+        : modelsQuery.isLoading
+            ? `${modelKey} · loading models...`
+            : modelsQuery.isError
+                ? `${modelKey} · model list unavailable`
+                : modelIds.length > 0
+                    ? `${modelKey} · ${modelIds.length} model${modelIds.length === 1 ? "" : "s"} available`
+                    : `${modelKey} · no models returned`;
+    const setModelName = (modelName: string) =>
+        onEnvVarsChange(setEnvValue(envVars, modelKey, modelName));
 
     return (
         <label>
             Model
-            <Input
-                list={modelIds.length > 0 ? datalistId : undefined}
+            <Combobox
+                freeform
+                inlinePopup
                 placeholder={placeholder}
+                selectedOptions={selectedOptions}
                 value={value}
-                onChange={(e) => onEnvVarsChange(setEnvValue(envVars, modelKey, e.target.value))}
-            />
-            {modelIds.length > 0 && (
-                <datalist id={datalistId}>
-                    {modelIds.map((modelId) => (
-                        <option key={modelId} value={modelId} />
-                    ))}
-                </datalist>
-            )}
-            <span className="muted">{modelKey}</span>
+                onChange={(e) => setModelName(e.target.value)}
+                onOptionSelect={(_, data) => {
+                    const selectedModel = data.optionValue ?? data.optionText;
+                    if (selectedModel) {
+                        setModelName(selectedModel);
+                    }
+                }}
+            >
+                {visibleModelIds.map((modelId) => (
+                    <Option key={modelId} text={modelId} value={modelId}>
+                        {modelId}
+                    </Option>
+                ))}
+                {connectionId !== null && modelsQuery.isLoading && (
+                    <Option disabled text="Loading models">
+                        Loading models...
+                    </Option>
+                )}
+                {connectionId !== null && modelsQuery.isError && (
+                    <Option disabled text="Model list unavailable">
+                        Model list unavailable
+                    </Option>
+                )}
+                {connectionId !== null
+                    && !modelsQuery.isLoading
+                    && !modelsQuery.isError
+                    && modelIds.length > 0
+                    && visibleModelIds.length === 0 && (
+                    <Option disabled text="No matching models">
+                        No matching models
+                    </Option>
+                )}
+                {connectionId !== null
+                    && !modelsQuery.isLoading
+                    && !modelsQuery.isError
+                    && modelIds.length === 0 && (
+                    <Option disabled text="No models returned">
+                        No models returned
+                    </Option>
+                )}
+            </Combobox>
+            <span className="muted">{modelHelp}</span>
         </label>
     );
 }
