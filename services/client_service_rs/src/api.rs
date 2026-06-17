@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -110,6 +110,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/skills", get(list_skills).post(create_skill))
         .route("/skills/{skill_id}/versions", get(list_skill_versions))
+        .route("/skills/{skill_id}/download", get(download_skill))
         .route(
             "/skills/{skill_id}/versions/{version}/rollback",
             post(rollback_skill_version),
@@ -1307,6 +1308,32 @@ async fn get_skill(
     Ok(Json(Value::Object(skill)))
 }
 
+async fn download_skill(
+    State(state): State<AppState>,
+    Path(skill_id): Path<String>,
+) -> Result<Response, ApiError> {
+    validate_skill_id(&skill_id)?;
+    let download = state.agent_host.download_skill(&skill_id).await?;
+    let mut response = Body::from(download.body).into_response();
+    insert_download_header(
+        response.headers_mut(),
+        header::CONTENT_TYPE,
+        &download.content_type,
+    )?;
+    insert_download_header(
+        response.headers_mut(),
+        header::CONTENT_DISPOSITION,
+        &download.content_disposition,
+    )?;
+    tracing::info!(
+        route = "/skills/:skill_id/download",
+        action = "download_skill",
+        skill_id = %skill_id,
+        "api handler completed"
+    );
+    Ok(response)
+}
+
 async fn list_skill_versions(
     State(state): State<AppState>,
     Path(skill_id): Path<String>,
@@ -1379,6 +1406,21 @@ async fn delete_skill(
         "api handler completed"
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn insert_download_header(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    value: &str,
+) -> Result<(), ApiError> {
+    let value = HeaderValue::from_str(value).map_err(|source| {
+        ApiError::bad_gateway(format!(
+            "agent_host returned invalid download header {}: {source}",
+            name.as_str()
+        ))
+    })?;
+    headers.insert(name, value);
+    Ok(())
 }
 
 async fn list_gateway_types() -> Json<Vec<&'static str>> {
@@ -2637,7 +2679,7 @@ fn ndjson_stream_response(receiver: NdjsonReceiver) -> Response {
         [
             (header::CONTENT_TYPE, "application/x-ndjson"),
             (header::CACHE_CONTROL, "no-cache"),
-            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+            (HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         Body::from_stream(ReceiverStream::new(receiver)),
     )
@@ -3286,7 +3328,7 @@ mod tests {
         Json, Router,
         body::{Body, to_bytes},
         extract::{Path, State},
-        http::{Method, Request, StatusCode, header},
+        http::{HeaderValue, Method, Request, StatusCode, header},
         response::{IntoResponse, Response},
         routing::{get, post},
     };
@@ -3338,6 +3380,7 @@ mod tests {
                 .route("/sessions", post(upstream_create_session))
                 .route("/sessions/{session_id}", get(upstream_get_session))
                 .route("/models", get(upstream_models))
+                .route("/skills/{skill_id}/download", get(upstream_download_skill))
                 .route(
                     "/sessions/{session_id}/messages/stream",
                     post(upstream_stream_message),
@@ -3370,6 +3413,20 @@ mod tests {
 
     async fn upstream_get_session(Path(session_id): Path<String>) -> Json<Value> {
         Json(json!({ "session_id": session_id, "status": "idle" }))
+    }
+
+    async fn upstream_download_skill(Path(skill_id): Path<String>) -> Response {
+        (
+            [
+                (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"SKILL.md\"",
+                ),
+            ],
+            Body::from(format!("# {skill_id}")),
+        )
+            .into_response()
     }
 
     async fn upstream_models(State(final_delay): State<Duration>) -> Json<Value> {
@@ -3701,6 +3758,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skill_download_proxies_agent_host_attachment_headers()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = StreamingUpstream::start(Duration::ZERO).await?;
+        let app = test_router_with_agent_host(&upstream.base_url, Duration::from_secs(1))?;
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/skills/my-skill/download")
+            .body(Body::empty())?;
+        let response = app.oneshot(request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/markdown; charset=utf-8"))
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION),
+            Some(&HeaderValue::from_static(
+                "attachment; filename=\"SKILL.md\""
+            ))
+        );
+        let body = response.into_body().collect().await?.to_bytes();
+        assert_eq!(body.as_ref(), b"# my-skill");
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn gateway_type_and_stopped_gateway_routes_work()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let app = test_router()?;
@@ -3831,17 +3917,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
-            Some(&header::HeaderValue::from_static("application/x-ndjson"))
+            Some(&HeaderValue::from_static("application/x-ndjson"))
         );
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL),
-            Some(&header::HeaderValue::from_static("no-cache"))
+            Some(&HeaderValue::from_static("no-cache"))
         );
         assert_eq!(
             response
                 .headers()
                 .get(header::HeaderName::from_static("x-accel-buffering")),
-            Some(&header::HeaderValue::from_static("no"))
+            Some(&HeaderValue::from_static("no"))
         );
 
         let mut body = response.into_body();

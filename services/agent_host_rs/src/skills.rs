@@ -3,21 +3,24 @@ use std::{
     env,
     error::Error,
     fmt::{self, Display, Formatter},
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf, StripPrefixError},
     sync::{Arc, RwLock},
 };
 
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 use crate::{AppState, models::ServiceSummary};
 
@@ -26,6 +29,9 @@ const ENV_BUILTIN_SKILLS_DIR: &str = "AGENT_HOST_BUILTIN_SKILLS_DIR";
 const DEFAULT_SKILLS_DIR: &str = "/skills";
 const DEFAULT_BUILTIN_SKILLS_DIR: &str = "/builtin-skills";
 const SKILL_VERSIONS_DIR: &str = ".skill-versions";
+const SKILL_MARKDOWN_FILE: &str = "SKILL.md";
+const MARKDOWN_CONTENT_TYPE: &str = "text/markdown; charset=utf-8";
+const ZIP_CONTENT_TYPE: &str = "application/zip";
 
 #[derive(Clone)]
 pub struct SkillRegistry {
@@ -90,6 +96,18 @@ impl SkillRegistry {
                 operation: "lock skill service for get",
             })?;
             service.get_skill(&skill_id)
+        })
+        .await
+    }
+
+    pub async fn download_skill(&self, skill_id: &str) -> Result<SkillDownload, SkillError> {
+        let service = self.service.clone();
+        let skill_id = skill_id.to_owned();
+        run_skill_task("download skill", move || {
+            let service = service.read().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for download",
+            })?;
+            service.download_skill(&skill_id)
         })
         .await
     }
@@ -167,6 +185,13 @@ pub struct SkillSummary {
     pub source: SkillSource,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkillDownload {
+    pub filename: String,
+    pub content_type: &'static str,
+    pub body: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SkillVersion {
     pub skill_id: String,
@@ -240,6 +265,18 @@ pub enum SkillError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    Zip {
+        operation: &'static str,
+        source: zip::result::ZipError,
+    },
+    ArchiveIo {
+        operation: &'static str,
+        source: io::Error,
+    },
+    InvalidDownloadHeader {
+        filename: String,
+        source: header::InvalidHeaderValue,
+    },
     PathPrefix {
         path: PathBuf,
         base: PathBuf,
@@ -293,6 +330,14 @@ impl Display for SkillError {
                 "failed to {operation} at {}: {source}",
                 path.display()
             ),
+            Self::Zip { operation, source } => write!(formatter, "failed to {operation}: {source}"),
+            Self::ArchiveIo { operation, source } => {
+                write!(formatter, "failed to {operation}: {source}")
+            }
+            Self::InvalidDownloadHeader { filename, source } => write!(
+                formatter,
+                "failed to build download header for {filename:?}: {source}"
+            ),
             Self::PathPrefix { path, base, source } => write!(
                 formatter,
                 "failed to derive relative path for {} from {}: {source}",
@@ -315,8 +360,10 @@ impl Display for SkillError {
 impl Error for SkillError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io { source, .. } => Some(source),
+            Self::Io { source, .. } | Self::ArchiveIo { source, .. } => Some(source),
             Self::Json { source, .. } => Some(source),
+            Self::Zip { source, .. } => Some(source),
+            Self::InvalidDownloadHeader { source, .. } => Some(source),
             Self::PathPrefix { source, .. } => Some(source),
             Self::BlockingTaskJoin { source, .. } => Some(source),
             Self::SkillNotFound { .. }
@@ -482,6 +529,25 @@ impl SkillsService {
             skill_id: skill_id.to_owned(),
             files: read_skill_files(&skill_dir)?,
             source: self.source_for(skill_id),
+        })
+    }
+
+    pub fn download_skill(&self, skill_id: &str) -> Result<SkillDownload, SkillError> {
+        let skill = self.get_skill(skill_id)?;
+        if skill.files.len() == 1
+            && let Some(content) = skill.files.get(SKILL_MARKDOWN_FILE)
+        {
+            return Ok(SkillDownload {
+                filename: SKILL_MARKDOWN_FILE.to_owned(),
+                content_type: MARKDOWN_CONTENT_TYPE,
+                body: content.as_bytes().to_vec(),
+            });
+        }
+
+        Ok(SkillDownload {
+            filename: format!("{skill_id}.zip"),
+            content_type: ZIP_CONTENT_TYPE,
+            body: build_skill_zip(&skill.files)?,
         })
     }
 
@@ -755,6 +821,26 @@ fn read_skill_files(skill_dir: &Path) -> Result<BTreeMap<String, String>, SkillE
     Ok(files)
 }
 
+fn build_skill_zip(files: &BTreeMap<String, String>) -> Result<Vec<u8>, SkillError> {
+    let cursor = io::Cursor::new(Vec::new());
+    let mut writer = ZipWriter::new(cursor);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    for (relative_path, content) in files {
+        writer
+            .start_file(relative_path, options)
+            .map_err(|source| zip_error("start zip file", source))?;
+        writer
+            .write_all(content.as_bytes())
+            .map_err(|source| archive_io_error("write zip file", source))?;
+    }
+
+    writer
+        .finish()
+        .map(io::Cursor::into_inner)
+        .map_err(|source| zip_error("finish zip", source))
+}
+
 fn next_skill_version(versions_dir: &Path) -> Result<u64, SkillError> {
     let mut latest = 0;
     for entry in read_dir_sorted(versions_dir, "read skill versions dir")? {
@@ -888,6 +974,37 @@ fn json_error(operation: &'static str, path: &Path, source: serde_json::Error) -
     }
 }
 
+const fn zip_error(operation: &'static str, source: zip::result::ZipError) -> SkillError {
+    SkillError::Zip { operation, source }
+}
+
+const fn archive_io_error(operation: &'static str, source: io::Error) -> SkillError {
+    SkillError::ArchiveIo { operation, source }
+}
+
+fn attachment_filename(filename: &str) -> String {
+    format!("attachment; filename=\"{filename}\"")
+}
+
+fn skill_download_response(download: SkillDownload) -> Result<Response, SkillError> {
+    let disposition =
+        HeaderValue::from_str(&attachment_filename(&download.filename)).map_err(|source| {
+            SkillError::InvalidDownloadHeader {
+                filename: download.filename.clone(),
+                source,
+            }
+        })?;
+    let mut response = Body::from(download.body).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(download.content_type),
+    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_DISPOSITION, disposition);
+    Ok(response)
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/skills", post(create_skill).get(list_skills))
@@ -896,6 +1013,7 @@ pub fn router() -> Router<AppState> {
             "/skills/{skill_id}/versions/{version}/rollback",
             post(rollback_skill_version),
         )
+        .route("/skills/{skill_id}/download", get(download_skill))
         .route(
             "/skills/{skill_id}",
             get(get_skill).put(update_skill).delete(delete_skill),
@@ -935,6 +1053,18 @@ async fn get_skill(
         .await
         .map(Json)
         .map_err(SkillHttpError)
+}
+
+async fn download_skill(
+    State(state): State<AppState>,
+    AxumPath(skill_id): AxumPath<String>,
+) -> Result<Response, SkillHttpError> {
+    let download = state
+        .skills
+        .download_skill(&skill_id)
+        .await
+        .map_err(SkillHttpError)?;
+    skill_download_response(download).map_err(SkillHttpError)
 }
 
 async fn list_skill_versions(
@@ -1002,6 +1132,9 @@ impl IntoResponse for SkillHttpError {
             SkillError::BuiltinSkillReadOnly { .. } => StatusCode::FORBIDDEN,
             SkillError::Io { .. }
             | SkillError::Json { .. }
+            | SkillError::Zip { .. }
+            | SkillError::ArchiveIo { .. }
+            | SkillError::InvalidDownloadHeader { .. }
             | SkillError::PathPrefix { .. }
             | SkillError::LockPoisoned { .. }
             | SkillError::BlockingTaskJoin { .. } => StatusCode::INTERNAL_SERVER_ERROR,
@@ -1016,6 +1149,7 @@ mod tests {
     use std::{
         collections::BTreeMap,
         fs,
+        io::{Cursor, Read},
         path::{Path, PathBuf},
         process,
         sync::atomic::{AtomicU64, Ordering},
@@ -1024,7 +1158,10 @@ mod tests {
     use axum::{
         Router,
         body::Body,
-        http::{Method, Request, StatusCode, header::CONTENT_TYPE},
+        http::{
+            HeaderMap, Method, Request, StatusCode,
+            header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+        },
     };
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
@@ -1167,6 +1304,53 @@ mod tests {
             .get_skill("my-skill")
             .unwrap_or_else(|error| panic!("failed to get skill: {error}"));
         assert_eq!(fetched, created);
+    }
+
+    #[test]
+    fn download_single_file_skill_returns_skill_markdown() {
+        let root = TestDir::new("download-markdown");
+        let service = service(&root);
+        service
+            .create_skill("my-skill", &files(&[("SKILL.md", "# My Skill")]))
+            .unwrap_or_else(|error| panic!("failed to create skill: {error}"));
+
+        let download = service
+            .download_skill("my-skill")
+            .unwrap_or_else(|error| panic!("failed to prepare skill download: {error}"));
+
+        assert_eq!(download.filename, "SKILL.md");
+        assert_eq!(download.content_type, "text/markdown; charset=utf-8");
+        assert_eq!(download.body.as_slice(), b"# My Skill");
+    }
+
+    #[test]
+    fn download_multi_file_skill_returns_zip() {
+        let root = TestDir::new("download-zip");
+        let service = service(&root);
+        service
+            .create_skill(
+                "my-skill",
+                &files(&[
+                    ("SKILL.md", "# My Skill"),
+                    ("tools/helper.py", "print('hello')"),
+                ]),
+            )
+            .unwrap_or_else(|error| panic!("failed to create skill: {error}"));
+
+        let download = service
+            .download_skill("my-skill")
+            .unwrap_or_else(|error| panic!("failed to prepare skill download: {error}"));
+
+        assert_eq!(download.filename, "my-skill.zip");
+        assert_eq!(download.content_type, "application/zip");
+        let entries = zip_entries(&download.body);
+        assert_eq!(
+            entries,
+            BTreeMap::from([
+                ("SKILL.md".to_owned(), "# My Skill".to_owned()),
+                ("tools/helper.py".to_owned(), "print('hello')".to_owned()),
+            ])
+        );
     }
 
     #[test]
@@ -1459,6 +1643,8 @@ mod tests {
         .await;
         let (listed_status, listed) = empty_request(&app, Method::GET, "/skills").await;
         let (fetched_status, fetched) = empty_request(&app, Method::GET, "/skills/my-skill").await;
+        let (download_status, download_headers, download_body) =
+            binary_request(&app, Method::GET, "/skills/my-skill/download").await;
         let (updated_status, updated) = json_request(
             &app,
             Method::PUT,
@@ -1480,6 +1666,20 @@ mod tests {
         assert_eq!(listed[0]["skill_id"], "my-skill");
         assert_eq!(fetched_status, StatusCode::OK);
         assert_eq!(fetched["files"]["SKILL.md"], "# My Skill");
+        assert_eq!(download_status, StatusCode::OK);
+        assert_eq!(
+            download_headers
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/markdown; charset=utf-8")
+        );
+        assert_eq!(
+            download_headers
+                .get(CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok()),
+            Some("attachment; filename=\"SKILL.md\"")
+        );
+        assert_eq!(download_body.as_slice(), b"# My Skill");
         assert_eq!(updated_status, StatusCode::OK);
         assert_eq!(updated["files"]["SKILL.md"], "# Updated");
         assert_eq!(versions_status, StatusCode::OK);
@@ -1779,6 +1979,34 @@ mod tests {
         status
     }
 
+    async fn binary_request(
+        app: &Router,
+        method: Method,
+        uri: &str,
+    ) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("failed to build request: {error}"));
+        let response = app
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|error| panic!("request failed: {error}"));
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .unwrap_or_else(|error| panic!("failed to read response body: {error}"))
+            .to_bytes()
+            .to_vec();
+
+        (status, headers, body)
+    }
+
     async fn request(
         app: &Router,
         method: Method,
@@ -1813,6 +2041,22 @@ mod tests {
         };
 
         (status, payload)
+    }
+
+    fn zip_entries(content: &[u8]) -> BTreeMap<String, String> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(content))
+            .unwrap_or_else(|error| panic!("failed to read zip archive: {error}"));
+        let mut entries = BTreeMap::new();
+        for index in 0..archive.len() {
+            let mut file = archive
+                .by_index(index)
+                .unwrap_or_else(|error| panic!("failed to read zip entry {index}: {error}"));
+            let mut content = String::new();
+            file.read_to_string(&mut content)
+                .unwrap_or_else(|error| panic!("failed to read zip entry content: {error}"));
+            entries.insert(file.name().to_owned(), content);
+        }
+        entries
     }
 
     fn write_file(path: &Path, content: &str) {

@@ -472,6 +472,15 @@ export default function SkillsView() {
                                         {historySkillId === skill.skill_id ? "Hide History" : "History"}
                                     </Button>
                                 )}
+                                <Button
+                                    className="secondary-button small"
+                                    onClick={() => {
+                                        window.location.assign(api.downloadSkillUrl(skill.skill_id));
+                                    }}
+                                    type="button"
+                                >
+                                    Download
+                                </Button>
                                 {editingSkillId !== skill.skill_id && skill.source !== "builtin" && (
                                     <Button
                                         className="secondary-button small"

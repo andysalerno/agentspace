@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{Method, StatusCode, Url, header};
 use serde_json::{Map, Value, json};
 
 use crate::models::WorkspaceMountRecord;
@@ -21,6 +21,13 @@ pub type JsonObject = Map<String, Value>;
 pub type JsonArray = Vec<JsonObject>;
 pub type KernelEvent = JsonObject;
 pub type AgentHostResult<T> = Result<T, AgentHostError>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentHostDownload {
+    pub content_type: String,
+    pub content_disposition: String,
+    pub body: Vec<u8>,
+}
 
 #[derive(Clone, Debug)]
 pub struct AgentHostClient {
@@ -378,6 +385,14 @@ impl AgentHostClient {
             .await
     }
 
+    pub async fn download_skill(&self, skill_id: &str) -> AgentHostResult<AgentHostDownload> {
+        self.request_binary(
+            Method::GET,
+            self.endpoint(&["skills", skill_id, "download"])?,
+        )
+        .await
+    }
+
     pub async fn list_skills(&self) -> AgentHostResult<JsonArray> {
         self.request_array(Method::GET, self.endpoint(&["skills"])?, None)
             .await
@@ -695,11 +710,88 @@ impl AgentHostClient {
                     &payload_trace,
                     status,
                     started_at.elapsed(),
+                    "response_json_read",
                     &source,
                 );
                 Err(AgentHostError::Http { source })
             }
         }
+    }
+
+    async fn request_binary(&self, method: Method, url: Url) -> AgentHostResult<AgentHostDownload> {
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, None);
+        let payload_trace = JsonPayloadTrace::from_payload(None);
+        let started_at = Instant::now();
+        log_agent_host_request_start(&method, &trace_context, &payload_trace);
+        let response = match self
+            .client
+            .request(method.clone(), url)
+            .timeout(self.timeout)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(source) => {
+                log_agent_host_request_send_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    &source,
+                    started_at.elapsed(),
+                );
+                return Err(AgentHostError::Http { source });
+            }
+        };
+        let status = response.status();
+        let response = match ensure_success(response).await {
+            Ok(response) => response,
+            Err(error) => {
+                log_agent_host_request_failure(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    &error,
+                );
+                return Err(error);
+            }
+        };
+        let content_type =
+            required_header(response.headers(), &header::CONTENT_TYPE, "content-type")?;
+        let content_disposition = required_header(
+            response.headers(),
+            &header::CONTENT_DISPOSITION,
+            "content-disposition",
+        )?;
+        let body = match response.bytes().await {
+            Ok(bytes) => bytes.to_vec(),
+            Err(source) => {
+                log_agent_host_response_read_error(
+                    &method,
+                    &trace_context,
+                    &payload_trace,
+                    status,
+                    started_at.elapsed(),
+                    "response_body_read",
+                    &source,
+                );
+                return Err(AgentHostError::Http { source });
+            }
+        };
+        log_agent_host_request_success(
+            &method,
+            &trace_context,
+            &payload_trace,
+            status,
+            started_at.elapsed(),
+            JsonResponseTrace::binary(body.len()),
+        );
+        Ok(AgentHostDownload {
+            content_type,
+            content_disposition,
+            body,
+        })
     }
 }
 
@@ -816,6 +908,14 @@ impl JsonResponseTrace {
         }
     }
 
+    const fn binary(bytes: usize) -> Self {
+        Self {
+            kind: "binary",
+            fields: 0,
+            items: bytes,
+        }
+    }
+
     fn from_value(value: &Value) -> Self {
         match value {
             Value::Object(object) => Self {
@@ -885,6 +985,25 @@ fn object_object_len(object: &JsonObject, field: &str) -> usize {
         .get(field)
         .and_then(Value::as_object)
         .map_or(0, Map::len)
+}
+
+fn required_header(
+    headers: &header::HeaderMap,
+    name: &header::HeaderName,
+    header_name: &'static str,
+) -> AgentHostResult<String> {
+    let value = headers
+        .get(name)
+        .ok_or_else(|| AgentHostError::MissingHeader {
+            header: header_name,
+        })?;
+    value
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|source| AgentHostError::Header {
+            header: header_name,
+            source,
+        })
 }
 
 fn log_agent_host_request_start(
@@ -993,6 +1112,7 @@ fn log_agent_host_response_read_error(
     payload: &JsonPayloadTrace,
     status: StatusCode,
     elapsed: Duration,
+    error_kind: &'static str,
     source: &reqwest::Error,
 ) {
     tracing::warn!(
@@ -1008,7 +1128,7 @@ fn log_agent_host_response_read_error(
         payload_skills = payload.skills,
         payload_env = payload.env,
         payload_files = payload.files,
-        error_kind = "response_json_read",
+        error_kind,
         source_kind = reqwest_error_kind(source),
         error_status = reqwest_error_status(source),
         "agent_host response read failed"
@@ -1062,8 +1182,10 @@ fn agent_host_error_kind(error: &AgentHostError) -> &'static str {
         AgentHostError::Http { source } => reqwest_error_kind(source),
         AgentHostError::HttpStatus { .. } => "http_status",
         AgentHostError::Json { .. } => "json",
+        AgentHostError::Header { .. } => "header",
         AgentHostError::Utf8 { .. } => "utf8",
         AgentHostError::UnexpectedJson { .. } => "unexpected_json",
+        AgentHostError::MissingHeader { .. } => "missing_header",
         AgentHostError::MissingField { .. } => "missing_field",
         AgentHostError::InvalidField { .. } => "invalid_field",
     }
@@ -1079,8 +1201,10 @@ fn agent_host_error_status(error: &AgentHostError) -> u16 {
         | AgentHostError::UrlCannotBeBase { .. }
         | AgentHostError::BuildClient { .. }
         | AgentHostError::Json { .. }
+        | AgentHostError::Header { .. }
         | AgentHostError::Utf8 { .. }
         | AgentHostError::UnexpectedJson { .. }
+        | AgentHostError::MissingHeader { .. }
         | AgentHostError::MissingField { .. }
         | AgentHostError::InvalidField { .. } => 0,
     }
@@ -1115,6 +1239,10 @@ pub enum AgentHostError {
     Json {
         source: serde_json::Error,
     },
+    Header {
+        header: &'static str,
+        source: header::ToStrError,
+    },
     Utf8 {
         source: Utf8Error,
     },
@@ -1124,6 +1252,9 @@ pub enum AgentHostError {
     },
     MissingField {
         field: &'static str,
+    },
+    MissingHeader {
+        header: &'static str,
     },
     InvalidField {
         field: &'static str,
@@ -1166,6 +1297,10 @@ impl Display for AgentHostError {
                 write!(formatter, "agent_host returned HTTP {status}")
             }
             Self::Json { source } => write!(formatter, "agent_host JSON error: {source}"),
+            Self::Header { header, source } => write!(
+                formatter,
+                "agent_host response header {header:?} was not valid text: {source}"
+            ),
             Self::Utf8 { source } => write!(formatter, "agent_host stream was not UTF-8: {source}"),
             Self::UnexpectedJson { expected, .. } => {
                 write!(
@@ -1175,6 +1310,12 @@ impl Display for AgentHostError {
             }
             Self::MissingField { field } => {
                 write!(formatter, "agent_host response is missing field {field:?}")
+            }
+            Self::MissingHeader { header } => {
+                write!(
+                    formatter,
+                    "agent_host response is missing header {header:?}"
+                )
             }
             Self::InvalidField { field, expected } => {
                 write!(
@@ -1191,6 +1332,7 @@ impl Error for AgentHostError {
         match self {
             Self::BuildClient { source } | Self::Http { source } => Some(source),
             Self::Json { source } => Some(source),
+            Self::Header { source, .. } => Some(source),
             Self::Utf8 { source } => Some(source),
             Self::InvalidBaseUrl { .. }
             | Self::InvalidTimeout { .. }
@@ -1198,6 +1340,7 @@ impl Error for AgentHostError {
             | Self::UrlCannotBeBase { .. }
             | Self::HttpStatus { .. }
             | Self::UnexpectedJson { .. }
+            | Self::MissingHeader { .. }
             | Self::MissingField { .. }
             | Self::InvalidField { .. } => None,
         }
@@ -1610,7 +1753,10 @@ mod tests {
         Json, Router,
         body::{Body, Bytes},
         extract::{Path, Query, State},
-        http::{HeaderMap, Method, StatusCode},
+        http::{
+            HeaderMap, Method, StatusCode,
+            header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+        },
         response::{IntoResponse, Response},
         routing::{get, post},
     };
@@ -1759,6 +1905,7 @@ mod tests {
             .route("/sessions/{session_id}/container-logs", get(container_logs))
             .route("/sessions/{session_id}/reset", post(reset_session))
             .route("/skills", post(create_skill).get(list_skills))
+            .route("/skills/{skill_id}/download", get(download_skill))
             .route(
                 "/skills/{skill_id}",
                 get(get_skill).put(update_skill).delete(delete_skill),
@@ -1942,6 +2089,26 @@ mod tests {
     ) -> Result<Json<Value>, StatusCode> {
         state.record(Method::GET, format!("/skills/{skill_id}"), None, None)?;
         Ok(Json(json!({ "skill_id": skill_id })))
+    }
+
+    async fn download_skill(
+        State(state): State<TestState>,
+        Path(skill_id): Path<String>,
+    ) -> Result<Response, StatusCode> {
+        state.record(
+            Method::GET,
+            format!("/skills/{skill_id}/download"),
+            None,
+            None,
+        )?;
+        Ok((
+            [
+                (CONTENT_TYPE, "text/markdown; charset=utf-8"),
+                (CONTENT_DISPOSITION, "attachment; filename=\"SKILL.md\""),
+            ],
+            Body::from("# Skill"),
+        )
+            .into_response())
     }
 
     async fn update_skill(
@@ -2256,6 +2423,7 @@ mod tests {
         client.destroy_session("missing-session").await?;
         client.create_skill("skill-1", &files).await?;
         client.get_skill("skill-1").await?;
+        let download = client.download_skill("skill-1").await?;
         client.list_skills().await?;
         client.update_skill("skill-1", &files).await?;
         client.delete_skill("skill-1").await?;
@@ -2266,6 +2434,13 @@ mod tests {
         client.list_gateways().await?;
         client.get_gateway("gateway-1").await?;
         client.destroy_gateway("gateway-1").await?;
+
+        assert_eq!(download.content_type, "text/markdown; charset=utf-8");
+        assert_eq!(
+            download.content_disposition,
+            "attachment; filename=\"SKILL.md\""
+        );
+        assert_eq!(download.body.as_slice(), b"# Skill");
 
         assert_eq!(
             server.recorded()?,
@@ -2306,6 +2481,12 @@ mod tests {
                 RecordedRequest {
                     method: Method::GET,
                     path: "/skills/skill-1".to_owned(),
+                    query: None,
+                    body: None,
+                },
+                RecordedRequest {
+                    method: Method::GET,
+                    path: "/skills/skill-1/download".to_owned(),
                     query: None,
                     body: None,
                 },

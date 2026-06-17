@@ -271,6 +271,7 @@ export const api = {
   // Skills
   listSkills: () => requestJson<Skill[]>("/skills"),
   getSkill: (skillId: string) => requestJson<Skill>(`/skills/${skillId}`),
+  downloadSkillUrl: (skillId: string) => `${apiBase}/skills/${encodeURIComponent(skillId)}/download`,
   createSkill: (payload: { skill_id: string; files: Record<string, string> }) =>
     requestJson<Skill>("/skills", {
       method: "POST",
