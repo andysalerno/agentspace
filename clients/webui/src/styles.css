@@ -329,6 +329,11 @@ summary:focus-visible {
   transition: background-color 80ms linear, border-color 80ms linear, color 80ms linear;
 }
 
+.sidebar .sidebar-nav-item,
+.sidebar .sidebar-collapse-btn {
+  justify-content: flex-start;
+}
+
 .sidebar-nav-icon {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1769,8 +1774,8 @@ button:not(.fui-Button):disabled {
     padding: 6px 5px;
   }
 
-  .sidebar-nav-item,
-  .sidebar-collapse-btn {
+  .sidebar .sidebar-nav-item,
+  .sidebar .sidebar-collapse-btn {
     width: 100% !important;
     min-width: 0 !important;
     max-width: 100%;
