@@ -18,7 +18,7 @@ services:
     restart: "no"
 
   agent-host:
-    image: agentspace-agent-host-agent-host:latest
+    image: agentspace-agent-host:latest
     build:
       context: .
       dockerfile: services/agent_host_rs/Dockerfile
@@ -55,7 +55,7 @@ services:
       - agentspace
 
   client-service:
-    image: agentspace-client-service-rs:latest
+    image: agentspace-client-service:latest
     build:
       context: .
       dockerfile: services/client_service_rs/Dockerfile

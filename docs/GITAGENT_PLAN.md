@@ -33,7 +33,7 @@ AgentSpace already has the right seams for this, but GitAgent should be its own 
 
 - `compose.yaml` already puts `agent-host`, `client-service`, and `webui` on the `agentspace-stack` network. A `git-agent` service can join the same network and be reachable to kernels as `gitagent` via a service alias.
 - Kernel containers are spawned by `services/agent_host_rs` and already receive environment, per-session workspaces, persistent workspace mounts, skills, and the shared network. This is the correct place to inject `GITAGENT_REMOTE_URL` and `GITAGENT_PATCH_URL` into every agent.
-- `services/client_service_rs` is the public API and persistent config store. The web UI should continue talking to `client_service`, not directly to `git-agent`, for configuration and request history.
+- `client_service` (`services/client_service_rs`) is the public API and persistent config store. The web UI should continue talking to `client_service`, not directly to `git-agent`, for configuration and request history.
 - Agents are already configurable through `AgentRecord` fields: harness, system prompt, skills, env vars, connection, and workspace mounts. GitAgent should reuse this model for its reviewer identity instead of inventing a second agent configuration format.
 - The web UI sidebar/view pattern is simple: add a `git-agent` `ViewId`, a `GitAgentView.tsx`, API methods, and query hooks.
 
@@ -333,7 +333,7 @@ The UI does not need to render full diffs in the first slice, but the API should
 6. Add `client_service` GitAgent config/proxy endpoints and SQLite persistence.
 7. Add `GitAgentView.tsx`, sidebar entry, types, API methods, and query hooks.
 8. Add the `gitagent` helper CLI or built-in skill for agents.
-9. Add tests: git service unit tests with temporary repos, patch apply/conflict tests, reviewer response validation tests, Rust API tests, and web UI build/lint coverage.
+9. Add tests: git service unit tests with temporary repos, patch apply/conflict tests, reviewer response validation tests, client-service API tests, and web UI build/lint coverage.
 
 ### Questions, concerns, and doubts to address before implementation
 

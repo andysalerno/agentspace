@@ -42,7 +42,7 @@ AgentSpace is a system for defining, interacting with, and observing AI agents. 
 └─────────────────────────────────────────────────────────┘
 ```
 
-All inter-service communication uses HTTP (FastAPI). Kernel containers are spawned dynamically by `agent_host` and communicate over a shared Docker network (`agentspace-stack`).
+Inter-service communication uses HTTP APIs. Kernel containers are spawned dynamically by `agent_host` and communicate over a shared Docker network (`agentspace-stack`).
 
 ## Repository Layout
 
@@ -56,8 +56,8 @@ agentspace/
 │   ├── kernel_codex/        # OpenAI Codex CLI adapter
 │   └── kernel_host/         # Container entry point + HTTP service
 ├── services/
-│   ├── agent_host/          # Kernel lifecycle manager + skills
-│   └── client_service_rs/   # Rust public API gateway
+│   ├── agent_host_rs/       # Kernel lifecycle manager + skills
+│   └── client_service_rs/   # Public API gateway
 ├── clients/
 │   ├── webui/               # React/TypeScript dashboard
 │   └── cli_ui/              # Textual TUI client
@@ -161,7 +161,7 @@ The `DockerKernelRuntime` implements the `KernelRuntime` protocol, which could b
 #### `client_service` — Public API Gateway
 
 The single entry point for all clients. No client talks to `agent_host` directly.
-The active implementation is the Rust crate in `services/client_service_rs`.
+The implementation lives in `services/client_service_rs`.
 
 Responsibilities:
 - CRUD for agent definitions (name, harness type, system prompt, skills)
@@ -257,9 +257,8 @@ Kernel containers are not defined in Compose — they are created dynamically by
 
 ### Workspace
 
-The repo is a `uv` workspace for Python packages. Rust services live in
-separate Cargo crates under `services/client_service_rs` and
-`services/agent_host_rs`.
+The repo is a `uv` workspace for Python packages, plus a Cargo workspace for
+service crates under `services/client_service_rs` and `services/agent_host_rs`.
 
 ```
 kernels/*  services/git_agent  channels/*  clients/cli_ui
@@ -294,7 +293,7 @@ The codebase uses strict pyright type-checking, ruff with all lint rules enabled
 - Kernel host with both runner and HTTP service modes
 - Docker-based kernel container lifecycle
 - Agent host service with skills management
-- Rust client service gateway with agents, sessions, and transcript storage
+- Client service gateway with agents, sessions, and transcript storage
 - Web UI with chat, agents, sessions, kernels, and skills views
 - Terminal UI with equivalent functionality
 - CLI channel proof-of-concept

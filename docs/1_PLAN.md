@@ -74,7 +74,7 @@ AgentHost.ResetSession(session_id) -> new session_id (destroys kernel, spawns fr
 AgentHost.Attach(session_id) -> read-only stream of raw kernel output events
 ```
 
-**Language:** Python to prototype, Rust long-term.
+**Implementation:** Service crate in `services/agent_host_rs`.
 
 ---
 
@@ -128,7 +128,7 @@ Kernels.List() -> list of active kernel sessions + status
 Kernels.Attach(session_id) -> read-only stream of raw kernel output events
 ```
 
-**Language:** Python to prototype, Rust long-term.
+**Implementation:** Service crate in `services/client_service_rs`.
 
 ---
 
@@ -156,7 +156,7 @@ A terminal-based UI.
 - Agent management via commands or TUI
 - **Attach mode** — read-only tail of a running kernel session's raw output (equivalent of the web `/kernels` view)
 
-**Language:** Python (prompt_toolkit or similar) or Rust (ratatui).
+**Implementation:** Python Textual TUI.
 
 ---
 

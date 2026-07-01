@@ -13,8 +13,8 @@ services managed by the Cargo workspace at the repository root.
   - `kernel_copilot`: Primary kernel path (uses `copilot-cli`).
   - `kernel_host`: Runner for kernel containers.
 - **Services** (`services/`):
-  - `agent_host_rs`: Rust service that manages sessions by spawning `kernel_host` containers.
-  - `client_service_rs`: Rust implementation of the public backend API. Clients should talk to this, not `agent_host` directly.
+  - `agent_host` (`services/agent_host_rs`): Manages sessions by spawning `kernel_host` containers.
+  - `client_service` (`services/client_service_rs`): Public backend API. Clients should talk to this, not `agent_host` directly.
 - **Clients** (`clients/`, `channels/`):
   - `webui`: TypeScript dashboard.
   - `cli_channel`: CLI session client for validating `client_service` contract.
@@ -26,7 +26,7 @@ services managed by the Cargo workspace at the repository root.
 Use `just` for common tasks:
 - `just bootstrap`: Install all dependencies (`uv sync` and `pnpm install`).
 - `just check`: Run the full repo verification suite before finishing work.
-- `just test`: Run all Python tests via `uv run pytest`.
+- `just test`: Run Python and service tests.
 - `just stack-up`: Start the full stack using Docker Compose.
 - `just stack-down`: Stop the full stack.
 - `just copilot-setup`: Run `kernels/kernel_host/spawn-kernel.sh setup` to authenticate Copilot.
@@ -48,5 +48,5 @@ present, and the web build.
 - **Copilot Sessions**: To resume a session, set `COPILOT_SESSION_ID` in `kernels/kernel_host/.env.example`.
 - **Service Ports**:
 - `agent_host`: `http://127.0.0.1:8001`
-- `client_service_rs`: `http://127.0.0.1:8002`
+- `client_service`: `http://127.0.0.1:8002`
 - `webui`: `http://127.0.0.1:8003`

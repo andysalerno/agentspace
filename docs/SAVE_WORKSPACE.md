@@ -147,7 +147,7 @@ It should not remove persistent workspace volumes.
 Startup cleanup for orphaned `agentspace-session-workspace-*` volumes can be a
 separate safe cleanup pass.
 
-### 6. Add Rust `client_service_rs` Save Orchestration
+### 6. Add `client_service` Save Orchestration
 
 Add an `AgentHostClient` method such as:
 
@@ -155,7 +155,7 @@ Add an `AgentHostClient` method such as:
 snapshot_session_workspace(session_id, workspace_id, volume_name, exclude_names)
 ```
 
-Add a Rust endpoint such as:
+Add an endpoint such as:
 
 ```text
 POST /sessions/{session_id}/workspace/save
@@ -177,7 +177,7 @@ Flow:
 3. Ensure the workspace ID is not already registered.
 4. Call `agent_host` snapshot with target volume name
    `agentspace-workspace-<workspace_id>`.
-5. Insert a `WorkspaceRecord` in `client_service_rs`.
+5. Insert a `WorkspaceRecord` in `client_service`.
 6. Return the new workspace summary.
 
 Then the UI can call the existing delete-session endpoint to end and destroy the
@@ -185,12 +185,12 @@ scratch workspace.
 
 ### 7. Handle Save Atomicity
 
-The main risk is partial failure between `client_service_rs` and `agent_host`.
+The main risk is partial failure between `client_service` and `agent_host`.
 
 Preferred robust shape:
 
 1. Add a workspace status field such as `creating` / `ready`.
-2. Create a `creating` record in Rust.
+2. Create a `creating` record in `client_service`.
 3. Snapshot into `agentspace-workspace-<id>`.
 4. Mark the workspace `ready`.
 5. Delete the session scratch volume only when the session is actually destroyed.
@@ -263,7 +263,7 @@ Add or update tests to verify:
 - destroy removes the scratch volume;
 - snapshot copies scratch files but excludes mounted workspaces.
 
-### `client_service_rs`
+### `client_service`
 
 Add tests to verify:
 
@@ -286,8 +286,8 @@ Add tests or manually verify:
 Run:
 
 ```sh
-just client-service-rs-check
-just agent-host-rs-check
+just client-service-check
+just agent-host-check
 pnpm --dir clients/webui run lint
 pnpm --dir clients/webui run build
 just check

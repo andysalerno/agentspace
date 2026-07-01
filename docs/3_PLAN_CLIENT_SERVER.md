@@ -53,7 +53,7 @@ Missing from the original architecture:
 
 - We built `agent_host` before `client_service`.
   - This was a reasonable sequencing choice because the kernel/session lifecycle had to be proven first.
-- We used direct FastAPI/HTTP contracts instead of introducing `proto/` first.
+- We used direct HTTP contracts instead of introducing `proto/` first.
   - This is acceptable for now, but the APIs should be kept small and easy to formalize later.
 - `agent_host` currently returns buffered event lists for `send_message`.
   - The original plan assumes streaming output and attach semantics; that is still not implemented.
@@ -271,20 +271,19 @@ Build the smallest hosted UI that proves:
 
 ### Recommended shape
 
-Use a simple server-hosted web app with minimal client-side JavaScript.
+Use the existing dashboard shape.
 
 Preferred implementation:
 
-- Python FastAPI service for `webui`
-- Jinja templates
-- plain HTML/CSS
-- very small JavaScript only where needed
+- TypeScript/React single-page app for `webui`
+- Vite build served by Nginx
+- client-side API calls to `client_service`
 
 Reasoning:
 
-- fastest path in this repo
-- easy to containerize beside the Python services
-- avoids introducing a JS build system before the client API is proven
+- aligns with the current dashboard architecture
+- easy to containerize beside the service containers
+- keeps all browser-facing code in the web UI package
 
 ### Initial pages
 
@@ -322,7 +321,7 @@ What this slice should preserve for it:
 - `client_service` endpoints should be usable from a terminal client without web-specific assumptions
 - assistant responses should be returned as plain text as well as raw events
 
-If time permits later in the same slice, add a very small Python CLI that can:
+The headless CLI channel should be able to:
 
 - list agents
 - create a session
@@ -337,7 +336,7 @@ If time permits later in the same slice, add a very small Python CLI that can:
 2. add typed models for agents, sessions, and messages
 3. add an `AgentHostClient` wrapper
 4. implement in-memory `ClientService`
-5. add FastAPI routes
+5. add HTTP routes
 6. add tests
 
 ### Phase 2: `client_service` e2e
@@ -366,7 +365,7 @@ If time permits later in the same slice, add a very small Python CLI that can:
 For `client_service`:
 
 - service-layer tests with a stub `AgentHostClient`
-- API tests with FastAPI `TestClient`
+- API contract tests against the service router
 - validation tests for transcript flattening and reset behavior
 
 For `webui`:

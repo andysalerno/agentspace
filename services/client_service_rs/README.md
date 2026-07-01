@@ -1,7 +1,6 @@
-# client_service_rs
+# client_service
 
-Rust implementation of the AgentSpace `client_service` API. This is the active
-and default client-service implementation.
+AgentSpace `client_service` API implementation.
 
 ## Run locally
 
@@ -25,16 +24,16 @@ an `agent_host` instance at `CLIENT_SERVICE_AGENT_HOST_BASE_URL`.
 
 ## Run with a container
 
-Build the Rust service image from the repository root:
+Build the service image from the repository root:
 
 ```sh
-podman build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest .
+podman build -f services/client_service_rs/Dockerfile -t agentspace-client-service:latest .
 ```
 
 Use `CONTAINER_RUNTIME=docker` with the `just` recipe if you prefer Docker:
 
 ```sh
-just client-service-rs-image
+just client-service-image
 ```
 
 The container defaults match `run-service.sh`:
@@ -45,7 +44,7 @@ The container defaults match `run-service.sh`:
 - `CLIENT_SERVICE_CONNECTION_MODELS_TIMEOUT=15`
 - `CLIENT_SERVICE_GIT_AGENT_BASE_URL=http://git-agent:8004`
 
-The root compose stack builds and runs this Rust service by default:
+The root compose stack builds and runs this service by default:
 
 ```sh
 just stack-up
@@ -56,7 +55,7 @@ In compose, the dashboard talks to this service through the usual
 
 ## Validate
 
-Run the Rust crate checks from this directory:
+Run the service crate checks from this directory:
 
 ```sh
 cargo fmt --check
@@ -67,5 +66,5 @@ cargo clippy --all-targets --all-features
 Or from the repository root:
 
 ```sh
-just client-service-rs-check
+just client-service-check
 ```

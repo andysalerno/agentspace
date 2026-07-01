@@ -66,7 +66,7 @@ Web UI
   |
   | HTTP /api/workspaces, /api/agents, /api/sessions
   v
-client_service_rs (:8002)
+client_service (:8002)
   - persists workspace records
   - persists per-agent workspace mount config
   - validates referenced workspaces when agents/sessions are created
@@ -85,12 +85,12 @@ kernel container
   - sees mounted workspaces at /workspace/<workspace_id>
 ```
 
-The Rust `client_service_rs` implementation is the active and default client
-service.
+`client_service` is the public API for workspace CRUD and workspace-aware
+session creation.
 
 ## Public API Contract
 
-The Web UI talks to `client_service_rs` through the nginx `/api` proxy. The
+The Web UI talks to `client_service` through the nginx `/api` proxy. The
 service exposes workspace CRUD and accepts workspace mount configuration on
 agents.
 
@@ -164,7 +164,7 @@ Save-session-workspace payload:
 }
 ```
 
-The Rust service implements the robust save flow:
+`client_service` implements the robust save flow:
 
 1. Insert the workspace record as `creating`.
 2. Ask `agent_host` to snapshot the session scratch volume into
@@ -182,7 +182,7 @@ Clone payload:
 ```
 
 The clone flow uses the same status lifecycle as saving a session workspace:
-`client_service_rs` inserts the target as `creating`, asks `agent_host` to copy
+`client_service` inserts the target as `creating`, asks `agent_host` to copy
 the source volume to `agentspace-workspace-<workspace_id>`, and then marks the
 target `ready` or `failed`. The source workspace must already be `ready`.
 
@@ -235,22 +235,22 @@ Create/update agent payloads accept the same mount list without `mount_path`:
 }
 ```
 
-`client_service_rs` validates that:
+`client_service` validates that:
 
 - every referenced workspace exists;
 - every referenced workspace is `ready`;
 - every referenced workspace ID has a valid format;
 - a single agent cannot mount the same workspace more than once.
 
-When a session is created, `client_service_rs` validates the agent's mounts again
+When a session is created, `client_service` validates the agent's mounts again
 before forwarding them to `agent_host`. This catches stale state if a workspace
 record is removed or corrupted outside normal API flows.
 
 ## Persistence
 
-The active persistence implementation is in `services/client_service_rs`.
+Workspace persistence lives in `services/client_service_rs`.
 
-Important Rust model types:
+Important model types:
 
 | Type | File | Purpose |
 |------|------|---------|
@@ -314,7 +314,7 @@ first.
 
 Persistent workspace volumes are created lazily if they do not already exist.
 This makes workspace creation cheap: registering a workspace in
-`client_service_rs` does not need to talk to Docker/Podman immediately.
+`client_service` does not need to talk to Docker/Podman immediately.
 
 The mount path is also added to the kernel's additional accessible paths. This
 is important for CLI harnesses that need explicit directory allowlists, such as
@@ -322,7 +322,7 @@ Copilot, Codex, or Claude-style agents.
 
 ### Saving Session Scratch Workspaces
 
-`client_service_rs` calls `agent_host` through:
+`client_service` calls `agent_host` through:
 
 ```http
 POST /sessions/{agent_host_session_id}/workspace/snapshot
@@ -345,7 +345,7 @@ such as `/workspace/todo-list-code` and the ACP skills mount under
 
 ### Cloning and Opening Workspaces
 
-`client_service_rs` calls `agent_host` through:
+`client_service` calls `agent_host` through:
 
 ```http
 POST /workspaces/clone
@@ -407,10 +407,10 @@ Use the standard repository check before finishing changes:
 just check
 ```
 
-For Rust-only iteration on `client_service_rs`:
+For client-service iteration:
 
 ```sh
-just client-service-rs-check
+just client-service-check
 ```
 
 That target runs:
@@ -419,7 +419,7 @@ That target runs:
 - `cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml`
 - `cargo clippy --manifest-path services/client_service_rs/Cargo.toml --all-targets --all-features`
 
-Workspace-specific Rust tests live in:
+Workspace-specific tests live in:
 
 | Test file | Coverage |
 |-----------|----------|
@@ -491,10 +491,10 @@ If bugs are found during manual testing, record repro steps in `BUGS.md`.
 
 When adding or changing workspace behavior, check all of these layers:
 
-1. **Rust models** — `services/client_service_rs/src/models.rs`
-2. **Rust persistence** — `services/client_service_rs/src/store.rs` and
+1. **Models** — `services/client_service_rs/src/models.rs`
+2. **Persistence** — `services/client_service_rs/src/store.rs` and
    `services/client_service_rs/src/store/sqlite.rs`
-3. **Rust API** — `services/client_service_rs/src/api.rs`
+3. **API** — `services/client_service_rs/src/api.rs`
 4. **Agent-host client boundary** —
    `services/client_service_rs/src/agent_host.rs`
 5. **Runtime mounting** —
@@ -510,10 +510,9 @@ handling, Docker mount options, Web UI selectors, and tests.
 
 ## Operational Notes
 
-- `just stack-up` uses the Rust client service image from
-  `services/client_service_rs`.
+- `just stack-up` uses the client-service image from `services/client_service_rs`.
 - The Web UI is served at `http://127.0.0.1:8003`.
-- The Rust client service is available at `http://127.0.0.1:8002`.
+- `client_service` is available at `http://127.0.0.1:8002`.
 - `agent_host` is available at `http://127.0.0.1:8001`.
 - Workspace volume data persists outside AgentSpace records. Deleting a
   workspace through the API unregisters it only; it intentionally does not delete

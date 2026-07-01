@@ -22,8 +22,8 @@ check:
   uv run ruff check .
   uv run pyright
   uv run --all-packages pytest
-  just client-service-rs-check
-  just agent-host-rs-check
+  just client-service-check
+  just agent-host-check
   pnpm --dir clients/webui run lint
   pnpm --dir clients/webui run --if-present test
   pnpm --dir clients/webui run build
@@ -33,21 +33,21 @@ test:
   cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
   cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
 
-client-service-rs-check:
+client-service-check:
   cargo fmt --check --manifest-path services/client_service_rs/Cargo.toml
   cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
   cargo clippy --manifest-path services/client_service_rs/Cargo.toml --all-targets --all-features
 
-agent-host-rs-check:
+agent-host-check:
   cargo fmt --check --manifest-path services/agent_host_rs/Cargo.toml
   cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
   cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
 
-client-service-rs-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest .
+client-service-image:
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service:latest .
 
-agent-host-rs-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/agent_host_rs/Dockerfile -t agentspace-agent-host-agent-host:latest .
+agent-host-image:
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/agent_host_rs/Dockerfile -t agentspace-agent-host:latest .
 
 webui-outdated:
   pnpm --dir clients/webui outdated

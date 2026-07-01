@@ -9,7 +9,7 @@ The repo is currently centered on the kernel milestone:
 - `kernel_copilot`: `copilot-cli` kernel adapter
 - `kernel_host`: runner plus one-session HTTP service mode for kernel containers
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
-- `client_service` (`services/client_service_rs`): Rust client-facing API over `agent_host`
+- `client_service` (`services/client_service_rs`): client-facing API over `agent_host`
 - `git_agent`: internal GitAgent service for repo access and patch submission
 - `webui`: TypeScript dashboard over `client_service`
 - `cli_channel`: proof-of-concept CLI session client over `client_service`
