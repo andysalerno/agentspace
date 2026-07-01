@@ -22,16 +22,19 @@ check:
   uv run ruff check .
   uv run pyright
   uv run --all-packages pytest
-  just client-service-check
-  just agent-host-check
+  just rust-check
   pnpm --dir clients/webui run lint
   pnpm --dir clients/webui run --if-present test
   pnpm --dir clients/webui run build
 
 test:
   uv run --all-packages pytest
-  cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
-  cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
+  cargo test --quiet --workspace
+
+rust-check:
+  cargo fmt --check --all
+  cargo test --quiet --workspace
+  cargo clippy --workspace --all-targets --all-features
 
 client-service-check:
   cargo fmt --check --manifest-path services/client_service_rs/Cargo.toml

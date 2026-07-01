@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM docker.io/library/python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
@@ -49,7 +51,7 @@ ENV UV_LINK_MODE=copy
 WORKDIR /app
 
 # Copy all kernel packages and root project config
-COPY pyproject.toml pyproject.toml
+COPY pyproject.toml uv.lock ./
 COPY kernels/kernel kernels/kernel
 COPY kernels/kernel_claude_code kernels/kernel_claude_code
 COPY kernels/kernel_echo kernels/kernel_echo
@@ -60,7 +62,8 @@ COPY kernels/kernel_acp kernels/kernel_acp
 COPY kernels/kernel_host kernels/kernel_host
 
 # Install kernel_host and all its dependencies
-RUN uv sync --no-dev --package kernel-host
+RUN --mount=type=cache,id=agentspace-uv-cache,target=/root/.cache/uv,sharing=locked \
+    uv sync --frozen --no-dev --package kernel-host
 
 # Create clean kernel workspace directory
 RUN mkdir -p /workspace

@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM docker.io/library/python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
@@ -11,10 +13,11 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-COPY pyproject.toml pyproject.toml
+COPY pyproject.toml uv.lock ./
 COPY services/git_agent services/git_agent
 
-RUN uv sync --no-dev --package git-agent
+RUN --mount=type=cache,id=agentspace-uv-cache,target=/root/.cache/uv,sharing=locked \
+    uv sync --frozen --no-dev --package git-agent
 
 EXPOSE 8004
 

@@ -33,6 +33,18 @@ cli-ui = { workspace = true }
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+testpaths = [
+    "channels/cli_channel/tests",
+    "clients/cli_ui/tests",
+    "gateways/gateway/tests",
+    "gateways/gateway_discord/tests",
+    "gateways/gateway_echo/tests",
+    "gateways/gateway_host/tests",
+    "kernels/kernel/tests",
+    "kernels/kernel_acp/tests",
+    "kernels/kernel_host/tests",
+    "services/git_agent/tests",
+]
 norecursedirs = [
     "kernels/kernel_claude_code",
     "kernels/kernel_codex",
