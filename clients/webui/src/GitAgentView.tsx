@@ -21,6 +21,17 @@ import type {
     GitAgentReviewComment,
     GitAgentStatus,
 } from "./types";
+import {
+    Button,
+    Input,
+    Table,
+    TableBody,
+    TableCell,
+    TableHeader,
+    TableHeaderCell,
+    TableRow,
+    Textarea,
+} from "./fluent";
 
 const DEFAULT_REVIEW_AGENT_ID = "git-agent";
 const DEFAULT_DEFAULT_BRANCH = "main";
@@ -544,7 +555,7 @@ function RequestDetail({
     const commitSha = requestCommitSha(request);
 
     return (
-        <section className="card management-card git-agent-detail-card">
+        <div className="card management-card git-agent-detail-card">
             <div className="card-body">
                 <div className="management-card-heading">
                     <div className="management-title-block">
@@ -607,7 +618,7 @@ function RequestDetail({
                     <pre className="skill-file-content git-agent-patch-block"><code>{patch || "Patch not included in this response."}</code></pre>
                 </div>
             </div>
-        </section>
+        </div>
     );
 }
 
@@ -725,15 +736,15 @@ export default function GitAgentView() {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button className="secondary-button" onClick={refresh} type="button">
+                    <Button className="secondary-button" onClick={refresh} type="button">
                         Refresh
-                    </button>
-                    <button
+                    </Button>
+                    <Button
                         onClick={editingConfig ? cancelConfigEditor : openConfigEditor}
                         type="button"
                     >
                         {editingConfig ? "Cancel" : "Edit Config"}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -762,7 +773,7 @@ export default function GitAgentView() {
                 >
                     <label>
                         Remote URL
-                        <input
+                        <Input
                             placeholder="http://gitagent:8004/repo.git"
                             value={configForm.remote_url}
                             onChange={(event) =>
@@ -771,7 +782,7 @@ export default function GitAgentView() {
                     </label>
                     <label>
                         Patch URL
-                        <input
+                        <Input
                             placeholder="http://gitagent:8004/PatchRequest"
                             value={configForm.patch_url}
                             onChange={(event) =>
@@ -780,7 +791,7 @@ export default function GitAgentView() {
                     </label>
                     <label>
                         Default Branch
-                        <input
+                        <Input
                             placeholder="main"
                             required
                             value={configForm.default_branch}
@@ -790,7 +801,7 @@ export default function GitAgentView() {
                     </label>
                     <label>
                         Review Agent ID
-                        <input
+                        <Input
                             placeholder={DEFAULT_REVIEW_AGENT_ID}
                             value={configForm.review_agent_id}
                             onChange={(event) =>
@@ -799,7 +810,7 @@ export default function GitAgentView() {
                     </label>
                     <label>
                         Validation Command
-                        <input
+                        <Input
                             placeholder="just validate"
                             value={configForm.validation_command}
                             onChange={(event) =>
@@ -814,7 +825,7 @@ export default function GitAgentView() {
                         </span>
                         <label>
                             Allowed refs
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.allowed_refs}
                                 onChange={(event) =>
@@ -823,7 +834,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Allowed ref prefixes
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.allowed_ref_prefixes}
                                 onChange={(event) =>
@@ -832,7 +843,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Protected refs
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.protected_refs}
                                 onChange={(event) =>
@@ -841,7 +852,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Protected ref prefixes
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.protected_ref_prefixes}
                                 onChange={(event) =>
@@ -850,7 +861,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Unprotected refs
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.unprotected_refs}
                                 onChange={(event) =>
@@ -859,7 +870,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Unprotected ref prefixes
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.unprotected_ref_prefixes}
                                 onChange={(event) =>
@@ -868,7 +879,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Skip review prefixes
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.skip_review_ref_prefixes}
                                 onChange={(event) =>
@@ -877,7 +888,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Skip validation prefixes
-                            <textarea
+                            <Textarea
                                 rows={2}
                                 value={configForm.skip_validation_ref_prefixes}
                                 onChange={(event) =>
@@ -889,7 +900,7 @@ export default function GitAgentView() {
                         <legend>Reviewer agent config</legend>
                         <label>
                             Display Name
-                            <input
+                            <Input
                                 placeholder="Git Agent Reviewer"
                                 value={configForm.reviewer_name}
                                 onChange={(event) =>
@@ -898,7 +909,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Kernel
-                            <input
+                            <Input
                                 placeholder="copilot-cli"
                                 value={configForm.reviewer_harness}
                                 onChange={(event) =>
@@ -907,7 +918,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Connection ID
-                            <input
+                            <Input
                                 placeholder="optional connection id"
                                 value={configForm.reviewer_connection_id}
                                 onChange={(event) =>
@@ -916,7 +927,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Skills
-                            <textarea
+                            <Textarea
                                 placeholder="comma or newline separated skill ids"
                                 rows={2}
                                 value={configForm.reviewer_skills}
@@ -926,7 +937,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             System Prompt
-                            <textarea
+                            <Textarea
                                 rows={6}
                                 value={configForm.reviewer_system_prompt}
                                 onChange={(event) =>
@@ -935,7 +946,7 @@ export default function GitAgentView() {
                         </label>
                         <label>
                             Environment Variables
-                            <textarea
+                            <Textarea
                                 placeholder="KEY=VALUE"
                                 rows={5}
                                 value={configForm.reviewer_env_vars}
@@ -945,17 +956,17 @@ export default function GitAgentView() {
                         </label>
                     </fieldset>
                     <div className="skills-edit-actions">
-                        <button disabled={saveConfigMutation.isPending} type="submit">
+                        <Button disabled={saveConfigMutation.isPending} type="submit">
                             {saveConfigMutation.isPending ? "Saving…" : "Save Config"}
-                        </button>
-                        <button
+                        </Button>
+                        <Button
                             className="secondary-button"
                             disabled={saveConfigMutation.isPending}
                             onClick={cancelConfigEditor}
                             type="button"
                         >
                             Cancel
-                        </button>
+                        </Button>
                     </div>
                 </form>
             )}
@@ -1067,21 +1078,21 @@ export default function GitAgentView() {
                 </div>
                 {requests.length > 0 ? (
                     <div className="table-container management-table-container">
-                        <table className="data-table management-table">
-                            <thead>
-                                <tr>
-                                    <th>Status</th>
-                                    <th>Request</th>
-                                    <th>Target</th>
-                                    <th>Requester</th>
-                                    <th>Base</th>
-                                    <th>Commit</th>
-                                    <th>Reviewer Summary</th>
-                                    <th>Updated</th>
-                                    <th aria-label="Actions"></th>
-                                </tr>
-                            </thead>
-                            <tbody>
+                        <Table className="data-table management-table">
+                            <TableHeader>
+                                <TableRow>
+                                    <TableHeaderCell>Status</TableHeaderCell>
+                                    <TableHeaderCell>Request</TableHeaderCell>
+                                    <TableHeaderCell>Target</TableHeaderCell>
+                                    <TableHeaderCell>Requester</TableHeaderCell>
+                                    <TableHeaderCell>Base</TableHeaderCell>
+                                    <TableHeaderCell>Commit</TableHeaderCell>
+                                    <TableHeaderCell>Reviewer Summary</TableHeaderCell>
+                                    <TableHeaderCell>Updated</TableHeaderCell>
+                                    <TableHeaderCell aria-label="Actions"></TableHeaderCell>
+                                </TableRow>
+                            </TableHeader>
+                            <TableBody>
                                 {requests.map((request, index) => {
                                     const id = requestId(request);
                                     const statusLabel = requestStatus(request);
@@ -1096,50 +1107,50 @@ export default function GitAgentView() {
                                         field(request, "createdAt"),
                                     );
                                     return (
-                                        <tr key={id || index}>
-                                            <td>
+                                        <TableRow key={id || index}>
+                                            <TableCell>
                                                 <span className={`status-badge ${statusClass(statusLabel)}`}>
                                                     {statusLabel}
                                                 </span>
-                                            </td>
-                                            <td className="mono" title={id}>
+                                            </TableCell>
+                                            <TableCell className="mono" title={id}>
                                                 <span className="truncate-value">{id || "—"}</span>
-                                            </td>
-                                            <td>
+                                            </TableCell>
+                                            <TableCell>
                                                 <span className="truncate-value">
                                                     {requestTargetRef(request)}
                                                 </span>
-                                            </td>
-                                            <td>
+                                            </TableCell>
+                                            <TableCell>
                                                 <span className="truncate-value">{requester(request)}</span>
-                                            </td>
-                                            <td className="mono" title={baseSha}>
+                                            </TableCell>
+                                            <TableCell className="mono" title={baseSha}>
                                                 {shortSha(baseSha)}
-                                            </td>
-                                            <td className="mono" title={commitSha}>
+                                            </TableCell>
+                                            <TableCell className="mono" title={commitSha}>
                                                 {shortSha(commitSha)}
-                                            </td>
-                                            <td>
+                                            </TableCell>
+                                            <TableCell>
                                                 <span className="truncate-value">{summary || "—"}</span>
-                                            </td>
-                                            <td className="nowrap">
+                                            </TableCell>
+                                            <TableCell className="nowrap">
                                                 {updatedAt ? formatDate(updatedAt) : "—"}
-                                            </td>
-                                            <td className="actions-cell">
-                                                <button
+                                            </TableCell>
+                                            <TableCell className="actions-cell">
+                                                <Button
                                                     className="secondary-button small"
                                                     disabled={!id}
                                                     onClick={() => setSelectedRequestId(id)}
                                                     type="button"
                                                 >
                                                     {selected ? "Selected" : "Details"}
-                                                </button>
-                                            </td>
-                                        </tr>
+                                                </Button>
+                                            </TableCell>
+                                        </TableRow>
                                     );
                                 })}
-                            </tbody>
-                        </table>
+                            </TableBody>
+                        </Table>
                     </div>
                 ) : (
                     <div className="empty-state">No patch requests yet.</div>

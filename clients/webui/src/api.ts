@@ -20,6 +20,7 @@ import type {
   SessionDetail,
   SessionSummary,
   Skill,
+  SkillVersion,
   SystemInfo,
   Workspace,
   WorkspaceMount,
@@ -270,6 +271,7 @@ export const api = {
   // Skills
   listSkills: () => requestJson<Skill[]>("/skills"),
   getSkill: (skillId: string) => requestJson<Skill>(`/skills/${skillId}`),
+  downloadSkillUrl: (skillId: string) => `${apiBase}/skills/${encodeURIComponent(skillId)}/download`,
   createSkill: (payload: { skill_id: string; files: Record<string, string> }) =>
     requestJson<Skill>("/skills", {
       method: "POST",
@@ -279,6 +281,12 @@ export const api = {
     requestJson<Skill>(`/skills/${skillId}`, {
       method: "PUT",
       body: JSON.stringify({ files }),
+    }),
+  listSkillVersions: (skillId: string) =>
+    requestJson<SkillVersion[]>(`/skills/${skillId}/versions`),
+  rollbackSkillVersion: (skillId: string, version: number) =>
+    requestJson<Skill>(`/skills/${skillId}/versions/${version}/rollback`, {
+      method: "POST",
     }),
   deleteSkill: (skillId: string) =>
     requestJson<void>(`/skills/${skillId}`, { method: "DELETE" }),

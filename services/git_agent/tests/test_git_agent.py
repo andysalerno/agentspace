@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import uuid
@@ -16,6 +17,7 @@ from git_agent.reviewer import (
     Reviewer,
     ReviewerRawResponse,
     build_review_prompt,
+    validate_reviewer_response,
 )
 
 if TYPE_CHECKING:
@@ -115,6 +117,13 @@ class WorktreeInspectingReviewer:
         assert "Review in prototyping mode" in prompt
         assert "minimal smoke" in prompt
         assert context.agent_worktree_path in prompt
+
+        git_file = Path(context.service_worktree_path) / ".git"
+        gitdir = git_file.read_text(encoding="utf-8").strip().removeprefix("gitdir: ")
+        assert not Path(gitdir).is_absolute()
+        assert "README.md" in _run(
+            ["git", "-C", context.service_worktree_path, "status", "--short"],
+        )
 
         diff = _run(
             [
@@ -331,6 +340,23 @@ def test_reviewer_comments_must_map_to_changed_lines(workspace: Path) -> None:
         assert response["status"] == "review_error"
         assert response["accepted"] is False
         assert client.get("/status").json()["refs"] == []
+
+
+def test_reviewer_extracts_client_service_assistant_message() -> None:
+    content = json.dumps(
+        {
+            "accepted": True,
+            "summary": "accepted from client-service response",
+            "comments": [],
+        },
+    )
+    decision = validate_reviewer_response(
+        ReviewerRawResponse(payload={"assistant_message": {"content": content}}),
+        analyze_patch(ADD_README_PATCH),
+    )
+
+    assert decision.accepted is True
+    assert decision.summary == "accepted from client-service response"
 
 
 def test_protected_review_uses_worktree_not_prompt_patch(workspace: Path) -> None:

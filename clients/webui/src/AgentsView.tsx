@@ -1,7 +1,7 @@
 import type { FormEvent } from "react";
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Agent, WorkspaceMountMode } from "./types";
+import type { Agent, ConnectionModels, WorkspaceMountMode } from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import {
@@ -21,6 +21,7 @@ import {
     useWorkspaces,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { Button, Checkbox, Combobox, Input, Option, Select } from "./fluent";
 
 type AgentsViewProps = {
     onSessionCreated: (sessionId: string) => void;
@@ -109,13 +110,17 @@ type ModelNameFieldProps = {
     onEnvVarsChange: (envVars: string) => void;
 };
 
-function modelIdsFromResponse(response: { data?: Array<{ id?: string }> } | undefined): string[] {
+function modelIdsFromResponse(response: ConnectionModels | undefined): string[] {
     if (!response?.data) {
         return [];
     }
-    return response.data
-        .map((model) => model.id)
-        .filter((id): id is string => typeof id === "string" && id.length > 0);
+    return Array.from(
+        new Set(
+            response.data
+                .map((model) => (typeof model === "string" ? model : model.id))
+                .filter((id): id is string => typeof id === "string" && id.length > 0),
+        ),
+    );
 }
 
 function ModelNameField({
@@ -131,31 +136,80 @@ function ModelNameField({
     }
 
     const modelIds = modelIdsFromResponse(modelsQuery.data);
-    const datalistId = `models-${harness}-${connectionId ?? "none"}`;
     const value = getEnvValue(envVars, modelKey);
+    const normalizedValue = value.trim().toLocaleLowerCase();
+    const visibleModelIds = normalizedValue === ""
+        ? modelIds
+        : modelIds.filter((modelId) => modelId.toLocaleLowerCase().includes(normalizedValue));
+    const selectedOptions = modelIds.includes(value) ? [value] : [];
     const placeholder = connectionId === null
         ? "Select a connection or type a model name"
         : modelsQuery.isError
             ? "Model list unavailable; type a model name"
             : "Select or type a model name";
+    const modelHelp = connectionId === null
+        ? modelKey
+        : modelsQuery.isLoading
+            ? `${modelKey} · loading models...`
+            : modelsQuery.isError
+                ? `${modelKey} · model list unavailable`
+                : modelIds.length > 0
+                    ? `${modelKey} · ${modelIds.length} model${modelIds.length === 1 ? "" : "s"} available`
+                    : `${modelKey} · no models returned`;
+    const setModelName = (modelName: string) =>
+        onEnvVarsChange(setEnvValue(envVars, modelKey, modelName));
 
     return (
         <label>
             Model
-            <input
-                list={modelIds.length > 0 ? datalistId : undefined}
+            <Combobox
+                freeform
+                inlinePopup
                 placeholder={placeholder}
+                selectedOptions={selectedOptions}
                 value={value}
-                onChange={(e) => onEnvVarsChange(setEnvValue(envVars, modelKey, e.target.value))}
-            />
-            {modelIds.length > 0 && (
-                <datalist id={datalistId}>
-                    {modelIds.map((modelId) => (
-                        <option key={modelId} value={modelId} />
-                    ))}
-                </datalist>
-            )}
-            <span className="muted">{modelKey}</span>
+                onChange={(e) => setModelName(e.target.value)}
+                onOptionSelect={(_, data) => {
+                    const selectedModel = data.optionValue ?? data.optionText;
+                    if (selectedModel) {
+                        setModelName(selectedModel);
+                    }
+                }}
+            >
+                {visibleModelIds.map((modelId) => (
+                    <Option key={modelId} text={modelId} value={modelId}>
+                        {modelId}
+                    </Option>
+                ))}
+                {connectionId !== null && modelsQuery.isLoading && (
+                    <Option disabled text="Loading models">
+                        Loading models...
+                    </Option>
+                )}
+                {connectionId !== null && modelsQuery.isError && (
+                    <Option disabled text="Model list unavailable">
+                        Model list unavailable
+                    </Option>
+                )}
+                {connectionId !== null
+                    && !modelsQuery.isLoading
+                    && !modelsQuery.isError
+                    && modelIds.length > 0
+                    && visibleModelIds.length === 0 && (
+                    <Option disabled text="No matching models">
+                        No matching models
+                    </Option>
+                )}
+                {connectionId !== null
+                    && !modelsQuery.isLoading
+                    && !modelsQuery.isError
+                    && modelIds.length === 0 && (
+                    <Option disabled text="No models returned">
+                        No models returned
+                    </Option>
+                )}
+            </Combobox>
+            <span className="muted">{modelHelp}</span>
         </label>
     );
 }
@@ -376,9 +430,9 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button onClick={() => { setShowForm(!showForm); stopEditingAgent(); if (showForm) setEnvDirty(false); }} type="button">
+                    <Button onClick={() => { setShowForm(!showForm); stopEditingAgent(); if (showForm) setEnvDirty(false); }} type="button">
                         {showForm ? "Cancel" : "New Agent"}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -386,7 +440,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Agent ID
-                        <input
+                        <Input
                             pattern="[a-z]+(?:-[a-z]+)*"
                             placeholder="support-bot"
                             required
@@ -396,7 +450,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                     </label>
                     <label>
                         Display Name
-                        <input
+                        <Input
                             placeholder="Support Bot"
                             required
                             value={form.name}
@@ -405,7 +459,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                     </label>
                     <label>
                         Kernel
-                        <select
+                        <Select
                             value={form.harness}
                             onChange={(e) => setForm({ ...form, harness: e.target.value })}
                         >
@@ -414,11 +468,11 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     {formatHarnessLabel(harness)}
                                 </option>
                             ))}
-                        </select>
+                        </Select>
                     </label>
                     <label>
                         Connection
-                        <select
+                        <Select
                             value={form.connection_id ?? ""}
                             onChange={(e) => setForm({ ...form, connection_id: e.target.value || null })}
                         >
@@ -428,7 +482,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     {conn.name} ({conn.connection_id})
                                 </option>
                             ))}
-                        </select>
+                        </Select>
                     </label>
                     <ModelNameField
                         connectionId={form.connection_id}
@@ -453,14 +507,13 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             <legend>Skills</legend>
                             <div className="checkbox-grid">
                                 {skills.map((skill) => (
-                                    <label className="checkbox-label" key={skill.skill_id}>
-                                        <input
-                                            checked={form.skills.includes(skill.skill_id)}
-                                            onChange={() => toggleFormSkill(skill.skill_id)}
-                                            type="checkbox"
-                                        />
-                                        {skill.skill_id}
-                                    </label>
+                                    <Checkbox
+                                        checked={form.skills.includes(skill.skill_id)}
+                                        className="checkbox-label"
+                                        key={skill.skill_id}
+                                        label={skill.skill_id}
+                                        onChange={() => toggleFormSkill(skill.skill_id)}
+                                    />
                                 ))}
                             </div>
                         </fieldset>
@@ -477,7 +530,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     return (
                                         <label className="checkbox-label" key={workspace.workspace_id}>
                                             <span>{workspace.name} ({workspace.workspace_id})</span>
-                                            <select
+                                            <Select
                                                 value={mount?.mode ?? ""}
                                                 onChange={(e) =>
                                                     setFormWorkspaceMode(
@@ -488,7 +541,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                 <option value="">Not mounted</option>
                                                 <option value="rw">Read/write</option>
                                                 <option value="ro">Read-only</option>
-                                            </select>
+                                            </Select>
                                         </label>
                                     );
                                 })}
@@ -505,9 +558,9 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                         />
                         <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
                     </div>
-                    <button disabled={busy} type="submit">
+                    <Button disabled={busy} type="submit">
                         Create Agent
-                    </button>
+                    </Button>
                 </form>
             )}
 
@@ -582,7 +635,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     )}
                                     <label>
                                         Display Name
-                                        <input
+                                        <Input
                                             required
                                             value={editForm.name}
                                             onChange={(e) =>
@@ -591,7 +644,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     </label>
                                     <label>
                                         Kernel
-                                        <select
+                                        <Select
                                             value={editForm.harness}
                                             onChange={(e) =>
                                                 setEditForm({ ...editForm, harness: e.target.value })}
@@ -601,11 +654,11 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                     {formatHarnessLabel(harness)}
                                                 </option>
                                             ))}
-                                        </select>
+                                        </Select>
                                     </label>
                                     <label>
                                         Connection
-                                        <select
+                                        <Select
                                             value={editForm.connection_id ?? ""}
                                             onChange={(e) =>
                                                 setEditForm({
@@ -619,7 +672,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                     {conn.name} ({conn.connection_id})
                                                 </option>
                                             ))}
-                                        </select>
+                                        </Select>
                                     </label>
                                     <ModelNameField
                                         connectionId={editForm.connection_id}
@@ -643,14 +696,13 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                             <legend>Skills</legend>
                                             <div className="checkbox-grid">
                                                 {skills.map((skill) => (
-                                                    <label className="checkbox-label" key={skill.skill_id}>
-                                                        <input
-                                                            checked={editForm.skills.includes(skill.skill_id)}
-                                                            onChange={() => toggleEditSkill(skill.skill_id)}
-                                                            type="checkbox"
-                                                        />
-                                                        {skill.skill_id}
-                                                    </label>
+                                                    <Checkbox
+                                                        checked={editForm.skills.includes(skill.skill_id)}
+                                                        className="checkbox-label"
+                                                        key={skill.skill_id}
+                                                        label={skill.skill_id}
+                                                        onChange={() => toggleEditSkill(skill.skill_id)}
+                                                    />
                                                 ))}
                                             </div>
                                         </fieldset>
@@ -667,7 +719,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                     return (
                                                         <label className="checkbox-label" key={workspace.workspace_id}>
                                                             <span>{workspace.name} ({workspace.workspace_id})</span>
-                                                            <select
+                                                            <Select
                                                                 value={mount?.mode ?? ""}
                                                                 onChange={(e) =>
                                                                     setEditWorkspaceMode(
@@ -678,7 +730,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                                 <option value="">Not mounted</option>
                                                                 <option value="rw">Read/write</option>
                                                                 <option value="ro">Read-only</option>
-                                                            </select>
+                                                            </Select>
                                                         </label>
                                                     );
                                                 })}
@@ -698,16 +750,16 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                         <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
                                     </div>
                                     <div className="skills-edit-actions">
-                                        <button className="small" disabled={busy} type="submit">
+                                        <Button className="small" disabled={busy} type="submit">
                                             Save
-                                        </button>
-                                        <button
+                                        </Button>
+                                        <Button
                                             className="secondary-button small"
                                             onClick={stopEditingAgent}
                                             type="button"
                                         >
                                             Cancel
-                                        </button>
+                                        </Button>
                                     </div>
                                 </form>
                             )}
@@ -717,32 +769,32 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                 Created {new Date(agent.created_at).toLocaleDateString()}
                             </span>
                             <div className="card-footer-actions">
-                                <button
+                                <Button
                                     className="small"
                                     disabled={busy}
                                     onClick={() => startSessionMutation.mutate(agent.agent_id)}
                                     type="button"
                                 >
                                     New Session
-                                </button>
+                                </Button>
                                 {editingAgentId !== agent.agent_id && (
-                                    <button
+                                    <Button
                                         className="secondary-button small"
                                         disabled={busy}
                                         onClick={() => startEditingAgent(agent)}
                                         type="button"
                                     >
                                         Edit
-                                    </button>
+                                    </Button>
                                 )}
-                                <button
+                                <Button
                                     className="danger-button small"
                                     disabled={busy}
                                     onClick={() => deleteMutation.mutate(agent.agent_id)}
                                     type="button"
                                 >
                                     Delete
-                                </button>
+                                </Button>
                             </div>
                         </div>
                     </div>

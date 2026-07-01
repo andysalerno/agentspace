@@ -24,6 +24,7 @@ import {
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 import { promptSaveWorkspace, promptWorkspaceSaveDetails } from "./saveWorkspacePrompt";
+import { Button, Input, Select, Textarea } from "./fluent";
 import "./chat-workspace.css";
 
 type ChatViewProps = {
@@ -407,13 +408,13 @@ function MessageMarkdown({
                             const toolCall = toolCalls[toolCallIndex];
                             if (toolCall) {
                                 return (
-                                    <button
+                                    <Button
                                         className="tool-call-tag inline-tool-call"
                                         type="button"
                                         onClick={() => onSelectToolCall?.(toolCall)}
                                     >
                                         {children}
-                                    </button>
+                                    </Button>
                                 );
                             }
                         }
@@ -494,6 +495,26 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
             }
         },
         onError: reportError,
+    });
+    const deleteAllSessionsMutation = useMutation({
+        mutationFn: async (sessionIds: string[]) => {
+            for (const sessionId of sessionIds) {
+                await api.deleteSession(sessionId);
+            }
+        },
+        onSuccess: (_, sessionIds) => {
+            for (const sessionId of sessionIds) {
+                queryClient.removeQueries({ queryKey: queryKeys.session(sessionId) });
+            }
+            if (selectedSessionId !== null && sessionIds.includes(selectedSessionId)) {
+                onSelectSession(null);
+            }
+        },
+        onError: reportError,
+        onSettled: () => {
+            void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
+            void queryClient.invalidateQueries({ queryKey: queryKeys.kernels });
+        },
     });
     const saveWorkspaceMutation = useMutation({
         mutationFn: ({ sessionId, workspace_id, name }: { sessionId: string; workspace_id: string; name: string }) =>
@@ -766,6 +787,30 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         deleteSessionMutation.mutate(sessionId);
     }
 
+    function handleDeleteAllSessions() {
+        const sessionIds = sessions.map((session) => session.session_id);
+        if (sessionIds.length === 0) {
+            return;
+        }
+        const targetLabel = sessionIds.length === 1
+            ? "the only workspace session"
+            : `all ${sessionIds.length} workspace sessions`;
+        const confirmed = window.confirm(
+            `Delete ${targetLabel}? This will destroy unsaved workspaces forever and cannot be undone.`,
+        );
+        if (!confirmed) {
+            return;
+        }
+        streamControllerRef.current?.abort();
+        streamControllerRef.current = null;
+        streamingSessionIdRef.current = null;
+        streamingTurnIdRef.current = null;
+        setPendingUserMessage(null);
+        setStreamingMessage(null);
+        setStreaming(false);
+        deleteAllSessionsMutation.mutate(sessionIds);
+    }
+
     async function handleSaveWorkspace(sessionId: string) {
         const details = promptWorkspaceSaveDetails();
         if (details === null) {
@@ -796,9 +841,10 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
             ? mergeAssistantProgress(streamingMessage, persistedStreamingAssistant)
             : streamingMessage);
     const effectiveStreaming = streaming && !streamCompletedFromCache;
+    const deletingSessions = deleteSessionMutation.isPending || deleteAllSessionsMutation.isPending;
     const busy = effectiveStreaming || Boolean(selectedSession?.active_turn)
         || createSessionMutation.isPending || resetMutation.isPending
-        || deleteSessionMutation.isPending || saveWorkspaceMutation.isPending;
+        || deletingSessions || saveWorkspaceMutation.isPending;
     const visibleCachedMessages = displayedStreamingMessage && activeAssistantMessageId
         ? cachedMessages.filter((message) => message.message_id !== activeAssistantMessageId)
         : cachedMessages;
@@ -847,21 +893,33 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                             <span className="rail-count">{sessions.length}</span>
                         </h3>
                     </div>
-                    <button
-                        className="icon-button new-session-button"
-                        onClick={() => setShowNewSession(!showNewSession)}
-                        type="button"
-                        title="New session"
-                        aria-expanded={showNewSession}
-                    >
-                        {showNewSession ? "×" : "+"}
-                    </button>
+                    <div className="rail-heading-actions">
+                        <Button
+                            aria-label="Delete all workspace sessions"
+                            className="secondary-button rail-delete-all-button"
+                            disabled={sessions.length === 0 || deletingSessions || saveWorkspaceMutation.isPending}
+                            onClick={handleDeleteAllSessions}
+                            title="Delete all workspace sessions"
+                            type="button"
+                        >
+                            {deleteAllSessionsMutation.isPending ? "Deleting..." : "Delete all"}
+                        </Button>
+                        <Button
+                            className="icon-button new-session-button"
+                            onClick={() => setShowNewSession(!showNewSession)}
+                            type="button"
+                            title="New session"
+                            aria-expanded={showNewSession}
+                        >
+                            {showNewSession ? "×" : "+"}
+                        </Button>
+                    </div>
                 </div>
                 {showNewSession && (
                     <form className="compact-form new-session-form" onSubmit={(e) => { void handleCreateSession(e); }}>
                         <label>
                             <span>Agent</span>
-                            <select
+                            <Select
                                 value={newSessionAgentId}
                                 onChange={(e) => setNewSessionAgentId(e.target.value)}
                             >
@@ -870,19 +928,19 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                         {a.name}
                                     </option>
                                 ))}
-                            </select>
+                            </Select>
                         </label>
                         <label>
                             <span>Channel</span>
-                            <input
+                            <Input
                                 placeholder="default channel"
                                 value={newSessionChannelName}
                                 onChange={(e) => setNewSessionChannelName(e.target.value)}
                             />
                         </label>
-                        <button disabled={busy || !newSessionAgentId} type="submit">
+                        <Button disabled={busy || !newSessionAgentId} type="submit">
                             Start session
-                        </button>
+                        </Button>
                     </form>
                 )}
                 <div className="session-list" aria-label="Sessions">
@@ -893,7 +951,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                 className={`session-row chat-session-row ${selectedSessionId === session.session_id ? "active" : ""}`}
                                 key={session.session_id}
                             >
-                                <button
+                                <Button
                                     className="session-item chat-session-card"
                                     onClick={() => onSelectSession(session.session_id)}
                                     type="button"
@@ -913,26 +971,26 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     <span className={`session-status-pill status-${tone}`}>
                                         {session.status}
                                     </span>
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     aria-label={`Delete session ${session.session_id}`}
                                     className="session-delete-button"
-                                    disabled={deleteSessionMutation.isPending || saveWorkspaceMutation.isPending}
+                                    disabled={deletingSessions || saveWorkspaceMutation.isPending}
                                     onClick={() => void handleDeleteSession(session.session_id)}
                                     title="Delete session"
                                     type="button"
                                 >
                                     ×
-                                </button>
+                                </Button>
                             </div>
                         );
                     })}
                     {sessions.length === 0 && (
                         <div className="empty-state rail-empty-state">
                             <span>No sessions yet</span>
-                            <button className="secondary-button small" onClick={() => setShowNewSession(true)} type="button">
+                            <Button className="secondary-button small" onClick={() => setShowNewSession(true)} type="button">
                                 Create one
-                            </button>
+                            </Button>
                         </div>
                     )}
                 </div>
@@ -981,14 +1039,14 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                 VS Code
                                             </a>
                                         ) : (
-                                            <button
+                                            <Button
                                                 className="secondary-button"
                                                 disabled
                                                 title="VS Code unavailable"
                                                 type="button"
                                             >
                                                 VS Code
-                                            </button>
+                                            </Button>
                                         )}
                                         {serviceUrl ? (
                                             <a
@@ -1000,27 +1058,27 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                                 Service
                                             </a>
                                         ) : null}
-                                        <button
+                                        <Button
                                             className="secondary-button"
                                             disabled={busy}
                                             onClick={() => void handleSaveWorkspace(selectedSession.session_id)}
                                             type="button"
                                         >
                                             Save workspace
-                                        </button>
+                                        </Button>
                                     </>
                                 ) : null}
-                                <button
+                                <Button
                                     className="secondary-button"
                                     disabled={busy}
                                     onClick={handleResetSession}
                                     type="button"
                                 >
                                     Reset
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     className="danger-button"
-                                    disabled={deleteSessionMutation.isPending || saveWorkspaceMutation.isPending}
+                                    disabled={deletingSessions || saveWorkspaceMutation.isPending}
                                     onClick={() => {
                                         if (selectedSessionId) {
                                             void handleDeleteSession(selectedSessionId);
@@ -1029,7 +1087,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     type="button"
                                 >
                                     Delete
-                                </button>
+                                </Button>
                             </div>
                         </div>
                         <div className="transcript chat-transcript" aria-live={effectiveStreaming ? "polite" : "off"}>
@@ -1101,7 +1159,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     <span>{sessionChannelLabel(selectedSession.channel_name)}</span>
                                     <span>Enter sends · Shift+Enter newline</span>
                                 </div>
-                                <textarea
+                                <Textarea
                                     placeholder="Ask the agent to inspect, edit, run, or explain…"
                                     rows={2}
                                     value={messageDraft}
@@ -1114,19 +1172,19 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     }}
                                 />
                             </div>
-                            <button className="composer-send-button" disabled={busy || !messageDraft.trim()} type="submit">
+                            <Button className="composer-send-button" disabled={busy || !messageDraft.trim()} type="submit">
                                 Send
-                            </button>
+                            </Button>
                         </form>
                     </>
                 ) : (
-                    <div className="empty-state centered full-height chat-empty-state chat-empty-workspace">
+                    <div className="empty-state centered chat-empty-state chat-empty-workspace">
                         <div className="empty-state-kicker">AgentSpace chat</div>
                         <h3>Select a session to enter the workspace</h3>
                         <p>Create a fresh channel or jump back into an existing session from the rail.</p>
-                        <button className="secondary-button" onClick={() => setShowNewSession(true)} type="button">
+                        <Button onClick={() => setShowNewSession(true)} type="button">
                             New session
-                        </button>
+                        </Button>
                     </div>
                 )}
             </section>

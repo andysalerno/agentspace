@@ -21,7 +21,7 @@ services:
     image: agentspace-agent-host-agent-host:latest
     build:
       context: .
-      dockerfile: services/agent_host/Dockerfile
+      dockerfile: services/agent_host_rs/Dockerfile
     depends_on:
       kernel-host-image:
         condition: service_completed_successfully
@@ -57,8 +57,8 @@ services:
   client-service:
     image: agentspace-client-service-rs:latest
     build:
-      context: services/client_service_rs
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: services/client_service_rs/Dockerfile
     depends_on:
       agent-host:
         condition: service_started
@@ -66,6 +66,7 @@ services:
       - LOG_LEVEL=INFO
       - CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://agent-host:8001
       - CLIENT_SERVICE_AGENT_HOST_TIMEOUT=60
+      - CLIENT_SERVICE_CONNECTION_MODELS_TIMEOUT=15
       - CLIENT_SERVICE_GIT_AGENT_BASE_URL=http://git-agent:8004
       - CLIENT_SERVICE_GIT_AGENT_DATA_VOLUME=${GITAGENT_DATA_VOLUME:-agentspace-git-agent-data}
       - CLIENT_SERVICE_DB_PATH=/data/client_service.sqlite

@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -33,6 +33,9 @@ use crate::{
         validate_workspace_id,
     },
 };
+
+const DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL: &str = "http://client-service:8002";
+const AGENTSPACE_CLIENT_SERVICE_URL_ENV: &str = "CLIENT_SERVICE_AGENTSPACE_BASE_URL";
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -106,6 +109,12 @@ pub fn router() -> Router<AppState> {
             get(kernel_container_logs),
         )
         .route("/skills", get(list_skills).post(create_skill))
+        .route("/skills/{skill_id}/versions", get(list_skill_versions))
+        .route("/skills/{skill_id}/download", get(download_skill))
+        .route(
+            "/skills/{skill_id}/versions/{version}/rollback",
+            post(rollback_skill_version),
+        )
         .route(
             "/skills/{skill_id}",
             get(get_skill).put(update_skill).delete(delete_skill),
@@ -301,7 +310,10 @@ async fn list_connection_models(
         "fetching connection models"
     );
     let url = format!("{}/models", connection.url.trim_end_matches('/'));
-    let mut request = state.http_client.get(url);
+    let mut request = state
+        .http_client
+        .get(url)
+        .timeout(state.config.connection_models_timeout());
     if !connection.api_key.is_empty() {
         request = request.bearer_auth(&connection.api_key);
     }
@@ -1239,15 +1251,27 @@ async fn create_skill(
     Json(payload): Json<CreateSkillRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_skill_id(&payload.skill_id)?;
+    if let Some(creator_agent_id) = payload.creator_agent_id.as_deref() {
+        validate_agent_id(creator_agent_id)?;
+        require_agent(&state, creator_agent_id)?;
+    }
     let skill = state
         .agent_host
         .create_skill(&payload.skill_id, &payload.files)
         .await?;
+    let auto_enabled = payload
+        .creator_agent_id
+        .as_deref()
+        .map(|agent_id| state.agents.add_skill(agent_id, &payload.skill_id))
+        .transpose()?
+        .unwrap_or(false);
     tracing::info!(
         route = "/skills",
         action = "create_skill",
         skill_id = %payload.skill_id,
         file_count = payload.files.len(),
+        creator_agent_id = payload.creator_agent_id.as_deref().unwrap_or_default(),
+        auto_enabled,
         "api handler completed"
     );
     Ok(Json(Value::Object(skill)))
@@ -1284,6 +1308,53 @@ async fn get_skill(
     Ok(Json(Value::Object(skill)))
 }
 
+async fn download_skill(
+    State(state): State<AppState>,
+    Path(skill_id): Path<String>,
+) -> Result<Response, ApiError> {
+    validate_skill_id(&skill_id)?;
+    let download = state.agent_host.download_skill(&skill_id).await?;
+    let mut response = Body::from(download.body).into_response();
+    insert_download_header(
+        response.headers_mut(),
+        header::CONTENT_TYPE,
+        &download.content_type,
+    )?;
+    insert_download_header(
+        response.headers_mut(),
+        header::CONTENT_DISPOSITION,
+        &download.content_disposition,
+    )?;
+    tracing::info!(
+        route = "/skills/:skill_id/download",
+        action = "download_skill",
+        skill_id = %skill_id,
+        "api handler completed"
+    );
+    Ok(response)
+}
+
+async fn list_skill_versions(
+    State(state): State<AppState>,
+    Path(skill_id): Path<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let versions = state
+        .agent_host
+        .list_skill_versions(&skill_id)
+        .await?
+        .into_iter()
+        .map(Value::Object)
+        .collect::<Vec<_>>();
+    tracing::info!(
+        route = "/skills/:skill_id/versions",
+        action = "list_skill_versions",
+        skill_id = %skill_id,
+        version_count = versions.len(),
+        "api handler completed"
+    );
+    Ok(Json(versions))
+}
+
 async fn update_skill(
     State(state): State<AppState>,
     Path(skill_id): Path<String>,
@@ -1304,6 +1375,25 @@ async fn update_skill(
     Ok(Json(Value::Object(skill)))
 }
 
+async fn rollback_skill_version(
+    State(state): State<AppState>,
+    Path((skill_id, version)): Path<(String, u64)>,
+) -> Result<Json<Value>, ApiError> {
+    validate_skill_id(&skill_id)?;
+    let skill = state
+        .agent_host
+        .rollback_skill_version(&skill_id, version)
+        .await?;
+    tracing::info!(
+        route = "/skills/:skill_id/versions/:version/rollback",
+        action = "rollback_skill_version",
+        skill_id = %skill_id,
+        version,
+        "api handler completed"
+    );
+    Ok(Json(Value::Object(skill)))
+}
+
 async fn delete_skill(
     State(state): State<AppState>,
     Path(skill_id): Path<String>,
@@ -1316,6 +1406,21 @@ async fn delete_skill(
         "api handler completed"
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn insert_download_header(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    value: &str,
+) -> Result<(), ApiError> {
+    let value = HeaderValue::from_str(value).map_err(|source| {
+        ApiError::bad_gateway(format!(
+            "agent_host returned invalid download header {}: {source}",
+            name.as_str()
+        ))
+    })?;
+    headers.insert(name, value);
+    Ok(())
 }
 
 async fn list_gateway_types() -> Json<Vec<&'static str>> {
@@ -1744,6 +1849,16 @@ fn session_env(
         }
     }
     env.extend(parse_env_vars(&agent.env_vars));
+    env.insert("AGENTSPACE_AGENT_ID".to_owned(), agent.agent_id.clone());
+    env.insert(
+        "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
+        state
+            .config
+            .client_service_env
+            .get(AGENTSPACE_CLIENT_SERVICE_URL_ENV)
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL.to_owned()),
+    );
     if !agent.system_prompt.is_empty() {
         env.insert(
             "KERNEL_SYSTEM_PROMPT".to_owned(),
@@ -2564,7 +2679,7 @@ fn ndjson_stream_response(receiver: NdjsonReceiver) -> Response {
         [
             (header::CONTENT_TYPE, "application/x-ndjson"),
             (header::CACHE_CONTROL, "no-cache"),
-            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+            (HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         Body::from_stream(ReceiverStream::new(receiver)),
     )
@@ -3014,6 +3129,7 @@ struct ContainerLogsQuery {
 struct CreateSkillRequest {
     skill_id: String,
     files: BTreeMap<String, String>,
+    creator_agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3212,7 +3328,7 @@ mod tests {
         Json, Router,
         body::{Body, to_bytes},
         extract::{Path, State},
-        http::{Method, Request, StatusCode, header},
+        http::{HeaderValue, Method, Request, StatusCode, header},
         response::{IntoResponse, Response},
         routing::{get, post},
     };
@@ -3242,6 +3358,17 @@ mod tests {
         Ok(build_router(AppState::with_agent_host(config, agent_host)))
     }
 
+    fn test_router_with_connection_models_timeout(
+        timeout: Duration,
+    ) -> Result<Router, Box<dyn Error + Send + Sync>> {
+        let mut env = BTreeMap::new();
+        env.insert("CLIENT_SERVICE_TEST".to_owned(), "enabled".to_owned());
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env)
+            .with_connection_models_timeout(timeout);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        Ok(build_router(AppState::with_agent_host(config, agent_host)))
+    }
+
     struct StreamingUpstream {
         base_url: String,
         handle: JoinHandle<Result<(), std::io::Error>>,
@@ -3252,6 +3379,8 @@ mod tests {
             let app = Router::new()
                 .route("/sessions", post(upstream_create_session))
                 .route("/sessions/{session_id}", get(upstream_get_session))
+                .route("/models", get(upstream_models))
+                .route("/skills/{skill_id}/download", get(upstream_download_skill))
                 .route(
                     "/sessions/{session_id}/messages/stream",
                     post(upstream_stream_message),
@@ -3284,6 +3413,25 @@ mod tests {
 
     async fn upstream_get_session(Path(session_id): Path<String>) -> Json<Value> {
         Json(json!({ "session_id": session_id, "status": "idle" }))
+    }
+
+    async fn upstream_download_skill(Path(skill_id): Path<String>) -> Response {
+        (
+            [
+                (header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"SKILL.md\"",
+                ),
+            ],
+            Body::from(format!("# {skill_id}")),
+        )
+            .into_response()
+    }
+
+    async fn upstream_models(State(final_delay): State<Duration>) -> Json<Value> {
+        sleep(final_delay).await;
+        Json(json!({ "data": [{ "id": "slow-model" }], "object": "list" }))
     }
 
     async fn upstream_stream_message(
@@ -3523,6 +3671,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connection_models_route_times_out_slow_upstreams()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = StreamingUpstream::start(Duration::from_millis(200)).await?;
+        let app = test_router_with_connection_models_timeout(Duration::from_millis(50))?;
+        let payload = json!({
+            "connection_id": "main",
+            "name": "Main",
+            "url": upstream.base_url,
+        });
+        let (status, _value) =
+            request_json(app.clone(), Method::POST, "/connections", Some(payload)).await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let start = Instant::now();
+        let (status, value) = get_json(app, "/connections/main/models").await?;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(value["detail"].is_string());
+        assert!(start.elapsed() < Duration::from_millis(500));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn agent_routes_handle_crud_and_missing_connections()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let app = test_router()?;
@@ -3553,7 +3725,10 @@ mod tests {
         .await?;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["harness"], "acp");
-        assert_eq!(value["system_prompt"], "");
+        assert_eq!(
+            value["system_prompt"],
+            crate::models::DEFAULT_AGENT_SYSTEM_PROMPT
+        );
         assert_eq!(value["skills"], json!([]));
 
         let (status, value) = request_json(
@@ -3578,6 +3753,35 @@ mod tests {
         let (status, value) = get_json(app, "/agents/agent-one").await?;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn skill_download_proxies_agent_host_attachment_headers()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = StreamingUpstream::start(Duration::ZERO).await?;
+        let app = test_router_with_agent_host(&upstream.base_url, Duration::from_secs(1))?;
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/skills/my-skill/download")
+            .body(Body::empty())?;
+        let response = app.oneshot(request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("text/markdown; charset=utf-8"))
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_DISPOSITION),
+            Some(&HeaderValue::from_static(
+                "attachment; filename=\"SKILL.md\""
+            ))
+        );
+        let body = response.into_body().collect().await?.to_bytes();
+        assert_eq!(body.as_ref(), b"# my-skill");
 
         Ok(())
     }
@@ -3713,17 +3917,17 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_TYPE),
-            Some(&header::HeaderValue::from_static("application/x-ndjson"))
+            Some(&HeaderValue::from_static("application/x-ndjson"))
         );
         assert_eq!(
             response.headers().get(header::CACHE_CONTROL),
-            Some(&header::HeaderValue::from_static("no-cache"))
+            Some(&HeaderValue::from_static("no-cache"))
         );
         assert_eq!(
             response
                 .headers()
                 .get(header::HeaderName::from_static("x-accel-buffering")),
-            Some(&header::HeaderValue::from_static("no"))
+            Some(&HeaderValue::from_static("no"))
         );
 
         let mut body = response.into_body();

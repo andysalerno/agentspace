@@ -11,6 +11,7 @@ import {
     useGatewayTypes,
 } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { Button, Checkbox, Input, Select, Textarea } from "./fluent";
 
 type SecretEntry = { key: string; value: string };
 
@@ -408,9 +409,9 @@ export default function GatewaysView() {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button onClick={() => setShowForm(!showForm)} type="button">
+                    <Button onClick={() => setShowForm(!showForm)} type="button">
                         {showForm ? "Cancel" : "New Gateway"}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -418,7 +419,7 @@ export default function GatewaysView() {
                 <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Gateway ID
-                        <input
+                        <Input
                             pattern="[a-z]+(?:-[a-z]+)*"
                             placeholder="echo-bridge"
                             required
@@ -428,7 +429,7 @@ export default function GatewaysView() {
                     </label>
                     <label>
                         Name
-                        <input
+                        <Input
                             placeholder="My Echo Gateway"
                             required
                             value={gatewayName}
@@ -437,7 +438,7 @@ export default function GatewaysView() {
                     </label>
                     <label>
                         Type
-                        <select
+                        <Select
                             value={gatewayType}
                             onChange={(e) => setGatewayType(e.target.value)}
                         >
@@ -446,11 +447,11 @@ export default function GatewaysView() {
                                     {type}
                                 </option>
                             ))}
-                        </select>
+                        </Select>
                     </label>
                     <label>
                         Agent
-                        <select
+                        <Select
                             value={agentId}
                             onChange={(e) => setAgentId(e.target.value)}
                             required
@@ -463,16 +464,14 @@ export default function GatewaysView() {
                                     {agent.name} ({agent.agent_id})
                                 </option>
                             ))}
-                        </select>
+                        </Select>
                     </label>
-                    <label className="checkbox-label">
-                        <input
-                            checked={enabled}
-                            onChange={(e) => setEnabled(e.target.checked)}
-                            type="checkbox"
-                        />
-                        Auto-start on boot
-                    </label>
+                    <Checkbox
+                        checked={enabled}
+                        className="checkbox-label"
+                        label="Auto-start on boot"
+                        onChange={(_, data) => setEnabled(data.checked === true)}
+                    />
                     {schema && schema.fields.length > 0 && (
                         <fieldset className="schema-fields">
                             <legend>Gateway environment variables</legend>
@@ -480,7 +479,8 @@ export default function GatewaysView() {
                                 <label key={f.key}>
                                     {f.label}
                                     {f.required && <span aria-hidden="true"> *</span>}
-                                    <input
+                                    <Input
+                                        autoComplete={f.kind === "secret" ? "new-password" : undefined}
                                         type={f.kind === "secret" ? "password" : "text"}
                                         required={f.required}
                                         placeholder={f.placeholder ?? f.default ?? ""}
@@ -501,7 +501,7 @@ export default function GatewaysView() {
                     )}
                     <label>
                         Other environment variables (.env format)
-                        <textarea
+                        <Textarea
                             placeholder="EXTRA_VAR=value"
                             rows={4}
                             value={envVars}
@@ -513,41 +513,42 @@ export default function GatewaysView() {
                             <span className="skill-files-label">
                                 Other secrets (passed as env)
                             </span>
-                            <button
+                            <Button
                                 className="secondary-button small"
                                 onClick={addSecret}
                                 type="button"
                             >
                                 + Add Secret
-                            </button>
+                            </Button>
                         </div>
                         {newSecrets.map((secret, index) => (
                             <div className="skill-file-entry-header" key={index}>
-                                <input
+                                <Input
                                     placeholder="KEY"
                                     value={secret.key}
                                     onChange={(e) => updateSecret(index, "key", e.target.value)}
                                 />
-                                <input
+                                <Input
+                                    autoComplete="new-password"
                                     placeholder="value"
                                     type="password"
                                     value={secret.value}
                                     onChange={(e) => updateSecret(index, "value", e.target.value)}
                                 />
-                                <button
+                                <Button
                                     className="icon-button danger-button"
                                     onClick={() => removeSecret(index)}
                                     type="button"
                                     title="Remove secret"
                                 >
                                     ×
-                                </button>
+                                </Button>
                             </div>
                         ))}
                     </div>
-                    <button disabled={busy || !agentId} type="submit">
+                    <Button disabled={busy || !agentId} type="submit">
                         Create Gateway
-                    </button>
+                    </Button>
                 </form>
             )}
 
@@ -640,7 +641,7 @@ export default function GatewaysView() {
                                     )}
                                     <label>
                                         Name
-                                        <input
+                                        <Input
                                             required
                                             value={editName}
                                             onChange={(e) => setEditName(e.target.value)}
@@ -648,7 +649,7 @@ export default function GatewaysView() {
                                     </label>
                                     <label>
                                         Agent
-                                        <select
+                                        <Select
                                             value={editAgentId}
                                             onChange={(e) => setEditAgentId(e.target.value)}
                                             required
@@ -666,7 +667,7 @@ export default function GatewaysView() {
                                                     {agent.name} ({agent.agent_id})
                                                 </option>
                                             ))}
-                                        </select>
+                                        </Select>
                                         {editShowsMissingAgent && (
                                             <small className="field-help error-text">
                                                 The currently assigned agent no longer exists. Select
@@ -674,14 +675,12 @@ export default function GatewaysView() {
                                             </small>
                                         )}
                                     </label>
-                                    <label className="checkbox-label">
-                                        <input
-                                            checked={editEnabled}
-                                            onChange={(e) => setEditEnabled(e.target.checked)}
-                                            type="checkbox"
-                                        />
-                                        Auto-start on boot
-                                    </label>
+                                    <Checkbox
+                                        checked={editEnabled}
+                                        className="checkbox-label"
+                                        label="Auto-start on boot"
+                                        onChange={(_, data) => setEditEnabled(data.checked === true)}
+                                    />
                                     {editSchema && editSchema.fields.length > 0 && (
                                         <fieldset className="schema-fields">
                                             <legend>Gateway environment variables</legend>
@@ -693,7 +692,8 @@ export default function GatewaysView() {
                                                     <label key={f.key}>
                                                         {f.label}
                                                         {f.required && <span aria-hidden="true"> *</span>}
-                                                        <input
+                                                        <Input
+                                                            autoComplete={f.kind === "secret" ? "new-password" : undefined}
                                                             type={f.kind === "secret" ? "password" : "text"}
                                                             // Don't enforce required on existing secrets:
                                                             // empty means "keep current value".
@@ -721,7 +721,7 @@ export default function GatewaysView() {
                                     )}
                                     <label>
                                         Other environment variables (.env format)
-                                        <textarea
+                                        <Textarea
                                             placeholder="EXTRA_VAR=value"
                                             rows={4}
                                             value={editExtraEnv}
@@ -733,24 +733,25 @@ export default function GatewaysView() {
                                             <span className="skill-files-label">
                                                 Other secrets (passed as env)
                                             </span>
-                                            <button
+                                            <Button
                                                 className="secondary-button small"
                                                 onClick={addEditSecret}
                                                 type="button"
                                             >
                                                 + Add Secret
-                                            </button>
+                                            </Button>
                                         </div>
                                         {editNewSecrets.map((secret, index) => (
                                             <div className="skill-file-entry-header" key={index}>
-                                                <input
+                                                <Input
                                                     placeholder="KEY"
                                                     value={secret.key}
                                                     onChange={(e) =>
                                                         updateEditSecret(index, "key", e.target.value)
                                                     }
                                                 />
-                                                <input
+                                                <Input
+                                                    autoComplete="new-password"
                                                     placeholder="value"
                                                     type="password"
                                                     value={secret.value}
@@ -758,19 +759,19 @@ export default function GatewaysView() {
                                                         updateEditSecret(index, "value", e.target.value)
                                                     }
                                                 />
-                                                <button
+                                                <Button
                                                     className="icon-button danger-button"
                                                     onClick={() => removeEditSecret(index)}
                                                     type="button"
                                                     title="Remove secret"
                                                 >
                                                     ×
-                                                </button>
+                                                </Button>
                                             </div>
                                         ))}
                                     </div>
                                     <div className="card-footer-actions">
-                                        <button
+                                        <Button
                                             disabled={
                                                 busy
                                                 || !editAgentId
@@ -781,20 +782,20 @@ export default function GatewaysView() {
                                             type="submit"
                                         >
                                             Save Changes
-                                        </button>
-                                        <button
+                                        </Button>
+                                        <Button
                                             className="secondary-button"
                                             onClick={cancelEdit}
                                             type="button"
                                         >
                                             Cancel
-                                        </button>
+                                        </Button>
                                     </div>
                                 </form>
                             )}
                         </div>
                         <div className="card-footer">
-                            <button
+                            <Button
                                 className="secondary-button small"
                                 disabled={logsQuery.isFetching && expandedGatewayId === gateway.gateway_id}
                                 onClick={() => handleToggleLogs(gateway)}
@@ -803,28 +804,28 @@ export default function GatewaysView() {
                                 {expandedGatewayId === gateway.gateway_id
                                     ? "Hide Logs"
                                     : "View Logs"}
-                            </button>
+                            </Button>
                             <div className="card-footer-actions">
                                 {gateway.status === "running" ? (
-                                    <button
+                                    <Button
                                         className="secondary-button small"
                                         disabled={busy}
                                         onClick={() => stopMutation.mutate(gateway.gateway_id)}
                                         type="button"
                                     >
                                         Stop
-                                    </button>
+                                    </Button>
                                 ) : (
-                                    <button
+                                    <Button
                                         className="small"
                                         disabled={busy || agentsLoading || !hasValidAgent}
                                         onClick={() => startMutation.mutate(gateway.gateway_id)}
                                         type="button"
                                     >
                                         Start
-                                    </button>
+                                    </Button>
                                 )}
-                                <button
+                                <Button
                                     className="secondary-button small"
                                     disabled={
                                         busy
@@ -840,8 +841,8 @@ export default function GatewaysView() {
                                     type="button"
                                 >
                                     {gateway.enabled ? "Disable" : "Enable"}
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     className="secondary-button small"
                                     disabled={busy}
                                     onClick={() => openEdit(gateway)}
@@ -849,15 +850,15 @@ export default function GatewaysView() {
                                     title="Edit gateway configuration. Running gateways will be restarted to pick up changes."
                                 >
                                     Edit
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     className="danger-button small"
                                     disabled={busy}
                                     onClick={() => deleteMutation.mutate(gateway.gateway_id)}
                                     type="button"
                                 >
                                     Delete
-                                </button>
+                                </Button>
                             </div>
                         </div>
                     </div>

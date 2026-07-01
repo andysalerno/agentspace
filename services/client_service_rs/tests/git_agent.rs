@@ -17,7 +17,7 @@ use axum::{
 };
 use client_service_rs::{
     AppConfig, AppState, agent_host::AgentHostClient, build_router, git_agent::GitAgentClient,
-    store::StoreSet,
+    models::DEFAULT_AGENT_SYSTEM_PROMPT, store::StoreSet,
 };
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -494,6 +494,11 @@ async fn git_agent_workspace_mount_uses_git_agent_volume()
     assert_eq!(
         agent_host.recorded()?,
         vec![json!({
+            "env": {
+                "AGENTSPACE_AGENT_ID": "workspace-agent",
+                "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                "KERNEL_SYSTEM_PROMPT": DEFAULT_AGENT_SYSTEM_PROMPT
+            },
             "harness": "acp",
             "skills": [],
             "workspace_mounts": [
@@ -538,6 +543,8 @@ async fn session_request_can_add_git_agent_workspace_mount()
         agent_host.recorded()?,
         vec![json!({
             "env": {
+                "AGENTSPACE_AGENT_ID": "git-agent",
+                "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
                 "KERNEL_SYSTEM_PROMPT": "Review submitted patches for correctness, safety, and repository policy before GitAgent commits them."
             },
             "harness": "acp",

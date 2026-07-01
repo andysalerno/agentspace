@@ -4,8 +4,8 @@ AgentSpace is a system for defining, interacting with, and observing AI agents.
 
 ## System Architecture
 
-The repository is a monorepo managed by `uv` for Python packages, with the
-Rust client service managed by Cargo under `services/client_service_rs`.
+The repository is a monorepo managed by `uv` for Python packages, with Rust
+services managed by the Cargo workspace at the repository root.
 
 ### Key Components
 
@@ -13,7 +13,7 @@ Rust client service managed by Cargo under `services/client_service_rs`.
   - `kernel_copilot`: Primary kernel path (uses `copilot-cli`).
   - `kernel_host`: Runner for kernel containers.
 - **Services** (`services/`):
-  - `agent_host`: Containerized FastAPI service that manages sessions by spawning `kernel_host` containers.
+  - `agent_host_rs`: Rust service that manages sessions by spawning `kernel_host` containers.
   - `client_service_rs`: Rust implementation of the public backend API. Clients should talk to this, not `agent_host` directly.
 - **Clients** (`clients/`, `channels/`):
   - `webui`: TypeScript dashboard.
@@ -24,7 +24,7 @@ Rust client service managed by Cargo under `services/client_service_rs`.
 ### Commands
 
 Use `just` for common tasks:
-- `just bootstrap`: Install all dependencies (`uv sync` and `npm install`).
+- `just bootstrap`: Install all dependencies (`uv sync` and `pnpm install`).
 - `just check`: Run the full repo verification suite before finishing work.
 - `just test`: Run all Python tests via `uv run pytest`.
 - `just stack-up`: Start the full stack using Docker Compose.
@@ -32,7 +32,7 @@ Use `just` for common tasks:
 - `just copilot-setup`: Run `kernels/kernel_host/spawn-kernel.sh setup` to authenticate Copilot.
 
 Run `just check` after completing any code or documentation change. It covers
-Python formatting, linting, type-checking, tests, web linting, npm tests when
+Python formatting, linting, type-checking, tests, web linting, pnpm tests when
 present, and the web build.
 
 ### Python Standards

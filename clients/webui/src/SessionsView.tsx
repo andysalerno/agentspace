@@ -3,6 +3,15 @@ import { api } from "./api";
 import { useErrorContext } from "./ErrorContext";
 import { queryKeys, useAgents, useSessions } from "./queries";
 import { promptSaveWorkspace } from "./saveWorkspacePrompt";
+import {
+    Button,
+    Table,
+    TableBody,
+    TableCell,
+    TableHeader,
+    TableHeaderCell,
+    TableRow,
+} from "./fluent";
 
 type SessionsViewProps = {
     onNavigateToChat: (sessionId: string) => void;
@@ -60,59 +69,59 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
 
             {sessions.length > 0 ? (
                 <div className="table-container management-table-container">
-                    <table className="data-table management-table">
-                        <thead>
-                            <tr>
-                                <th>Agent</th>
-                                <th>Session ID</th>
-                                <th>Status</th>
-                                <th>Messages</th>
-                                <th>Channel</th>
-                                <th>Created</th>
-                                <th aria-label="Actions"></th>
-                            </tr>
-                        </thead>
-                        <tbody>
+                    <Table className="data-table management-table">
+                        <TableHeader>
+                            <TableRow>
+                                <TableHeaderCell>Agent</TableHeaderCell>
+                                <TableHeaderCell>Session ID</TableHeaderCell>
+                                <TableHeaderCell>Status</TableHeaderCell>
+                                <TableHeaderCell>Messages</TableHeaderCell>
+                                <TableHeaderCell>Channel</TableHeaderCell>
+                                <TableHeaderCell>Created</TableHeaderCell>
+                                <TableHeaderCell aria-label="Actions"></TableHeaderCell>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
                             {sessions.map((s) => (
-                                <tr key={s.session_id}>
-                                    <td>
+                                <TableRow key={s.session_id}>
+                                    <TableCell>
                                         <strong className="truncate-value">{agentMap[s.agent_id]?.name ?? s.agent_id}</strong>
                                         <div className="muted mono truncate-value">{s.agent_id}</div>
-                                    </td>
-                                    <td className="mono" title={s.session_id}>
+                                    </TableCell>
+                                    <TableCell className="mono" title={s.session_id}>
                                         <span className="truncate-value">{s.session_id.slice(0, 12)}…</span>
-                                    </td>
-                                    <td>
+                                    </TableCell>
+                                    <TableCell>
                                         <span className={`status-badge ${s.status}`}>{s.status}</span>
-                                    </td>
-                                    <td>{s.message_count}</td>
-                                    <td>
+                                    </TableCell>
+                                    <TableCell>{s.message_count}</TableCell>
+                                    <TableCell>
                                         <span className="truncate-value">{s.channel_name ?? "—"}</span>
-                                    </td>
-                                    <td className="nowrap">{new Date(s.created_at).toLocaleString()}</td>
-                                    <td className="actions-cell">
+                                    </TableCell>
+                                    <TableCell className="nowrap">{new Date(s.created_at).toLocaleString()}</TableCell>
+                                    <TableCell className="actions-cell">
                                         <div className="card-footer-actions">
-                                            <button
+                                            <Button
                                                 className="secondary-button small"
                                                 onClick={() => onNavigateToChat(s.session_id)}
                                                 type="button"
                                             >
                                                 Open Chat
-                                            </button>
-                                            <button
+                                            </Button>
+                                            <Button
                                                 className="danger-button small"
                                                 disabled={deleteMutation.isPending || saveWorkspaceMutation.isPending}
                                                 onClick={() => void handleDeleteSession(s.session_id)}
                                                 type="button"
                                             >
                                                 Delete
-                                            </button>
+                                            </Button>
                                         </div>
-                                    </td>
-                                </tr>
+                                    </TableCell>
+                                </TableRow>
                             ))}
-                        </tbody>
-                    </table>
+                        </TableBody>
+                    </Table>
                 </div>
             ) : (
                 <div className="empty-state">No sessions yet.</div>

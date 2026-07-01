@@ -5,6 +5,7 @@ import type { Connection } from "./types";
 import { api } from "./api";
 import { queryKeys, useConnections } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { Button, Input, Select } from "./fluent";
 
 type ConnectionApiFlavor = Connection["api_flavor"];
 
@@ -129,9 +130,9 @@ export default function ConnectionsView() {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button onClick={() => setShowForm(!showForm)} type="button">
+                    <Button onClick={() => setShowForm(!showForm)} type="button">
                         {showForm ? "Cancel" : "New Connection"}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -139,7 +140,8 @@ export default function ConnectionsView() {
                 <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Connection ID
-                        <input
+                        <Input
+                            autoComplete="username"
                             pattern="[a-z]+(?:-[a-z]+)*"
                             placeholder="openai"
                             required
@@ -149,7 +151,8 @@ export default function ConnectionsView() {
                     </label>
                     <label>
                         Display Name
-                        <input
+                        <Input
+                            autoComplete="organization"
                             placeholder="OpenAI"
                             required
                             value={formName}
@@ -158,7 +161,8 @@ export default function ConnectionsView() {
                     </label>
                     <label>
                         URL
-                        <input
+                        <Input
+                            autoComplete="url"
                             placeholder="https://api.openai.com/v1"
                             required
                             value={formUrl}
@@ -167,7 +171,8 @@ export default function ConnectionsView() {
                     </label>
                     <label>
                         API Key
-                        <input
+                        <Input
+                            autoComplete="new-password"
                             placeholder="sk-..."
                             type="password"
                             value={formApiKey}
@@ -177,7 +182,7 @@ export default function ConnectionsView() {
                     </label>
                     <label>
                         API Flavor
-                        <select
+                        <Select
                             required
                             value={formApiFlavor}
                             onChange={(e) => setFormApiFlavor(e.target.value as ConnectionApiFlavor)}
@@ -187,11 +192,11 @@ export default function ConnectionsView() {
                                     {option.label}
                                 </option>
                             ))}
-                        </select>
+                        </Select>
                     </label>
-                    <button disabled={busy} type="submit">
+                    <Button disabled={busy} type="submit">
                         Create Connection
-                    </button>
+                    </Button>
                 </form>
             )}
 
@@ -228,7 +233,8 @@ export default function ConnectionsView() {
                                 >
                                     <label>
                                         Display Name
-                                        <input
+                                        <Input
+                                            autoComplete="organization"
                                             required
                                             value={editName}
                                             onChange={(e) => setEditName(e.target.value)}
@@ -236,7 +242,8 @@ export default function ConnectionsView() {
                                     </label>
                                     <label>
                                         URL
-                                        <input
+                                        <Input
+                                            autoComplete="url"
                                             required
                                             value={editUrl}
                                             onChange={(e) => setEditUrl(e.target.value)}
@@ -244,7 +251,8 @@ export default function ConnectionsView() {
                                     </label>
                                     <label>
                                         API Key
-                                        <input
+                                        <Input
+                                            autoComplete="new-password"
                                             placeholder={editingConn && editingConn.has_api_key ? "(leave blank to keep current value)" : "sk-..."}
                                             type="password"
                                             value={editApiKey}
@@ -253,7 +261,7 @@ export default function ConnectionsView() {
                                     </label>
                                     <label>
                                         API Flavor
-                                        <select
+                                        <Select
                                             required
                                             value={editApiFlavor}
                                             onChange={(e) => setEditApiFlavor(e.target.value as ConnectionApiFlavor)}
@@ -263,22 +271,22 @@ export default function ConnectionsView() {
                                                     {option.label}
                                                 </option>
                                             ))}
-                                        </select>
+                                        </Select>
                                     </label>
                                     <div className="card-footer-actions">
-                                        <button
+                                        <Button
                                             disabled={busy}
                                             type="submit"
                                         >
                                             Save Changes
-                                        </button>
-                                        <button
+                                        </Button>
+                                        <Button
                                             className="secondary-button"
                                             onClick={cancelEdit}
                                             type="button"
                                         >
                                             Cancel
-                                        </button>
+                                        </Button>
                                     </div>
                                 </form>
                             )}
@@ -289,23 +297,23 @@ export default function ConnectionsView() {
                             </span>
                             <div className="card-footer-actions">
                                 {editingId !== conn.connection_id && (
-                                    <button
+                                    <Button
                                         className="secondary-button small"
                                         disabled={busy}
                                         onClick={() => openEdit(conn)}
                                         type="button"
                                     >
                                         Edit
-                                    </button>
+                                    </Button>
                                 )}
-                                <button
+                                <Button
                                     className="danger-button small"
                                     disabled={busy}
                                     onClick={() => deleteMutation.mutate(conn.connection_id)}
                                     type="button"
                                 >
                                     Delete
-                                </button>
+                                </Button>
                             </div>
                         </div>
                     </div>

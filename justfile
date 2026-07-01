@@ -1,7 +1,7 @@
 set shell := ["bash", "-cu"]
 set windows-shell := ["bash", "-cu"]
 
-agent_host_script := "services/agent_host/run-service.sh"
+agent_host_script := "services/agent_host_rs/run-service.sh"
 client_service_script := "services/client_service_rs/run-service.sh"
 webui_script := "clients/webui/run-service.sh"
 kernel_host_script := "kernels/kernel_host/spawn-kernel.sh"
@@ -15,34 +15,46 @@ help:
 # Workspace setup and validation
 bootstrap:
   uv sync --all-packages --dev
-  npm --prefix clients/webui install
+  pnpm --dir clients/webui install
 
 check:
   uv run ruff format --check .
   uv run ruff check .
   uv run pyright
   uv run --all-packages pytest
-  npm --prefix clients/webui run lint
-  npm --prefix clients/webui run test --if-present
-  npm --prefix clients/webui run build
+  just client-service-rs-check
+  just agent-host-rs-check
+  pnpm --dir clients/webui run lint
+  pnpm --dir clients/webui run --if-present test
+  pnpm --dir clients/webui run build
 
 test:
   uv run --all-packages pytest
+  cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
+  cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
 
 client-service-rs-check:
   cargo fmt --check --manifest-path services/client_service_rs/Cargo.toml
   cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
   cargo clippy --manifest-path services/client_service_rs/Cargo.toml --all-targets --all-features
 
+agent-host-rs-check:
+  cargo fmt --check --manifest-path services/agent_host_rs/Cargo.toml
+  cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
+  cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
+
 client-service-rs-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest services/client_service_rs
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/client_service_rs/Dockerfile -t agentspace-client-service-rs:latest .
+
+agent-host-rs-image:
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; "$runtime" build -f services/agent_host_rs/Dockerfile -t agentspace-agent-host-agent-host:latest .
 
 webui-outdated:
-  npm --prefix clients/webui outdated
+  pnpm --dir clients/webui outdated
 
 # Static analysis for the webui (knip: unused/unlisted deps, dead exports)
 webui-lint:
-  npm --prefix clients/webui run lint
+  pnpm --dir clients/webui run lint
 
 # Full stack compose workflow
 stack-build:

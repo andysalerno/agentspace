@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -25,21 +25,5 @@ uuid = { version = "1", features = ["serde", "v7"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
-[lints.rust]
-rust_2018_idioms = { level = "deny", priority = -1 }
-unsafe_code = "forbid"
-unused_lifetimes = "deny"
-unused_qualifications = "deny"
-warnings = "deny"
-
-[lints.clippy]
-all = { level = "deny", priority = -1 }
-pedantic = { level = "deny", priority = -1 }
-nursery = { level = "warn", priority = -1 }
-cargo = { level = "warn", priority = -1 }
-expect_used = "deny"
-multiple_crate_versions = "allow"
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-unwrap_used = "deny"
+[lints]
+workspace = true

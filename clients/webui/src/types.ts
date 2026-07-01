@@ -48,6 +48,13 @@ export type Skill = {
   source?: "builtin" | "user";
 };
 
+export type SkillVersion = {
+  skill_id: string;
+  version: number;
+  created_at: string;
+  files: Record<string, string>;
+};
+
 export type SessionSummary = {
   session_id: string;
   agent_id: string;
@@ -199,7 +206,7 @@ export type Connection = {
 
 export type ConnectionModels = {
   object?: string;
-  data?: Array<{
+  data?: Array<string | {
     id?: string;
     object?: string;
     [key: string]: unknown;

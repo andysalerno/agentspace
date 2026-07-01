@@ -2,10 +2,11 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { Skill } from "./types";
+import type { Skill, SkillVersion } from "./types";
 import CodeEditor from "./CodeEditor";
 import { queryKeys, useSkills } from "./queries";
 import { useErrorContext } from "./ErrorContext";
+import { Button, Input } from "./fluent";
 
 type FileEntry = { path: string; content: string };
 
@@ -40,6 +41,9 @@ export default function SkillsView() {
     const [expandedSkill, setExpandedSkill] = useState<Skill | null>(null);
     const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
     const [editFiles, setEditFiles] = useState<FileEntry[]>([]);
+    const [historySkillId, setHistorySkillId] = useState<string | null>(null);
+    const [historyVersions, setHistoryVersions] = useState<SkillVersion[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
     const [loading, setLoading] = useState(false);
 
     const invalidateSkills = () =>
@@ -61,12 +65,30 @@ export default function SkillsView() {
 
     const deleteMutation = useMutation({
         mutationFn: (skillId: string) => api.deleteSkill(skillId),
-        onSuccess: () => invalidateSkills(),
+        onSuccess: (_result, deletedSkillId) => {
+            if (historySkillId === deletedSkillId) {
+                setHistorySkillId(null);
+                setHistoryVersions([]);
+            }
+            if (expandedSkillId === deletedSkillId) {
+                setExpandedSkillId(null);
+                setExpandedSkill(null);
+            }
+            return invalidateSkills();
+        },
         onError: reportError,
     });
 
+    const rollbackMutation = useMutation({
+        mutationFn: ({ skillId, version }: { skillId: string; version: number }) =>
+            api.rollbackSkillVersion(skillId, version),
+    });
+
     const busy =
-        createMutation.isPending || updateMutation.isPending || deleteMutation.isPending;
+        createMutation.isPending ||
+        updateMutation.isPending ||
+        deleteMutation.isPending ||
+        rollbackMutation.isPending;
 
     function updateNewFile(index: number, field: "path" | "content", value: string) {
         setNewFiles((prev) => prev.map((f, i) => (i === index ? { ...f, [field]: value } : f)));
@@ -129,6 +151,49 @@ export default function SkillsView() {
         }
     }
 
+    async function loadSkillVersions(targetSkillId: string) {
+        const versions = await api.listSkillVersions(targetSkillId);
+        setHistoryVersions(versions);
+        setHistorySkillId(targetSkillId);
+    }
+
+    async function handleToggleHistory(skill: Skill) {
+        if (historySkillId === skill.skill_id) {
+            setHistorySkillId(null);
+            setHistoryVersions([]);
+            return;
+        }
+        setHistoryLoading(true);
+        setHistorySkillId(skill.skill_id);
+        setHistoryVersions([]);
+        try {
+            await loadSkillVersions(skill.skill_id);
+        } catch (err) {
+            setHistorySkillId(null);
+            reportError(err);
+        } finally {
+            setHistoryLoading(false);
+        }
+    }
+
+    async function handleRollback(skillIdToRollback: string, version: number) {
+        try {
+            const rolledBack = await rollbackMutation.mutateAsync({
+                skillId: skillIdToRollback,
+                version,
+            });
+            await invalidateSkills();
+            if (expandedSkillId === skillIdToRollback) {
+                setExpandedSkill(rolledBack);
+            }
+            if (historySkillId === skillIdToRollback) {
+                await loadSkillVersions(skillIdToRollback);
+            }
+        } catch (err) {
+            reportError(err);
+        }
+    }
+
     function startEditing(skill: Skill) {
         const entries: FileEntry[] = skill.files
             ? Object.entries(skill.files).map(([path, content]) => ({ path, content }))
@@ -152,6 +217,13 @@ export default function SkillsView() {
                 reportError(err);
             }
         }
+        if (historySkillId === targetSkillId) {
+            try {
+                await loadSkillVersions(targetSkillId);
+            } catch (err) {
+                reportError(err);
+            }
+        }
     }
 
     return (
@@ -164,9 +236,9 @@ export default function SkillsView() {
                     </span>
                 </div>
                 <div className="view-header-actions">
-                    <button onClick={() => setShowForm(!showForm)} type="button">
+                    <Button onClick={() => setShowForm(!showForm)} type="button">
                         {showForm ? "Cancel" : "New Skill"}
-                    </button>
+                    </Button>
                 </div>
             </div>
 
@@ -174,7 +246,7 @@ export default function SkillsView() {
                 <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
                     <label>
                         Skill ID
-                        <input
+                        <Input
                             pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
                             placeholder="code-review"
                             required
@@ -185,18 +257,18 @@ export default function SkillsView() {
                     <div className="skill-files-section">
                         <div className="skill-files-header">
                             <span className="skill-files-label">Files</span>
-                            <button
+                            <Button
                                 className="secondary-button small"
                                 onClick={addNewFile}
                                 type="button"
                             >
                                 + Add File
-                            </button>
+                            </Button>
                         </div>
                         {newFiles.map((file, index) => (
                             <div className="skill-file-entry" key={index}>
                                 <div className="skill-file-entry-header">
-                                    <input
+                                    <Input
                                         className="skill-file-path-input"
                                         placeholder="path/to/file.md"
                                         required
@@ -204,14 +276,14 @@ export default function SkillsView() {
                                         onChange={(e) => updateNewFile(index, "path", e.target.value)}
                                     />
                                     {newFiles.length > 1 && (
-                                        <button
+                                        <Button
                                             className="icon-button danger-button"
                                             onClick={() => removeNewFile(index)}
                                             type="button"
                                             title="Remove file"
                                         >
                                             ×
-                                        </button>
+                                        </Button>
                                     )}
                                 </div>
                                 <CodeEditor
@@ -223,9 +295,9 @@ export default function SkillsView() {
                             </div>
                         ))}
                     </div>
-                    <button disabled={busy} type="submit">
+                    <Button disabled={busy} type="submit">
                         Create Skill
-                    </button>
+                    </Button>
                 </form>
             )}
 
@@ -253,6 +325,16 @@ export default function SkillsView() {
                                     <strong>Files</strong>
                                     <span>{Object.keys(skill.files ?? {}).length || "load to inspect"}</span>
                                 </div>
+                                <div>
+                                    <strong>Versions</strong>
+                                    <span>
+                                        {skill.source === "builtin"
+                                            ? "read-only"
+                                            : historySkillId === skill.skill_id
+                                                ? historyVersions.length
+                                                : "load history"}
+                                    </span>
+                                </div>
                             </div>
                             {expandedSkillId === skill.skill_id && expandedSkill?.files && (
                                 <div className="skill-file-preview">
@@ -268,18 +350,18 @@ export default function SkillsView() {
                                 <div className="skill-files-section">
                                     <div className="skill-files-header">
                                         <span className="skill-files-label">Edit Files</span>
-                                        <button
+                                        <Button
                                             className="secondary-button small"
                                             onClick={addEditFile}
                                             type="button"
                                         >
                                             + Add File
-                                        </button>
+                                        </Button>
                                     </div>
                                     {editFiles.map((file, index) => (
                                         <div className="skill-file-entry" key={index}>
                                             <div className="skill-file-entry-header">
-                                                <input
+                                                <Input
                                                     className="skill-file-path-input"
                                                     placeholder="path/to/file.md"
                                                     value={file.path}
@@ -288,14 +370,14 @@ export default function SkillsView() {
                                                     }
                                                 />
                                                 {editFiles.length > 1 && (
-                                                    <button
+                                                    <Button
                                                         className="icon-button danger-button"
                                                         onClick={() => removeEditFile(index)}
                                                         type="button"
                                                         title="Remove file"
                                                     >
                                                         ×
-                                                    </button>
+                                                    </Button>
                                                 )}
                                             </div>
                                             <CodeEditor
@@ -307,37 +389,100 @@ export default function SkillsView() {
                                         </div>
                                     ))}
                                     <div className="skills-edit-actions">
-                                        <button
+                                        <Button
                                             className="small"
                                             disabled={busy}
                                             onClick={() => { void handleSaveEdit(skill.skill_id); }}
                                             type="button"
                                         >
                                             Save
-                                        </button>
-                                        <button
+                                        </Button>
+                                        <Button
                                             className="secondary-button small"
                                             onClick={() => setEditingSkillId(null)}
                                             type="button"
                                         >
                                             Cancel
-                                        </button>
+                                        </Button>
                                     </div>
+                                </div>
+                            )}
+                            {historySkillId === skill.skill_id && (
+                                <div className="skill-version-history">
+                                    <div className="skill-version-history-header">
+                                        <strong>Version History</strong>
+                                        <span>{historyVersions.length} saved versions</span>
+                                    </div>
+                                    {historyLoading ? (
+                                        <div className="empty-state">Loading version history...</div>
+                                    ) : historyVersions.length === 0 ? (
+                                        <div className="empty-state">No versions have been saved yet.</div>
+                                    ) : (
+                                        [...historyVersions].reverse().map((version) => (
+                                            <details className="skill-version-entry" key={version.version}>
+                                                <summary>
+                                                    <span>Version {version.version}</span>
+                                                    <time dateTime={version.created_at}>
+                                                        {new Date(version.created_at).toLocaleString()}
+                                                    </time>
+                                                </summary>
+                                                <div className="skill-version-actions">
+                                                    <Button
+                                                        className="secondary-button small"
+                                                        disabled={busy}
+                                                        onClick={() => {
+                                                            void handleRollback(skill.skill_id, version.version);
+                                                        }}
+                                                        type="button"
+                                                    >
+                                                        Roll back to this version
+                                                    </Button>
+                                                </div>
+                                                <div className="skill-file-preview">
+                                                    {Object.entries(version.files).map(([filename, content]) => (
+                                                        <div key={filename}>
+                                                            <div className="skill-filename">{filename}</div>
+                                                            <pre className="skill-file-content">{content}</pre>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </details>
+                                        ))
+                                    )}
                                 </div>
                             )}
                         </div>
                         <div className="card-footer">
-                            <button
+                            <Button
                                 className="secondary-button small"
                                 disabled={loading}
                                 onClick={() => { void handleToggleExpand(skill); }}
                                 type="button"
                             >
                                 {expandedSkillId === skill.skill_id ? "Collapse" : "View Files"}
-                            </button>
+                            </Button>
                             <div className="card-footer-actions">
+                                {skill.source !== "builtin" && (
+                                    <Button
+                                        className="secondary-button small"
+                                        disabled={historyLoading}
+                                        onClick={() => { void handleToggleHistory(skill); }}
+                                        type="button"
+                                    >
+                                        {historySkillId === skill.skill_id ? "Hide History" : "History"}
+                                    </Button>
+                                )}
+                                <Button
+                                    className="secondary-button small"
+                                    onClick={() => {
+                                        window.location.assign(api.downloadSkillUrl(skill.skill_id));
+                                    }}
+                                    type="button"
+                                >
+                                    Download
+                                </Button>
                                 {editingSkillId !== skill.skill_id && skill.source !== "builtin" && (
-                                    <button
+                                    <Button
                                         className="secondary-button small"
                                         disabled={busy}
                                         onClick={() => {
@@ -350,17 +495,17 @@ export default function SkillsView() {
                                         type="button"
                                     >
                                         Edit
-                                    </button>
+                                    </Button>
                                 )}
                                 {skill.source !== "builtin" && (
-                                    <button
+                                    <Button
                                         className="danger-button small"
                                         disabled={busy}
                                         onClick={() => deleteMutation.mutate(skill.skill_id)}
                                         type="button"
                                     >
                                         Delete
-                                    </button>
+                                    </Button>
                                 )}
                             </div>
                         </div>

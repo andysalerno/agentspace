@@ -9,6 +9,17 @@ import { queryKeys, useKernels } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 import type { KernelStats, KernelSummary } from "./types";
 import { promptSaveWorkspace } from "./saveWorkspacePrompt";
+import {
+    Button,
+    Checkbox,
+    Select,
+    Table,
+    TableBody,
+    TableCell,
+    TableHeader,
+    TableHeaderCell,
+    TableRow,
+} from "./fluent";
 
 const LOG_POLL_INTERVAL_MS = 1000;
 const DEFAULT_LOG_TAIL = 2000;
@@ -226,21 +237,21 @@ export default function KernelsView() {
 
             {kernels.length > 0 ? (
                 <div className="table-container management-table-container">
-                    <table className="data-table management-table kernels-table">
-                        <thead>
-                            <tr>
-                                <th>Harness</th>
-                                <th>Session</th>
-                                <th>Container</th>
-                                <th>Status</th>
-                                <th className="num">CPU</th>
-                                <th className="num">Memory</th>
-                                <th className="num">Turns</th>
-                                <th>Clients</th>
-                                <th aria-label="Actions"></th>
-                            </tr>
-                        </thead>
-                        <tbody>
+                    <Table className="data-table management-table kernels-table">
+                        <TableHeader>
+                            <TableRow>
+                                <TableHeaderCell>Harness</TableHeaderCell>
+                                <TableHeaderCell>Session</TableHeaderCell>
+                                <TableHeaderCell>Container</TableHeaderCell>
+                                <TableHeaderCell>Status</TableHeaderCell>
+                                <TableHeaderCell className="num">CPU</TableHeaderCell>
+                                <TableHeaderCell className="num">Memory</TableHeaderCell>
+                                <TableHeaderCell className="num">Turns</TableHeaderCell>
+                                <TableHeaderCell>Clients</TableHeaderCell>
+                                <TableHeaderCell aria-label="Actions"></TableHeaderCell>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
                             {kernels.map((kernel) => (
                                 <KernelRow
                                     key={kernel.session_id}
@@ -268,8 +279,8 @@ export default function KernelsView() {
                                     }
                                 />
                             ))}
-                        </tbody>
-                    </table>
+                        </TableBody>
+                    </Table>
                 </div>
             ) : (
                 <div className="empty-state">No active kernels.</div>
@@ -293,7 +304,7 @@ export default function KernelsView() {
                             <div className="logs-modal-actions">
                                 <label className="muted small log-source-select">
                                     Source:&nbsp;
-                                    <select
+                                    <Select
                                         value={logsState.source}
                                         onChange={(e) =>
                                             setLogSource(e.target.value as LogSource)
@@ -301,33 +312,31 @@ export default function KernelsView() {
                                     >
                                         <option value="harness">Harness logs</option>
                                         <option value="container">Container logs</option>
-                                    </select>
+                                    </Select>
                                 </label>
-                                <label className="muted small follow-toggle">
-                                    <input
-                                        type="checkbox"
-                                        checked={follow}
-                                        onChange={(e) => setFollow(e.target.checked)}
-                                    />
-                                    Follow
-                                </label>
+                                <Checkbox
+                                    checked={follow}
+                                    className="muted small follow-toggle"
+                                    label="Follow"
+                                    onChange={(_, data) => setFollow(data.checked === true)}
+                                />
                                 <span className="muted small">
                                     {loadingLogs ? "Loading…" : ""}
                                 </span>
-                                <button
+                                <Button
                                     className="secondary-button small"
                                     onClick={() => void downloadAllLogs()}
                                     type="button"
                                 >
                                     Download all
-                                </button>
-                                <button
+                                </Button>
+                                <Button
                                     className="secondary-button small"
                                     onClick={closeLogs}
                                     type="button"
                                 >
                                     Close
-                                </button>
+                                </Button>
                             </div>
                         </div>
                         <div className="logs-modal-body">
@@ -404,23 +413,23 @@ function KernelRow({
     }, [isMenuOpen]);
 
     return (
-        <tr>
-            <td>
+        <TableRow>
+            <TableCell>
                 <span className="tag">{kernel.harness}</span>
-            </td>
-            <td className="mono" title={kernel.session_id}>
+            </TableCell>
+            <TableCell className="mono" title={kernel.session_id}>
                 <span className="truncate-value">{kernel.session_id.slice(0, 12)}…</span>
-            </td>
-            <td className="mono" title={kernel.container_name ?? undefined}>
+            </TableCell>
+            <TableCell className="mono" title={kernel.container_name ?? undefined}>
                 <span className="truncate-value">{kernel.container_name ?? "—"}</span>
-            </td>
-            <td>
+            </TableCell>
+            <TableCell>
                 <span className={`status-badge ${kernel.status}`}>{kernel.status}</span>
-            </td>
-            <td className="num mono">{formatCpu(kernel.stats)}</td>
-            <td className="num mono">{formatMemory(kernel.stats)}</td>
-            <td className="num">{kernel.turns}</td>
-            <td>
+            </TableCell>
+            <TableCell className="num mono">{formatCpu(kernel.stats)}</TableCell>
+            <TableCell className="num mono">{formatMemory(kernel.stats)}</TableCell>
+            <TableCell className="num">{kernel.turns}</TableCell>
+            <TableCell>
                 {kernel.client_session_ids.length > 0 ? (
                     <span className="muted small">
                         {kernel.client_session_ids.length} attached
@@ -428,9 +437,9 @@ function KernelRow({
                 ) : (
                     <span className="muted small">—</span>
                 )}
-            </td>
-            <td className="actions-cell">
-                <button
+            </TableCell>
+            <TableCell className="actions-cell">
+                <Button
                     ref={buttonRef}
                     type="button"
                     className="kebab-button"
@@ -443,7 +452,7 @@ function KernelRow({
                     }}
                 >
                     ⋯
-                </button>
+                </Button>
                 {isMenuOpen &&
                     menuPos !== null &&
                     createPortal(
@@ -457,14 +466,14 @@ function KernelRow({
                             }}
                             onClick={(e) => e.stopPropagation()}
                         >
-                            <button
+                            <Button
                                 type="button"
                                 role="menuitem"
                                 className="kebab-menu-item"
                                 onClick={onViewLogs}
                             >
                                 View logs
-                            </button>
+                            </Button>
                             {kernel.vscode_url ? (
                                 <a
                                     role="menuitem"
@@ -477,14 +486,14 @@ function KernelRow({
                                     Open VS Code
                                 </a>
                             ) : (
-                                <button
+                                <Button
                                     type="button"
                                     role="menuitem"
                                     className="kebab-menu-item"
                                     disabled
                                 >
                                     VS Code unavailable
-                                </button>
+                                </Button>
                             )}
                             {kernel.free_port_url ? (
                                 <a
@@ -498,7 +507,7 @@ function KernelRow({
                                     Open service
                                 </a>
                             ) : null}
-                            <button
+                            <Button
                                 type="button"
                                 role="menuitem"
                                 className="kebab-menu-item danger"
@@ -506,12 +515,12 @@ function KernelRow({
                                 onClick={onKill}
                             >
                                 Kill
-                            </button>
+                            </Button>
                         </div>,
                         document.body,
                     )}
-            </td>
-        </tr>
+            </TableCell>
+        </TableRow>
     );
 }
 

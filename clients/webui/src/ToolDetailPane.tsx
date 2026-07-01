@@ -1,5 +1,6 @@
 import Editor from "@monaco-editor/react";
 import type { ToolCall } from "./types";
+import { Button } from "./fluent";
 
 type ToolDetailPaneProps = {
     toolCall: ToolCall;
@@ -18,9 +19,9 @@ export default function ToolDetailPane({ toolCall, onClose }: ToolDetailPaneProp
             <div className="tool-detail-pane" onClick={(e) => e.stopPropagation()}>
                 <div className="tool-detail-header">
                     <h3>⚙ {toolCall.tool}</h3>
-                    <button className="icon-button" type="button" onClick={onClose}>
+                    <Button className="icon-button" type="button" onClick={onClose}>
                         ×
-                    </button>
+                    </Button>
                 </div>
                 <div className="tool-detail-editors">
                     <div className="tool-detail-section">
