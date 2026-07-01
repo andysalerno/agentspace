@@ -22,6 +22,8 @@ services:
     build:
       context: .
       dockerfile: services/agent_host_rs/Dockerfile
+      args:
+        RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     depends_on:
       kernel-host-image:
         condition: service_completed_successfully
@@ -59,6 +61,8 @@ services:
     build:
       context: .
       dockerfile: services/client_service_rs/Dockerfile
+      args:
+        RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     depends_on:
       agent-host:
         condition: service_started

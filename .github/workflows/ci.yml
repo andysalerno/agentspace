@@ -67,6 +67,7 @@ jobs:
     env:
       DOCKER_BUILDKIT: "1"
       KERNEL_WORKDIR: /workspace
+      RUST_BUILD_PROFILE: debug
 
     steps:
       - name: Check out repository

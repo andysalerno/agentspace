@@ -2,6 +2,8 @@
 
 FROM docker.io/library/rust:1.96-slim-bookworm AS builder
 
+ARG RUST_BUILD_PROFILE=release
+
 WORKDIR /usr/src/agentspace
 
 COPY Cargo.toml Cargo.lock ./
@@ -14,13 +16,22 @@ RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/regi
     && printf 'fn main() {}\n' > services/agent_host_rs/src/main.rs \
     && printf 'pub fn placeholder() {}\n' > services/client_service_rs/src/lib.rs \
     && printf 'fn main() {}\n' > services/client_service_rs/src/main.rs \
-    && cargo build --locked --release --workspace
+    && case "$RUST_BUILD_PROFILE" in \
+        release) cargo build --locked --release --workspace ;; \
+        debug) cargo build --locked --workspace ;; \
+        *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 1 ;; \
+    esac
 
 COPY services/agent_host_rs services/agent_host_rs
 RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=agentspace-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --locked --release --package agent_host_rs --bin agent_host_rs \
-    && cp target/release/agent_host_rs /usr/local/bin/agent_host_rs
+    case "$RUST_BUILD_PROFILE" in \
+        release) cargo build --locked --release --package agent_host_rs --bin agent_host_rs \
+            && cp target/release/agent_host_rs /usr/local/bin/agent_host_rs ;; \
+        debug) cargo build --locked --package agent_host_rs --bin agent_host_rs \
+            && cp target/debug/agent_host_rs /usr/local/bin/agent_host_rs ;; \
+        *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 1 ;; \
+    esac
 
 FROM docker.io/library/debian:bookworm-slim AS runtime
 
