@@ -55,7 +55,7 @@ The service can be started from this directory with:
 - Expanded `/harnesses` to all modeled harnesses and improved gateway schema
   responses for echo and Discord gateways.
 - Added Docker wiring plus `just client-service-check` and
-  `just client-service-image`.
+  `just client-service-build-image`.
 - Promoted the service to the root compose default.
 
 ## Remaining work
