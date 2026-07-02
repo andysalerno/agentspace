@@ -64,7 +64,7 @@ stack-build:
   AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml build
 
 stack-up:
-  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml up -d --build
+  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml up -d
 
 # Same as stack-up but with the rootless-Podman override (uses the user's
 # podman.sock instead of /var/run/docker.sock and works around libpod's
