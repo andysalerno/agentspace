@@ -33,7 +33,7 @@ podman build -f services/client_service_rs/Dockerfile -t agentspace-client-servi
 Use `CONTAINER_RUNTIME=docker` with the `just` recipe if you prefer Docker:
 
 ```sh
-just client-service-image
+just client-service-build-image
 ```
 
 The container defaults match `run-service.sh`:

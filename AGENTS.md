@@ -29,7 +29,6 @@ Use `just` for common tasks:
 - `just test`: Run Python and service tests.
 - `just stack-up`: Start the full stack using Docker Compose.
 - `just stack-down`: Stop the full stack.
-- `just copilot-setup`: Run `kernels/kernel_host/spawn-kernel.sh setup` to authenticate Copilot.
 
 Run `just check` after completing any code or documentation change. It covers
 Python formatting, linting, type-checking, tests, web linting, pnpm tests when
