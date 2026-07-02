@@ -21,3 +21,6 @@ RUN --mount=type=cache,id=agentspace-uv-cache,target=/root/.cache/uv,sharing=loc
     uv sync --frozen --no-dev --package gateway-host
 
 ENTRYPOINT ["uv", "run", "--no-dev", "--package", "gateway-host", "-m", "gateway_host.api_main"]
+
+ARG AGENTSPACE_VERSION=dev
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}

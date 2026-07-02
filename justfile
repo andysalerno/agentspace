@@ -47,10 +47,10 @@ agent-host-check:
   cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
 
 client-service-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; rust_profile="${RUST_BUILD_PROFILE:-debug}"; "$runtime" build --build-arg "RUST_BUILD_PROFILE=$rust_profile" -f services/client_service_rs/Dockerfile -t agentspace-client-service:latest .
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; rust_profile="${RUST_BUILD_PROFILE:-debug}"; version="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"; "$runtime" build --build-arg "AGENTSPACE_VERSION=$version" --build-arg "RUST_BUILD_PROFILE=$rust_profile" -f services/client_service_rs/Dockerfile -t agentspace-client-service:latest .
 
 agent-host-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; rust_profile="${RUST_BUILD_PROFILE:-debug}"; "$runtime" build --build-arg "RUST_BUILD_PROFILE=$rust_profile" -f services/agent_host_rs/Dockerfile -t agentspace-agent-host:latest .
+  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; rust_profile="${RUST_BUILD_PROFILE:-debug}"; version="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"; "$runtime" build --build-arg "AGENTSPACE_VERSION=$version" --build-arg "RUST_BUILD_PROFILE=$rust_profile" -f services/agent_host_rs/Dockerfile -t agentspace-agent-host:latest .
 
 webui-outdated:
   pnpm --dir clients/webui outdated
@@ -61,17 +61,17 @@ webui-lint:
 
 # Full stack compose workflow
 stack-build:
-  podman compose -f compose.yaml build
+  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml build
 
 stack-up:
-  podman compose -f compose.yaml up -d --build
+  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml up -d
 
 # Same as stack-up but with the rootless-Podman override (uses the user's
 # podman.sock instead of /var/run/docker.sock and works around libpod's
 # strict depends_on validation). Requires `systemctl --user enable --now
 # podman.socket` once.
 stack-up-podman:
-  podman compose -f compose.yaml -f compose.podman.yaml up -d --build
+  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml -f compose.podman.yaml up -d --build
 
 stack-down:
   podman compose -f compose.yaml down --remove-orphans

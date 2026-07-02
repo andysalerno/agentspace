@@ -3,6 +3,8 @@ services:
     build:
       context: ../..
       dockerfile: kernels/kernel_host/Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     env_file:
       - .env
     environment:
@@ -15,6 +17,8 @@ services:
     build:
       context: ../..
       dockerfile: kernels/kernel_host/Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     env_file:
       - .env
     environment:

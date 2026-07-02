@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1
+
 FROM docker.io/library/node:22-alpine AS build
 
 WORKDIR /app
@@ -24,3 +26,6 @@ COPY docker-entrypoint.sh /docker-entrypoint.d/40-webui-config.sh
 RUN chmod +x /docker-entrypoint.d/40-webui-config.sh
 
 EXPOSE 8003
+
+ARG AGENTSPACE_VERSION=dev
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}

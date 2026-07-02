@@ -22,3 +22,6 @@ RUN --mount=type=cache,id=agentspace-uv-cache,target=/root/.cache/uv,sharing=loc
 EXPOSE 8004
 
 ENTRYPOINT ["uv", "run", "--no-dev", "--package", "git-agent", "-m", "git_agent"]
+
+ARG AGENTSPACE_VERSION=dev
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}

@@ -11,6 +11,8 @@ if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
     cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
 fi
 
+export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash "$REPO_ROOT/scripts/build-version.sh")}"
+
 case "${1:-start}" in
     start)
         docker compose -p "agentspace-kernel" -f "$KERNEL_COMPOSE_FILE" build kernel

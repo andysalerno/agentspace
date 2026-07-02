@@ -3,6 +3,8 @@ services:
     build:
       context: ../..
       dockerfile: services/agent_host_rs/Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     env_file:
       - .env
     environment:

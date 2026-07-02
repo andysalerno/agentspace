@@ -70,3 +70,6 @@ RUN mkdir -p /workspace
 EXPOSE 8000 8080 8081
 
 ENTRYPOINT ["uv", "run", "--no-dev", "--package", "kernel-host", "-m", "kernel_host.runner"]
+
+ARG AGENTSPACE_VERSION=dev
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}
