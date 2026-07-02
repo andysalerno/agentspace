@@ -50,3 +50,9 @@ present, and the web build.
 - `agent_host`: `http://127.0.0.1:8001`
 - `client_service`: `http://127.0.0.1:8002`
 - `webui`: `http://127.0.0.1:8003`
+
+## Git Management
+
+This repo lives in github at: https://github.com/andysalerno/agentspace
+
+You may use the `gh` cli tool to interact with the repo on github.
