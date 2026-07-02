@@ -31,6 +31,7 @@ type SidebarProps = {
     onToggleCollapse: () => void;
     darkMode: boolean;
     onToggleDarkMode: () => void;
+    version: string;
 };
 
 type NavItem = { id: ViewId; label: string; icon: ReactElement };
@@ -68,7 +69,7 @@ const navGroups: NavGroup[] = [
     },
 ];
 
-export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, onToggleCollapse, darkMode, onToggleDarkMode }: SidebarProps) {
+export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, onToggleCollapse, darkMode, onToggleDarkMode, version }: SidebarProps) {
     const [expandedGroups, setExpandedGroups] = useState<Partial<Record<string, ViewId>>>({});
 
     function collapseGroups() {
@@ -185,6 +186,10 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                 >
                     <span className="sidebar-nav-label">Collapse</span>
                 </Button>
+                <div className="sidebar-version" title={`WebUI version ${version}`}>
+                    <span className="sidebar-version-label">webui</span>
+                    <code>{version}</code>
+                </div>
             </div>
         </nav>
     );

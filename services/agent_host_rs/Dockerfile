@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
 
+ARG AGENTSPACE_VERSION=dev
+
 FROM docker.io/library/rust:1.96-slim-bookworm AS builder
 
 ARG RUST_BUILD_PROFILE=release
@@ -35,6 +37,8 @@ RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/regi
 
 FROM docker.io/library/debian:bookworm-slim AS runtime
 
+ARG AGENTSPACE_VERSION=dev
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -43,7 +47,8 @@ WORKDIR /app
 
 COPY --from=builder /usr/local/bin/agent_host_rs /usr/local/bin/agent_host_rs
 
-ENV AGENT_HOST_HOST=0.0.0.0 \
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION} \
+    AGENT_HOST_HOST=0.0.0.0 \
     AGENT_HOST_PORT=8001
 
 EXPOSE 8001

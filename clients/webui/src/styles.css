@@ -403,6 +403,26 @@ summary:focus-visible {
   border-top: 1px solid var(--border-color);
 }
 
+.sidebar-version {
+  margin-top: 8px;
+  padding: 6px 8px 0;
+  color: var(--sidebar-text-muted);
+  font-size: 0.68rem;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.sidebar-version-label {
+  display: block;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sidebar-version code {
+  font-family: var(--font-mono);
+}
+
 .sidebar-group-chevron {
   margin-left: auto;
   opacity: 0.65;
@@ -437,7 +457,8 @@ summary:focus-visible {
 
 .sidebar.collapsed .sidebar-title,
 .sidebar.collapsed .sidebar-nav-label,
-.sidebar.collapsed .sidebar-nav-section-label {
+.sidebar.collapsed .sidebar-nav-section-label,
+.sidebar.collapsed .sidebar-version {
   display: none;
 }
 

@@ -177,6 +177,7 @@ export type MessageStreamChunk = MessageStreamEventChunk | MessageStreamFinalChu
 
 export type ServiceInfoSection = {
   service: string;
+  version?: string;
   env_prefix?: string;
   env?: Record<string, string>;
   error?: string;

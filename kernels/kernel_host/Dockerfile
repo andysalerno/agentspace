@@ -2,6 +2,8 @@
 
 FROM docker.io/library/python:3.13-slim
 
+ARG AGENTSPACE_VERSION=dev
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 COPY --from=ghcr.io/casey/just:latest /just /usr/local/bin/
 
@@ -45,6 +47,7 @@ RUN apt-get update && \
 # Ensure opencode is in PATH
 RUN ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode
 
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 

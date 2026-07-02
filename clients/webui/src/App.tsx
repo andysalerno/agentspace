@@ -16,6 +16,7 @@ import InfoView from "./InfoView";
 import ConfigKernelsView from "./ConfigKernelsView";
 import { useErrorContext } from "./ErrorContext";
 import { Button, FluentProvider } from "./fluent";
+import { useWebuiInfo } from "./queries";
 
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
@@ -30,7 +31,9 @@ export default function App() {
   });
 
   const queryClient = useQueryClient();
+  const webuiInfoQuery = useWebuiInfo();
   const { error, clearError } = useErrorContext();
+  const webuiVersion = webuiInfoQuery.data?.version || import.meta.env.VITE_WEBUI_VERSION || "dev";
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", darkMode ? "dark" : "light");
@@ -96,6 +99,7 @@ export default function App() {
         onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((prev) => !prev)}
+        version={webuiVersion}
       />
       <div className="main-area">
         {error && (

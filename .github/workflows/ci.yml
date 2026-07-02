@@ -73,5 +73,8 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Generate image version
+        run: echo "AGENTSPACE_VERSION=$(bash scripts/build-version.sh)" >> "$GITHUB_ENV"
+
       - name: Build Docker images
         run: docker compose -f compose.yaml build

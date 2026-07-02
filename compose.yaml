@@ -5,6 +5,8 @@ services:
     build:
       context: .
       dockerfile: kernels/kernel_host/Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     command: ["python", "-c", "print('kernel image ready')"]
     restart: "no"
 
@@ -13,6 +15,8 @@ services:
     build:
       context: .
       dockerfile: gateways/gateway_host/Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     entrypoint: []
     command: ["python", "-c", "print('gateway image ready')"]
     restart: "no"
@@ -23,6 +27,7 @@ services:
       context: .
       dockerfile: services/agent_host_rs/Dockerfile
       args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
         RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     depends_on:
       kernel-host-image:
@@ -62,6 +67,7 @@ services:
       context: .
       dockerfile: services/client_service_rs/Dockerfile
       args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
         RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     depends_on:
       agent-host:
@@ -86,6 +92,8 @@ services:
     build:
       context: .
       dockerfile: services/git_agent/Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     depends_on:
       client-service:
         condition: service_started
@@ -114,6 +122,8 @@ services:
     build:
       context: clients/webui
       dockerfile: Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     depends_on:
       client-service:
         condition: service_started

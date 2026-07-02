@@ -2,8 +2,11 @@
 
 FROM docker.io/library/python:3.13-slim
 
+ARG AGENTSPACE_VERSION=dev
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 

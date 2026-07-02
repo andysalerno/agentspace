@@ -1,8 +1,10 @@
 services:
   webui:
     build:
-      context: ../..
-      dockerfile: clients/webui/Dockerfile
+      context: .
+      dockerfile: Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     env_file:
       - .env
     ports:
