@@ -2,11 +2,8 @@
 
 FROM docker.io/library/python:3.13-slim
 
-ARG AGENTSPACE_VERSION=dev
-
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
-ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
 
@@ -24,3 +21,6 @@ RUN --mount=type=cache,id=agentspace-uv-cache,target=/root/.cache/uv,sharing=loc
     uv sync --frozen --no-dev --package gateway-host
 
 ENTRYPOINT ["uv", "run", "--no-dev", "--package", "gateway-host", "-m", "gateway_host.api_main"]
+
+ARG AGENTSPACE_VERSION=dev
+ENV AGENTSPACE_VERSION=${AGENTSPACE_VERSION}
