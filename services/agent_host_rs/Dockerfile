@@ -25,6 +25,8 @@ RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/regi
 COPY services/agent_host_rs services/agent_host_rs
 RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=agentspace-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    cargo clean --package agent_host_rs \
+    && \
     case "$RUST_BUILD_PROFILE" in \
         release) cargo build --locked --release --package agent_host_rs --bin agent_host_rs \
             && cp target/release/agent_host_rs /usr/local/bin/agent_host_rs ;; \
