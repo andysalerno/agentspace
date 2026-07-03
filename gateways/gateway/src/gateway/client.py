@@ -52,6 +52,9 @@ class ClientServiceClient:
             json={"message": message},
         )
 
+    async def reset_session(self, *, session_id: str) -> dict[str, object]:
+        return await self._request_json("POST", f"/sessions/{session_id}/reset")
+
     def stream_message(
         self,
         *,

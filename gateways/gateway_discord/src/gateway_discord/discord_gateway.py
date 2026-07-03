@@ -3,10 +3,9 @@
 Bridges a single 1:1 Discord direct message conversation to an AgentSpace
 agent through ``client_service``.
 
-The implementation is intentionally narrow — see ``DISCORD_PLAN.md`` for the
-locked-down scope.  Anything resembling guild support, slash commands,
-streaming edits, or per-channel session routing is explicitly out of scope
-for v1.
+The implementation is intentionally narrow.  Anything resembling guild
+support, streaming edits, or per-channel session routing is explicitly out of
+scope for v1.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import discord
 from fastapi import APIRouter
+from gateway.commands import CommandInvocation, GatewayCommand, GatewayCommandRegistry
 from gateway.events import GatewayEvent, GatewayEventType
 from gateway.protocol import GatewayConfig, GatewayStatus, GatewayType
 from gateway.simulated_typing import (
@@ -38,6 +38,8 @@ EVENTS_LIMIT = 200
 DEFAULT_CHUNK_MAX_CHARS = 1900
 DISCORD_MAX_MESSAGE_CHARS = 2000
 LOGIN_TIMEOUT_S = 30.0
+NEW_SESSION_COMMAND_NAME = "new"
+NEW_SESSION_STARTED_MESSAGE = "a new session has started"
 
 
 class _ClientFactory(Protocol):
@@ -124,6 +126,12 @@ class _MessageLike(Protocol):
     async def remove_reaction(self, emoji: str, member: object) -> object: ...
 
 
+@dataclass(frozen=True, slots=True)
+class _DiscordCommandContext:
+    channel: _ChannelLike
+    sender: str
+
+
 # Reactions used to give the user visible feedback about turn progress on
 # their own message:
 #   * EYES is added once the gateway acquires its send lock and starts
@@ -163,6 +171,15 @@ class DiscordGateway:
         self._events: deque[GatewayEvent] = deque(maxlen=EVENTS_LIMIT)
         self._ready_event = asyncio.Event()
         self._client_factory: _ClientFactory = client_factory or _default_client_factory
+        self._commands = GatewayCommandRegistry[_DiscordCommandContext](
+            [
+                GatewayCommand(
+                    name=NEW_SESSION_COMMAND_NAME,
+                    description="Start a fresh agent session.",
+                    handler=self._handle_new_session_command,
+                ),
+            ],
+        )
 
     @property
     def name(self) -> str:
@@ -314,10 +331,10 @@ class DiscordGateway:
 
         _ = (on_ready, on_message)
 
-    async def _on_message(self, message: discord.Message) -> None:  # noqa: PLR0911
+    async def _on_message(self, message: discord.Message) -> None:  # noqa: C901, PLR0911
         if self._config is None:
             return
-        # ERROR is terminal until the gateway is restarted (see DISCORD_PLAN.md).
+        # ERROR is terminal until the gateway is restarted.
         if self._status is not GatewayStatus.RUNNING:
             return
         author = message.author
@@ -363,6 +380,12 @@ class DiscordGateway:
 
         async with self._send_lock:
             channel = cast("_ChannelLike", message.channel)
+            if await self._dispatch_command(
+                text,
+                _DiscordCommandContext(channel=channel, sender=str(author.id)),
+            ):
+                return
+
             # Drop the EYES reaction up front so the user sees we've picked
             # the message up before the (potentially slow) agent call begins.
             await self._react(message, _PROCESSING_REACTION)
@@ -473,6 +496,69 @@ class DiscordGateway:
             agent_id=self._config.agent_id,
             channel_name=f"discord:dm:{self._owner_id}",
         )
+        self._session_id = str(session["session_id"])
+        return self._session_id
+
+    async def _handle_new_session_command(
+        self,
+        invocation: CommandInvocation,
+        context: _DiscordCommandContext,
+    ) -> None:
+        del invocation
+        try:
+            session_id = await self._start_new_session()
+        except Exception as exc:  # noqa: BLE001 - any failure should ERROR the gateway
+            await self._handle_send_failure(
+                context.channel,
+                sender=context.sender,
+                session_id=self._session_id,
+                exc=exc,
+            )
+            return
+
+        try:
+            await context.channel.send(NEW_SESSION_STARTED_MESSAGE)
+        except Exception as exc:  # noqa: BLE001 - Discord send failure is operational
+            await self._handle_send_failure(
+                context.channel,
+                sender=context.sender,
+                session_id=session_id,
+                exc=exc,
+            )
+            return
+
+        self._record_event(
+            GatewayEvent(
+                type=GatewayEventType.OUTBOUND,
+                sender=context.sender,
+                content=NEW_SESSION_STARTED_MESSAGE,
+                session_id=session_id,
+            ),
+        )
+
+    async def _dispatch_command(
+        self,
+        text: str,
+        context: _DiscordCommandContext,
+    ) -> bool:
+        try:
+            result = await self._commands.dispatch(text, context)
+        except Exception as exc:  # noqa: BLE001 - command failures are operational
+            await self._handle_send_failure(
+                context.channel,
+                sender=context.sender,
+                session_id=self._session_id,
+                exc=exc,
+            )
+            return True
+        return result.handled
+
+    async def _start_new_session(self) -> str:
+        assert self._config is not None  # noqa: S101 - invariant
+        if self._session_id is None:
+            return await self._ensure_session()
+
+        session = await self._config.client.reset_session(session_id=self._session_id)
         self._session_id = str(session["session_id"])
         return self._session_id
 

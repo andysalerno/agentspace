@@ -1,6 +1,6 @@
 """Discord gateway — bridges a single 1:1 Discord DM to an AgentSpace agent.
 
-Scope is intentionally narrow (see DISCORD_PLAN.md):
+Scope is intentionally narrow:
 
 - Single owner DM allowed via ``DISCORD_OWNER_USER_ID``.
 - Messages from guilds, threads, group DMs, and other users are ignored.
