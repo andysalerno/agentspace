@@ -3,7 +3,7 @@ name = "gateway-discord"
 version = "0.1.0"
 description = "Discord gateway — bridges a Discord bot DM to an AgentSpace agent"
 requires-python = ">=3.13"
-dependencies = ["gateway", "fastapi", "discord.py>=2.4"]
+dependencies = ["gateway", "fastapi", "discord.py>=2.7.1"]
 
 [build-system]
 requires = ["hatchling"]

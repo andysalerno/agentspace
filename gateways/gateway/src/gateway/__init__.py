@@ -1,6 +1,13 @@
 """Gateway abstraction — types and helpers shared by all gateway implementations."""
 
 from gateway.client import ClientServiceClient, ClientServiceError
+from gateway.commands import (
+    CommandDispatchResult,
+    CommandInvocation,
+    GatewayCommand,
+    GatewayCommandRegistry,
+    parse_command_text,
+)
 from gateway.events import GatewayEvent, GatewayEventType
 from gateway.protocol import (
     Gateway,
@@ -24,7 +31,11 @@ __all__ = [
     "GATEWAY_SCHEMAS",
     "ClientServiceClient",
     "ClientServiceError",
+    "CommandDispatchResult",
+    "CommandInvocation",
     "Gateway",
+    "GatewayCommand",
+    "GatewayCommandRegistry",
     "GatewayConfig",
     "GatewayConfigField",
     "GatewayEvent",
@@ -35,5 +46,6 @@ __all__ = [
     "SimulatedTypingConfig",
     "TypingChunk",
     "get_schema",
+    "parse_command_text",
     "plan_simulated_typing",
 ]

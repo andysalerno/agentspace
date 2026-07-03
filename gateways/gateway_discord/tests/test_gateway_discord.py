@@ -143,6 +143,7 @@ class FakeClient:
     sessions_created: list[tuple[str, str | None]] = field(
         default_factory=list[tuple[str, str | None]],
     )
+    sessions_reset: list[str] = field(default_factory=list[str])
     sent_messages: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
     fail_send: bool = False
     next_session_id: int = 0
@@ -157,6 +158,11 @@ class FakeClient:
         channel_name: str | None = None,
     ) -> dict[str, object]:
         self.sessions_created.append((agent_id, channel_name))
+        self.next_session_id += 1
+        return {"session_id": f"sess-{self.next_session_id}"}
+
+    async def reset_session(self, *, session_id: str) -> dict[str, object]:
+        self.sessions_reset.append(session_id)
         self.next_session_id += 1
         return {"session_id": f"sess-{self.next_session_id}"}
 
@@ -450,6 +456,57 @@ async def test_owner_dm_streams_text_before_tool_call_in_order() -> None:
         "sunny and 72",
     ]
     assert channel.typing_active_at_send == [0, 0, 0]
+
+
+@pytest.mark.asyncio
+async def test_new_command_creates_session_and_sends_automated_reply() -> None:
+    fake = FakeClient()
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="/new",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert fake.sessions_created == [("agent-1", "discord:dm:111")]
+    assert fake.sessions_reset == []
+    assert fake.sent_messages == []
+    assert channel.sent == [gw_mod.NEW_SESSION_STARTED_MESSAGE]
+    assert gateway._session_id == "sess-1"  # type: ignore[reportPrivateUsage]  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_new_command_resets_existing_session_and_next_turn_uses_it() -> None:
+    fake = FakeClient(reply="ok")
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    first_msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="first topic",
+        channel=channel,
+    )
+    new_msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content=" /new ",
+        channel=channel,
+    )
+    second_msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="second topic",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", first_msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    await gateway._on_message(cast("object", new_msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+    await gateway._on_message(cast("object", second_msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert fake.sessions_created == [("agent-1", "discord:dm:111")]
+    assert fake.sessions_reset == ["sess-1"]
+    assert fake.sent_messages == [("sess-1", "first topic"), ("sess-2", "second topic")]
+    assert channel.sent == ["ok", gw_mod.NEW_SESSION_STARTED_MESSAGE, "ok"]
 
 
 @pytest.mark.asyncio
