@@ -3,9 +3,9 @@
 Bridges a single 1:1 Discord direct message conversation to an AgentSpace
 agent through ``client_service``.
 
-The implementation is intentionally narrow — see ``DISCORD_PLAN.md`` for the
-locked-down scope.  Anything resembling guild support, streaming edits, or
-per-channel session routing is explicitly out of scope for v1.
+The implementation is intentionally narrow.  Anything resembling guild
+support, streaming edits, or per-channel session routing is explicitly out of
+scope for v1.
 """
 
 from __future__ import annotations
@@ -334,7 +334,7 @@ class DiscordGateway:
     async def _on_message(self, message: discord.Message) -> None:  # noqa: C901, PLR0911
         if self._config is None:
             return
-        # ERROR is terminal until the gateway is restarted (see DISCORD_PLAN.md).
+        # ERROR is terminal until the gateway is restarted.
         if self._status is not GatewayStatus.RUNNING:
             return
         author = message.author

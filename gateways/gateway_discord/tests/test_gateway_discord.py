@@ -163,8 +163,7 @@ class FakeClient:
 
     async def reset_session(self, *, session_id: str) -> dict[str, object]:
         self.sessions_reset.append(session_id)
-        self.next_session_id += 1
-        return {"session_id": f"sess-{self.next_session_id}"}
+        return {"session_id": session_id}
 
     async def send_message(
         self,
@@ -479,7 +478,7 @@ async def test_new_command_creates_session_and_sends_automated_reply() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_command_resets_existing_session_and_next_turn_uses_it() -> None:
+async def test_new_command_resets_existing_session_and_preserves_session_id() -> None:
     fake = FakeClient(reply="ok")
     gateway = _ready_gateway(fake)
     channel = FakeChannel()
@@ -505,7 +504,7 @@ async def test_new_command_resets_existing_session_and_next_turn_uses_it() -> No
 
     assert fake.sessions_created == [("agent-1", "discord:dm:111")]
     assert fake.sessions_reset == ["sess-1"]
-    assert fake.sent_messages == [("sess-1", "first topic"), ("sess-2", "second topic")]
+    assert fake.sent_messages == [("sess-1", "first topic"), ("sess-1", "second topic")]
     assert channel.sent == ["ok", gw_mod.NEW_SESSION_STARTED_MESSAGE, "ok"]
 
 
