@@ -23,9 +23,12 @@ RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/regi
     esac
 
 COPY services/client_service_rs services/client_service_rs
+# The cache warmup build uses placeholder sources. Cargo can otherwise consider
+# that placeholder artifact fresh after COPY, so force the real package rebuild.
 RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=agentspace-cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    case "$RUST_BUILD_PROFILE" in \
+    cargo clean --package client_service_rs \
+    && case "$RUST_BUILD_PROFILE" in \
         release) cargo build --locked --release --package client_service_rs --bin client_service_rs \
             && cp target/release/client_service_rs /usr/local/bin/client_service_rs ;; \
         debug) cargo build --locked --package client_service_rs --bin client_service_rs \
