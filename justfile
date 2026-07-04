@@ -76,6 +76,11 @@ webui-deps-outdated:
 stack-build-images:
   AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml build
 
+# Build stack container images with Compose without using cached layers.
+[group('build')]
+stack-build-images-no-cache *services:
+  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml build --no-cache {{services}}
+
 # Start the full Compose stack.
 [group('run')]
 stack-up:
@@ -85,6 +90,12 @@ stack-up:
 [group('run')]
 stack-up-rootless-podman:
   AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml -f compose.podman.yaml up -d
+
+# Rebuild rootless Podman stack images without cache, then recreate containers.
+[group('run')]
+stack-rebuild-rootless-podman *services:
+  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml -f compose.podman.yaml build --no-cache {{services}}
+  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml -f compose.podman.yaml up -d --force-recreate {{services}}
 
 # Stop the Compose stack and clean spawned kernel/gateway containers.
 [group('run')]
