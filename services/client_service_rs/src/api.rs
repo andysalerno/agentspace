@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     str::FromStr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use axum::{
@@ -14,7 +15,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -36,6 +37,8 @@ use crate::{
 
 const DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL: &str = "http://client-service:8002";
 const AGENTSPACE_CLIENT_SERVICE_URL_ENV: &str = "CLIENT_SERVICE_AGENTSPACE_BASE_URL";
+const GATEWAY_AUTOSTART_ATTEMPTS: usize = 5;
+const GATEWAY_AUTOSTART_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -1545,7 +1548,9 @@ async fn create_gateway(
         "gateway created"
     );
     if enabled {
-        return start_gateway_by_id(&state, &gateway_id).await.map(Json);
+        return start_gateway_by_id(&state, &gateway_id, GatewayStartFailureMode::ReturnRecord)
+            .await
+            .map(Json);
     }
     let gateway = require_gateway(&state, &gateway_id)?;
     tracing::info!(
@@ -1632,12 +1637,16 @@ async fn update_gateway(
         "gateway updated"
     );
     if enabled && !previously_enabled {
-        start_gateway_by_id(&state, &gateway_id).await.map(Json)
+        start_gateway_by_id(&state, &gateway_id, GatewayStartFailureMode::ReturnRecord)
+            .await
+            .map(Json)
     } else if !enabled && previously_enabled {
         stop_gateway_by_id(&state, &gateway_id).await.map(Json)
     } else if config_changed && was_running {
         let _stopped = stop_gateway_by_id(&state, &gateway_id).await?;
-        start_gateway_by_id(&state, &gateway_id).await.map(Json)
+        start_gateway_by_id(&state, &gateway_id, GatewayStartFailureMode::ReturnRecord)
+            .await
+            .map(Json)
     } else {
         let gateway = require_gateway(&state, &gateway_id)?;
         Ok(Json(gateway.summary(false)))
@@ -1681,7 +1690,9 @@ async fn start_gateway(
         gateway_id = %gateway_id,
         "starting gateway"
     );
-    start_gateway_by_id(&state, &gateway_id).await.map(Json)
+    start_gateway_by_id(&state, &gateway_id, GatewayStartFailureMode::Propagate)
+        .await
+        .map(Json)
 }
 
 async fn stop_gateway(
@@ -1713,7 +1724,91 @@ async fn gateway_logs(
     Ok(Json(json!({ "lines": lines })))
 }
 
-async fn start_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value, ApiError> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayStartFailureMode {
+    Propagate,
+    ReturnRecord,
+}
+
+pub async fn start_enabled_gateways(state: AppState) {
+    let gateways = match state.gateways.list() {
+        Ok(gateways) => gateways,
+        Err(error) => {
+            tracing::error!(
+                action = "start_enabled_gateways",
+                error = %error,
+                "failed to list gateways for startup"
+            );
+            return;
+        }
+    };
+    let enabled_gateways = gateways
+        .into_iter()
+        .filter(|gateway| gateway.enabled)
+        .collect::<Vec<_>>();
+    if enabled_gateways.is_empty() {
+        tracing::info!(
+            action = "start_enabled_gateways",
+            gateway_count = 0,
+            "no enabled gateways to start"
+        );
+        return;
+    }
+
+    tracing::info!(
+        action = "start_enabled_gateways",
+        gateway_count = enabled_gateways.len(),
+        "starting enabled gateways"
+    );
+    for gateway in enabled_gateways {
+        start_enabled_gateway_with_retries(&state, &gateway.gateway_id).await;
+    }
+}
+
+async fn start_enabled_gateway_with_retries(state: &AppState, gateway_id: &str) {
+    for attempt in 1..=GATEWAY_AUTOSTART_ATTEMPTS {
+        match start_gateway_by_id(state, gateway_id, GatewayStartFailureMode::Propagate).await {
+            Ok(_gateway) => {
+                tracing::info!(
+                    action = "start_enabled_gateways",
+                    gateway_id = %gateway_id,
+                    attempt,
+                    "enabled gateway started"
+                );
+                return;
+            }
+            Err(error) if attempt < GATEWAY_AUTOSTART_ATTEMPTS => {
+                tracing::warn!(
+                    action = "start_enabled_gateways",
+                    gateway_id = %gateway_id,
+                    attempt,
+                    status = error.status.as_u16(),
+                    error = %error.detail,
+                    retry_delay_ms = GATEWAY_AUTOSTART_RETRY_DELAY.as_millis(),
+                    "enabled gateway start failed; retrying"
+                );
+                sleep(GATEWAY_AUTOSTART_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    action = "start_enabled_gateways",
+                    gateway_id = %gateway_id,
+                    attempt,
+                    status = error.status.as_u16(),
+                    error = %error.detail,
+                    "enabled gateway start failed"
+                );
+                return;
+            }
+        }
+    }
+}
+
+async fn start_gateway_by_id(
+    state: &AppState,
+    gateway_id: &str,
+    failure_mode: GatewayStartFailureMode,
+) -> Result<Value, ApiError> {
     let mut gateway = require_gateway(state, gateway_id)?;
     "starting".clone_into(&mut gateway.status);
     gateway.last_error = None;
@@ -1728,22 +1823,9 @@ async fn start_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value
         env_var_count = env.len(),
         "creating upstream gateway"
     );
-    match state
-        .agent_host
-        .create_gateway(
-            gateway_id,
-            gateway.gateway_type.as_str(),
-            &gateway.agent_id,
-            &env,
-        )
-        .await
-    {
+    match create_agent_host_gateway(state, &gateway, &env).await {
         Ok(response) => {
-            "running".clone_into(&mut gateway.status);
-            gateway.container_name = response
-                .get("container_name")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned);
+            apply_gateway_start_response(&mut gateway, &response);
             gateway.updated_at = utc_now();
             state.gateways.update(gateway.clone())?;
             tracing::info!(
@@ -1758,19 +1840,84 @@ async fn start_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value
             Ok(gateway.summary(false))
         }
         Err(error) => {
+            let detail = error.to_string();
             "error".clone_into(&mut gateway.status);
-            gateway.last_error = Some(error.to_string());
+            gateway.last_error = Some(detail);
             gateway.updated_at = utc_now();
-            state.gateways.update(gateway)?;
+            state.gateways.update(gateway.clone())?;
             tracing::warn!(
                 action = "start_gateway_by_id",
                 gateway_id = %gateway_id,
                 error_kind = "agent_host_error",
                 "gateway start failed"
             );
-            Err(error.into())
+            if failure_mode == GatewayStartFailureMode::Propagate {
+                Err(error.into())
+            } else {
+                Ok(gateway.summary(false))
+            }
         }
     }
+}
+
+async fn create_agent_host_gateway(
+    state: &AppState,
+    gateway: &GatewayRecord,
+    env: &BTreeMap<String, String>,
+) -> Result<JsonObject, AgentHostError> {
+    let result = state
+        .agent_host
+        .create_gateway(
+            &gateway.gateway_id,
+            gateway.gateway_type.as_str(),
+            &gateway.agent_id,
+            env,
+        )
+        .await;
+    match result {
+        Err(AgentHostError::HttpStatus { status, .. }) if status == StatusCode::CONFLICT => {
+            tracing::warn!(
+                action = "start_gateway_by_id",
+                gateway_id = %gateway.gateway_id,
+                "upstream gateway already exists; replacing stale runtime"
+            );
+            state
+                .agent_host
+                .destroy_gateway(&gateway.gateway_id)
+                .await?;
+            state
+                .agent_host
+                .create_gateway(
+                    &gateway.gateway_id,
+                    gateway.gateway_type.as_str(),
+                    &gateway.agent_id,
+                    env,
+                )
+                .await
+        }
+        other => other,
+    }
+}
+
+fn apply_gateway_start_response(gateway: &mut GatewayRecord, response: &JsonObject) {
+    response
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|status| is_gateway_status(status))
+        .unwrap_or("running")
+        .clone_into(&mut gateway.status);
+    gateway.last_error = response
+        .get("last_error")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    gateway.container_name = response
+        .get("container_name")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+}
+
+fn is_gateway_status(status: &str) -> bool {
+    matches!(status, "stopped" | "starting" | "running" | "error")
 }
 
 async fn stop_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value, ApiError> {

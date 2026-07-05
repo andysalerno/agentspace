@@ -16,7 +16,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
-use client_service_rs::{AppConfig, AppState, agent_host::AgentHostClient, build_router};
+use client_service_rs::{
+    AppConfig, AppState, agent_host::AgentHostClient, api::start_enabled_gateways, build_router,
+};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, task::JoinHandle};
 use tower::ServiceExt;
@@ -61,6 +63,14 @@ impl StubState {
             .map_err(|_error| "stub request mutex poisoned")?;
         Ok(requests.clone())
     }
+
+    fn clear_recorded(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.requests
+            .lock()
+            .map_err(|_error| "stub request mutex poisoned")?
+            .clear();
+        Ok(())
+    }
 }
 
 struct TestServer {
@@ -84,13 +94,21 @@ impl TestServer {
     }
 
     fn app(&self) -> Result<Router, Box<dyn Error + Send + Sync>> {
+        Ok(build_router(self.app_state()?))
+    }
+
+    fn app_state(&self) -> Result<AppState, Box<dyn Error + Send + Sync>> {
         let config = AppConfig::new("127.0.0.1", 0, &self.base_url, BTreeMap::new());
         let agent_host = AgentHostClient::new(&self.base_url, Duration::from_secs(5))?;
-        Ok(build_router(AppState::with_agent_host(config, agent_host)))
+        Ok(AppState::with_agent_host(config, agent_host))
     }
 
     fn recorded(&self) -> Result<Vec<RecordedRequest>, Box<dyn Error + Send + Sync>> {
         self.state.recorded()
+    }
+
+    fn clear_recorded(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.state.clear_recorded()
     }
 }
 
@@ -340,15 +358,22 @@ async fn delete_host_skill(
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn create_host_gateway(
-    State(state): State<StubState>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    state.record(Method::POST, "/gateways", None, Some(body.clone()))?;
-    Ok(Json(json!({
+async fn create_host_gateway(State(state): State<StubState>, Json(body): Json<Value>) -> Response {
+    if let Err(status) = state.record(Method::POST, "/gateways", None, Some(body.clone())) {
+        return status.into_response();
+    }
+    if body["gateway_id"] == "failing-gateway" {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "detail": "gateway failed to start" })),
+        )
+            .into_response();
+    }
+    Json(json!({
         "gateway_id": body["gateway_id"],
         "container_name": "gateway-container"
-    })))
+    }))
+    .into_response()
 }
 
 async fn delete_host_gateway(
@@ -438,6 +463,14 @@ async fn put_json(
     body: Value,
 ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
     request_json(app, Method::PUT, path, Some(body)).await
+}
+
+async fn patch_json(
+    app: &Router,
+    path: &str,
+    body: Value,
+) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
+    request_json(app, Method::PATCH, path, Some(body)).await
 }
 
 async fn get_json(
@@ -1049,6 +1082,116 @@ async fn gateway_routes_proxy_and_update_persisted_status()
                 body: None,
             },
         ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn gateway_enable_persists_when_runtime_start_fails()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    create_basic_agent(&app).await?;
+
+    let (status, _gateway) = post_json(
+        &app,
+        "/gateways",
+        json!({
+            "gateway_id": "failing-gateway",
+            "name": "Failing Gateway",
+            "gateway_type": "echo",
+            "agent_id": "stub-agent",
+            "enabled": false
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, gateway) = patch_json(
+        &app,
+        "/gateways/failing-gateway",
+        json!({ "enabled": true }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(gateway["enabled"], true);
+    assert_eq!(gateway["status"], "error");
+    assert_eq!(
+        gateway["last_error"],
+        "agent_host returned HTTP 500 Internal Server Error"
+    );
+
+    let (status, persisted) = get_json(&app, "/gateways/failing-gateway").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(persisted["enabled"], true);
+    assert_eq!(persisted["status"], "error");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn enabled_stopped_gateways_autostart() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let state = server.app_state()?;
+    let app = build_router(state.clone());
+    create_basic_agent(&app).await?;
+
+    let (status, _gateway) = post_json(
+        &app,
+        "/gateways",
+        json!({
+            "gateway_id": "autostart-gateway",
+            "name": "Autostart Gateway",
+            "gateway_type": "echo",
+            "agent_id": "stub-agent",
+            "enabled": false,
+            "env_vars": "VISIBLE=value",
+            "secrets": { "SECRET": "secret-value" }
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, enabled) = patch_json(
+        &app,
+        "/gateways/autostart-gateway",
+        json!({ "enabled": true }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(enabled["enabled"], true);
+    assert_eq!(enabled["status"], "running");
+
+    let (status, stopped) = post_json(&app, "/gateways/autostart-gateway/stop", json!({})).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stopped["enabled"], true);
+    assert_eq!(stopped["status"], "stopped");
+
+    server.clear_recorded()?;
+    start_enabled_gateways(state).await;
+
+    let (status, gateway) = get_json(&app, "/gateways/autostart-gateway").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(gateway["enabled"], true);
+    assert_eq!(gateway["status"], "running");
+    assert_eq!(gateway["container_name"], "gateway-container");
+    assert_eq!(
+        server.recorded()?,
+        vec![RecordedRequest {
+            method: Method::POST,
+            path: "/gateways".to_owned(),
+            query: None,
+            body: Some(json!({
+                "gateway_id": "autostart-gateway",
+                "gateway_type": "echo",
+                "agent_id": "stub-agent",
+                "env": {
+                    "SECRET": "secret-value",
+                    "VISIBLE": "value"
+                }
+            })),
+        }]
     );
 
     Ok(())
