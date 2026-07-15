@@ -10,21 +10,6 @@ Search, scrape, and interact with the web. Returns clean markdown optimized for 
 
 Run `firecrawl --help` or `firecrawl <command> --help` for full option details.
 
-## Prerequisites
-
-Must be installed and authenticated. Check with `firecrawl --status`.
-
-```
-  🔥 firecrawl cli v1.8.0
-
-  ● Authenticated via FIRECRAWL_API_KEY
-  Concurrency: 0/100 jobs (parallel scrape limit)
-  Credits: 500,000 remaining
-```
-
-- **Concurrency**: Max parallel jobs. Run parallel operations up to this limit.
-- **Credits**: Remaining API credits. Each operation consumes credits.
-
 ## Workflow
 
 Follow this escalation pattern:
@@ -69,6 +54,8 @@ Unless the user specifies to return in context, write results to `.firecrawl/` w
 firecrawl search "react hooks" -o .firecrawl/search-react-hooks.json --json
 firecrawl scrape "<url>" -o .firecrawl/page.md
 ```
+
+Prefer the local .firecrawl/ directory for output; avoid temporary files in `/tmp/` or `/var/tmp/`.
 
 Naming conventions:
 
