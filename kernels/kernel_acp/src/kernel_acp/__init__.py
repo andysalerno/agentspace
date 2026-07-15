@@ -52,7 +52,10 @@ _OPENCODE_PERMISSION_CONFIG = {
     },
     "webfetch": "deny",
     "doom_loop": "deny",
-    "external_directory": "deny",
+    "external_directory": {
+        "*": "deny",
+        "/tmp/**": "allow",  # noqa: S108
+    },
     "websearch": "deny",
     "question": "deny",
     "lsp": "deny",
