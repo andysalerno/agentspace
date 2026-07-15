@@ -278,6 +278,10 @@ class TestAcpMapping:
             "model-a": {"name": "model-a"},
         }
         assert config["permission"]["bash"] == {"*": "allow"}
+        assert config["permission"]["external_directory"] == {
+            "*": "deny",
+            "/tmp/**": "allow",  # noqa: S108
+        }
         assert config["permission"]["webfetch"] == "deny"
 
     def test_write_opencode_config_uses_openai_provider_for_responses_flavor(
