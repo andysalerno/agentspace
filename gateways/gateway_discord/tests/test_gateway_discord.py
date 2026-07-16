@@ -521,6 +521,87 @@ async def test_owner_dm_waits_for_complete_execute_tool_input() -> None:
 
 
 @pytest.mark.asyncio
+async def test_owner_dm_merges_acp_other_tool_updates() -> None:
+    fake = FakeClient(
+        stream_items=[
+            {
+                "type": "event",
+                "event": {
+                    "type": "session/update",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "call-skill",
+                        "title": "skill",
+                        "kind": "other",
+                        "status": "pending",
+                        "rawInput": {},
+                    },
+                },
+            },
+            {
+                "type": "event",
+                "event": {
+                    "type": "session/update",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "call-skill",
+                        "status": "in_progress",
+                        "rawInput": {"name": "firecrawl"},
+                    },
+                },
+            },
+            {
+                "type": "event",
+                "event": {
+                    "type": "session/update",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "call-refresh",
+                        "title": "refresh index",
+                        "kind": "other",
+                        "status": "pending",
+                        "rawInput": {},
+                    },
+                },
+            },
+            {
+                "type": "event",
+                "event": {
+                    "type": "session/update",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "call-refresh",
+                        "status": "completed",
+                    },
+                },
+            },
+            {
+                "type": "final",
+                "completed": True,
+                "assistant_message": {"content": ""},
+            },
+        ],
+    )
+    gateway = _ready_gateway(fake, DISCORD_CHUNK_MAX_CHARS="1900")
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="search for news",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert channel.sent == [
+        (
+            "Invoking tool `skill` with input:\n"
+            '```json\n{\n  "name": "firecrawl"\n}\n```'
+        ),
+        "Invoking tool `refresh index` with input:\n```json\n{}\n```",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_new_command_creates_session_and_sends_automated_reply() -> None:
     fake = FakeClient()
     gateway = _ready_gateway(fake)

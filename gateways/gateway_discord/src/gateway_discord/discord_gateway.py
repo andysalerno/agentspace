@@ -576,6 +576,7 @@ class DiscordGateway:
         sent_any_message = False
         sent_tool_call_count = 0
         sent_tool_call_keys: set[str] = set()
+        acp_tool_calls: dict[str, dict[str, object]] = {}
         final_reply = ""
         final_item: dict[str, object] | None = None
         final_received = False
@@ -663,7 +664,10 @@ class DiscordGateway:
                     text_delta = _stream_event_text(event)
                     if text_delta:
                         pending_text.append(text_delta)
-                    tool_invocation = _tool_invocation_from_event(event)
+                    tool_invocation = _tool_invocation_from_event(
+                        event,
+                        acp_tool_calls,
+                    )
                     if tool_invocation is not None:
                         if not await flush_pending_text():
                             return False
@@ -876,12 +880,15 @@ def _stream_event_text(event: dict[str, object]) -> str:
     return _content_text(update_dict.get("content"))
 
 
-def _tool_invocation_from_event(event: dict[str, object]) -> _ToolInvocation | None:
+def _tool_invocation_from_event(
+    event: dict[str, object],
+    acp_tool_calls: dict[str, dict[str, object]],
+) -> _ToolInvocation | None:
     event_type = event.get("type")
     if event_type == "tool_call":
         return _legacy_tool_invocation(event)
     if event_type == "session/update":
-        return _acp_tool_invocation(event)
+        return _acp_tool_invocation(event, acp_tool_calls)
     return None
 
 
@@ -892,53 +899,68 @@ def _legacy_tool_invocation(event: dict[str, object]) -> _ToolInvocation | None:
     return _ToolInvocation(key=None, tool=tool, input=event.get("input"))
 
 
-def _acp_tool_invocation(event: dict[str, object]) -> _ToolInvocation | None:
+def _acp_tool_invocation(
+    event: dict[str, object],
+    tool_calls: dict[str, dict[str, object]],
+) -> _ToolInvocation | None:
     update = event.get("update")
     if not isinstance(update, dict):
         return None
     update_dict = cast("dict[str, object]", update)
     update_type = update_dict.get("sessionUpdate")
     tool_call_id = _optional_non_empty_string(update_dict.get("toolCallId"))
-    if not _should_send_acp_tool_invocation(update_dict, update_type, tool_call_id):
+    if update_type == "tool_call":
+        if tool_call_id is None:
+            return _acp_tool_invocation_from_state(update_dict, None)
+        state = dict(update_dict)
+        tool_calls[tool_call_id] = state
+    elif update_type == "tool_call_update" and tool_call_id is not None:
+        # ACP updates are patches, so omitted fields retain their prior values.
+        state = tool_calls.setdefault(tool_call_id, {})
+        state.update(update_dict)
+    else:
         return None
-    if _is_incomplete_acp_execute_invocation(update_dict):
+
+    terminal = state.get("status") in {"completed", "failed"}
+    if not terminal and not _has_displayable_acp_tool_input(state):
         return None
-    tool = _acp_tool_name(update_dict, tool_call_id)
-    tool_input = update_dict.get("rawInput") if "rawInput" in update_dict else None
+    invocation = _acp_tool_invocation_from_state(state, tool_call_id)
+    if terminal:
+        del tool_calls[tool_call_id]
+    return invocation
+
+
+def _has_displayable_acp_tool_input(state: dict[str, object]) -> bool:
+    if "rawInput" not in state:
+        return False
+    raw_input = state.get("rawInput")
+    if raw_input is None:
+        return False
+    if not isinstance(raw_input, dict):
+        return True
+    input_dict = cast("dict[str, object]", raw_input)
+    if not input_dict:
+        return False
+    return state.get("kind") != "execute" or not set(input_dict).issubset(
+        {"cwd", "workdir"},
+    )
+
+
+def _acp_tool_invocation_from_state(
+    state: dict[str, object],
+    tool_call_id: str | None,
+) -> _ToolInvocation:
+    tool = _acp_tool_name(state, tool_call_id)
+    tool_input = state.get("rawInput") if "rawInput" in state else None
     return _ToolInvocation(key=tool_call_id, tool=tool, input=tool_input)
 
 
-def _should_send_acp_tool_invocation(
-    update: dict[str, object],
-    update_type: object,
-    tool_call_id: str | None,
-) -> bool:
-    if update_type == "tool_call":
-        return True
-    if update_type != "tool_call_update":
-        return False
-    return tool_call_id is not None and "rawInput" in update
-
-
-def _is_incomplete_acp_execute_invocation(update: dict[str, object]) -> bool:
-    if update.get("kind") != "execute":
-        return False
-    raw_input = update.get("rawInput")
-    if raw_input is None:
-        return True
-    if not isinstance(raw_input, dict):
-        return False
-    input_dict = cast("dict[str, object]", raw_input)
-    return set(input_dict).issubset({"cwd", "workdir"})
-
-
 def _acp_tool_name(update: dict[str, object], tool_call_id: str | None) -> str:
-    return (
-        _optional_non_empty_string(update.get("kind"))
-        or _optional_non_empty_string(update.get("title"))
-        or tool_call_id
-        or "tool"
-    )
+    kind = _optional_non_empty_string(update.get("kind"))
+    title = _optional_non_empty_string(update.get("title"))
+    if kind == "other":
+        return title or kind
+    return kind or title or tool_call_id or "tool"
 
 
 def _optional_non_empty_string(value: object) -> str | None:
