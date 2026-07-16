@@ -458,6 +458,69 @@ async def test_owner_dm_streams_text_before_tool_call_in_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_owner_dm_waits_for_complete_shell_tool_input() -> None:
+    fake = FakeClient(
+        stream_items=[
+            {
+                "type": "event",
+                "event": {
+                    "type": "session/update",
+                    "update": {
+                        "sessionUpdate": "tool_call",
+                        "toolCallId": "call-1",
+                        "title": "bash",
+                        "kind": "execute",
+                        "rawInput": {"cwd": "/workspace"},
+                    },
+                },
+            },
+            {
+                "type": "event",
+                "event": {
+                    "type": "session/update",
+                    "update": {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": "call-1",
+                        "title": "printf 'hello\\n'",
+                        "kind": "execute",
+                        "rawInput": {
+                            "command": "printf 'hello\\n'",
+                            "cwd": "/workspace",
+                        },
+                    },
+                },
+            },
+            {
+                "type": "final",
+                "completed": True,
+                "assistant_message": {"content": ""},
+            },
+        ],
+    )
+    gateway = _ready_gateway(fake, DISCORD_CHUNK_MAX_CHARS="1900")
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="say hello",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert channel.sent == [
+        (
+            "Invoking tool `bash` with input:\n"
+            "```json\n"
+            "{\n"
+            '  "command": "printf \'hello\\\\n\'",\n'
+            '  "cwd": "/workspace"\n'
+            "}\n"
+            "```"
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_new_command_creates_session_and_sends_automated_reply() -> None:
     fake = FakeClient()
     gateway = _ready_gateway(fake)
