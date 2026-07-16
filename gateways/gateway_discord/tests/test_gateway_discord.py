@@ -458,7 +458,7 @@ async def test_owner_dm_streams_text_before_tool_call_in_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_owner_dm_waits_for_complete_shell_tool_input() -> None:
+async def test_owner_dm_waits_for_complete_execute_tool_input() -> None:
     fake = FakeClient(
         stream_items=[
             {
@@ -468,7 +468,7 @@ async def test_owner_dm_waits_for_complete_shell_tool_input() -> None:
                     "update": {
                         "sessionUpdate": "tool_call",
                         "toolCallId": "call-1",
-                        "title": "bash",
+                        "title": "provider-specific terminal",
                         "kind": "execute",
                         "rawInput": {"cwd": "/workspace"},
                     },
@@ -509,7 +509,7 @@ async def test_owner_dm_waits_for_complete_shell_tool_input() -> None:
 
     assert channel.sent == [
         (
-            "Invoking tool `bash` with input:\n"
+            "Invoking tool `execute` with input:\n"
             "```json\n"
             "{\n"
             '  "command": "printf \'hello\\\\n\'",\n'

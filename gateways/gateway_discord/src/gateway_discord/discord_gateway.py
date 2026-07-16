@@ -901,7 +901,7 @@ def _acp_tool_invocation(event: dict[str, object]) -> _ToolInvocation | None:
     tool_call_id = _optional_non_empty_string(update_dict.get("toolCallId"))
     if not _should_send_acp_tool_invocation(update_dict, update_type, tool_call_id):
         return None
-    if _is_incomplete_acp_shell_invocation(update_dict):
+    if _is_incomplete_acp_execute_invocation(update_dict):
         return None
     tool = _acp_tool_name(update_dict, tool_call_id)
     tool_input = update_dict.get("rawInput") if "rawInput" in update_dict else None
@@ -920,11 +920,8 @@ def _should_send_acp_tool_invocation(
     return tool_call_id is not None and "rawInput" in update
 
 
-def _is_incomplete_acp_shell_invocation(update: dict[str, object]) -> bool:
+def _is_incomplete_acp_execute_invocation(update: dict[str, object]) -> bool:
     if update.get("kind") != "execute":
-        return False
-    title = _optional_non_empty_string(update.get("title"))
-    if title is None or title.casefold() not in {"bash", "shell"}:
         return False
     raw_input = update.get("rawInput")
     if raw_input is None:
@@ -936,9 +933,12 @@ def _is_incomplete_acp_shell_invocation(update: dict[str, object]) -> bool:
 
 
 def _acp_tool_name(update: dict[str, object], tool_call_id: str | None) -> str:
-    if update.get("kind") == "execute":
-        return "bash"
-    return _optional_non_empty_string(update.get("title")) or tool_call_id or "tool"
+    return (
+        _optional_non_empty_string(update.get("kind"))
+        or _optional_non_empty_string(update.get("title"))
+        or tool_call_id
+        or "tool"
+    )
 
 
 def _optional_non_empty_string(value: object) -> str | None:
