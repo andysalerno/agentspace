@@ -75,8 +75,10 @@ kernel + memory skill + memory CLI -- HTTP ----------> memory --serve
 
 The control-plane `memory --serve` container always mounts the memory volume so
 the Web UI can manage it. The opt-in requirement applies to hosted agent
-kernels: only a kernel with the `memory` skill enabled mounts the volume
-directly. A deployment may set `AGENTSPACE_MEMORY_URI` for an agent to use the
+kernels: only a kernel with the `memory` skill enabled receives the volume
+needed by the local transport. The path is an internal implementation detail:
+it is not advertised as an accessible workspace path or documented in the
+skill. A deployment may set `AGENTSPACE_MEMORY_URI` for an agent to use the
 server instead; the CLI then ignores its local directory.
 
 The implementation should be a Rust workspace crate at `services/memory_rs`.
@@ -128,15 +130,61 @@ serialization, but must not implement memory behavior. The test suite should
 run one client contract against `DirectMemoryClient` and `HttpMemoryClient` to
 prevent the two paths from drifting.
 
+### Agent-facing filesystem abstraction
+
+Every supported agent interaction with memory goes through the `memory` binary.
+The skill must not tell the agent where the corpus is mounted or suggest direct
+filesystem access. Structured reads and writes use commands such as
+`memory read`, `memory write`, `memory query`, `memory move`, and `memory rm`.
+Familiar read-oriented filesystem inspection is available only through:
+
+```text
+memory run <command> [args...]
+```
+
+The initial executable allowlist is:
+
+```text
+rg ls cat head tail wc stat pwd
+```
+
+`memory run` executes the selected program directly with the corpus root as its
+working directory. It does not invoke a shell and does not support an inner
+pipeline, redirection, substitution, or shell built-in. An outer shell may
+still consume its output, for example:
+
+```sh
+memory run rg birthday | head
+```
+
+After checking only the executable name, the implementation passes all
+remaining arguments through unchanged. This deliberately preserves familiar
+tool behavior, but makes `memory run` a convenience boundary rather than a
+security boundary: absolute paths and tool-specific escape hatches such as
+`rg --pre` are not blocked in v1, and `memory run pwd` reveals the backing path.
+The subprocess should still receive a minimal environment and the memory
+service container must contain no credentials. Hard confinement would require
+strict per-command argument validation or an OS-level read-only sandbox and is
+an explicit future hardening option.
+
+Both transports use a shared `AllowlistedCommandRunner` behind
+`MemoryService`. Local mode spawns the process in the kernel; remote mode spawns
+it in the memory service container. The allowlist, environment construction,
+timeout, output limits, cancellation, and exit semantics are application
+behavior shared by both modes.
+
 ## Memory Model
 
 ### Files and paths
 
-The configured store root is `/memory` in hosted kernels and the memory service.
-A page path is its canonical identity:
+The configured store root is not proactively advertised to the agent. The
+examples use `<memory-root>` only to explain the on-disk format; its actual path
+is not part of the stable agent-facing contract even though `memory run pwd` or
+other passthrough arguments can reveal it. A page path is its canonical
+identity:
 
 ```text
-/memory/
+<memory-root>/
   people/
     alice.md
   projects/
@@ -188,10 +236,11 @@ written through the CLI or API. Links are ordinary relative Markdown links to
 other `.md` pages. They are derived from page content and are not duplicated in
 frontmatter or an index.
 
-The store accepts manually created valid Markdown pages. The skill should
-recommend direct file reads and `rg` for ad hoc inspection, but require the CLI
-for mutations so timestamps, revisions, locking, and link maintenance remain
-correct.
+The store accepts manually created valid Markdown pages for administrator
+recovery and migration. The skill must direct agents to use the structured
+commands for mutations and `memory run` for familiar filesystem inspection so
+timestamps, revisions, locking, and link maintenance remain under the memory
+service contract.
 
 ### Revisions and concurrent access
 
@@ -215,7 +264,7 @@ links, or links in arbitrary HTML.
 ### Query and graph behavior
 
 The first version scans the filesystem on each operation. This avoids stale
-indexes and keeps direct inspection trustworthy.
+indexes and keeps the authoritative files trustworthy.
 
 - Text query is case-insensitive literal matching over path, title, tags, and
   body.
@@ -233,7 +282,7 @@ baseline semantics.
 
 ## CLI Contract
 
-The CLI should be useful interactively and safe for agent scripting:
+The CLI should be useful interactively and predictable for agent scripting:
 
 ```text
 memory --help
@@ -246,6 +295,7 @@ memory query <text> [--under PREFIX] [--with-tag TAG]... [--limit N]
 memory tags ls
 memory links <path> [--backlinks]
 memory check
+memory run <rg|ls|cat|head|tail|wc|stat|pwd> [args...]
 memory --serve [--host HOST] [--port PORT]
 ```
 
@@ -254,16 +304,25 @@ creates missing parent directories and replaces an existing page only when
 explicitly requested or when its expected revision matches. Commands support a
 stable `--json` output for agents; human-readable output remains concise.
 
+`memory run` is the only passthrough form; shorthand commands such as
+`memory rg` are not supported. Direct mode and remote mode stream stdout and
+stderr independently and make the `memory` process exit with the invoked
+command's exit code. Both apply configurable execution-time and output-byte
+limits. A timeout, output-limit termination, cancellation, transport failure,
+or rejected executable is distinguishable from the child process's own exit.
+
 Backend selection precedence is:
 
 1. explicit `--uri` or `--root`;
 2. `AGENTSPACE_MEMORY_URI`;
 3. `AGENTSPACE_MEMORY_DIR`;
-4. `/memory`.
+4. the private built-in local root.
 
 `--uri` and `--root` are mutually exclusive. If a remote URI is configured,
 connection and protocol errors are surfaced and local storage is never used as
-a success-shaped fallback.
+a success-shaped fallback. Hosted-agent documentation and the built-in skill
+must not expose `--root`, `AGENTSPACE_MEMORY_DIR`, or the built-in root; those
+remain operator and local-development configuration.
 
 ## HTTP Contract
 
@@ -279,6 +338,7 @@ POST   /v1/pages/move
 GET    /v1/tags
 GET    /v1/links?path=<path>
 GET    /v1/check
+POST   /v1/run
 ```
 
 List/query parameters mirror the CLI. Page reads return metadata, body,
@@ -286,6 +346,15 @@ outgoing links, and revision. Mutations accept `expected_revision` and return
 the resulting page or a structured conflict. Error responses distinguish
 validation errors, missing pages, conflicts, unavailable storage, and internal
 failures.
+
+`POST /v1/run` accepts an argument vector, validates its first element against
+the executable allowlist, and returns a streaming response. Frames preserve
+arbitrary stdout and stderr bytes separately and end with the child exit code
+or a typed timeout, output-limit, cancellation, or launch error. The HTTP
+client writes decoded chunks to its own stdout/stderr as they arrive and exits
+with equivalent semantics. The protocol must bound both execution duration and
+total streamed bytes, kill the child when a bound is exceeded or the client
+disconnects, and never buffer unbounded command output.
 
 `client_service` proxies this as `/memory/...`, just as it proxies other
 specialized services. Configure its upstream with
@@ -311,7 +380,8 @@ memory skill declares:
       {
         "id": "data",
         "scope": "installation",
-        "mount_path": "/memory",
+        "mount_path": "/var/lib/agentspace/memory",
+        "advertise": false,
         "mode": "rw"
       }
     ]
@@ -326,7 +396,8 @@ For v1:
 - actual volume names are derived by AgentSpace, never supplied by a skill;
 - resource IDs, mount paths, modes, and collisions are strictly validated;
 - reserved kernel paths cannot be shadowed;
-- the resolved mount path is added to harness accessible paths;
+- `advertise: false` prevents the mount path from being added to harness
+  accessible paths, prompts, skill text, or session summaries;
 - the volume is created lazily, labeled as AgentSpace-managed, and retained
   when sessions are reset or deleted;
 - enabling multiple skills that request the same mount path fails session
@@ -334,8 +405,15 @@ For v1:
 
 The memory resource resolves to the stable named volume
 `${AGENTSPACE_MEMORY_VOLUME:-agentspace-memory-data}`. Compose uses the same
-volume for `memory --serve`. `agent_host` mounts it at `/memory` only when
-`memory` is among the session's enabled skills.
+volume for `memory --serve`. In local mode, `agent_host` mounts it at the
+private built-in path only when `memory` is among the session's enabled skills.
+
+This is a soft abstraction, not filesystem isolation. Because the binary runs
+as the same container user, a sufficiently determined agent may discover and
+access the mount. The supported interface, skill, prompts, and diagnostics
+nevertheless expose only the `memory` CLI. Hard isolation would require moving
+local access behind a sidecar/Unix-socket boundary or using a privileged
+sandbox, neither of which is part of v1.
 
 This metadata is generic rather than a special `if skill == "memory"` branch.
 Future schema versions can add agent-scoped volumes, read-only shared datasets,
@@ -381,6 +459,9 @@ Work:
 - Implement transport-neutral models, `MemoryClient`, `MemoryService`, and
   `MemoryStore` abstractions.
 - Implement `DirectMemoryClient` as an in-process adapter over the service.
+- Implement `AllowlistedCommandRunner` with direct argv execution, the fixed
+  read-oriented allowlist, separate stdout/stderr streaming, exit-code
+  preservation, cancellation, and configurable timeout/output limits.
 - Implement the filesystem store, locking, atomic writes, revisions, moves,
   queries, tags, links, backlinks, and integrity checks.
 - Implement the local forms of all CLI commands except `--serve`.
@@ -399,6 +480,9 @@ Acceptance criteria:
   fail safely.
 - Reopening the directory reconstructs all list, tag, and graph results without
   an index or migration step.
+- `memory run` accepts only the eight named executables, never invokes a shell,
+  preserves their arguments, streams, and exit codes, and terminates children
+  that exceed configured limits.
 
 This milestone is useful independently as a portable local memory manager.
 
@@ -414,20 +498,25 @@ Work:
 - Resolve enabled built-in skill volume resources during session creation.
 - Extend `agent_host` runtime mount construction to validate, create, label,
   and mount those volumes.
-- Add resource mount paths to kernel accessible paths and diagnostics.
+- Add the `advertise` resource property and keep non-advertised mount paths out
+  of harness accessible paths, prompts, summaries, and diagnostics.
 - Add `mounts/skills/memory/SKILL.md` and its resource manifest.
 - Teach the skill to inspect `memory --help`, query before writing, prefer
   updating an existing page over duplication, use links/tags sparingly, run
-  `memory check`, and never store secrets.
+  `memory check`, use `memory run` for common filesystem inspection, never
+  access or mention a backing path, and never store secrets.
 - Build and install the `memory` binary in the kernel image.
 - Declare the stable memory volume in Compose.
 
 Acceptance criteria:
 
-- A session for an agent without the `memory` skill has no `/memory` mount.
+- A session for an agent without the `memory` skill has no memory-data mount.
 - A newly created session for an agent with the skill has the persistent volume
-  at `/memory`, can run `memory --help`, and retains writes across reset,
-  deletion, stack down, and stack up.
+  at the non-advertised private path, can run `memory --help`, and retains
+  writes across reset, deletion, stack down, and stack up.
+- The skill, generated prompts, session API, and harness accessible paths do not
+  proactively advertise or recommend the backing filesystem path. The
+  passthrough `pwd` command may reveal it by design.
 - Two memory-enabled sessions see the same installation-scoped corpus.
 - Invalid manifests and mount collisions prevent startup with clear errors.
 - Existing skills without metadata and existing workspace mounts behave
@@ -448,6 +537,9 @@ Work:
 - Implement `HttpMemoryClient`, selected by
   `AGENTSPACE_MEMORY_URI`.
 - Run one `MemoryClient` contract suite against direct and HTTP transports.
+- Implement the framed `/v1/run` stream and verify stdout/stderr ordering per
+  stream, arbitrary bytes, exit-code parity, disconnect cancellation, and
+  timeout/output-limit termination.
 - Add a multi-stage memory service image that runs the same compiled `memory`
   artifact as the kernel image, plus a Compose service sharing
   `agentspace-memory-data`.
@@ -466,7 +558,7 @@ Acceptance criteria:
   private to the stack network.
 - Upstream timeout, malformed response, conflict, and unavailable-service cases
   return explicit non-success responses.
-- Setting `AGENTSPACE_MEMORY_URI` never silently falls back to `/memory`.
+- Setting `AGENTSPACE_MEMORY_URI` never silently falls back to the local store.
 
 This milestone enables remote agents, automation, and the future UI while
 preserving offline local mode.
@@ -495,7 +587,11 @@ Acceptance criteria:
 
 - The Web UI and memory-enabled agents observe the same pages, tags, and links.
 - A stale browser edit cannot overwrite a newer agent edit.
-- Agents without the skill still lack direct filesystem access to the corpus.
+- Agents without the skill still receive neither the CLI instructions nor the
+  memory-data mount.
+- Memory-enabled agents are taught only the structured commands and
+  `memory run`; no UI or structured agent-facing API proactively advertises the
+  backing path, although `memory run pwd` may reveal it.
 - Memory survives normal session and stack lifecycle operations.
 - `just check` and the containerized end-to-end scenario pass.
 
@@ -514,8 +610,12 @@ Tests should be layered around the shared contract:
 - **Client conformance tests:** run the same CRUD/query/tag/graph/error cases
   through `DirectMemoryClient` and `HttpMemoryClient`; both must reach the same
   `MemoryService` behavior.
+- **Command-runner tests:** executable allowlist, direct argv preservation, no
+  shell parsing, working directory, minimal environment, stdout/stderr
+  streaming, arbitrary output bytes, exit parity, cancellation, timeout, and
+  output limits in direct and HTTP modes.
 - **Agent host tests:** manifest validation, resource resolution, volume labels,
-  mount gating, collision rejection, and accessible paths.
+  mount gating, collision rejection, and suppression of non-advertised paths.
 - **Client service tests:** route contracts, proxy payloads, timeout/error
   mapping, and no direct memory-service exposure to Web UI code.
 - **Web checks:** TypeScript build, lint/dead-code checks, and browser smoke
@@ -529,6 +629,12 @@ be verified with the smallest relevant Compose build and smoke scenario.
 ## Operational and Security Rules
 
 - Never follow symlinks or allow paths outside the configured root.
+- Apply root/path confinement to structured page operations. `memory run`
+  intentionally passes arguments through unchanged and is not a security
+  boundary in v1.
+- Execute `memory run` without a shell, with a minimal environment, explicit
+  timeout/output limits, child cleanup on cancellation, and an unprivileged
+  service container containing no credentials.
 - Never render raw HTML from memory pages without the Web UI's existing
   sanitization boundary.
 - Apply explicit limits to page size, request size, result count, and scan
@@ -555,6 +661,8 @@ be verified with the smallest relevant Compose build and smoke scenario.
 - Page version history beyond volume-level backups.
 - Arbitrary host bind mounts or user-supplied volume names in skill metadata.
 - User-created skills provisioning persistent volumes.
+- Hard filesystem isolation from the kernel user.
+- Sandboxing or per-command argument validation for `memory run`.
 
 These can be added later behind the client, service/store, and resource-scope
 abstractions without replacing the Markdown corpus or changing the basic CLI.
