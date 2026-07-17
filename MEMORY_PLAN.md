@@ -5,8 +5,8 @@
 AgentSpace should add a text-first memory system with three parts:
 
 1. A built-in `memory` skill that teaches agents when and how to use memory.
-2. A `memory` CLI that uses either a local filesystem store or a remote HTTP
-   store with the same behavior.
+2. A single Rust `memory` binary whose CLI uses the same client/service path
+   through either an in-process transport or HTTP.
 3. A Memory page in the Web UI, backed by `client_service`, for browsing,
    searching, editing, and linking the same memories agents use.
 
@@ -79,20 +79,54 @@ kernels: only a kernel with the `memory` skill enabled mounts the volume
 directly. A deployment may set `AGENTSPACE_MEMORY_URI` for an agent to use the
 server instead; the CLI then ignores its local directory.
 
-The new Python workspace package should live at `services/memory`. It should
-produce a console script named `memory` and contain:
+The implementation should be a Rust workspace crate at `services/memory_rs`.
+It produces one binary named `memory`; that same artifact runs normal CLI
+commands and the server selected by `memory --serve`. The kernel image and the
+memory service image copy the same compiled binary rather than maintaining
+separate CLI and server packages.
 
-- backend-neutral page models and validation;
-- a `MemoryBackend` protocol;
-- a `FilesystemMemoryBackend`;
-- an HTTP client backend;
-- the CLI;
-- the FastAPI app used by `memory --serve`.
+The crate contains:
 
-This follows the existing Python/FastAPI service pattern while allowing the
-same package to be installed in the kernel image. Use established dependencies
-already present in the repository where possible. Add only a widely supported
-YAML parser for frontmatter rather than implementing a partial YAML parser.
+- transport-neutral request, response, page, and error models;
+- a `MemoryClient` trait used by every CLI command;
+- direct and HTTP implementations of `MemoryClient`;
+- a `MemoryService` containing all application behavior;
+- a `MemoryStore` trait and filesystem implementation beneath the service;
+- the Clap CLI;
+- the Axum HTTP adapter used by `memory --serve`.
+
+This follows the existing Rust service pattern, workspace lints, and
+`just rust-check`. Reuse established Rust dependencies where possible and add a
+maintained Serde-compatible YAML parser for frontmatter rather than
+implementing a partial YAML parser.
+
+### One client/server path in both modes
+
+Local mode must not be a separate CLI implementation that reaches into files
+directly. After argument parsing, every command constructs the same typed
+request and calls the same `MemoryClient` interface:
+
+```text
+local:
+CLI command -> DirectMemoryClient -> MemoryService -> FilesystemMemoryStore
+
+remote:
+CLI command -> HttpMemoryClient -> HTTP -> MemoryService
+                                      -> FilesystemMemoryStore
+```
+
+`DirectMemoryClient` is an in-process transport adapter: it owns or references
+the same `MemoryService` used by the server and delegates typed calls directly.
+`HttpMemoryClient` only serializes those request/response models over HTTP.
+Axum handlers deserialize requests, call `MemoryService`, and serialize the
+same responses. Validation, query behavior, revisions, locking, link updates,
+and domain error mapping live behind `MemoryService` and are therefore
+identical in both modes.
+
+Transport code may handle connection failures, HTTP status mapping, and
+serialization, but must not implement memory behavior. The test suite should
+run one client contract against `DirectMemoryClient` and `HttpMemoryClient` to
+prevent the two paths from drifting.
 
 ## Memory Model
 
@@ -193,8 +227,9 @@ indexes and keeps direct inspection trustworthy.
 - `memory check` reports invalid frontmatter, unsafe paths, duplicate normalized
   tags, and broken internal links.
 
-The backend protocol should leave room for a future indexed or embedding-based
-implementation, but those features must not alter these baseline semantics.
+The service/store boundary should leave room for a future indexed or
+embedding-based store implementation, but those features must not alter these
+baseline semantics.
 
 ## CLI Contract
 
@@ -341,15 +376,19 @@ orchestration.
 
 Work:
 
-- Add `services/memory` to the uv workspace with a `memory` console entry point.
-- Implement page/path/frontmatter models and the backend protocol.
-- Implement the filesystem backend, locking, atomic writes, revisions, moves,
+- Add `services/memory_rs` to the Cargo workspace with a single `memory` binary
+  target and the repository's workspace lint configuration.
+- Implement transport-neutral models, `MemoryClient`, `MemoryService`, and
+  `MemoryStore` abstractions.
+- Implement `DirectMemoryClient` as an in-process adapter over the service.
+- Implement the filesystem store, locking, atomic writes, revisions, moves,
   queries, tags, links, backlinks, and integrity checks.
 - Implement the local forms of all CLI commands except `--serve`.
 - Add `--json` output and structured exit codes.
 - Add fixtures containing nested concepts, Unicode text, relative links,
   broken links, and invalid pages.
-- Include the package tests in root pytest discovery and `just check`.
+- Include unit and direct-client contract tests in `cargo test` and
+  `just check`.
 
 Acceptance criteria:
 
@@ -380,7 +419,7 @@ Work:
 - Teach the skill to inspect `memory --help`, query before writing, prefer
   updating an existing page over duplication, use links/tags sparingly, run
   `memory check`, and never store secrets.
-- Install the `memory` package and console script in the kernel image.
+- Build and install the `memory` binary in the kernel image.
 - Declare the stable memory volume in Compose.
 
 Acceptance criteria:
@@ -397,18 +436,20 @@ Acceptance criteria:
 This milestone delivers durable memory to agents without requiring an HTTP
 service or Web UI.
 
-### Milestone 3: HTTP backend and public service boundary
+### Milestone 3: HTTP transport and public service boundary
 
 Expose the same store remotely without changing CLI behavior or bypassing
 `client_service`.
 
 Work:
 
-- Implement the FastAPI adapter and `memory --serve`.
-- Implement the HTTP `MemoryBackend` client selected by
+- Add the Axum adapter and `memory --serve` mode to the same Rust binary used by
+  local CLI commands.
+- Implement `HttpMemoryClient`, selected by
   `AGENTSPACE_MEMORY_URI`.
-- Run one backend conformance suite against both filesystem and HTTP adapters.
-- Add a memory service image and Compose service sharing
+- Run one `MemoryClient` contract suite against direct and HTTP transports.
+- Add a multi-stage memory service image that runs the same compiled `memory`
+  artifact as the kernel image, plus a Compose service sharing
   `agentspace-memory-data`.
 - Add health checks, bounded timeouts, request limits, and structured logging.
 - Add `client_service` configuration, upstream client, `/memory` proxy routes,
@@ -470,8 +511,9 @@ Tests should be layered around the shared contract:
 - **Filesystem tests:** atomicity, locking, stale revisions, moves with
   backlinks, symlink/traversal rejection, manual valid files, and restart
   reconstruction.
-- **Backend conformance tests:** run the same CRUD/query/tag/graph/error cases
-  against local and HTTP backends.
+- **Client conformance tests:** run the same CRUD/query/tag/graph/error cases
+  through `DirectMemoryClient` and `HttpMemoryClient`; both must reach the same
+  `MemoryService` behavior.
 - **Agent host tests:** manifest validation, resource resolution, volume labels,
   mount gating, collision rejection, and accessible paths.
 - **Client service tests:** route contracts, proxy payloads, timeout/error
@@ -514,5 +556,5 @@ be verified with the smallest relevant Compose build and smoke scenario.
 - Arbitrary host bind mounts or user-supplied volume names in skill metadata.
 - User-created skills provisioning persistent volumes.
 
-These can be added later behind the backend and resource-scope abstractions
-without replacing the Markdown corpus or changing the basic CLI.
+These can be added later behind the client, service/store, and resource-scope
+abstractions without replacing the Markdown corpus or changing the basic CLI.
