@@ -31,6 +31,8 @@
 # Rust build artifacts
 **/target/
 **/.cargo/
+!services/memory_rs/
+!services/memory_rs/**
 
 # Local environment / secrets (compose loads these from disk separately)
 .env
