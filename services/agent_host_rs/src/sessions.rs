@@ -30,6 +30,7 @@ use crate::{
         KernelStatus, RuntimeSessionSummary, ServiceSummary, SessionSummary, WorkspaceMount,
         WorkspaceMountMode,
     },
+    skills::{SkillRegistry, SkillVolumeResource},
 };
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostError>> + Send>>;
@@ -41,6 +42,7 @@ pub struct RuntimeCreateSession {
     pub env: BTreeMap<String, String>,
     pub additional_paths: Vec<String>,
     pub skills: Vec<String>,
+    pub skill_volumes: Vec<SkillVolumeResource>,
     pub workspace_mounts: Vec<WorkspaceMount>,
 }
 
@@ -130,6 +132,7 @@ pub struct SessionRegistry {
 
 struct SessionRegistryInner {
     runtime: Arc<dyn KernelRuntime>,
+    skills: Option<SkillRegistry>,
     sessions: Arc<RwLock<BTreeMap<String, SessionRecord>>>,
 }
 
@@ -137,6 +140,7 @@ impl Default for SessionRegistryInner {
     fn default() -> Self {
         Self {
             runtime: Arc::new(DockerKernelRuntime::from_env()),
+            skills: None,
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -148,6 +152,18 @@ impl SessionRegistry {
         Self {
             inner: Arc::new(SessionRegistryInner {
                 runtime,
+                skills: None,
+                sessions: Arc::new(RwLock::new(BTreeMap::new())),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn with_skills(skills: SkillRegistry) -> Self {
+        Self {
+            inner: Arc::new(SessionRegistryInner {
+                runtime: Arc::new(DockerKernelRuntime::from_env()),
+                skills: Some(skills),
                 sessions: Arc::new(RwLock::new(BTreeMap::new())),
             }),
         }
@@ -167,11 +183,24 @@ impl SessionRegistry {
         let mut merged_env: BTreeMap<String, String> = std::env::vars().collect();
         merged_env.extend(caller_env);
         let workspace_mounts = validate_workspace_mount_requests(request.workspace_mounts)?;
+        let skill_volumes = match &self.inner.skills {
+            Some(skills) => skills
+                .resolve_volume_resources(&request.skills)
+                .await
+                .map_err(|error| AgentHostError::validation(error.to_string()))?,
+            None => Vec::new(),
+        };
         let additional_paths = append_unique_paths(
             request.additional_paths,
             workspace_mounts
                 .iter()
                 .map(WorkspaceMount::mount_path)
+                .chain(
+                    skill_volumes
+                        .iter()
+                        .filter(|resource| resource.advertise)
+                        .map(|resource| resource.mount_path.clone()),
+                )
                 .collect::<Vec<_>>(),
         );
         let runtime_request = RuntimeCreateSession {
@@ -180,6 +209,7 @@ impl SessionRegistry {
             env: merged_env.clone(),
             additional_paths: additional_paths.clone(),
             skills: request.skills.clone(),
+            skill_volumes,
             workspace_mounts: workspace_mounts.clone(),
         };
         let runtime_session = self.inner.runtime.create_session(runtime_request).await?;

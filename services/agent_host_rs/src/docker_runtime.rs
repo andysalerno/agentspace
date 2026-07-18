@@ -109,9 +109,7 @@ impl DockerKernelRuntime {
     ) -> Result<(), AgentHostError> {
         let environment = self.kernel_environment(request);
         let ports = self.kernel_ports(&environment);
-        let volumes = self
-            .kernel_volumes(container_name, &request.workspace_mounts)
-            .await?;
+        let volumes = self.kernel_volumes(container_name, request).await?;
 
         self.backend
             .run_container(ContainerRunSpec {
@@ -176,7 +174,7 @@ impl DockerKernelRuntime {
     async fn kernel_volumes(
         &self,
         container_name: &str,
-        workspace_mounts: &[WorkspaceMount],
+        request: &RuntimeCreateSession,
     ) -> Result<Vec<VolumeMount>, AgentHostError> {
         let session_workspace_volume =
             session_workspace_volume_name_from_container(container_name)?;
@@ -208,10 +206,47 @@ impl DockerKernelRuntime {
                 mode: "ro".to_owned(),
             },
         ];
-        for mount in workspace_mounts {
+        for mount in &request.workspace_mounts {
             volumes.push(self.workspace_volume_mount(mount).await?);
         }
+        for resource in &request.skill_volumes {
+            volumes.push(self.skill_volume_mount(resource).await?);
+        }
         Ok(volumes)
+    }
+
+    async fn skill_volume_mount(
+        &self,
+        resource: &crate::skills::SkillVolumeResource,
+    ) -> Result<VolumeMount, AgentHostError> {
+        let key = format!("{}/{}", resource.skill_id, resource.resource_id);
+        let volume_name = self
+            .config
+            .skill_volume_overrides
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "agentspace-{}-{}",
+                    resource.skill_id, resource.resource_id
+                )
+            });
+        self.backend
+            .ensure_volume(
+                &volume_name,
+                btree_map([
+                    ("agentspace.role", "skill-resource"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.skill_id", resource.skill_id.as_str()),
+                    ("agentspace.resource_id", resource.resource_id.as_str()),
+                ]),
+            )
+            .await?;
+        Ok(VolumeMount {
+            volume_name,
+            bind: resource.mount_path.clone(),
+            mode: resource.mode.to_string(),
+        })
     }
 
     async fn workspace_volume_mount(
@@ -637,6 +672,7 @@ pub struct DockerRuntimeConfig {
     pub copilot_volume: String,
     pub skills_volume: String,
     pub skills_dir: String,
+    pub skill_volume_overrides: BTreeMap<String, String>,
     pub gitagent_env: BTreeMap<String, String>,
 }
 
@@ -656,6 +692,7 @@ impl Default for DockerRuntimeConfig {
             copilot_volume: "agentspace-kernel_copilot-config".to_owned(),
             skills_volume: "agentspace-skills".to_owned(),
             skills_dir: "/skills".to_owned(),
+            skill_volume_overrides: BTreeMap::new(),
             gitagent_env: BTreeMap::new(),
         }
     }
@@ -697,8 +734,30 @@ impl DockerRuntimeConfig {
         config.copilot_volume = env_or("AGENT_HOST_COPILOT_VOLUME", &config.copilot_volume);
         config.skills_volume = env_or("AGENT_HOST_SKILLS_VOLUME", &config.skills_volume);
         config.skills_dir = env_or("AGENT_HOST_SKILLS_DIR", &config.skills_dir);
+        config.skill_volume_overrides = Self::skill_volume_overrides_from_process();
         config.gitagent_env = gitagent_env_from_process();
         config
+    }
+
+    fn skill_volume_overrides_from_process() -> BTreeMap<String, String> {
+        const PREFIX: &str = "AGENT_HOST_SKILL_VOLUME_";
+        std::env::vars()
+            .filter_map(|(name, value)| {
+                let suffix = name.strip_prefix(PREFIX)?;
+                let (skill_id, resource_id) = suffix.split_once("__")?;
+                if skill_id.is_empty() || resource_id.is_empty() || value.is_empty() {
+                    return None;
+                }
+                Some((
+                    format!(
+                        "{}/{}",
+                        skill_id.to_ascii_lowercase().replace('_', "-"),
+                        resource_id.to_ascii_lowercase().replace('_', "-")
+                    ),
+                    value,
+                ))
+            })
+            .collect()
     }
 }
 
