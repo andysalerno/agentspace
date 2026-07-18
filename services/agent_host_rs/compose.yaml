@@ -3,8 +3,6 @@ services:
     build:
       context: ../..
       dockerfile: services/agent_host_rs/Dockerfile
-      additional_contexts:
-        memory-rs: ../../services/memory_rs
       args:
         AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
     env_file:

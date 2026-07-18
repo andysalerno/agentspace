@@ -65,6 +65,7 @@ jobs:
     name: Docker build
     runs-on: ubuntu-latest
     env:
+      COMPOSE_BAKE: "false"
       DOCKER_BUILDKIT: "1"
       KERNEL_WORKDIR: /workspace
       RUST_BUILD_PROFILE: debug
