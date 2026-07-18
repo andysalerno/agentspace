@@ -226,10 +226,7 @@ impl DockerKernelRuntime {
             .get(&key)
             .cloned()
             .unwrap_or_else(|| {
-                format!(
-                    "agentspace-{}-{}",
-                    resource.skill_id, resource.resource_id
-                )
+                format!("agentspace-{}-{}", resource.skill_id, resource.resource_id)
             });
         self.backend
             .ensure_volume(
@@ -1558,6 +1555,7 @@ mod tests {
             env: BTreeMap::new(),
             additional_paths: Vec::new(),
             skills: Vec::new(),
+            skill_volumes: Vec::new(),
             workspace_mounts: vec![
                 WorkspaceMount::new("todo-list-code", WorkspaceMountMode::ReadWrite),
                 WorkspaceMount::new("todo-list-items", WorkspaceMountMode::ReadOnly),
@@ -1702,6 +1700,7 @@ mod tests {
             env,
             additional_paths: Vec::new(),
             skills: Vec::new(),
+            skill_volumes: Vec::new(),
             workspace_mounts: Vec::new(),
         };
 

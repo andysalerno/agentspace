@@ -384,7 +384,10 @@ impl Display for SkillError {
                 write!(formatter, "invalid skill file path: {path}")
             }
             Self::InvalidMetadata { skill_id, message } => {
-                write!(formatter, "invalid metadata for builtin skill '{skill_id}': {message}")
+                write!(
+                    formatter,
+                    "invalid metadata for builtin skill '{skill_id}': {message}"
+                )
             }
             Self::BuiltinSkillReadOnly { skill_id } => {
                 write!(formatter, "builtin skill '{skill_id}' is read-only")
@@ -673,10 +676,8 @@ impl SkillsService {
             }
             let metadata_content = fs::read_to_string(&metadata_path)
                 .map_err(|source| io_error("read skill metadata", &metadata_path, source))?;
-            let metadata: SkillMetadata =
-                serde_json::from_str(&metadata_content).map_err(|source| {
-                    json_error("parse skill metadata", &metadata_path, source)
-                })?;
+            let metadata: SkillMetadata = serde_json::from_str(&metadata_content)
+                .map_err(|source| json_error("parse skill metadata", &metadata_path, source))?;
             if metadata.schema_version != 1 {
                 return Err(invalid_metadata(
                     skill_id,
