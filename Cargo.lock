@@ -392,6 +392,7 @@ dependencies = [
  "axum",
  "chrono",
  "http-body-util",
+ "memory_rs",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1152,15 +1153,23 @@ name = "memory_rs"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "bytes",
  "chrono",
  "clap",
  "fs4",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml_ng",
  "sha2",
  "tempfile",
  "tokio",
+ "tokio-stream",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1999,6 +2008,7 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",

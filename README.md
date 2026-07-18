@@ -10,6 +10,7 @@ The repo is currently centered on the kernel milestone:
 - `kernel_host`: runner plus one-session HTTP service mode for kernel containers
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
 - `client_service` (`services/client_service_rs`): client-facing API over `agent_host`
+- `memory` (`services/memory_rs`): local CLI and private HTTP memory service
 - `git_agent`: internal GitAgent service for repo access and patch submission
 - `webui`: TypeScript dashboard over `client_service`
 - `cli_channel`: proof-of-concept CLI session client over `client_service`
@@ -100,8 +101,33 @@ The volume name defaults to `agentspace-memory-data` and can be overridden with
 `just stack-down`, and `just stack-up`. Removing that named volume permanently
 deletes the corpus.
 
-Milestone 2 exposes memory to agents through the CLI only. The memory service,
-client-service API, and Web UI are later milestones.
+The default stack also runs a private `memory` HTTP service on the internal
+network. It uses the same `memory` binary and named volume as local
+memory-enabled kernels. Clients must use the `client_service` proxy under
+`/memory`; the memory service does not publish a host port.
+
+The CLI supports three deployment modes:
+
+```sh
+# Explicit local store
+memory --root /path/to/memory pages ls
+
+# In-stack or otherwise reachable service
+AGENTSPACE_MEMORY_URI=http://memory:8005 memory pages ls
+
+# Externally hosted service
+memory --uri https://memory.example.internal pages ls
+```
+
+`--uri` or `AGENTSPACE_MEMORY_URI` selects HTTP mode and never falls back to
+local storage after an error. `--root` or `AGENTSPACE_MEMORY_DIR` selects local
+mode. Run a standalone service with
+`memory --serve --root /path/to/memory --host 127.0.0.1 --port 8005`.
+
+Configure the public proxy with `CLIENT_SERVICE_MEMORY_BASE_URL` and its
+bounded upstream timeout with `CLIENT_SERVICE_MEMORY_TIMEOUT`. It exposes the
+memory service routes at `/memory/healthz` and `/memory/v1/...`. The operator
+Web UI is delivered in Milestone 4.
 
 ## Client Service
 
@@ -131,6 +157,7 @@ Current endpoints:
 - `POST /sessions/{session_id}/reset`
 - `DELETE /sessions/{session_id}`
 - `GET /kernels`
+- `/memory/healthz` and `/memory/v1/...` proxy routes
 
 Session metadata notes:
 

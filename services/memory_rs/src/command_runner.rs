@@ -84,33 +84,28 @@ impl Display for RunOutcome {
     }
 }
 
-/// Runs `argv` directly (never through a shell).
+/// Validates `argv[0]` against [`ALLOWED_COMMANDS`] and spawns it.
 ///
-/// Uses `cwd` as its working directory, streaming stdout/stderr
-/// independently into the given sinks as bytes arrive, honoring `limits`,
-/// and resolving early if `cancel` completes first.
+/// Spawns directly (never through a shell) with `cwd` as its working
+/// directory and a minimal environment (only `PATH`, so allowlisted tools
+/// can still be located).
 ///
-/// Only `argv[0]` is validated against [`ALLOWED_COMMANDS`]; every remaining
-/// argument is passed through unchanged. The subprocess receives a minimal
-/// environment (only `PATH`, so allowlisted tools can still be located).
-pub async fn run<Out, ErrOut, Cancel>(
-    cwd: &Path,
-    argv: &[String],
-    limits: RunLimits,
-    stdout_sink: Out,
-    stderr_sink: ErrOut,
-    cancel: Cancel,
-) -> RunOutcome
-where
-    Out: AsyncWrite + Unpin + Send + 'static,
-    ErrOut: AsyncWrite + Unpin + Send + 'static,
-    Cancel: Future<Output = ()> + Send + 'static,
-{
+/// Kept separate from [`drive`] so a caller such as the Axum `/v1/run`
+/// adapter can distinguish a rejected or unlaunchable command — reported
+/// before any response streaming begins — from every outcome that can only
+/// be known once the child is running.
+///
+/// # Errors
+///
+/// Returns [`RunOutcome::NotAllowed`] if `argv` is empty or its first
+/// element is not in [`ALLOWED_COMMANDS`], or [`RunOutcome::LaunchFailed`]
+/// if the process could not be spawned.
+pub fn spawn(cwd: &Path, argv: &[String]) -> Result<tokio::process::Child, RunOutcome> {
     let Some(program) = argv.first() else {
-        return RunOutcome::NotAllowed(String::new());
+        return Err(RunOutcome::NotAllowed(String::new()));
     };
     if !is_allowed(program) {
-        return RunOutcome::NotAllowed(program.clone());
+        return Err(RunOutcome::NotAllowed(program.clone()));
     }
 
     let mut command = Command::new(program);
@@ -125,11 +120,54 @@ where
         command.env("PATH", path_var);
     }
 
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => return RunOutcome::LaunchFailed(error.to_string()),
-    };
+    command
+        .spawn()
+        .map_err(|error| RunOutcome::LaunchFailed(error.to_string()))
+}
 
+/// Runs `argv` directly (never through a shell).
+///
+/// Uses `cwd` as its working directory, streaming stdout/stderr
+/// independently into the given sinks as bytes arrive, honoring `limits`,
+/// and resolving early if `cancel` completes first.
+///
+/// Only `argv[0]` is validated against [`ALLOWED_COMMANDS`]; every remaining
+/// argument is passed through unchanged.
+pub async fn run<Out, ErrOut, Cancel>(
+    cwd: &Path,
+    argv: &[String],
+    limits: RunLimits,
+    stdout_sink: Out,
+    stderr_sink: ErrOut,
+    cancel: Cancel,
+) -> RunOutcome
+where
+    Out: AsyncWrite + Unpin + Send + 'static,
+    ErrOut: AsyncWrite + Unpin + Send + 'static,
+    Cancel: Future<Output = ()> + Send + 'static,
+{
+    let child = match spawn(cwd, argv) {
+        Ok(child) => child,
+        Err(outcome) => return outcome,
+    };
+    drive(child, limits, stdout_sink, stderr_sink, cancel).await
+}
+
+/// Drives an already-spawned child to completion, streaming stdout/stderr
+/// independently into the given sinks as bytes arrive, honoring `limits`,
+/// and resolving early if `cancel` completes first.
+pub async fn drive<Out, ErrOut, Cancel>(
+    mut child: tokio::process::Child,
+    limits: RunLimits,
+    stdout_sink: Out,
+    stderr_sink: ErrOut,
+    cancel: Cancel,
+) -> RunOutcome
+where
+    Out: AsyncWrite + Unpin + Send + 'static,
+    ErrOut: AsyncWrite + Unpin + Send + 'static,
+    Cancel: Future<Output = ()> + Send + 'static,
+{
     let child_stdout = child.stdout.take();
     let child_stderr = child.stderr.take();
 

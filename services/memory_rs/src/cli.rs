@@ -39,9 +39,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Run the HTTP server instead of a one-shot command (not implemented
-    /// until milestone 3).
-    #[arg(long)]
+    /// Run the Axum HTTP server over the resolved local store instead of a
+    /// one-shot command. Mutually exclusive with `--uri`; `--serve` never
+    /// serves a remote-configured backend (rejected at runtime if
+    /// `AGENTSPACE_MEMORY_URI` is set instead of `--uri`, since `clap`
+    /// cannot see environment variables).
+    #[arg(long, conflicts_with = "uri")]
     pub serve: bool,
 
     /// Bind host for `--serve`.
@@ -194,7 +197,12 @@ pub const fn exit_code_for(error: &MemoryError) -> i32 {
         MemoryError::RunOutputLimitExceeded => 7,
         MemoryError::RunCancelled => 8,
         MemoryError::RunLaunchFailed { .. } => 9,
-        MemoryError::Lock { .. } | MemoryError::Io { .. } | MemoryError::Yaml { .. } => 1,
+        MemoryError::Unavailable { .. } => 10,
+        MemoryError::MalformedResponse { .. } => 11,
+        MemoryError::Lock { .. }
+        | MemoryError::Io { .. }
+        | MemoryError::Yaml { .. }
+        | MemoryError::Internal { .. } => 1,
     }
 }
 

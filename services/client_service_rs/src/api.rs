@@ -7,9 +7,9 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::Body,
-    extract::{Path, Query, State},
-    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
+    body::{Body, to_bytes},
+    extract::{OriginalUri, Path, Query, State},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
@@ -24,6 +24,7 @@ use crate::{
     agent_host::{AgentHostError, JsonObject, KernelEvent},
     errors::{StoreError, ValidationError},
     git_agent::GitAgentError,
+    memory::{MEMORY_JSON_CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE, MemoryProxyError},
     models::{
         AgentRecord, BUILTIN_GIT_AGENT_WORKSPACE_ID, BUILTIN_GIT_AGENT_WORKSPACE_NAME, ClientType,
         ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
@@ -39,6 +40,8 @@ const DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL: &str = "http://client-service:8002"
 const AGENTSPACE_CLIENT_SERVICE_URL_ENV: &str = "CLIENT_SERVICE_AGENTSPACE_BASE_URL";
 const GATEWAY_AUTOSTART_ATTEMPTS: usize = 5;
 const GATEWAY_AUTOSTART_RETRY_DELAY: Duration = Duration::from_secs(2);
+const MEMORY_MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+const MEMORY_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -69,6 +72,7 @@ pub fn router() -> Router<AppState> {
             "/agents/{agent_id}",
             get(get_agent).patch(update_agent).delete(delete_agent),
         )
+        .merge(memory_router())
         .merge(git_agent_router())
         .route("/workspaces", get(list_workspaces).post(create_workspace))
         .route(
@@ -139,6 +143,21 @@ pub fn router() -> Router<AppState> {
         .route("/gateways/{gateway_id}/logs", get(gateway_logs))
 }
 
+fn memory_router() -> Router<AppState> {
+    Router::new()
+        .route("/memory/healthz", get(proxy_memory))
+        .route("/memory/v1/pages", get(proxy_memory))
+        .route(
+            "/memory/v1/pages/content",
+            get(proxy_memory).put(proxy_memory).delete(proxy_memory),
+        )
+        .route("/memory/v1/pages/move", post(proxy_memory))
+        .route("/memory/v1/tags", get(proxy_memory))
+        .route("/memory/v1/links", get(proxy_memory))
+        .route("/memory/v1/check", get(proxy_memory))
+        .route("/memory/v1/run", post(proxy_memory))
+}
+
 fn git_agent_router() -> Router<AppState> {
     Router::new()
         .route(
@@ -155,6 +174,119 @@ fn git_agent_router() -> Router<AppState> {
             "/git-agent/requests/{request_id}/rerun-review",
             post(rerun_git_agent_review),
         )
+}
+
+async fn proxy_memory(
+    State(state): State<AppState>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let upstream_path = uri
+        .path()
+        .strip_prefix("/memory")
+        .ok_or_else(|| ApiError::internal("invalid memory proxy route".to_owned()))?;
+    let request_body = to_bytes(body, MEMORY_MAX_REQUEST_BYTES)
+        .await
+        .map_err(|error| ApiError::payload_too_large(error.to_string()))?
+        .to_vec();
+    let response = state
+        .memory
+        .request(
+            method,
+            upstream_path,
+            uri.query(),
+            headers.get(header::CONTENT_TYPE),
+            request_body,
+            upstream_path == "/v1/run",
+        )
+        .await?;
+    let status = response.status();
+
+    if upstream_path == "/v1/run" && status.is_success() {
+        require_memory_content_type(&response, MEMORY_RUN_CONTENT_TYPE)?;
+        return Ok(stream_memory_response(status, response));
+    }
+
+    if status == StatusCode::NO_CONTENT {
+        return Ok(status.into_response());
+    }
+
+    require_memory_content_type(&response, MEMORY_JSON_CONTENT_TYPE)?;
+    let bytes = collect_memory_response(response).await?;
+    serde_json::from_slice::<Value>(&bytes).map_err(|error| {
+        MemoryProxyError::MalformedResponse {
+            detail: error.to_string(),
+        }
+    })?;
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, MEMORY_JSON_CONTENT_TYPE)
+        .body(Body::from(bytes))
+        .map_err(|error| ApiError::internal(error.to_string()))
+}
+
+fn require_memory_content_type(
+    response: &reqwest::Response,
+    expected: &'static str,
+) -> Result<(), MemoryProxyError> {
+    let actual = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if actual == Some(expected) {
+        return Ok(());
+    }
+    Err(MemoryProxyError::MalformedResponse {
+        detail: format!("expected content-type {expected:?}, got {actual:?}"),
+    })
+}
+
+async fn collect_memory_response(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, MemoryProxyError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|source| MemoryProxyError::Http { source })?
+    {
+        if body.len().saturating_add(chunk.len()) > MEMORY_MAX_RESPONSE_BYTES {
+            return Err(MemoryProxyError::ResponseTooLarge {
+                limit: MEMORY_MAX_RESPONSE_BYTES,
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+fn stream_memory_response(status: StatusCode, mut response: reqwest::Response) -> Response {
+    let (sender, receiver) = mpsc::channel::<StreamItem>(8);
+    tokio::spawn(async move {
+        loop {
+            let item = match response.chunk().await {
+                Ok(Some(chunk)) => Ok(chunk.to_vec()),
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, "memory run upstream stream failed");
+                    break;
+                }
+            };
+            if sender.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    (
+        status,
+        [(header::CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE)],
+        Body::from_stream(ReceiverStream::new(receiver)),
+    )
+        .into_response()
 }
 
 async fn healthz() -> Json<HealthResponse> {
@@ -3368,6 +3500,27 @@ impl ApiError {
         }
     }
 
+    const fn service_unavailable(detail: String) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            detail,
+        }
+    }
+
+    const fn gateway_timeout(detail: String) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            detail,
+        }
+    }
+
+    const fn payload_too_large(detail: String) -> Self {
+        Self {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            detail,
+        }
+    }
+
     const fn internal(detail: String) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -3381,6 +3534,9 @@ impl ApiError {
             StatusCode::CONFLICT => "conflict",
             StatusCode::UNPROCESSABLE_ENTITY => "validation",
             StatusCode::BAD_GATEWAY => "bad_gateway",
+            StatusCode::SERVICE_UNAVAILABLE => "service_unavailable",
+            StatusCode::GATEWAY_TIMEOUT => "gateway_timeout",
+            StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
             StatusCode::INTERNAL_SERVER_ERROR => "internal",
             status if status.is_client_error() => "client_error",
             status if status.is_server_error() => "server_error",
@@ -3450,11 +3606,26 @@ impl From<GitAgentError> for ApiError {
             GitAgentError::HttpStatus { status, .. } if status == StatusCode::NOT_FOUND => {
                 Self::not_found(format!("git_agent returned HTTP {status}"))
             }
+
             GitAgentError::HttpStatus { status, .. } if status.is_client_error() => Self {
                 status,
                 detail: format!("git_agent returned HTTP {status}"),
             },
             other => Self::bad_gateway(other.to_string()),
+        }
+    }
+}
+
+impl From<MemoryProxyError> for ApiError {
+    fn from(error: MemoryProxyError) -> Self {
+        match error {
+            MemoryProxyError::Timeout { .. } => Self::gateway_timeout(error.to_string()),
+            MemoryProxyError::Unavailable { .. } => Self::service_unavailable(error.to_string()),
+            MemoryProxyError::MalformedResponse { .. }
+            | MemoryProxyError::ResponseTooLarge { .. }
+            | MemoryProxyError::Http { .. }
+            | MemoryProxyError::InvalidBaseUrl { .. }
+            | MemoryProxyError::UrlCannotBeBase { .. } => Self::bad_gateway(error.to_string()),
         }
     }
 }

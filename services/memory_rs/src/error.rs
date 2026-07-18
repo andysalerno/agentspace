@@ -48,6 +48,24 @@ pub enum MemoryError {
     NotImplemented {
         feature: String,
     },
+    /// The configured remote transport could not complete the request:
+    /// connection refused, DNS failure, or a bounded connect/request
+    /// timeout elapsed. Never used by the local/direct transport.
+    Unavailable {
+        message: String,
+    },
+    /// A remote transport received a response that could not be
+    /// interpreted as a valid reply to the request that was sent: an
+    /// unexpected content type, invalid JSON, or a `/v1/run` byte stream
+    /// that ended without a terminal frame.
+    MalformedResponse {
+        message: String,
+    },
+    /// A failure that does not fit any other category, surfaced by either
+    /// transport.
+    Internal {
+        message: String,
+    },
     Io {
         source: std::io::Error,
     },
@@ -125,6 +143,27 @@ impl MemoryError {
         }
     }
 
+    #[must_use]
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::Unavailable {
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn malformed_response(message: impl Into<String>) -> Self {
+        Self::MalformedResponse {
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+        }
+    }
+
     /// A stable machine-readable kind, used for `--json` output and process
     /// exit code mapping.
     #[must_use]
@@ -143,6 +182,9 @@ impl MemoryError {
             Self::RunLaunchFailed { .. } => "run_launch_failed",
             Self::Lock { .. } => "lock",
             Self::NotImplemented { .. } => "not_implemented",
+            Self::Unavailable { .. } => "unavailable",
+            Self::MalformedResponse { .. } => "malformed_response",
+            Self::Internal { .. } => "internal",
             Self::Io { .. } => "io",
             Self::Yaml { .. } => "yaml",
         }
@@ -195,6 +237,16 @@ impl Display for MemoryError {
             Self::NotImplemented { feature } => {
                 write!(formatter, "{feature} is not implemented yet")
             }
+            Self::Unavailable { message } => {
+                write!(formatter, "memory service is unavailable: {message}")
+            }
+            Self::MalformedResponse { message } => {
+                write!(
+                    formatter,
+                    "memory service returned a malformed response: {message}"
+                )
+            }
+            Self::Internal { message } => write!(formatter, "internal error: {message}"),
             Self::Io { source } => write!(formatter, "I/O error: {source}"),
             Self::Yaml { source } => write!(formatter, "YAML error: {source}"),
         }
@@ -218,7 +270,10 @@ impl Error for MemoryError {
             | Self::RunCancelled
             | Self::RunLaunchFailed { .. }
             | Self::Lock { .. }
-            | Self::NotImplemented { .. } => None,
+            | Self::NotImplemented { .. }
+            | Self::Unavailable { .. }
+            | Self::MalformedResponse { .. }
+            | Self::Internal { .. } => None,
         }
     }
 }
