@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
 
+FROM scratch AS memory-rs
+COPY services/memory_rs /
+
 FROM docker.io/library/rust:1.96-slim-bookworm AS builder
 
 ARG RUST_BUILD_PROFILE=release
@@ -9,7 +12,7 @@ WORKDIR /usr/src/agentspace
 COPY Cargo.toml Cargo.lock ./
 COPY services/agent_host_rs services/agent_host_rs
 COPY services/client_service_rs services/client_service_rs
-COPY services/memory_rs services/memory_rs
+COPY --from=memory-rs . services/memory_rs
 RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=agentspace-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \

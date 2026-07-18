@@ -1,0 +1,10 @@
+services:
+  agent-host:
+    build:
+      additional_contexts:
+        memory-rs: ./services/memory_rs
+
+  client-service:
+    build:
+      additional_contexts:
+        memory-rs: ./services/memory_rs
