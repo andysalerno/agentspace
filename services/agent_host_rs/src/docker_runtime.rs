@@ -1437,8 +1437,12 @@ mod tests {
     use crate::{
         docker_runtime::skills_mount_path,
         errors::AgentHostError,
-        models::{HarnessName, WorkspaceMount, WorkspaceMountMode},
+        models::{
+            DockerKernelSession, HarnessName, KernelRuntimeSession, WorkspaceMount,
+            WorkspaceMountMode,
+        },
         sessions::{KernelRuntime, RuntimeCreateSession},
+        skills::{SkillVolumeMode, SkillVolumeResource},
     };
 
     #[derive(Clone, Default)]
@@ -1618,6 +1622,86 @@ mod tests {
             );
             drop(state);
         }
+    }
+
+    #[tokio::test]
+    async fn skill_volume_is_shared_and_retained_when_sessions_are_destroyed() {
+        let backend = FakeDockerBackend::default();
+        let mut config = DockerRuntimeConfig::default();
+        config.skill_volume_overrides.insert(
+            "memory/data".to_owned(),
+            "agentspace-memory-data".to_owned(),
+        );
+        let runtime = DockerKernelRuntime::new(config, Arc::new(backend.clone()));
+        let request = RuntimeCreateSession {
+            session_id: "memory-enabled".to_owned(),
+            harness: HarnessName::Echo,
+            env: BTreeMap::new(),
+            additional_paths: Vec::new(),
+            skills: vec!["memory".to_owned()],
+            skill_volumes: vec![SkillVolumeResource {
+                skill_id: "memory".to_owned(),
+                resource_id: "data".to_owned(),
+                mount_path: "/var/lib/agentspace/memory".to_owned(),
+                advertise: false,
+                mode: SkillVolumeMode::Rw,
+            }],
+            workspace_mounts: Vec::new(),
+        };
+
+        runtime
+            .run_kernel_container("agentspace-kernel-one", &request)
+            .await
+            .unwrap_or_else(|error| panic!("first run failed: {error}"));
+        runtime
+            .run_kernel_container("agentspace-kernel-two", &request)
+            .await
+            .unwrap_or_else(|error| panic!("second run failed: {error}"));
+        runtime
+            .destroy_session(KernelRuntimeSession::Docker(DockerKernelSession {
+                container_name: "agentspace-kernel-one".to_owned(),
+                session_workspace_volume_name: "agentspace-session-workspace-one".to_owned(),
+                base_url: "http://agentspace-kernel-one:8000".to_owned(),
+                vscode_url: None,
+                free_port_url: None,
+            }))
+            .await
+            .unwrap_or_else(|error| panic!("destroy failed: {error}"));
+
+        let state = backend.state();
+        assert_eq!(
+            state
+                .created_volumes
+                .iter()
+                .filter(|(name, _labels)| name == "agentspace-memory-data")
+                .count(),
+            1
+        );
+        let labels = state
+            .created_volumes
+            .iter()
+            .find_map(|(name, labels)| (name == "agentspace-memory-data").then_some(labels))
+            .unwrap_or_else(|| panic!("memory volume was not created"));
+        assert_eq!(
+            labels.get("agentspace.role").map(String::as_str),
+            Some("skill-resource")
+        );
+        assert_eq!(
+            labels.get("agentspace.skill_id").map(String::as_str),
+            Some("memory")
+        );
+        assert!(state.run_specs.iter().all(|spec| {
+            spec.volumes.contains(&VolumeMount {
+                volume_name: "agentspace-memory-data".to_owned(),
+                bind: "/var/lib/agentspace/memory".to_owned(),
+                mode: "rw".to_owned(),
+            })
+        }));
+        assert_eq!(
+            state.removed_volumes,
+            vec!["agentspace-session-workspace-one"]
+        );
+        drop(state);
     }
 
     #[test]

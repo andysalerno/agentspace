@@ -83,6 +83,26 @@ Currently implemented endpoints:
 - `POST /sessions/{session_id}/reset`
 - `DELETE /sessions/{session_id}`
 
+## Agent Memory
+
+The built-in `memory` skill provides opt-in, durable memory to hosted agents.
+Enable **memory** on an agent in the Agents page, then start a new session or
+reset an existing one. The kernel image includes the `memory` CLI; enabled
+sessions receive its instructions and share an installation-scoped persistent
+volume.
+
+The memory corpus is shared by every agent that enables the skill. Never store
+credentials, tokens, secrets, or sensitive personal information in it. Agents
+without the skill do not receive the memory volume or memory instructions.
+
+The volume name defaults to `agentspace-memory-data` and can be overridden with
+`AGENTSPACE_MEMORY_VOLUME`. It survives normal session deletion, reset,
+`just stack-down`, and `just stack-up`. Removing that named volume permanently
+deletes the corpus.
+
+Milestone 2 exposes memory to agents through the CLI only. The memory service,
+client-service API, and Web UI are later milestones.
+
 ## Client Service
 
 `client_service` is the intended public backend API. Clients should talk to it, not to `agent_host` directly. The implementation lives in `services/client_service_rs`.

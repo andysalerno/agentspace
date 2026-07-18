@@ -7,6 +7,7 @@ services:
       dockerfile: kernels/kernel_host/Dockerfile
       args:
         AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
+        RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     command: ["python", "-c", "print('kernel image ready')"]
     restart: "no"
 
@@ -41,6 +42,7 @@ services:
       - AGENT_HOST_COPILOT_VOLUME=agentspace-kernel_copilot-config
       - AGENT_HOST_SKILLS_VOLUME=agentspace-skills
       - AGENT_HOST_SKILLS_DIR=/skills
+      - AGENT_HOST_SKILL_VOLUME_MEMORY__DATA=${AGENTSPACE_MEMORY_VOLUME:-agentspace-memory-data}
       - AGENT_HOST_DOCKER_NETWORK=agentspace-stack
       - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
       - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
@@ -152,6 +154,8 @@ networks:
 volumes:
   skills:
     name: agentspace-skills
+  memory-data:
+    name: ${AGENTSPACE_MEMORY_VOLUME:-agentspace-memory-data}
   git-agent-data:
     # Stable named volume so GitAgent's repository and request database survive
     # service/container teardown. Override for deployment-specific isolation.
