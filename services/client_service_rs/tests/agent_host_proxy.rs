@@ -31,6 +31,26 @@ struct RecordedRequest {
     body: Option<Value>,
 }
 
+fn take_session_control_env(
+    requests: &mut [RecordedRequest],
+) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
+    let env = requests
+        .first_mut()
+        .and_then(|request| request.body.as_mut())
+        .and_then(|body| body.get_mut("env"))
+        .and_then(Value::as_object_mut)
+        .ok_or("recorded session environment missing")?;
+    let session_id = env
+        .remove("AGENTSPACE_SESSION_ID")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or("recorded session id missing")?;
+    let token = env
+        .remove("AGENTSPACE_SESSION_CONTROL_TOKEN")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or("recorded session control token missing")?;
+    Ok((session_id, token))
+}
+
 #[derive(Clone, Default)]
 struct StubState {
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
@@ -608,8 +628,12 @@ async fn create_session_merges_environment_for_agent_host()
     .await?;
     assert_eq!(status, StatusCode::OK);
 
+    let mut recorded = server.recorded()?;
+    let (session_id, token) = take_session_control_env(&mut recorded)?;
+    assert_eq!(session_id.len(), 32);
+    assert_eq!(token.len(), 64);
     assert_eq!(
-        server.recorded()?,
+        recorded,
         vec![RecordedRequest {
             method: Method::POST,
             path: "/sessions".to_owned(),
@@ -749,8 +773,12 @@ async fn send_message_proxies_to_stream_and_persists_messages()
         value["assistant_message"]["tool_calls"]
     );
 
+    let mut recorded = server.recorded()?;
+    let (recorded_session_id, token) = take_session_control_env(&mut recorded)?;
+    assert_eq!(recorded_session_id, session_id);
+    assert_eq!(token.len(), 64);
     assert_eq!(
-        server.recorded()?,
+        recorded,
         vec![
             RecordedRequest {
                 method: Method::POST,

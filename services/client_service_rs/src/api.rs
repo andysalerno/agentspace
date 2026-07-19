@@ -15,6 +15,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -108,6 +110,7 @@ pub fn router() -> Router<AppState> {
             get(stream_turn),
         )
         .route("/sessions/{session_id}/reset", post(reset_session))
+        .merge(session_control_router())
         .route("/kernels", get(list_kernels))
         .route("/kernels/{kernel_session_id}", delete(kill_kernel))
         .route("/kernels/{kernel_session_id}/logs", get(kernel_logs))
@@ -141,6 +144,13 @@ pub fn router() -> Router<AppState> {
         .route("/gateways/{gateway_id}/start", post(start_gateway))
         .route("/gateways/{gateway_id}/stop", post(stop_gateway))
         .route("/gateways/{gateway_id}/logs", get(gateway_logs))
+}
+
+fn session_control_router() -> Router<AppState> {
+    Router::new().route(
+        "/internal/session-control/start-new",
+        post(request_start_new_session),
+    )
 }
 
 fn memory_router() -> Router<AppState> {
@@ -1004,7 +1014,9 @@ async fn create_session(
     let session_mounts =
         session_workspace_mounts(&agent.workspace_mounts, &payload.workspace_mounts);
     validate_workspace_mounts(&state, &session_mounts)?;
-    let env = session_env(&state, &agent)?;
+    let session_id = Uuid::now_v7().simple().to_string();
+    let session_control_token = generate_session_control_token()?;
+    let env = session_env(&state, &agent, &session_id, &session_control_token)?;
     tracing::info!(
         route = "/sessions",
         action = "create_session",
@@ -1028,14 +1040,15 @@ async fn create_session(
         .await?;
     let upstream_session_id = string_field(&upstream, "session_id")?;
     let status = string_field(&upstream, "status")?;
-    let session = SessionRecord::new(
-        Uuid::now_v7().simple().to_string(),
+    let mut session = SessionRecord::new(
+        session_id,
         payload.agent_id,
         upstream_session_id.clone(),
         status.clone(),
         payload.channel_name,
         payload.client_type,
     );
+    session.session_control_token_hash = Some(hash_session_control_token(&session_control_token));
     let value = session_summary(&state, &session)?;
     state.sessions.insert(session)?;
     tracing::info!(
@@ -1048,6 +1061,40 @@ async fn create_session(
         "api handler completed"
     );
     Ok(Json(value))
+}
+
+async fn request_start_new_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<StartNewSessionRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let token = bearer_token(&headers)?;
+    let session = authenticate_session_control(&state, &payload.session_id, token)?;
+    let mut active_turns = state
+        .active_turns
+        .lock()
+        .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
+    let turn = active_turns
+        .get_mut(&session.session_id)
+        .ok_or_else(|| ApiError::conflict("session does not have an active turn".to_owned()))?;
+    turn.start_new_requested = true;
+    let turn_id = turn.turn_id.clone();
+    drop(active_turns);
+
+    tracing::info!(
+        route = "/internal/session-control/start-new",
+        action = "request_start_new_session",
+        session_id = %session.session_id,
+        turn_id = %turn_id,
+        "fresh-session handoff accepted"
+    );
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "accepted": true,
+            "turn_id": turn_id,
+        })),
+    ))
 }
 
 async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
@@ -2108,9 +2155,66 @@ async fn require_kernel(state: &AppState, kernel_session_id: &str) -> Result<(),
     }
 }
 
+fn generate_session_control_token() -> Result<String, ApiError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        ApiError::internal(format!("failed to generate session capability: {error}"))
+    })?;
+    Ok(hex_encode(&bytes))
+}
+
+fn hash_session_control_token(token: &str) -> String {
+    hex_encode(&Sha256::digest(token.as_bytes()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _written = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(invalid_session_control_credentials)
+}
+
+fn authenticate_session_control(
+    state: &AppState,
+    session_id: &str,
+    token: &str,
+) -> Result<SessionRecord, ApiError> {
+    let session = state
+        .sessions
+        .get(session_id)?
+        .ok_or_else(invalid_session_control_credentials)?;
+    let expected_hash = session
+        .session_control_token_hash
+        .as_deref()
+        .ok_or_else(invalid_session_control_credentials)?;
+    let actual_hash = hash_session_control_token(token);
+    if !bool::from(actual_hash.as_bytes().ct_eq(expected_hash.as_bytes())) {
+        return Err(invalid_session_control_credentials());
+    }
+    Ok(session)
+}
+
+fn invalid_session_control_credentials() -> ApiError {
+    ApiError::unauthorized("invalid session control credentials".to_owned())
+}
+
 fn session_env(
     state: &AppState,
     agent: &AgentRecord,
+    session_id: &str,
+    session_control_token: &str,
 ) -> Result<BTreeMap<String, String>, ApiError> {
     let mut env = BTreeMap::new();
     if let Some(config) = state.kernel_configs.get(agent.harness)? {
@@ -2129,6 +2233,11 @@ fn session_env(
     }
     env.extend(parse_env_vars(&agent.env_vars));
     env.insert("AGENTSPACE_AGENT_ID".to_owned(), agent.agent_id.clone());
+    env.insert("AGENTSPACE_SESSION_ID".to_owned(), session_id.to_owned());
+    env.insert(
+        "AGENTSPACE_SESSION_CONTROL_TOKEN".to_owned(),
+        session_control_token.to_owned(),
+    );
     env.insert(
         "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
         state
@@ -2238,6 +2347,7 @@ fn start_streaming_turn(
             turn_id: turn_id.clone(),
             user_message_id: user_message.message_id.clone(),
             assistant_message_id: assistant_message_id.clone(),
+            start_new_requested: false,
             stream: Some(stream.clone()),
         },
     )?;
@@ -2638,6 +2748,7 @@ async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<V
             turn_id: turn_id.clone(),
             user_message_id: user_message.message_id.clone(),
             assistant_message_id: assistant_message_id.clone(),
+            start_new_requested: false,
             stream: None,
         },
     )?;
@@ -3398,6 +3509,11 @@ struct SendMessageRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct StartNewSessionRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ContainerLogsQuery {
     tail: Option<u64>,
     #[serde(default, rename = "all")]
@@ -3472,6 +3588,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    const fn unauthorized(detail: String) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            detail,
+        }
+    }
+
     const fn not_found(detail: String) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -3531,6 +3654,7 @@ impl ApiError {
     fn error_kind(&self) -> &'static str {
         match self.status {
             StatusCode::NOT_FOUND => "not_found",
+            StatusCode::UNAUTHORIZED => "unauthorized",
             StatusCode::CONFLICT => "conflict",
             StatusCode::UNPROCESSABLE_ENTITY => "validation",
             StatusCode::BAD_GATEWAY => "bad_gateway",
@@ -3658,7 +3782,8 @@ mod tests {
 
     use super::send_stream_item;
     use crate::{
-        ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient, build_router,
+        ActiveTurnRecord, ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient,
+        build_router,
     };
 
     fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
@@ -3690,6 +3815,36 @@ mod tests {
     struct StreamingUpstream {
         base_url: String,
         handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    struct SessionControlUpstream {
+        base_url: String,
+        create_payload: Arc<Mutex<Option<Value>>>,
+        handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    impl SessionControlUpstream {
+        async fn start() -> Result<Self, Box<dyn Error + Send + Sync>> {
+            let create_payload = Arc::new(Mutex::new(None));
+            let app = Router::new()
+                .route("/sessions", post(capture_upstream_create_session))
+                .with_state(create_payload.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let handle = tokio::spawn(axum::serve(listener, app).into_future());
+
+            Ok(Self {
+                base_url: format_base_url(address),
+                create_payload,
+                handle,
+            })
+        }
+    }
+
+    impl Drop for SessionControlUpstream {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
     }
 
     impl StreamingUpstream {
@@ -3726,6 +3881,16 @@ mod tests {
     }
 
     async fn upstream_create_session(Json(_body): Json<Value>) -> Json<Value> {
+        Json(json!({ "session_id": "upstream-session", "status": "idle" }))
+    }
+
+    async fn capture_upstream_create_session(
+        State(create_payload): State<Arc<Mutex<Option<Value>>>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        if let Ok(mut payload) = create_payload.lock() {
+            *payload = Some(body);
+        }
         Json(json!({ "session_id": "upstream-session", "status": "idle" }))
     }
 
@@ -3857,6 +4022,29 @@ mod tests {
         Ok((status, value))
     }
 
+    async fn request_json_with_authorization(
+        app: Router,
+        path: &str,
+        body: Value,
+        authorization: Option<&str>,
+    ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(authorization) = authorization {
+            builder = builder.header(header::AUTHORIZATION, authorization);
+        }
+        let response = app
+            .oneshot(builder.body(Body::from(serde_json::to_vec(&body)?))?)
+            .await?;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let value = serde_json::from_slice(&body)
+            .unwrap_or_else(|_error| Value::String(String::from_utf8_lossy(&body).into_owned()));
+        Ok((status, value))
+    }
+
     async fn get_json(
         app: Router,
         path: &str,
@@ -3916,6 +4104,141 @@ mod tests {
         let (status, value) = get_json(app, "/kernel-configs/unknown").await?;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_control_identity_and_endpoint_are_private_authenticated_and_idempotent()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = SessionControlUpstream::start().await?;
+        let config = AppConfig::new("127.0.0.1", 0, &upstream.base_url, BTreeMap::new());
+        let agent_host = AgentHostClient::new(&upstream.base_url, Duration::from_secs(1))?;
+        let state = AppState::with_agent_host(config, agent_host);
+        let app = build_router(state.clone());
+
+        let (status, _agent) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, session_summary) = request_json(
+            app.clone(),
+            Method::POST,
+            "/sessions",
+            Some(json!({ "agent_id": "agent-one" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let session_id = session_summary["session_id"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("session_id missing"))?
+            .to_owned();
+        let create_payload = upstream
+            .create_payload
+            .lock()
+            .map_err(|_error| std::io::Error::other("create payload lock poisoned"))?
+            .clone()
+            .ok_or_else(|| std::io::Error::other("upstream create payload missing"))?;
+        let env = create_payload["env"]
+            .as_object()
+            .ok_or_else(|| std::io::Error::other("upstream environment missing"))?;
+        let token = env["AGENTSPACE_SESSION_CONTROL_TOKEN"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("session control token missing"))?
+            .to_owned();
+        assert_eq!(env["AGENTSPACE_SESSION_ID"], session_id);
+        assert_eq!(token.len(), 64);
+
+        let stored = state
+            .sessions
+            .get(&session_id)?
+            .ok_or_else(|| std::io::Error::other("stored session missing"))?;
+        let stored_hash = stored
+            .session_control_token_hash
+            .as_deref()
+            .ok_or_else(|| std::io::Error::other("stored capability hash missing"))?;
+        assert_eq!(stored_hash, super::hash_session_control_token(&token));
+        let public_summary = serde_json::to_string(&session_summary)?;
+        assert!(!public_summary.contains(&token));
+        assert!(!public_summary.contains(stored_hash));
+
+        let endpoint = "/internal/session-control/start-new";
+        let payload = json!({ "session_id": session_id });
+        let expected_auth_error = json!({ "detail": "invalid session control credentials" });
+        for (authorization, request_payload) in [
+            (None, payload.clone()),
+            (Some("Basic invalid".to_owned()), payload.clone()),
+            (Some("Bearer wrong-token".to_owned()), payload.clone()),
+            (
+                Some(format!("Bearer {token}")),
+                json!({ "session_id": "missing-session" }),
+            ),
+        ] {
+            let (status, response) = request_json_with_authorization(
+                app.clone(),
+                endpoint,
+                request_payload,
+                authorization.as_deref(),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(response, expected_auth_error);
+        }
+
+        let authorization = format!("Bearer {token}");
+        let (status, _response) =
+            request_json_with_authorization(app.clone(), endpoint, json!({}), Some(&authorization))
+                .await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, response) = request_json_with_authorization(
+            app.clone(),
+            endpoint,
+            payload.clone(),
+            Some(&authorization),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            response,
+            json!({ "detail": "session does not have an active turn" })
+        );
+
+        state
+            .active_turns
+            .lock()
+            .map_err(|_error| std::io::Error::other("active turn lock poisoned"))?
+            .insert(
+                session_id.clone(),
+                ActiveTurnRecord {
+                    turn_id: "turn-one".to_owned(),
+                    user_message_id: "user-one".to_owned(),
+                    assistant_message_id: "assistant-one".to_owned(),
+                    start_new_requested: false,
+                    stream: None,
+                },
+            );
+        for _request_number in 0..2 {
+            let (status, response) = request_json_with_authorization(
+                app.clone(),
+                endpoint,
+                payload.clone(),
+                Some(&authorization),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(response, json!({ "accepted": true, "turn_id": "turn-one" }));
+        }
+        let active_turns = state
+            .active_turns
+            .try_lock()
+            .map_err(|_error| std::io::Error::other("active turn mutex remained locked"))?;
+        assert!(active_turns[&session_id].start_new_requested);
+        drop(active_turns);
 
         Ok(())
     }

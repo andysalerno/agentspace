@@ -34,6 +34,25 @@ struct StubAgentHost {
     recorded: Arc<Mutex<Vec<Value>>>,
 }
 
+fn take_session_control_env(
+    requests: &mut [Value],
+) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
+    let env = requests
+        .first_mut()
+        .and_then(|body| body.get_mut("env"))
+        .and_then(Value::as_object_mut)
+        .ok_or("recorded session environment missing")?;
+    let session_id = env
+        .remove("AGENTSPACE_SESSION_ID")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or("recorded session id missing")?;
+    let token = env
+        .remove("AGENTSPACE_SESSION_CONTROL_TOKEN")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or("recorded session control token missing")?;
+    Ok((session_id, token))
+}
+
 impl StubAgentHost {
     async fn start() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let recorded = Arc::new(Mutex::new(Vec::new()));
@@ -483,7 +502,7 @@ async fn git_agent_workspace_mount_uses_git_agent_volume()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(agent["workspace_mounts"][0]["workspace_id"], "git-agent");
 
-    let (status, _session) = request_json(
+    let (status, session) = request_json(
         &app,
         Method::POST,
         "/sessions",
@@ -491,8 +510,12 @@ async fn git_agent_workspace_mount_uses_git_agent_volume()
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    let mut recorded = agent_host.recorded()?;
+    let (recorded_session_id, token) = take_session_control_env(&mut recorded)?;
+    assert_eq!(recorded_session_id, session["session_id"]);
+    assert_eq!(token.len(), 64);
     assert_eq!(
-        agent_host.recorded()?,
+        recorded,
         vec![json!({
             "env": {
                 "AGENTSPACE_AGENT_ID": "workspace-agent",
@@ -526,7 +549,7 @@ async fn session_request_can_add_git_agent_workspace_mount()
     let (status, _config) = get_json(&app, "/git-agent/config").await?;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, _session) = request_json(
+    let (status, session) = request_json(
         &app,
         Method::POST,
         "/sessions",
@@ -539,8 +562,12 @@ async fn session_request_can_add_git_agent_workspace_mount()
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    let mut recorded = agent_host.recorded()?;
+    let (recorded_session_id, token) = take_session_control_env(&mut recorded)?;
+    assert_eq!(recorded_session_id, session["session_id"]);
+    assert_eq!(token.len(), 64);
     assert_eq!(
-        agent_host.recorded()?,
+        recorded,
         vec![json!({
             "env": {
                 "AGENTSPACE_AGENT_ID": "git-agent",

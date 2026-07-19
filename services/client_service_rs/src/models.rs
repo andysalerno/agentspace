@@ -622,6 +622,8 @@ pub struct SessionRecord {
     pub session_id: String,
     pub agent_id: String,
     pub agent_host_session_id: String,
+    #[serde(skip)]
+    pub(crate) session_control_token_hash: Option<String>,
     pub status: String,
     pub channel_name: Option<String>,
     pub client_type: Option<ClientType>,
@@ -646,6 +648,7 @@ impl SessionRecord {
             session_id: session_id.into(),
             agent_id: agent_id.into(),
             agent_host_session_id: agent_host_session_id.into(),
+            session_control_token_hash: None,
             status: status.into(),
             channel_name,
             client_type,

@@ -271,6 +271,7 @@ pub(crate) struct ActiveTurnRecord {
     pub(crate) turn_id: String,
     pub(crate) user_message_id: String,
     pub(crate) assistant_message_id: String,
+    pub(crate) start_new_requested: bool,
     pub(crate) stream: Option<Arc<Mutex<ActiveTurnStreamState>>>,
 }
 
