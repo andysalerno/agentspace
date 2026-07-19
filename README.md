@@ -126,8 +126,56 @@ mode. Run a standalone service with
 
 Configure the public proxy with `CLIENT_SERVICE_MEMORY_BASE_URL` and its
 bounded upstream timeout with `CLIENT_SERVICE_MEMORY_TIMEOUT`. It exposes the
-memory service routes at `/memory/healthz` and `/memory/v1/...`. The operator
-Web UI is delivered in Milestone 4.
+memory service routes at `/memory/healthz` and `/memory/v1/...`.
+
+The Web UI's **Memory** page uses that proxy to browse the page tree, search,
+filter by tags, edit and preview Markdown, inspect links and backlinks, move or
+delete pages, and view integrity findings. Browser writes always include the
+revision that was loaded. If an agent or another browser changes the page
+first, the stale edit is retained as a draft but cannot overwrite the newer
+content; reload the latest revision before saving again. The page explicitly
+distinguishes a healthy empty corpus from an unavailable memory service.
+
+### Back up and restore memory
+
+Stop the stack before taking a consistent filesystem backup:
+
+```sh
+just stack-down
+podman run --rm \
+  -v agentspace-memory-data:/source:ro \
+  -v "$PWD":/backup \
+  docker.io/library/alpine \
+  tar czf /backup/agentspace-memory-backup.tgz -C /source .
+```
+
+To restore into an empty volume:
+
+```sh
+just stack-down
+podman volume create agentspace-memory-data
+podman run --rm \
+  -v agentspace-memory-data:/target \
+  -v "$PWD":/backup:ro \
+  docker.io/library/alpine \
+  tar xzf /backup/agentspace-memory-backup.tgz -C /target
+just stack-up
+```
+
+Replace `agentspace-memory-data` in both commands when
+`AGENTSPACE_MEMORY_VOLUME` selects another volume. Backups contain the shared
+Markdown corpus and should be protected accordingly.
+
+To intentionally erase all memory, stop the stack and remove the configured
+named volume:
+
+```sh
+just stack-down
+podman volume rm agentspace-memory-data
+```
+
+Disabling the skill, deleting agents or sessions, and normal stack recreation
+never remove this volume.
 
 ## Client Service
 
@@ -214,6 +262,7 @@ It currently supports:
 - viewing existing sessions, including sessions created by other clients
 - viewing the session source metadata attached at creation time
 - viewing active kernel sessions exposed through `client_service`
+- browsing and revision-safe editing of shared agent memory
 
 Kernel VS Code links are opened against the web UI's current browser host when
 the kernel reports a loopback or wildcard host. For remote deployments, make sure

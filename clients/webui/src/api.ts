@@ -13,6 +13,14 @@ import type {
   KernelConfig,
   KernelEvent,
   KernelSummary,
+  MemoryCheckReport,
+  MemoryErrorEnvelope,
+  MemoryHealth,
+  MemoryLinksReport,
+  MemoryMoveOutcome,
+  MemoryPage,
+  MemoryPageSummary,
+  MemoryTagCount,
   MessageStreamChunk,
   MessageStreamFinalChunk,
   SendMessageResponse,
@@ -29,6 +37,18 @@ import type {
 
 const apiBase = "/api";
 
+export class ApiError extends Error {
+  readonly status: number;
+  readonly payload: unknown;
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
+
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     headers: {
@@ -40,7 +60,17 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(text || `${response.status} ${response.statusText}`);
+    let payload: unknown;
+    try {
+      payload = text ? JSON.parse(text) : undefined;
+    } catch {
+      payload = undefined;
+    }
+    const envelope = payload as Partial<MemoryErrorEnvelope> | undefined;
+    const message = envelope?.error?.message
+      || text
+      || `${response.status} ${response.statusText}`;
+    throw new ApiError(message, response.status, payload);
   }
 
   if (response.status === 204) {
@@ -313,6 +343,67 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ env_vars: envVars }),
     }),
+
+  // Memory
+  getMemoryHealth: () => requestJson<MemoryHealth>("/memory/healthz"),
+  listMemoryPages: (filter?: {
+    text?: string;
+    under?: string;
+    tags?: string[];
+    limit?: number;
+  }) => {
+    const params = new URLSearchParams();
+    if (filter?.text) params.set("text", filter.text);
+    if (filter?.under) params.set("under", filter.under);
+    if (filter?.tags?.length) params.set("with-tag", filter.tags.join(","));
+    if (filter?.limit !== undefined) params.set("limit", String(filter.limit));
+    const query = params.size > 0 ? `?${params.toString()}` : "";
+    return requestJson<MemoryPageSummary[]>(`/memory/v1/pages${query}`);
+  },
+  getMemoryPage: (path: string) =>
+    requestJson<MemoryPage>(
+      `/memory/v1/pages/content?path=${encodeURIComponent(path)}`,
+    ),
+  writeMemoryPage: (
+    path: string,
+    payload: {
+      title?: string;
+      tags?: string[];
+      body: string;
+      overwrite?: boolean;
+      expected_revision?: string;
+      actor?: string;
+    },
+  ) =>
+    requestJson<MemoryPage>(
+      `/memory/v1/pages/content?path=${encodeURIComponent(path)}`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    ),
+  deleteMemoryPage: (path: string, expectedRevision: string) => {
+    const params = new URLSearchParams({
+      path,
+      expected_revision: expectedRevision,
+    });
+    return requestJson<void>(`/memory/v1/pages/content?${params.toString()}`, {
+      method: "DELETE",
+    });
+  },
+  moveMemoryPage: (payload: {
+    source: string;
+    destination: string;
+    expected_revision: string;
+    actor?: string;
+  }) =>
+    requestJson<MemoryMoveOutcome>("/memory/v1/pages/move", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listMemoryTags: () => requestJson<MemoryTagCount[]>("/memory/v1/tags"),
+  getMemoryLinks: (path: string) => {
+    const params = new URLSearchParams({ path, backlinks: "true" });
+    return requestJson<MemoryLinksReport>(`/memory/v1/links?${params.toString()}`);
+  },
+  checkMemory: () => requestJson<MemoryCheckReport>("/memory/v1/check"),
 
   // Webui-local config: served as a static file at /info.json by the
   // webui's nginx, generated at container start from WEBUI_CLIENT* env vars.

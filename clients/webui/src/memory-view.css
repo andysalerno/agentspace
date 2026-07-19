@@ -1,0 +1,320 @@
+.memory-management-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.memory-layout {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.memory-browser,
+.memory-page-panel {
+  background: var(--mgmt-panel);
+  border: 1px solid var(--mgmt-border);
+  min-height: 0;
+}
+
+.memory-browser {
+  border-radius: var(--mgmt-radius) 0 0 var(--mgmt-radius);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+.memory-browser .fui-Input {
+  width: 100%;
+}
+
+.memory-page-panel {
+  border-left: 0;
+  border-radius: 0 var(--mgmt-radius) var(--mgmt-radius) 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.memory-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.memory-tag-filter {
+  border: 1px solid var(--mgmt-border);
+  border-radius: 999px;
+  color: var(--mgmt-muted);
+  display: inline-flex;
+  font-size: 0.72rem;
+  gap: 6px;
+  min-height: 24px !important;
+  padding: 2px 7px !important;
+  width: auto;
+}
+
+.memory-tag-filter.active,
+.memory-tabs .active {
+  background: var(--colorBrandBackground2);
+  border-color: var(--colorBrandStroke1);
+  color: var(--colorBrandForeground1);
+}
+
+.memory-tree-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.memory-tree {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 12px;
+}
+
+.memory-tree:first-child {
+  padding-left: 0;
+}
+
+.memory-tree li {
+  margin: 1px 0;
+}
+
+.memory-tree summary {
+  color: var(--mgmt-muted);
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 4px 6px;
+}
+
+.memory-tree-page {
+  color: var(--mgmt-text);
+  display: block;
+  font-size: 0.78rem;
+  justify-content: flex-start;
+  min-height: 28px !important;
+  overflow: hidden;
+  padding: 4px 8px !important;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.memory-tree-page.active {
+  background: var(--colorBrandBackground2);
+  color: var(--colorBrandForeground1);
+}
+
+.memory-empty-browser {
+  color: var(--mgmt-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  padding: 12px 4px;
+}
+
+.memory-health {
+  border: 1px solid var(--mgmt-border);
+  border-radius: 999px;
+  font-size: 0.74rem;
+  padding: 4px 9px;
+}
+
+.memory-health.healthy {
+  color: var(--success);
+}
+
+.memory-health.warning {
+  color: var(--warning);
+}
+
+.memory-page-toolbar,
+.memory-save-row,
+.memory-tabs {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.memory-page-toolbar {
+  border-bottom: 1px solid var(--mgmt-border);
+  margin: -4px 0 14px;
+  padding-bottom: 12px;
+}
+
+.memory-page-toolbar > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.memory-page-toolbar code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.memory-fields {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 12px;
+}
+
+.memory-fields label {
+  display: flex;
+  flex-direction: column;
+}
+
+.memory-fields .fui-Input {
+  width: 100%;
+}
+
+.memory-tabs {
+  justify-content: flex-start;
+  margin-bottom: 8px;
+}
+
+.memory-tabs .muted {
+  margin-left: auto;
+}
+
+.memory-preview {
+  border: 1px solid var(--mgmt-border);
+  border-radius: var(--mgmt-radius);
+  line-height: 1.55;
+  min-height: 240px;
+  overflow-wrap: anywhere;
+  padding: 16px 20px;
+}
+
+.memory-preview > :first-child {
+  margin-top: 0;
+}
+
+.memory-preview > :last-child {
+  margin-bottom: 0;
+}
+
+.memory-preview pre,
+.memory-preview code {
+  background: var(--mgmt-code-bg);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
+
+.memory-preview pre {
+  overflow: auto;
+  padding: 10px;
+}
+
+.memory-save-row {
+  justify-content: flex-start;
+  margin: 12px 0 18px;
+}
+
+.memory-link-panels {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.memory-link-panels section,
+.memory-integrity-panel {
+  background: var(--mgmt-panel-subtle);
+  border: 1px solid var(--mgmt-border);
+  border-radius: var(--mgmt-radius);
+  padding: 12px;
+}
+
+.memory-link-panels h3,
+.memory-integrity-panel h3 {
+  font-size: 0.82rem;
+  margin: 0 0 8px;
+}
+
+.memory-link {
+  align-items: flex-start;
+  color: var(--mgmt-text);
+  display: flex;
+  flex-direction: column;
+  font-size: 0.76rem;
+  justify-content: center;
+  min-height: 30px !important;
+  padding: 4px 6px !important;
+  width: 100%;
+}
+
+.memory-link small {
+  color: var(--mgmt-muted);
+}
+
+.memory-broken {
+  color: var(--danger);
+  font-size: 0.68rem;
+}
+
+.memory-conflict,
+.memory-operation-error,
+.memory-unavailable {
+  background: var(--colorStatusDangerBackground1);
+  border: 1px solid var(--colorStatusDangerBorder1);
+  border-radius: var(--mgmt-radius);
+  color: var(--colorStatusDangerForeground1);
+  margin-bottom: 12px;
+  padding: 12px;
+}
+
+.memory-conflict {
+  display: grid;
+  gap: 5px;
+}
+
+.memory-conflict-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.memory-operation-error {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.memory-unavailable {
+  margin: 24px auto;
+  max-width: 620px;
+}
+
+.memory-unavailable h3 {
+  margin-top: 0;
+}
+
+.memory-integrity-panel {
+  margin-top: 12px;
+}
+
+.memory-integrity-panel > div {
+  display: grid;
+  gap: 2px;
+  margin-top: 8px;
+}
+
+@media (max-width: 900px) {
+  .memory-layout {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .memory-fields,
+  .memory-link-panels {
+    grid-template-columns: 1fr;
+  }
+}

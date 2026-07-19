@@ -113,3 +113,8 @@ stack-logs:
 [group('run')]
 stack-status:
   podman compose -f compose.yaml ps
+
+# Run the containerized memory release smoke flow against prebuilt images.
+[group('check')]
+memory-e2e:
+  CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}" bash scripts/memory-e2e.sh

@@ -44,6 +44,7 @@ const navItems: NavItem[] = [
     { id: "sessions", label: "Sessions", icon: <ChatMultiple20Regular /> },
     { id: "kernels", label: "Running Kernels", icon: <Code20Regular /> },
     { id: "git-agent", label: "Git Agent", icon: <BranchFork20Regular /> },
+    { id: "memory", label: "Memory", icon: <Database20Regular /> },
     { id: "gateways", label: "Gateways", icon: <Apps20Regular /> },
     { id: "skills", label: "Skills", icon: <BookOpen20Regular /> },
     { id: "info", label: "Info", icon: <Info20Regular /> },
