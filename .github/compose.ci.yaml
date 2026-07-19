@@ -1,0 +1,20 @@
+services:
+  kernel-host-image:
+    build:
+      additional_contexts:
+        memory-rs: ./services/memory_rs
+
+  memory:
+    build:
+      additional_contexts:
+        memory-rs: ./services/memory_rs
+
+  agent-host:
+    build:
+      additional_contexts:
+        memory-rs: ./services/memory_rs
+
+  client-service:
+    build:
+      additional_contexts:
+        memory-rs: ./services/memory_rs

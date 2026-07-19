@@ -30,6 +30,7 @@ const DEFAULT_SKILLS_DIR: &str = "/skills";
 const DEFAULT_BUILTIN_SKILLS_DIR: &str = "/builtin-skills";
 const SKILL_VERSIONS_DIR: &str = ".skill-versions";
 const SKILL_MARKDOWN_FILE: &str = "SKILL.md";
+const SKILL_METADATA_FILE: &str = "agentspace.json";
 const MARKDOWN_CONTENT_TYPE: &str = "text/markdown; charset=utf-8";
 const ZIP_CONTENT_TYPE: &str = "application/zip";
 
@@ -170,6 +171,78 @@ impl SkillRegistry {
         })
         .await
     }
+
+    pub async fn resolve_volume_resources(
+        &self,
+        skill_ids: &[String],
+    ) -> Result<Vec<SkillVolumeResource>, SkillError> {
+        let service = self.service.clone();
+        let skill_ids = skill_ids.to_vec();
+        run_skill_task("resolve skill volume resources", move || {
+            let service = service.read().map_err(|_| SkillError::LockPoisoned {
+                operation: "lock skill service for resource resolution",
+            })?;
+            service.resolve_volume_resources(&skill_ids)
+        })
+        .await
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillMetadata {
+    schema_version: u32,
+    #[serde(default)]
+    resources: SkillResources,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillResources {
+    #[serde(default)]
+    volumes: Vec<SkillVolumeDeclaration>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SkillVolumeDeclaration {
+    id: String,
+    scope: SkillVolumeScope,
+    mount_path: String,
+    #[serde(default)]
+    advertise: bool,
+    mode: SkillVolumeMode,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum SkillVolumeScope {
+    Installation,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillVolumeMode {
+    Ro,
+    Rw,
+}
+
+impl Display for SkillVolumeMode {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Ro => "ro",
+            Self::Rw => "rw",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SkillVolumeResource {
+    pub skill_id: String,
+    pub resource_id: String,
+    pub mount_path: String,
+    pub advertise: bool,
+    pub mode: SkillVolumeMode,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -248,6 +321,10 @@ pub enum SkillError {
     InvalidSkillFilePath {
         path: String,
     },
+    InvalidMetadata {
+        skill_id: String,
+        message: String,
+    },
     BuiltinSkillReadOnly {
         skill_id: String,
     },
@@ -305,6 +382,12 @@ impl Display for SkillError {
             ),
             Self::InvalidSkillFilePath { path } => {
                 write!(formatter, "invalid skill file path: {path}")
+            }
+            Self::InvalidMetadata { skill_id, message } => {
+                write!(
+                    formatter,
+                    "invalid metadata for builtin skill '{skill_id}': {message}"
+                )
             }
             Self::BuiltinSkillReadOnly { skill_id } => {
                 write!(formatter, "builtin skill '{skill_id}' is read-only")
@@ -370,6 +453,7 @@ impl Error for SkillError {
             | Self::SkillAlreadyExists { .. }
             | Self::InvalidSkillId { .. }
             | Self::InvalidSkillFilePath { .. }
+            | Self::InvalidMetadata { .. }
             | Self::BuiltinSkillReadOnly { .. }
             | Self::SkillVersionNotFound { .. }
             | Self::LockPoisoned { .. } => None,
@@ -458,6 +542,7 @@ impl SkillsService {
                 continue;
             }
 
+            Self::skill_volume_resources(&skill_id, &entry.path())?;
             let destination = self.skill_path(&skill_id);
             remove_existing_path(&destination, "remove existing builtin skill")?;
             copy_dir_all(&entry.path(), &destination)?;
@@ -573,6 +658,93 @@ impl SkillsService {
         }
 
         Ok(skills)
+    }
+
+    fn resolve_volume_resources(
+        &self,
+        skill_ids: &[String],
+    ) -> Result<Vec<SkillVolumeResource>, SkillError> {
+        let mut resources = Vec::new();
+        let mut mount_paths = BTreeSet::new();
+        for skill_id in skill_ids {
+            validate_skill_id(skill_id)?;
+            if !self.is_builtin(skill_id) {
+                continue;
+            }
+            for resource in Self::skill_volume_resources(skill_id, &self.skill_path(skill_id))? {
+                if !mount_paths.insert(resource.mount_path.clone()) {
+                    return Err(invalid_metadata(
+                        skill_id,
+                        format!(
+                            "volume mount path {:?} conflicts with another enabled skill",
+                            resource.mount_path
+                        ),
+                    ));
+                }
+                resources.push(resource);
+            }
+        }
+        Ok(resources)
+    }
+
+    fn skill_volume_resources(
+        skill_id: &str,
+        skill_path: &Path,
+    ) -> Result<Vec<SkillVolumeResource>, SkillError> {
+        let metadata_path = skill_path.join(SKILL_METADATA_FILE);
+        if !metadata_path.is_file() {
+            return Ok(Vec::new());
+        }
+        let metadata_content = fs::read_to_string(&metadata_path)
+            .map_err(|source| io_error("read skill metadata", &metadata_path, source))?;
+        let metadata: SkillMetadata = serde_json::from_str(&metadata_content)
+            .map_err(|source| json_error("parse skill metadata", &metadata_path, source))?;
+        if metadata.schema_version != 1 {
+            return Err(invalid_metadata(
+                skill_id,
+                format!(
+                    "unsupported schema_version {}; expected 1",
+                    metadata.schema_version
+                ),
+            ));
+        }
+
+        let mut resource_ids = BTreeSet::new();
+        let mut mount_paths = BTreeSet::new();
+        metadata
+            .resources
+            .volumes
+            .into_iter()
+            .map(|declaration| {
+                validate_skill_id(&declaration.id).map_err(|_error| {
+                    invalid_metadata(
+                        skill_id,
+                        format!("invalid volume resource id {:?}", declaration.id),
+                    )
+                })?;
+                if !resource_ids.insert(declaration.id.clone()) {
+                    return Err(invalid_metadata(
+                        skill_id,
+                        format!("duplicate volume resource id {:?}", declaration.id),
+                    ));
+                }
+                validate_skill_mount_path(skill_id, &declaration.mount_path)?;
+                if !mount_paths.insert(declaration.mount_path.clone()) {
+                    return Err(invalid_metadata(
+                        skill_id,
+                        format!("duplicate volume mount_path {:?}", declaration.mount_path),
+                    ));
+                }
+                let SkillVolumeScope::Installation = declaration.scope;
+                Ok(SkillVolumeResource {
+                    skill_id: skill_id.to_owned(),
+                    resource_id: declaration.id,
+                    mount_path: declaration.mount_path,
+                    advertise: declaration.advertise,
+                    mode: declaration.mode,
+                })
+            })
+            .collect()
     }
 
     pub fn list_skill_versions(&self, skill_id: &str) -> Result<Vec<SkillVersion>, SkillError> {
@@ -758,6 +930,46 @@ fn validate_skill_id(skill_id: &str) -> Result<(), SkillError> {
         Err(SkillError::InvalidSkillId {
             skill_id: skill_id.to_owned(),
         })
+    }
+}
+
+fn validate_skill_mount_path(skill_id: &str, mount_path: &str) -> Result<(), SkillError> {
+    const RESERVED_PATHS: &[&str] = &[
+        "/workspace",
+        "/root/.copilot",
+        "/mnt/all-skills",
+        "/skills",
+        "/root/.config/opencode/skills",
+    ];
+    let valid = mount_path.starts_with('/')
+        && mount_path != "/"
+        && !mount_path.ends_with('/')
+        && mount_path
+            .split('/')
+            .skip(1)
+            .all(|component| !component.is_empty() && component != "." && component != "..");
+    if !valid {
+        return Err(invalid_metadata(
+            skill_id,
+            format!("volume mount_path {mount_path:?} must be a normalized absolute path"),
+        ));
+    }
+    if RESERVED_PATHS
+        .iter()
+        .any(|reserved| mount_path == *reserved || mount_path.starts_with(&format!("{reserved}/")))
+    {
+        return Err(invalid_metadata(
+            skill_id,
+            format!("volume mount_path {mount_path:?} overlaps a reserved kernel path"),
+        ));
+    }
+    Ok(())
+}
+
+fn invalid_metadata(skill_id: &str, message: impl Into<String>) -> SkillError {
+    SkillError::InvalidMetadata {
+        skill_id: skill_id.to_owned(),
+        message: message.into(),
     }
 }
 
@@ -1130,7 +1342,8 @@ impl IntoResponse for SkillHttpError {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
             SkillError::BuiltinSkillReadOnly { .. } => StatusCode::FORBIDDEN,
-            SkillError::Io { .. }
+            SkillError::InvalidMetadata { .. }
+            | SkillError::Io { .. }
             | SkillError::Json { .. }
             | SkillError::Zip { .. }
             | SkillError::ArchiveIo { .. }
@@ -1168,8 +1381,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        SkillError, SkillRegistry, SkillSource, SkillsService, validate_file_path,
-        validate_skill_id,
+        SkillError, SkillRegistry, SkillSource, SkillVolumeMode, SkillVolumeResource,
+        SkillsService, validate_file_path, validate_skill_id,
     };
     use crate::{AppConfig, AppState, build_router};
 
@@ -1813,6 +2026,153 @@ mod tests {
         assert_eq!(detail.source, SkillSource::Builtin);
         assert!(detail.files.contains_key("SKILL.md"));
         assert!(detail.files.contains_key("search.sh"));
+    }
+
+    #[test]
+    fn repository_memory_skill_declares_private_installation_volume() {
+        let root = TestDir::new("repository-memory-skill");
+        let builtin_skills_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mounts/skills");
+        let mut service = SkillsService::new(root.path().join("skills"), builtin_skills_dir);
+
+        service
+            .sync_builtin_skills()
+            .unwrap_or_else(|error| panic!("failed to sync repository skills: {error}"));
+        let resources = service
+            .resolve_volume_resources(&["memory".to_owned()])
+            .unwrap_or_else(|error| panic!("failed to resolve memory resources: {error}"));
+        let memory_skill = service
+            .get_skill("memory")
+            .unwrap_or_else(|error| panic!("failed to read memory skill: {error}"));
+
+        assert_eq!(
+            resources,
+            vec![SkillVolumeResource {
+                skill_id: "memory".to_owned(),
+                resource_id: "data".to_owned(),
+                mount_path: "/var/lib/agentspace/memory".to_owned(),
+                advertise: false,
+                mode: SkillVolumeMode::Rw,
+            }]
+        );
+        assert!(
+            memory_skill
+                .files
+                .get("SKILL.md")
+                .is_some_and(|content| !content.contains("/var/lib/agentspace/memory"))
+        );
+        assert!(memory_skill.files.contains_key("agentspace.json"));
+    }
+
+    #[test]
+    fn builtin_sync_rejects_invalid_volume_metadata() {
+        let cases = [
+            (
+                "schema",
+                r#"{"schema_version":2,"resources":{"volumes":[]}}"#,
+                "unsupported schema_version",
+            ),
+            (
+                "duplicate-id",
+                r#"{
+                    "schema_version": 1,
+                    "resources": {
+                        "volumes": [
+                            {"id":"data","scope":"installation","mount_path":"/data/a","mode":"rw"},
+                            {"id":"data","scope":"installation","mount_path":"/data/b","mode":"rw"}
+                        ]
+                    }
+                }"#,
+                "duplicate volume resource id",
+            ),
+            (
+                "duplicate-path",
+                r#"{
+                    "schema_version": 1,
+                    "resources": {
+                        "volumes": [
+                            {"id":"one","scope":"installation","mount_path":"/data/shared","mode":"rw"},
+                            {"id":"two","scope":"installation","mount_path":"/data/shared","mode":"ro"}
+                        ]
+                    }
+                }"#,
+                "duplicate volume mount_path",
+            ),
+            (
+                "reserved-path",
+                r#"{
+                    "schema_version": 1,
+                    "resources": {
+                        "volumes": [
+                            {"id":"data","scope":"installation","mount_path":"/workspace/memory","mode":"rw"}
+                        ]
+                    }
+                }"#,
+                "overlaps a reserved kernel path",
+            ),
+        ];
+
+        for (name, metadata, expected) in cases {
+            let root = TestDir::new(name);
+            let mut service = service(&root);
+            write_file(
+                &service.builtin_skills_dir().join("invalid/SKILL.md"),
+                "# Invalid",
+            );
+            write_file(
+                &service.builtin_skills_dir().join("invalid/agentspace.json"),
+                metadata,
+            );
+
+            let error = match service.sync_builtin_skills() {
+                Ok(()) => panic!("invalid builtin metadata should fail startup sync"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "{name}: expected {expected:?} in {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn enabled_builtin_volume_paths_must_not_collide() {
+        let root = TestDir::new("enabled-volume-collision");
+        let mut service = service(&root);
+        let metadata = r#"{
+            "schema_version": 1,
+            "resources": {
+                "volumes": [
+                    {"id":"data","scope":"installation","mount_path":"/var/lib/shared","mode":"rw"}
+                ]
+            }
+        }"#;
+        for skill_id in ["first", "second"] {
+            write_file(
+                &service.builtin_skills_dir().join(skill_id).join("SKILL.md"),
+                "# Skill",
+            );
+            write_file(
+                &service
+                    .builtin_skills_dir()
+                    .join(skill_id)
+                    .join("agentspace.json"),
+                metadata,
+            );
+        }
+        service
+            .sync_builtin_skills()
+            .unwrap_or_else(|error| panic!("failed to sync valid builtins: {error}"));
+
+        let Err(error) =
+            service.resolve_volume_resources(&["first".to_owned(), "second".to_owned()])
+        else {
+            panic!("colliding enabled skill volumes should fail");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("conflicts with another enabled skill")
+        );
     }
 
     #[test]

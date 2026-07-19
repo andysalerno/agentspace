@@ -33,6 +33,14 @@ export const queryKeys = {
     ["connections", connectionId, "models"] as const,
   systemInfo: ["info"] as const,
   webuiInfo: ["webui-info"] as const,
+  memory: ["memory"] as const,
+  memoryHealth: ["memory", "health"] as const,
+  memoryPages: (text: string, tags: readonly string[]) =>
+    ["memory", "pages", { text, tags }] as const,
+  memoryPage: (path: string) => ["memory", "pages", path] as const,
+  memoryTags: ["memory", "tags"] as const,
+  memoryLinks: (path: string) => ["memory", "links", path] as const,
+  memoryCheck: ["memory", "check"] as const,
 } as const;
 
 export const useHarnesses = () =>
@@ -181,4 +189,53 @@ export const useConnectionModels = (connectionId: string | null) =>
     enabled: connectionId !== null,
     staleTime: 60_000,
     retry: false,
+  });
+
+export const useMemoryHealth = () =>
+  useQuery({
+    queryKey: queryKeys.memoryHealth,
+    queryFn: api.getMemoryHealth,
+    retry: false,
+    refetchInterval: 10_000,
+  });
+
+export const useMemoryPages = (text: string, tags: readonly string[]) =>
+  useQuery({
+    queryKey: queryKeys.memoryPages(text, tags),
+    queryFn: () => api.listMemoryPages({ text, tags: [...tags] }),
+    refetchInterval: POLL_MS,
+  });
+
+export const useMemoryPage = (path: string | null) =>
+  useQuery({
+    queryKey: path
+      ? queryKeys.memoryPage(path)
+      : (["memory", "pages", "__none__"] as const),
+    queryFn: () => api.getMemoryPage(path as string),
+    enabled: path !== null,
+    refetchInterval: POLL_MS,
+  });
+
+export const useMemoryTags = () =>
+  useQuery({
+    queryKey: queryKeys.memoryTags,
+    queryFn: api.listMemoryTags,
+    refetchInterval: POLL_MS,
+  });
+
+export const useMemoryLinks = (path: string | null) =>
+  useQuery({
+    queryKey: path
+      ? queryKeys.memoryLinks(path)
+      : (["memory", "links", "__none__"] as const),
+    queryFn: () => api.getMemoryLinks(path as string),
+    enabled: path !== null,
+    refetchInterval: POLL_MS,
+  });
+
+export const useMemoryCheck = () =>
+  useQuery({
+    queryKey: queryKeys.memoryCheck,
+    queryFn: api.checkMemory,
+    refetchInterval: 30_000,
   });

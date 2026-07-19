@@ -2,6 +2,7 @@
 members = [
     "services/agent_host_rs",
     "services/client_service_rs",
+    "services/memory_rs",
 ]
 resolver = "3"
 

@@ -5,6 +5,7 @@ services:
       dockerfile: kernels/kernel_host/Dockerfile
       args:
         AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
+        RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     env_file:
       - .env
     environment:
@@ -19,6 +20,7 @@ services:
       dockerfile: kernels/kernel_host/Dockerfile
       args:
         AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
+        RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     env_file:
       - .env
     environment:

@@ -14,6 +14,7 @@ import ConnectionsView from "./ConnectionsView";
 import GatewaysView from "./GatewaysView";
 import InfoView from "./InfoView";
 import ConfigKernelsView from "./ConfigKernelsView";
+import MemoryView from "./MemoryView";
 import { useErrorContext } from "./ErrorContext";
 import { Button, FluentProvider } from "./fluent";
 import { useWebuiInfo } from "./queries";
@@ -72,6 +73,8 @@ export default function App() {
         return <KernelsView />;
       case "git-agent":
         return <GitAgentView />;
+      case "memory":
+        return <MemoryView />;
       case "skills":
         return <SkillsView />;
       case "connections":

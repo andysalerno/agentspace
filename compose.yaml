@@ -7,6 +7,7 @@ services:
       dockerfile: kernels/kernel_host/Dockerfile
       args:
         AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
+        RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
     command: ["python", "-c", "print('kernel image ready')"]
     restart: "no"
 
@@ -20,6 +21,39 @@ services:
     entrypoint: []
     command: ["python", "-c", "print('gateway image ready')"]
     restart: "no"
+
+  memory:
+    image: agentspace-memory:latest
+    build:
+      context: .
+      dockerfile: services/memory_rs/Dockerfile
+      args:
+        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
+        RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
+    command: ["--serve", "--host", "0.0.0.0", "--port", "8005"]
+    environment:
+      - AGENTSPACE_MEMORY_DIR=/var/lib/agentspace/memory
+      - LOG_LEVEL=INFO
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "memory",
+          "--uri",
+          "http://127.0.0.1:8005",
+          "pages",
+          "ls",
+          "--limit",
+          "1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    volumes:
+      - memory-data:/var/lib/agentspace/memory
+    networks:
+      - agentspace
 
   agent-host:
     image: agentspace-agent-host:latest
@@ -41,6 +75,7 @@ services:
       - AGENT_HOST_COPILOT_VOLUME=agentspace-kernel_copilot-config
       - AGENT_HOST_SKILLS_VOLUME=agentspace-skills
       - AGENT_HOST_SKILLS_DIR=/skills
+      - AGENT_HOST_SKILL_VOLUME_MEMORY__DATA=${AGENTSPACE_MEMORY_VOLUME:-agentspace-memory-data}
       - AGENT_HOST_DOCKER_NETWORK=agentspace-stack
       - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
       - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
@@ -72,6 +107,8 @@ services:
     depends_on:
       agent-host:
         condition: service_started
+      memory:
+        condition: service_healthy
     environment:
       - LOG_LEVEL=INFO
       - CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://agent-host:8001
@@ -79,6 +116,8 @@ services:
       - CLIENT_SERVICE_CONNECTION_MODELS_TIMEOUT=15
       - CLIENT_SERVICE_GIT_AGENT_BASE_URL=http://git-agent:8004
       - CLIENT_SERVICE_GIT_AGENT_DATA_VOLUME=${GITAGENT_DATA_VOLUME:-agentspace-git-agent-data}
+      - CLIENT_SERVICE_MEMORY_BASE_URL=http://memory:8005
+      - CLIENT_SERVICE_MEMORY_TIMEOUT=${CLIENT_SERVICE_MEMORY_TIMEOUT:-60}
       - CLIENT_SERVICE_DB_PATH=/data/client_service.sqlite
     ports:
       - "8002:8002"
@@ -152,6 +191,8 @@ networks:
 volumes:
   skills:
     name: agentspace-skills
+  memory-data:
+    name: ${AGENTSPACE_MEMORY_VOLUME:-agentspace-memory-data}
   git-agent-data:
     # Stable named volume so GitAgent's repository and request database survive
     # service/container teardown. Override for deployment-specific isolation.

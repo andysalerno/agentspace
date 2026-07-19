@@ -138,11 +138,12 @@ impl AppState {
 
     #[must_use]
     pub fn with_skill_registry(config: AppConfig, skills: skills::SkillRegistry) -> Self {
+        let sessions = sessions::SessionRegistry::with_skills(skills.clone());
         Self {
             config,
             instance_id: Uuid::now_v7(),
             started_at: Utc::now(),
-            sessions: sessions::SessionRegistry::default(),
+            sessions,
             docker_runtime: docker_runtime::DockerRuntime::default(),
             skills,
             gateways: gateways::GatewayRegistry::default(),

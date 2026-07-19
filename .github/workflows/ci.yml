@@ -77,4 +77,4 @@ jobs:
         run: echo "AGENTSPACE_VERSION=$(bash scripts/build-version.sh)" >> "$GITHUB_ENV"
 
       - name: Build Docker images
-        run: docker compose -f compose.yaml build
+        run: docker compose -f compose.yaml -f .github/compose.ci.yaml build

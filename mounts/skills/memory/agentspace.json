@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "resources": {
+    "volumes": [
+      {
+        "id": "data",
+        "scope": "installation",
+        "mount_path": "/var/lib/agentspace/memory",
+        "advertise": false,
+        "mode": "rw"
+      }
+    ]
+  }
+}

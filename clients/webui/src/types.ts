@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "git-agent" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
+export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "git-agent" | "memory" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
 
 export type Harness = string;
 
@@ -40,6 +40,86 @@ export type WorkspaceVscode = {
   volume_name: string;
   container_name: string;
   vscode_url: string | null;
+};
+
+export type MemoryHealth = {
+  status: "ok";
+};
+
+export type MemoryPageSummary = {
+  path: string;
+  title: string;
+  tags: string[];
+  updated_at: string;
+};
+
+export type MemoryPageLink = {
+  text: string;
+  raw_target: string;
+  resolved_path: string | null;
+  broken: boolean;
+};
+
+export type MemoryBacklink = {
+  from: string;
+  text: string;
+  raw_target: string;
+};
+
+export type MemoryPage = {
+  path: string;
+  schema_version: number;
+  title: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+  created_by: string | null;
+  updated_by: string | null;
+  extra: Record<string, unknown>;
+  revision: string;
+  body: string;
+  outgoing_links: MemoryPageLink[];
+};
+
+export type MemoryTagCount = {
+  tag: string;
+  count: number;
+};
+
+export type MemoryLinksReport = {
+  path: string;
+  outgoing: MemoryPageLink[];
+  backlinks: MemoryBacklink[];
+};
+
+export type MemoryCheckIssue = {
+  path: string | null;
+  message: string;
+};
+
+export type MemoryCheckReport = {
+  issues: MemoryCheckIssue[];
+};
+
+export type MemoryMoveOutcome = {
+  source: string;
+  destination: string;
+  revision: string;
+  updated_referrers: string[];
+};
+
+export type MemoryErrorBody = {
+  kind: string;
+  message: string;
+  path?: string;
+  expected_revision?: string;
+  actual_revision?: string;
+  limit?: number;
+  command?: string;
+};
+
+export type MemoryErrorEnvelope = {
+  error: MemoryErrorBody;
 };
 
 export type Skill = {

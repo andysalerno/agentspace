@@ -30,6 +30,7 @@ use crate::{
         KernelStatus, RuntimeSessionSummary, ServiceSummary, SessionSummary, WorkspaceMount,
         WorkspaceMountMode,
     },
+    skills::{SkillRegistry, SkillVolumeResource},
 };
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostError>> + Send>>;
@@ -41,6 +42,7 @@ pub struct RuntimeCreateSession {
     pub env: BTreeMap<String, String>,
     pub additional_paths: Vec<String>,
     pub skills: Vec<String>,
+    pub skill_volumes: Vec<SkillVolumeResource>,
     pub workspace_mounts: Vec<WorkspaceMount>,
 }
 
@@ -130,6 +132,7 @@ pub struct SessionRegistry {
 
 struct SessionRegistryInner {
     runtime: Arc<dyn KernelRuntime>,
+    skills: Option<SkillRegistry>,
     sessions: Arc<RwLock<BTreeMap<String, SessionRecord>>>,
 }
 
@@ -137,6 +140,7 @@ impl Default for SessionRegistryInner {
     fn default() -> Self {
         Self {
             runtime: Arc::new(DockerKernelRuntime::from_env()),
+            skills: None,
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -148,6 +152,23 @@ impl SessionRegistry {
         Self {
             inner: Arc::new(SessionRegistryInner {
                 runtime,
+                skills: None,
+                sessions: Arc::new(RwLock::new(BTreeMap::new())),
+            }),
+        }
+    }
+
+    #[must_use]
+    pub fn with_skills(skills: SkillRegistry) -> Self {
+        Self::with_runtime_and_skills(Arc::new(DockerKernelRuntime::from_env()), skills)
+    }
+
+    #[must_use]
+    pub fn with_runtime_and_skills(runtime: Arc<dyn KernelRuntime>, skills: SkillRegistry) -> Self {
+        Self {
+            inner: Arc::new(SessionRegistryInner {
+                runtime,
+                skills: Some(skills),
                 sessions: Arc::new(RwLock::new(BTreeMap::new())),
             }),
         }
@@ -167,11 +188,24 @@ impl SessionRegistry {
         let mut merged_env: BTreeMap<String, String> = std::env::vars().collect();
         merged_env.extend(caller_env);
         let workspace_mounts = validate_workspace_mount_requests(request.workspace_mounts)?;
+        let skill_volumes = match &self.inner.skills {
+            Some(skills) => skills
+                .resolve_volume_resources(&request.skills)
+                .await
+                .map_err(|error| AgentHostError::validation(error.to_string()))?,
+            None => Vec::new(),
+        };
         let additional_paths = append_unique_paths(
             request.additional_paths,
             workspace_mounts
                 .iter()
                 .map(WorkspaceMount::mount_path)
+                .chain(
+                    skill_volumes
+                        .iter()
+                        .filter(|resource| resource.advertise)
+                        .map(|resource| resource.mount_path.clone()),
+                )
                 .collect::<Vec<_>>(),
         );
         let runtime_request = RuntimeCreateSession {
@@ -180,6 +214,7 @@ impl SessionRegistry {
             env: merged_env.clone(),
             additional_paths: additional_paths.clone(),
             skills: request.skills.clone(),
+            skill_volumes,
             workspace_mounts: workspace_mounts.clone(),
         };
         let runtime_session = self.inner.runtime.create_session(runtime_request).await?;
@@ -1036,6 +1071,8 @@ impl IntoResponse for ApiError {
 mod tests {
     use std::{
         collections::BTreeMap,
+        fs,
+        path::{Path, PathBuf},
         sync::{Arc, Mutex, MutexGuard, PoisonError},
     };
 
@@ -1060,6 +1097,7 @@ mod tests {
             DockerStatsSummary, HarnessName, KernelEvent, KernelEventType, KernelRuntimeSession,
             KernelStatus, RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
         },
+        skills::{SkillRegistry, SkillVolumeMode, SkillVolumeResource, SkillsService},
     };
 
     #[derive(Clone, Default)]
@@ -1378,6 +1416,138 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[tokio::test]
+    async fn skill_volumes_are_opt_in_and_only_advertised_paths_are_exposed() {
+        let root = session_skill_test_dir("volume-privacy");
+        let skills = volume_privacy_test_skills(&root);
+        let runtime = FakeRuntime::default();
+        let registry = SessionRegistry::with_runtime_and_skills(Arc::new(runtime.clone()), skills);
+
+        let enabled = registry
+            .create_session(CreateSessionRequest {
+                harness: HarnessName::CopilotCli,
+                env: BTreeMap::new(),
+                additional_paths: vec!["/srv/original".to_owned()],
+                skills: vec!["memory".to_owned(), "published".to_owned()],
+                workspace_mounts: Vec::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("failed to create enabled session: {error}"));
+        registry
+            .create_session(CreateSessionRequest {
+                harness: HarnessName::CopilotCli,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("failed to create disabled session: {error}"));
+
+        {
+            let state = runtime.state();
+            assert_eq!(
+                state.created[0].skill_volumes,
+                vec![
+                    SkillVolumeResource {
+                        skill_id: "memory".to_owned(),
+                        resource_id: "data".to_owned(),
+                        mount_path: "/var/lib/agentspace/memory".to_owned(),
+                        advertise: false,
+                        mode: SkillVolumeMode::Rw,
+                    },
+                    SkillVolumeResource {
+                        skill_id: "published".to_owned(),
+                        resource_id: "docs".to_owned(),
+                        mount_path: "/srv/published".to_owned(),
+                        advertise: true,
+                        mode: SkillVolumeMode::Ro,
+                    },
+                ]
+            );
+            assert_eq!(
+                state.created[0].additional_paths,
+                vec!["/srv/original", "/srv/published"]
+            );
+            assert!(state.created[1].skill_volumes.is_empty());
+            drop(state);
+        }
+        assert_eq!(
+            enabled.additional_paths,
+            vec!["/srv/original", "/srv/published"]
+        );
+        assert!(
+            !serde_json::to_string(&enabled)
+                .unwrap_or_else(|error| panic!("failed to serialize session: {error}"))
+                .contains("/var/lib/agentspace/memory")
+        );
+
+        fs::remove_dir_all(&root)
+            .unwrap_or_else(|error| panic!("failed to remove {}: {error}", root.display()));
+    }
+
+    fn volume_privacy_test_skills(root: &Path) -> SkillRegistry {
+        let builtin_dir = root.join("builtin");
+        write_test_file(
+            &builtin_dir.join("memory/SKILL.md"),
+            "# Memory\nUse the memory CLI.",
+        );
+        write_test_file(
+            &builtin_dir.join("memory/agentspace.json"),
+            r#"{
+                "schema_version": 1,
+                "resources": {
+                    "volumes": [{
+                        "id": "data",
+                        "scope": "installation",
+                        "mount_path": "/var/lib/agentspace/memory",
+                        "advertise": false,
+                        "mode": "rw"
+                    }]
+                }
+            }"#,
+        );
+        write_test_file(&builtin_dir.join("published/SKILL.md"), "# Published");
+        write_test_file(
+            &builtin_dir.join("published/agentspace.json"),
+            r#"{
+                "schema_version": 1,
+                "resources": {
+                    "volumes": [{
+                        "id": "docs",
+                        "scope": "installation",
+                        "mount_path": "/srv/published",
+                        "advertise": true,
+                        "mode": "ro"
+                    }]
+                }
+            }"#,
+        );
+        SkillRegistry::from_synced_service(SkillsService::new(root.join("skills"), builtin_dir))
+            .unwrap_or_else(|error| panic!("failed to sync test skills: {error}"))
+    }
+
+    fn session_skill_test_dir(name: &str) -> PathBuf {
+        let path = std::env::current_dir()
+            .unwrap_or_else(|error| panic!("failed to read current dir: {error}"))
+            .join("target")
+            .join("agent_host_rs_session_skill_tests")
+            .join(format!("{name}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&path)
+            .unwrap_or_else(|error| panic!("failed to create {}: {error}", path.display()));
+        path
+    }
+
+    fn write_test_file(path: &Path, content: &str) {
+        fs::create_dir_all(
+            path.parent()
+                .unwrap_or_else(|| panic!("test path has no parent: {}", path.display())),
+        )
+        .unwrap_or_else(|error| panic!("failed to create parent for {}: {error}", path.display()));
+        fs::write(path, content)
+            .unwrap_or_else(|error| panic!("failed to write {}: {error}", path.display()));
     }
 
     #[tokio::test]

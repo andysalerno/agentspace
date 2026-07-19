@@ -1,9 +1,33 @@
 # syntax=docker/dockerfile:1
 
+FROM scratch AS memory-rs
+COPY services/memory_rs /
+
+FROM docker.io/library/rust:1.96-slim-bookworm AS memory-builder
+
+ARG RUST_BUILD_PROFILE=release
+
+WORKDIR /usr/src/agentspace
+
+COPY Cargo.toml Cargo.lock ./
+COPY services/agent_host_rs services/agent_host_rs
+COPY services/client_service_rs services/client_service_rs
+COPY --from=memory-rs . services/memory_rs
+RUN --mount=type=cache,id=agentspace-kernel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=agentspace-kernel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    case "$RUST_BUILD_PROFILE" in \
+        release) cargo build --locked --release --package memory_rs --bin memory \
+            && cp target/release/memory /usr/local/bin/memory ;; \
+        debug) cargo build --locked --package memory_rs --bin memory \
+            && cp target/debug/memory /usr/local/bin/memory ;; \
+        *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 1 ;; \
+    esac
+
 FROM docker.io/library/python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 COPY --from=ghcr.io/casey/just:latest /just /usr/local/bin/
+COPY --from=memory-builder /usr/local/bin/memory /usr/local/bin/memory
 
 # Install agent CLIs plus generally useful shell, build, and inspection tools.
 RUN apt-get update && \
@@ -47,6 +71,7 @@ RUN ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode
 
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_LINK_MODE=copy
+ENV AGENTSPACE_MEMORY_DIR=/var/lib/agentspace/memory
 
 WORKDIR /app
 
