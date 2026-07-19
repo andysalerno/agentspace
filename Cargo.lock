@@ -1727,6 +1727,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "session_tools_rs"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"

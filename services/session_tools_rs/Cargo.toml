@@ -1,0 +1,26 @@
+[package]
+name = "session_tools_rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "AgentSpace session lifecycle CLI"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "session-tools"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["net", "sync", "time"] }
+
+[lints]
+workspace = true
