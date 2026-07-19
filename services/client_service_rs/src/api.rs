@@ -331,6 +331,7 @@ async fn info(State(state): State<AppState>) -> Json<Value> {
         }
     };
 
+    let [requested, completed, failed, loop_prevented] = state.handoff_metrics.snapshot();
     Json(json!({
         "client_service": {
             "service": "client_service",
@@ -340,6 +341,12 @@ async fn info(State(state): State<AppState>) -> Json<Value> {
             "env": state.config.client_service_env,
             "instance_id": state.instance_id,
             "started_at": state.started_at,
+            "session_handoffs": {
+                "requested": requested,
+                "completed": completed,
+                "failed": failed,
+                "loop_prevented": loop_prevented,
+            },
         },
         "agent_host": agent_host,
     }))
@@ -1078,6 +1085,15 @@ async fn request_start_new_session(
         .get_mut(&session.session_id)
         .ok_or_else(|| ApiError::conflict("session does not have an active turn".to_owned()))?;
     if turn.automatic_restart_count > 0 {
+        let total = state.handoff_metrics.increment_loop_prevented();
+        tracing::warn!(
+            action = "request_start_new_session",
+            metric = "session_handoff_loop_prevented",
+            total,
+            session_id = %session.session_id,
+            turn_id = %turn.turn_id,
+            "additional fresh-session handoff prevented"
+        );
         return Err(ApiError::conflict(
             "fresh-session handoff already occurred for this turn".to_owned(),
         ));
@@ -1087,15 +1103,20 @@ async fn request_start_new_session(
             "active turn is already completing".to_owned(),
         ));
     }
+    let newly_requested = !turn.start_new_requested;
     turn.start_new_requested = true;
     let turn_id = turn.turn_id.clone();
     drop(active_turns);
 
+    let total = newly_requested.then(|| state.handoff_metrics.increment_requested());
     tracing::info!(
         route = "/internal/session-control/start-new",
         action = "request_start_new_session",
         session_id = %session.session_id,
         turn_id = %turn_id,
+        idempotent = !newly_requested,
+        metric = "session_handoff_requested",
+        total,
         "fresh-session handoff accepted"
     );
     Ok((
@@ -1242,6 +1263,7 @@ async fn reset_session_internal(
     session.status = string_field(&upstream, "status")?;
     session.updated_at = utc_now();
     state.sessions.clear_messages(session_id)?;
+    session.messages.clear();
     state.sessions.update(session.clone())?;
     tracing::info!(
         route = "/sessions/:session_id/reset",
@@ -2597,7 +2619,37 @@ async fn execute_turn(state: &AppState, turn: &mut TurnExecution) -> TurnOutcome
         }
     }
 
+    record_handoff_outcome(state, turn, &outcome);
     outcome
+}
+
+fn record_handoff_outcome(state: &AppState, turn: &TurnExecution, outcome: &TurnOutcome) {
+    if outcome.automatic_restart_count == 0 {
+        return;
+    }
+    if outcome.completed && outcome.error.is_none() {
+        let total = state.handoff_metrics.increment_completed();
+        tracing::info!(
+            action = "execute_turn",
+            metric = "session_handoff_completed",
+            total,
+            session_id = %turn.session_id,
+            turn_id = %turn.turn_id,
+            kernel_session_id = %turn.agent_host_session_id,
+            "fresh-session handoff replay completed"
+        );
+    } else {
+        let total = state.handoff_metrics.increment_failed();
+        tracing::warn!(
+            action = "execute_turn",
+            metric = "session_handoff_failed",
+            total,
+            session_id = %turn.session_id,
+            turn_id = %turn.turn_id,
+            kernel_session_id = %turn.agent_host_session_id,
+            "fresh-session handoff replay failed"
+        );
+    }
 }
 
 fn restart_requested(state: &AppState, turn: &TurnExecution) -> bool {
@@ -2678,12 +2730,12 @@ async fn restart_turn(state: &AppState, turn: &mut TurnExecution) -> Result<Kern
     let new_session = match reset_result {
         Ok(session) => session,
         Err(error) => {
-            replace_turn_messages(state, turn)?;
+            let _replacement_messages = replace_turn_messages(state, turn)?;
             return Err(error);
         }
     };
     turn.agent_host_session_id = new_session.agent_host_session_id;
-    replace_turn_messages(state, turn)?;
+    let (user_message, assistant_message) = replace_turn_messages(state, turn)?;
 
     tracing::info!(
         action = "restart_turn",
@@ -2696,12 +2748,17 @@ async fn restart_turn(state: &AppState, turn: &mut TurnExecution) -> Result<Kern
     Ok([
         ("type".to_owned(), json!("agentspace/session-restarted")),
         ("restart_count".to_owned(), json!(1)),
+        ("user_message".to_owned(), user_message.summary()),
+        ("assistant_message".to_owned(), assistant_message.summary()),
     ]
     .into_iter()
     .collect())
 }
 
-fn replace_turn_messages(state: &AppState, turn: &mut TurnExecution) -> Result<(), ApiError> {
+fn replace_turn_messages(
+    state: &AppState,
+    turn: &mut TurnExecution,
+) -> Result<(MessageRecord, MessageRecord), ApiError> {
     state.sessions.clear_messages(&turn.session_id)?;
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
@@ -2735,7 +2792,7 @@ fn replace_turn_messages(state: &AppState, turn: &mut TurnExecution) -> Result<(
     turn.assistant_message_id
         .clone_into(&mut active.assistant_message_id);
     drop(active_turns);
-    Ok(())
+    Ok((user_message, assistant_message))
 }
 
 fn process_turn_event(
@@ -3914,8 +3971,10 @@ mod tests {
 
     use super::send_stream_item;
     use crate::{
-        ActiveTurnRecord, ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient,
+        ActiveTurnRecord, ActiveTurnStreamState, AppConfig, AppState,
+        agent_host::AgentHostClient,
         build_router,
+        models::{MessageRecord, MessageRole},
     };
 
     fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
@@ -4597,6 +4656,18 @@ mod tests {
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let upstream = RestartingUpstream::start(false, false).await?;
         let (state, app, session_id, token) = restart_test_app(&upstream).await?;
+        state.sessions.append_message(&MessageRecord::new(
+            "prior-user",
+            &session_id,
+            MessageRole::User,
+            "prior topic",
+        ))?;
+        state.sessions.append_message(&MessageRecord::new(
+            "prior-assistant",
+            &session_id,
+            MessageRole::Assistant,
+            "prior answer",
+        ))?;
         let request = Request::builder()
             .method(Method::POST)
             .uri(format!("/sessions/{session_id}/messages/stream"))
@@ -4635,6 +4706,9 @@ mod tests {
             .map_err(|_frame| std::io::Error::other("restart event was not data"))?;
         let restart = serde_json::from_slice::<Value>(&restart)?;
         assert_eq!(restart["event"]["type"], "agentspace/session-restarted");
+        assert_eq!(restart["event"]["user_message"]["content"], "new topic");
+        assert_ne!(restart["event"]["user_message"]["message_id"], "prior-user");
+        let replacement_assistant_id = restart["event"]["assistant_message"]["message_id"].clone();
         upstream.state.fresh_started.acquire().await?.forget();
 
         let (status, repeated) = request_json_with_authorization(
@@ -4668,6 +4742,10 @@ mod tests {
         assert_eq!(
             final_payload["assistant_message"]["content"],
             "fresh-answer"
+        );
+        assert_eq!(
+            final_payload["assistant_message"]["message_id"],
+            replacement_assistant_id
         );
         assert_eq!(final_payload["session"]["session_id"], session_id);
         assert_eq!(
@@ -4703,6 +4781,7 @@ mod tests {
             .map_err(|_error| std::io::Error::other("reset request lock poisoned"))?
             .clone();
         assert_eq!(reset_requests, vec!["old-session"]);
+        assert_eq!(state.handoff_metrics.snapshot(), [1, 1, 0, 1]);
 
         Ok(())
     }
@@ -4818,6 +4897,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_reset_keeps_client_session_and_clears_history()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = RestartingUpstream::start(false, false).await?;
+        let (state, app, session_id, _token) = restart_test_app(&upstream).await?;
+        state.sessions.append_message(&MessageRecord::new(
+            "prior-user",
+            &session_id,
+            MessageRole::User,
+            "prior topic",
+        ))?;
+
+        let (status, response) = request_json(
+            app,
+            Method::POST,
+            &format!("/sessions/{session_id}/reset"),
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["session_id"], session_id);
+        assert_eq!(response["agent_host_session_id"], "fresh-session");
+        let stored = state
+            .sessions
+            .get(&session_id)?
+            .ok_or_else(|| std::io::Error::other("stored session missing"))?;
+        assert!(stored.messages.is_empty());
+        assert_eq!(stored.agent_host_session_id, "fresh-session");
+        assert_eq!(state.handoff_metrics.snapshot(), [0, 0, 0, 0]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn restart_and_replay_failures_are_terminal_without_old_context_fallback()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         for termination in [
@@ -4874,6 +4986,7 @@ mod tests {
                 assert_eq!(stored.messages.len(), 2);
                 assert_eq!(stored.messages[0].content, "new topic");
                 assert_eq!(stored.messages[1].content, "");
+                assert_eq!(state.handoff_metrics.snapshot(), [1, 0, 1, 0]);
             }
         }
 

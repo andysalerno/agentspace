@@ -5,7 +5,10 @@ use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     num::ParseIntError,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -262,6 +265,7 @@ pub struct AppState {
     pub(crate) workspaces: WorkspaceStore,
     pub(crate) sessions: SessionStore,
     pub(crate) active_turns: Arc<Mutex<BTreeMap<String, ActiveTurnRecord>>>,
+    pub(crate) handoff_metrics: Arc<HandoffMetrics>,
     pub(crate) instance_id: Uuid,
     pub(crate) started_at: DateTime<Utc>,
 }
@@ -280,6 +284,41 @@ pub(crate) struct ActiveTurnRecord {
 pub(crate) struct ActiveTurnStreamState {
     pub(crate) subscribers: Vec<StreamSender>,
     pub(crate) final_payload: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+pub(crate) struct HandoffMetrics {
+    requested: AtomicU64,
+    completed: AtomicU64,
+    failed: AtomicU64,
+    loop_prevented: AtomicU64,
+}
+
+impl HandoffMetrics {
+    pub(crate) fn increment_requested(&self) -> u64 {
+        self.requested.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub(crate) fn increment_completed(&self) -> u64 {
+        self.completed.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub(crate) fn increment_failed(&self) -> u64 {
+        self.failed.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub(crate) fn increment_loop_prevented(&self) -> u64 {
+        self.loop_prevented.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub(crate) fn snapshot(&self) -> [u64; 4] {
+        [
+            self.requested.load(Ordering::Relaxed),
+            self.completed.load(Ordering::Relaxed),
+            self.failed.load(Ordering::Relaxed),
+            self.loop_prevented.load(Ordering::Relaxed),
+        ]
+    }
 }
 
 impl AppState {
@@ -330,6 +369,7 @@ impl AppState {
             workspaces: stores.workspaces,
             sessions: stores.sessions,
             active_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            handoff_metrics: Arc::new(HandoffMetrics::default()),
             instance_id: Uuid::now_v7(),
             started_at: Utc::now(),
         }

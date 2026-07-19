@@ -30,7 +30,7 @@ from gateway.simulated_typing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -576,6 +576,7 @@ class DiscordGateway:
         sent_any_message = False
         sent_tool_call_count = 0
         sent_tool_call_keys: set[str] = set()
+        sent_messages: list[object] = []
         acp_tool_calls: dict[str, dict[str, object]] = {}
         final_reply = ""
         final_item: dict[str, object] | None = None
@@ -602,9 +603,9 @@ class DiscordGateway:
             await close_typing()
             try:
                 if use_simulated_typing:
-                    await self._deliver_reply(channel, content)
+                    delivered_messages = await self._deliver_reply(channel, content)
                 else:
-                    await self._send_chunked(channel, content)
+                    delivered_messages = await self._send_chunked(channel, content)
             except Exception as exc:  # noqa: BLE001 - keep gateway alive
                 logger.warning("discord send failed: %s", exc)
                 self._record_event(
@@ -616,6 +617,7 @@ class DiscordGateway:
                     ),
                 )
                 return False
+            sent_messages.extend(delivered_messages)
             self._record_event(
                 GatewayEvent(
                     type=GatewayEventType.OUTBOUND,
@@ -635,6 +637,15 @@ class DiscordGateway:
             content = "".join(pending_text)
             pending_text.clear()
             return await send_outbound(content, assistant_text=True)
+
+        async def delete_sent_messages() -> None:
+            for sent_message in reversed(sent_messages):
+                delete = getattr(sent_message, "delete", None)
+                if not callable(delete):
+                    continue
+                with contextlib.suppress(Exception):
+                    await cast("Callable[[], Awaitable[object]]", delete)()
+            sent_messages.clear()
 
         async def send_tool_invocation(invocation: _ToolInvocation) -> bool:
             nonlocal sent_tool_call_count
@@ -661,6 +672,23 @@ class DiscordGateway:
                     if not isinstance(raw_event, dict):
                         continue
                     event = cast("dict[str, object]", raw_event)
+                    if _is_session_restart_event(event):
+                        await delete_sent_messages()
+                        pending_text.clear()
+                        acp_tool_calls.clear()
+                        sent_tool_call_keys.clear()
+                        sent_tool_call_count = 0
+                        sent_any_message = False
+                        sent_assistant_text = False
+                        self._record_event(
+                            GatewayEvent(
+                                type=GatewayEventType.STATUS,
+                                sender=sender,
+                                session_id=session_id,
+                                message="automatic fresh-session handoff",
+                            ),
+                        )
+                        continue
                     text_delta = _stream_event_text(event)
                     if text_delta:
                         pending_text.append(text_delta)
@@ -730,7 +758,7 @@ class DiscordGateway:
         finally:
             await close_typing()
 
-    async def _deliver_reply(self, channel: _ChannelLike, reply: str) -> None:
+    async def _deliver_reply(self, channel: _ChannelLike, reply: str) -> list[object]:
         """Deliver an assistant reply, optionally with simulated typing.
 
         With simulated typing disabled, behaves like the previous
@@ -742,19 +770,20 @@ class DiscordGateway:
         Discord's typing indicator never lingers visibly after a message
         lands (see commit 77cb0d4).
         """
+        sent_messages: list[object] = []
         chunks = plan_simulated_typing(reply, self._sim_typing_cfg)
         for piece in chunks:
             if piece.delay_s > 0:
                 async with self._typing_indicator(channel):
                     await asyncio.sleep(piece.delay_s)
-            await self._send_chunked(channel, piece.content)
+            sent_messages.extend(await self._send_chunked(channel, piece.content))
+        return sent_messages
 
-    async def _send_chunked(self, channel: _ChannelLike, text: str) -> None:
+    async def _send_chunked(self, channel: _ChannelLike, text: str) -> list[object]:
         # Final safety pass: if any single planned chunk still exceeds
         # Discord's 2000-char limit (e.g. a giant code block in one
         # paragraph), split it down to size before sending.
-        for chunk in _chunk(text, self._chunk_max):
-            await channel.send(chunk)
+        return [await channel.send(chunk) for chunk in _chunk(text, self._chunk_max)]
 
     async def _handle_send_failure(
         self,
@@ -878,6 +907,10 @@ def _stream_event_text(event: dict[str, object]) -> str:
     if update_dict.get("sessionUpdate") != "agent_message_chunk":
         return ""
     return _content_text(update_dict.get("content"))
+
+
+def _is_session_restart_event(event: dict[str, object]) -> bool:
+    return event.get("type") == "agentspace/session-restarted"
 
 
 def _tool_invocation_from_event(

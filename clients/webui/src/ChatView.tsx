@@ -66,10 +66,20 @@ function createClientMessageId(prefix: string): string {
     return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-function applyEventToAssistant(
+// eslint-disable-next-line react-refresh/only-export-components
+export function applyEventToAssistant(
     message: ChatMessage,
     event: KernelEvent,
 ): ChatMessage {
+    if (event.type === "agentspace/session-restarted") {
+        return {
+            ...message,
+            content: "",
+            reasoning: "",
+            tool_calls: [],
+        };
+    }
+
     if (event.type === "session/update" && event.update) {
         return applyAcpUpdateToAssistant(message, event.update);
     }
@@ -110,6 +120,24 @@ function applyEventToAssistant(
     }
 
     return message;
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function sessionRestartMessages(event: KernelEvent): {
+    userMessage: ChatMessage;
+    assistantMessage: ChatMessage;
+} | null {
+    if (
+        event.type !== "agentspace/session-restarted"
+        || event.user_message?.role !== "user"
+        || event.assistant_message?.role !== "assistant"
+    ) {
+        return null;
+    }
+    return {
+        userMessage: event.user_message,
+        assistantMessage: event.assistant_message,
+    };
 }
 
 function applyAcpUpdateToAssistant(
@@ -583,6 +611,28 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         );
     }, [queryClient]);
 
+    const replaceMessagesAfterRestart = useCallback((
+        sessionId: string,
+        event: KernelEvent,
+    ) => {
+        const replacement = sessionRestartMessages(event);
+        if (!replacement) return null;
+        queryClient.setQueryData<SessionDetail | undefined>(
+            queryKeys.session(sessionId),
+            (current) => {
+                if (!current || current.session_id !== sessionId) return current;
+                return {
+                    ...current,
+                    messages: [
+                        replacement.userMessage,
+                        replacement.assistantMessage,
+                    ],
+                };
+            },
+        );
+        return replacement;
+    }, [queryClient]);
+
     const applyFinalChunk = useCallback((
         sessionId: string,
         chunk: MessageStreamFinalChunk,
@@ -635,9 +685,16 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         setStreaming(true);
 
         const activeSessionId = selectedSessionId;
-        const assistantMessageId = activeTurn.assistant_message_id;
+        let assistantMessageId = activeTurn.assistant_message_id;
         const controller = api.streamTurn(activeSessionId, activeTurn.turn_id, {
             onEvent: (event) => {
+                const replacement = replaceMessagesAfterRestart(activeSessionId, event);
+                if (replacement) {
+                    assistantMessageId = replacement.assistantMessage.message_id;
+                    setPendingUserMessage(replacement.userMessage);
+                    setStreamingMessage(replacement.assistantMessage);
+                    return;
+                }
                 updateMessageInCache(activeSessionId, assistantMessageId, (message) => (
                     applyEventToAssistant(message, event)
                 ));
@@ -670,6 +727,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         applyFinalChunk,
         queryClient,
         reportError,
+        replaceMessagesAfterRestart,
         selectedSession?.active_turn,
         selectedSessionId,
         updateMessageInCache,
@@ -702,8 +760,16 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         setStreamingMessage(pendingAssistant);
         setStreaming(true);
 
+        let currentUserMessage = userMessage;
         const controller = api.streamMessage(activeSessionId, message, {
             onEvent: (event) => {
+                const replacement = replaceMessagesAfterRestart(activeSessionId, event);
+                if (replacement) {
+                    currentUserMessage = replacement.userMessage;
+                    setPendingUserMessage(replacement.userMessage);
+                    setStreamingMessage(replacement.assistantMessage);
+                    return;
+                }
                 setStreamingMessage((current) => {
                     if (!current || current.session_id !== activeSessionId) {
                         return current;
@@ -712,7 +778,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 });
             },
             onFinal: (chunk) => {
-                applyFinalChunk(activeSessionId, chunk, userMessage);
+                applyFinalChunk(activeSessionId, chunk, currentUserMessage);
                 setPendingUserMessage(null);
                 setStreamingMessage(null);
                 setStreaming(false);

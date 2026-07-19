@@ -98,7 +98,7 @@ class FakeChannel:
     async def send(self, content: str) -> object:
         self.typing_active_at_send.append(self.typing_active)
         self.sent.append(content)
-        return None
+        return FakeSentMessage(channel=self, content=content)
 
     def typing(self) -> object:
         self.typing_calls += 1
@@ -112,6 +112,19 @@ class FakeChannel:
                 self.typing_exited += 1
 
         return _cm()
+
+
+@dataclass
+class FakeSentMessage:
+    channel: FakeChannel
+    content: str
+
+    async def delete(self) -> object:
+        if self.content in self.channel.sent:
+            index = self.channel.sent.index(self.content)
+            self.channel.sent.pop(index)
+            self.channel.typing_active_at_send.pop(index)
+        return None
 
 
 @dataclass
@@ -455,6 +468,54 @@ async def test_owner_dm_streams_text_before_tool_call_in_order() -> None:
         "sunny and 72",
     ]
     assert channel.typing_active_at_send == [0, 0, 0]
+
+
+@pytest.mark.asyncio
+async def test_owner_dm_discards_transient_text_after_fresh_session_handoff() -> None:
+    fake = FakeClient(
+        stream_items=[
+            {
+                "type": "event",
+                "event": {"type": "text_delta", "content": "old answer"},
+            },
+            {
+                "type": "event",
+                "event": {
+                    "type": "tool_call",
+                    "tool": "old-tool",
+                    "input": {"value": "old"},
+                },
+            },
+            {
+                "type": "event",
+                "event": {
+                    "type": "agentspace/session-restarted",
+                    "restart_count": 1,
+                },
+            },
+            {
+                "type": "event",
+                "event": {"type": "text_delta", "content": "fresh answer"},
+            },
+            {
+                "type": "final",
+                "completed": True,
+                "automatic_restart_count": 1,
+                "assistant_message": {"content": "fresh answer"},
+            },
+        ],
+    )
+    gateway = _ready_gateway(fake)
+    channel = FakeChannel()
+    msg = FakeMessage(
+        author=FakeAuthor(id=111),
+        content="new topic",
+        channel=channel,
+    )
+
+    await gateway._on_message(cast("object", msg))  # type: ignore[arg-type, reportPrivateUsage]  # noqa: SLF001
+
+    assert channel.sent == ["fresh answer"]
 
 
 @pytest.mark.asyncio

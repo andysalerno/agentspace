@@ -236,6 +236,9 @@ export type KernelEvent = {
   input?: Record<string, unknown> | null;
   output?: string | null;
   message?: string | null;
+  restart_count?: number | null;
+  user_message?: ChatMessage | null;
+  assistant_message?: ChatMessage | null;
 };
 
 export type MessageStreamEventChunk = {
@@ -251,6 +254,7 @@ export type MessageStreamFinalChunk = {
   turn_id?: string;
   completed?: boolean;
   error?: string;
+  automatic_restart_count?: number;
 };
 
 export type MessageStreamChunk = MessageStreamEventChunk | MessageStreamFinalChunk;

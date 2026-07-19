@@ -191,6 +191,9 @@ user-issued `/new` remains an explicit reset command and does not deliver its
 control message to the agent; an agent-initiated handoff instead replays the
 current user message automatically.
 
+See [Automatic Fresh-Session Handoff](docs/SESSION_HANDOFF.md) for lifecycle,
+observability, and troubleshooting details.
+
 ## Client Service
 
 `client_service` is the intended public backend API. Clients should talk to it, not to `agent_host` directly. The implementation lives in `services/client_service_rs`.

@@ -9,8 +9,8 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::{Body, to_bytes},
-    extract::{OriginalUri, State},
+    body::{Body, Bytes, to_bytes},
+    extract::{DefaultBodyLimit, OriginalUri, State},
     http::{Request, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -44,6 +44,7 @@ impl StubMemory {
             .route("/v1/tags", get(stub_slow_tags))
             .route("/v1/check", get(stub_malformed))
             .route("/v1/run", post(stub_run))
+            .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
             .with_state(state.clone());
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
@@ -94,7 +95,7 @@ async fn stub_pages(
     }])))
 }
 
-async fn stub_conflict() -> impl IntoResponse {
+async fn stub_conflict(_body: Bytes) -> impl IntoResponse {
     (
         StatusCode::CONFLICT,
         Json(json!({
