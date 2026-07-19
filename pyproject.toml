@@ -97,6 +97,7 @@ extraPaths = [
     "clients/cli_ui/src",
 ]
 exclude = [
+    ".agentspace-cache",
     ".venv",
     "clients/webui/node_modules",
     "kernels/kernel_claude_code",

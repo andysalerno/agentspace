@@ -26,6 +26,7 @@ services managed by the Cargo workspace at the repository root.
 Use `just` for common tasks:
 - `just bootstrap`: Install all dependencies (`uv sync` and `pnpm install`).
 - `just check`: Run the full repo verification suite before finishing work.
+- `just check-containerized`: Run the same suite with only Podman and `just` installed.
 - `just test`: Run Python and service tests.
 - `just stack-up`: Start the full stack using Docker Compose.
 - `just stack-down`: Stop the full stack.

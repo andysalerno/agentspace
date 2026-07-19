@@ -19,6 +19,18 @@ For now, keep `copilot-cli` as the only real kernel path.
 
 ## Validate
 
+With only Podman and `just` installed, run the complete pinned development
+toolchain in containers:
+
+```sh
+just check-containerized
+```
+
+This runs the same Python, Rust, and Web UI checks as `just check` without
+requiring those toolchains on the host.
+
+For a host-managed development environment:
+
 ```powershell
 $env:UV_CACHE_DIR='C:\Users\andys\AppData\Local\Temp\uv-cache'
 uv run pytest

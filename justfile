@@ -2,6 +2,9 @@ set shell := ["bash", "-cu"]
 set windows-shell := ["bash", "-cu"]
 
 kernel_host_script := "kernels/kernel_host/spawn-kernel.sh"
+container_runtime := env_var_or_default("CONTAINER_RUNTIME", "podman")
+dev_dockerfile := "Dockerfile.dev"
+dev_image := "localhost/agentspace-dev:latest"
 
 # Show available recipes.
 default:
@@ -24,11 +27,19 @@ check:
   pnpm --dir clients/webui run --if-present test
   pnpm --dir clients/webui run build
 
+# Run the full repository verification suite in the pinned development image.
+[group('check')]
+check-containerized: (_containerized-check "check")
+
 # Run all Python and Rust tests.
 [group('check')]
 test:
   uv run --all-packages pytest
   cargo test --quiet --workspace
+
+# Run all Python and Rust tests in the pinned development image.
+[group('check')]
+test-containerized: (_containerized-check "test")
 
 # Check the Rust workspace with fmt, tests, and Clippy.
 [group('check')]
@@ -37,6 +48,10 @@ rust-check:
   cargo test --quiet --workspace
   cargo clippy --workspace --all-targets --all-features
 
+# Check the Rust workspace in the pinned development image.
+[group('check')]
+rust-check-containerized: (_containerized-check "rust-check")
+
 # Check only the client-service Rust crate.
 [group('check')]
 client-service-check:
@@ -44,12 +59,20 @@ client-service-check:
   cargo test --quiet --manifest-path services/client_service_rs/Cargo.toml
   cargo clippy --manifest-path services/client_service_rs/Cargo.toml --all-targets --all-features
 
+# Check only the client-service Rust crate in the pinned development image.
+[group('check')]
+client-service-check-containerized: (_containerized-check "client-service-check")
+
 # Check only the agent-host Rust crate.
 [group('check')]
 agent-host-check:
   cargo fmt --check --manifest-path services/agent_host_rs/Cargo.toml
   cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
   cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
+
+# Check only the agent-host Rust crate in the pinned development image.
+[group('check')]
+agent-host-check-containerized: (_containerized-check "agent-host-check")
 
 # Build the client-service container image.
 [group('build')]
@@ -65,6 +88,14 @@ agent-host-build-image:
 [group('check')]
 webui-lint:
   pnpm --dir clients/webui run lint
+
+# Run Web UI linting in the pinned development image.
+[group('check')]
+webui-lint-containerized: (_containerized-check "webui-lint")
+
+# Build the Web UI in the pinned development image.
+[group('build')]
+webui-build-containerized: (_containerized-check "webui-build")
 
 # Check for outdated webui dependencies.
 [group('check')]
@@ -118,3 +149,9 @@ stack-status:
 [group('check')]
 memory-e2e:
   CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}" bash scripts/memory-e2e.sh
+
+[private]
+_containerized-check target:
+  mkdir -p .agentspace-cache/{cargo,home,node-modules,target,uv,venv,web-dist}
+  {{container_runtime}} build --file {{dev_dockerfile}} --target toolbox --tag {{dev_image}} .
+  runtime="{{container_runtime}}"; if [[ "${runtime##*/}" == podman ]]; then user_args=(--userns=keep-id); elif "$runtime" info 2>/dev/null | grep -q rootless; then user_args=(); else user_args=(--userns=host --user "$(id -u):$(id -g)"); fi; "$runtime" run --rm "${user_args[@]}" --env CARGO_HOME=/workspace/.agentspace-cache/cargo --env CI=1 --env HOME=/workspace/.agentspace-cache/home --env UV_CACHE_DIR=/workspace/.agentspace-cache/uv --volume "$PWD:/workspace:Z" --volume "$PWD/.agentspace-cache/node-modules:/workspace/clients/webui/node_modules:Z" --volume "$PWD/.agentspace-cache/target:/workspace/target:Z" --volume "$PWD/.agentspace-cache/venv:/workspace/.venv:Z" --volume "$PWD/.agentspace-cache/web-dist:/workspace/clients/webui/dist:Z" --workdir /workspace {{dev_image}} bash scripts/containerized-check.sh {{target}}
