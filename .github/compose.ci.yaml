@@ -3,18 +3,22 @@ services:
     build:
       additional_contexts:
         memory-rs: ./services/memory_rs
+        session-tools-rs: ./services/session_tools_rs
 
   memory:
     build:
       additional_contexts:
         memory-rs: ./services/memory_rs
+        session-tools-rs: ./services/session_tools_rs
 
   agent-host:
     build:
       additional_contexts:
         memory-rs: ./services/memory_rs
+        session-tools-rs: ./services/session_tools_rs
 
   client-service:
     build:
       additional_contexts:
         memory-rs: ./services/memory_rs
+        session-tools-rs: ./services/session_tools_rs
