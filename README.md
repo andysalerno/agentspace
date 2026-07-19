@@ -177,6 +177,20 @@ podman volume rm agentspace-memory-data
 Disabling the skill, deleting agents or sessions, and normal stack recreation
 never remove this volume.
 
+## Automatic Fresh-Session Handoff
+
+The built-in `start-fresh-session` skill lets an agent conservatively replay a
+clearly independent user message in a fresh kernel session while preserving the
+gateway-visible session and response stream. It is opt-in: enable
+**start-fresh-session** on an agent in the Agents page, then start a new session
+or reset each existing session that should receive the skill.
+
+Enabled sessions receive instructions for deciding when continuity would be
+harmful and can invoke the kernel image's `session-tools start-new` command. A
+user-issued `/new` remains an explicit reset command and does not deliver its
+control message to the agent; an agent-initiated handoff instead replays the
+current user message automatically.
+
 ## Client Service
 
 `client_service` is the intended public backend API. Clients should talk to it, not to `agent_host` directly. The implementation lives in `services/client_service_rs`.

@@ -2064,6 +2064,40 @@ mod tests {
     }
 
     #[test]
+    fn repository_start_fresh_session_skill_is_valid_and_read_only() {
+        let root = TestDir::new("repository-start-fresh-session-skill");
+        let builtin_skills_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mounts/skills");
+        let mut service = SkillsService::new(root.path().join("skills"), builtin_skills_dir);
+
+        service
+            .sync_builtin_skills()
+            .unwrap_or_else(|error| panic!("failed to sync repository skills: {error}"));
+        let skill = service
+            .get_skill("start-fresh-session")
+            .unwrap_or_else(|error| panic!("failed to read start-fresh-session skill: {error}"));
+        let instructions = skill
+            .files
+            .get("SKILL.md")
+            .unwrap_or_else(|| panic!("start-fresh-session SKILL.md missing"));
+
+        assert_eq!(skill.source, SkillSource::Builtin);
+        assert!(instructions.starts_with("---\nname: start-fresh-session\n"));
+        assert!(instructions.contains(
+            "description: Use when the latest user message clearly starts an independent conversation"
+        ));
+        assert!(instructions.contains("When uncertain, remain in the current session."));
+        assert!(instructions.contains("session-tools start-new"));
+        assert!(instructions.contains("stop this response immediately"));
+        assert!(matches!(
+            service.update_skill(
+                "start-fresh-session",
+                &files(&[("SKILL.md", "# Replacement")])
+            ),
+            Err(SkillError::BuiltinSkillReadOnly { .. })
+        ));
+    }
+
+    #[test]
     fn builtin_sync_rejects_invalid_volume_metadata() {
         let cases = [
             (
