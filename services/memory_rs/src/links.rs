@@ -2,7 +2,7 @@
 //! store pages, e.g. `[Alice](../people/alice.md)`.
 //!
 //! This module intentionally implements the first-version scope described in
-//! `MEMORY_PLAN.md`: literal `[text](target)` inline links to other `.md`
+//! literal `[text](target)` inline links to other `.md`
 //! pages. It does not claim to preserve reference-style links (`[text][ref]`),
 //! links inside arbitrary HTML, or external/absolute URLs.
 

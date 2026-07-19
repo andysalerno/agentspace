@@ -1,7 +1,7 @@
 //! `memory_rs`: transport-neutral models, service, and store for the
 //! `AgentSpace` text-first memory system, plus the `memory` CLI built on top.
 //!
-//! See `MEMORY_PLAN.md` at the repository root for the full design.
+//! The crate exposes the same memory contract through local and HTTP clients.
 
 pub mod cli;
 pub mod client;

@@ -26,7 +26,7 @@ use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use crate::{
     client::{CancelFuture, MemoryClient, OutputSink},
     command_runner::{self, RunLimits, RunOutcome},
-    error::MemoryError,
+    error::{MISSING_COMMAND, MemoryError},
     model::{ListFilter, MovePageRequest, QueryRequest, RemovePageRequest, WritePageRequest},
     path::PagePath,
     run_stream::{self, RUN_CONTENT_TYPE},
@@ -70,8 +70,7 @@ impl AppState {
     }
 }
 
-/// Builds the `/healthz` and `/v1/...` router documented in
-/// `MEMORY_PLAN.md`.
+/// Builds the memory service's `/healthz` and `/v1/...` router.
 ///
 /// `max_request_bytes` bounds every request body (`/v1/run`'s JSON launch
 /// request included; the resulting streamed response is unrelated to this
@@ -276,18 +275,16 @@ async fn check(State(state): State<AppState>) -> Result<Response, AppError> {
 /// [`MemoryClient::run_command`], which streams stdout/stderr through a
 /// pair of bounded pipes into the HTTP body as they arrive and reports a
 /// launch failure as a terminal stream frame rather than a top-level error,
-/// matching `MEMORY_PLAN.md`.
+/// matching the transport contract.
 async fn run(
     State(state): State<AppState>,
     Json(body): Json<RunRequestWire>,
 ) -> Result<Response, AppError> {
-    if body
-        .argv
-        .first()
-        .is_none_or(|program| !command_runner::is_allowed(program))
-    {
-        let command = body.argv.first().cloned().unwrap_or_default();
-        return Err(MemoryError::command_not_allowed(command).into());
+    let Some(program) = body.argv.first() else {
+        return Err(MemoryError::command_not_allowed(MISSING_COMMAND).into());
+    };
+    if !command_runner::is_allowed(program) {
+        return Err(MemoryError::command_not_allowed(program.clone()).into());
     }
 
     let timeout = body

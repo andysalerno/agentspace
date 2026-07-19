@@ -40,7 +40,7 @@ const DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL: &str = "http://client-service:8002"
 const AGENTSPACE_CLIENT_SERVICE_URL_ENV: &str = "CLIENT_SERVICE_AGENTSPACE_BASE_URL";
 const GATEWAY_AUTOSTART_ATTEMPTS: usize = 5;
 const GATEWAY_AUTOSTART_RETRY_DELAY: Duration = Duration::from_secs(2);
-const MEMORY_MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+const MEMORY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MEMORY_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {

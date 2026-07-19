@@ -3,6 +3,9 @@ use std::{
     fmt::{self, Display, Formatter},
 };
 
+/// Stable rejected-command value used when a run request omits `argv[0]`.
+pub const MISSING_COMMAND: &str = "<missing>";
+
 /// Domain-level errors shared by every transport and command.
 ///
 /// Both `DirectMemoryClient` and a future `HttpMemoryClient` map to and from
@@ -223,7 +226,11 @@ impl Display for MemoryError {
                 )
             }
             Self::CommandNotAllowed { command } => {
-                write!(formatter, "command {command:?} is not in the allowlist")
+                if command == MISSING_COMMAND {
+                    formatter.write_str("command is required")
+                } else {
+                    write!(formatter, "command {command:?} is not in the allowlist")
+                }
             }
             Self::RunTimedOut => formatter.write_str("command timed out"),
             Self::RunOutputLimitExceeded => {

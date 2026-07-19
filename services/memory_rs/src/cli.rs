@@ -13,7 +13,7 @@ use serde::Serialize;
 use crate::{
     client::MemoryClient,
     command_runner::{RunLimits, RunOutcome},
-    error::MemoryError,
+    error::{MISSING_COMMAND, MemoryError},
     model::{
         ListFilter, MovePageRequest, PageSummary, QueryRequest, RemovePageRequest, WritePageRequest,
     },
@@ -556,7 +556,7 @@ async fn check(client: &dyn MemoryClient, json: bool) -> Result<i32, MemoryError
 
 async fn run_command(client: &dyn MemoryClient, argv: Vec<String>) -> Result<i32, MemoryError> {
     if argv.is_empty() {
-        return Err(MemoryError::command_not_allowed(String::new()));
+        return Err(MemoryError::command_not_allowed(MISSING_COMMAND));
     }
     let stdout: crate::client::OutputSink = Box::new(tokio::io::stdout());
     let stderr: crate::client::OutputSink = Box::new(tokio::io::stderr());

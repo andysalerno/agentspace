@@ -73,7 +73,7 @@ fn init_tracing() {
 /// Always serves the resolved *local* root; a remote URI configured via
 /// `--uri` (rejected by `clap` itself, see [`Cli`]'s `conflicts_with`) or
 /// `AGENTSPACE_MEMORY_URI` is treated as a configuration error rather than
-/// silently ignored, per `MEMORY_PLAN.md`'s requirement that `--serve`
+/// silently ignored: `--serve`
 /// never proxies to another remote memory service.
 async fn serve(cli: &Cli) -> i32 {
     let root = match resolve_serve_root(cli) {
@@ -180,8 +180,7 @@ fn resolve_serve_root(cli: &Cli) -> Result<PathBuf, String> {
     Ok(built_in_root())
 }
 
-/// Resolves the backend using the precedence documented in
-/// `MEMORY_PLAN.md`: explicit `--uri`/`--root`, then
+/// Resolves the backend using this precedence: explicit `--uri`/`--root`, then
 /// `AGENTSPACE_MEMORY_URI`, then `AGENTSPACE_MEMORY_DIR`, then the private
 /// built-in local root.
 fn resolve_backend(cli: &Cli) -> Backend {

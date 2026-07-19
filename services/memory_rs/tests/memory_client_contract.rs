@@ -1,10 +1,10 @@
 //! The reusable `MemoryClient` contract: every behavior below is exercised
 //! once against an in-process `DirectMemoryClient` and once against a live
 //! `HttpMemoryClient` talking to a real Axum server, so both transports are
-//! held to the exact same behavior per `MEMORY_PLAN.md`.
+//! held to the exact same behavior.
 //!
 //! `run_command`'s "first argument not allowlisted" case is intentionally
-//! **not** shared here: `MEMORY_PLAN.md` specifies that `/v1/run` validates
+//! **not** shared here: `/v1/run` validates
 //! the executable allowlist before opening a stream, so the HTTP transport
 //! reports it as an ordinary `MemoryError::CommandNotAllowed` response,
 //! while `DirectMemoryClient` (matching `command_runner`'s pre-milestone-3

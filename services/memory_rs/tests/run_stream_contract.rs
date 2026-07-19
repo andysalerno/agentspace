@@ -10,10 +10,35 @@ use std::time::Duration;
 use memory_rs::{
     client::MemoryClient,
     command_runner::{RunLimits, RunOutcome},
-    error::MemoryError,
+    error::{MISSING_COMMAND, MemoryError},
     run_stream::RUN_CONTENT_TYPE,
 };
 use support::VecSink;
+
+#[tokio::test]
+async fn empty_argv_is_rejected_as_a_missing_command() {
+    let server = support::http_client().await;
+    let error = server
+        .client
+        .run_command(
+            Vec::new(),
+            RunLimits::default(),
+            Box::new(VecSink::default()),
+            Box::new(VecSink::default()),
+            Box::pin(std::future::pending()),
+        )
+        .await
+        .map_or_else(
+            |error| error,
+            |outcome| panic!("expected missing command error, got {outcome:?}"),
+        );
+
+    assert!(matches!(
+        error,
+        MemoryError::CommandNotAllowed { ref command } if command == MISSING_COMMAND
+    ));
+    assert_eq!(error.to_string(), "command is required");
+}
 
 #[tokio::test]
 async fn stdout_and_stderr_are_kept_separate() {

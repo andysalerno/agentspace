@@ -22,7 +22,7 @@ use crate::{
 pub const JSON_CONTENT_TYPE: &str = "application/json";
 
 /// A full page as returned by `GET /v1/pages/content`: metadata, body,
-/// outgoing links, and revision, per `MEMORY_PLAN.md`.
+/// outgoing links, and revision.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PageWire {
     pub path: String,

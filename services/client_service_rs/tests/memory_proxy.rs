@@ -170,6 +170,28 @@ async fn proxies_json_queries_and_upstream_conflicts() -> Result<(), Box<dyn Err
 }
 
 #[tokio::test]
+async fn accepts_requests_up_to_the_memory_service_limit()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let stub = StubMemory::start().await?;
+    let app = stub.app(Duration::from_secs(5))?;
+    let body = serde_json::to_vec(&json!({
+        "body": "x".repeat(3 * 1024 * 1024),
+        "expected_revision": "stale"
+    }))?;
+
+    let (status, _headers, _body) = request(
+        app,
+        Request::put("/memory/v1/pages/content?path=projects/large")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))?,
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    Ok(())
+}
+
+#[tokio::test]
 async fn streams_run_bytes_without_json_buffering() -> Result<(), Box<dyn Error + Send + Sync>> {
     let stub = StubMemory::start().await?;
     let (status, headers, body) = request(

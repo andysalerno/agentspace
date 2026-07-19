@@ -1,5 +1,5 @@
 //! Parsing and rendering of the canonical `---`-delimited YAML frontmatter
-//! plus Markdown body document format described in `MEMORY_PLAN.md`.
+//! plus a Markdown body.
 
 use chrono::{DateTime, Utc};
 use serde_yaml_ng::{Mapping, Value};

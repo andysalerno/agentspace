@@ -26,6 +26,8 @@ use tokio::{
     sync::Notify,
 };
 
+use crate::error::MISSING_COMMAND;
+
 /// The fixed set of executables `memory run` is allowed to invoke.
 pub const ALLOWED_COMMANDS: &[&str] = &["rg", "ls", "cat", "head", "tail", "wc", "stat", "pwd"];
 
@@ -102,7 +104,7 @@ impl Display for RunOutcome {
 /// if the process could not be spawned.
 pub fn spawn(cwd: &Path, argv: &[String]) -> Result<tokio::process::Child, RunOutcome> {
     let Some(program) = argv.first() else {
-        return Err(RunOutcome::NotAllowed(String::new()));
+        return Err(RunOutcome::NotAllowed(MISSING_COMMAND.to_owned()));
     };
     if !is_allowed(program) {
         return Err(RunOutcome::NotAllowed(program.clone()));
