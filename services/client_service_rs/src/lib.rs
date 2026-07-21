@@ -250,7 +250,6 @@ impl Error for ConfigError {
 #[derive(Clone)]
 pub struct AppState {
     pub(crate) config: AppConfig,
-    pub(crate) http_client: reqwest::Client,
     pub(crate) agent_host: AgentHostClient,
     pub(crate) git_agent: GitAgentClient,
     pub(crate) memory: MemoryProxyClient,
@@ -316,7 +315,6 @@ impl AppState {
         Self {
             memory: MemoryProxyClient::new(config.memory_base_url(), config.memory_timeout()),
             config,
-            http_client: reqwest::Client::new(),
             agent_host,
             git_agent,
             agents: stores.agents,

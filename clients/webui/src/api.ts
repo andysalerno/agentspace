@@ -424,8 +424,13 @@ export const api = {
     connection_id: string;
     name: string;
     url: string;
+    provider_type: Connection["provider_type"];
     api_flavor?: "chat_completions" | "responses";
+    transport?: Connection["transport"];
+    azure_api_version?: string;
     api_key?: string;
+    bearer_token?: string;
+    headers?: Record<string, string>;
   }) =>
     requestJson<Connection>("/connections", {
       method: "POST",
@@ -436,8 +441,13 @@ export const api = {
     payload: {
       name?: string;
       url?: string;
+      provider_type?: Connection["provider_type"];
       api_flavor?: "chat_completions" | "responses";
+      transport?: Connection["transport"];
+      azure_api_version?: string | null;
       api_key?: string;
+      bearer_token?: string;
+      headers?: Record<string, string>;
     },
   ) =>
     requestJson<Connection>(`/connections/${connectionId}`, {

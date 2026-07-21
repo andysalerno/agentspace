@@ -12,10 +12,10 @@ use rusqlite::{Connection, Error as RusqliteError, ErrorCode, OptionalExtension,
 use crate::{
     errors::{StoreError, ValidationError},
     models::{
-        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
-        GitAgentConfigRecord, HarnessName, KernelConfigRecord, MessageRecord, MessageRole,
-        SessionRecord, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus,
-        utc_now,
+        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionProviderType, ConnectionRecord,
+        ConnectionTransport, GatewayRecord, GatewayType, GitAgentConfigRecord, HarnessName,
+        KernelConfigRecord, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now,
     },
 };
 use tracing::{debug, info, warn};
@@ -64,8 +64,13 @@ CREATE TABLE IF NOT EXISTS connections (
     connection_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     url TEXT NOT NULL,
+    provider_type TEXT NOT NULL DEFAULT 'openai',
     api_flavor TEXT NOT NULL DEFAULT 'chat_completions',
+    transport TEXT NOT NULL DEFAULT 'http',
+    azure_api_version TEXT,
     api_key TEXT NOT NULL DEFAULT '',
+    bearer_token TEXT NOT NULL DEFAULT '',
+    headers_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -745,16 +750,26 @@ impl SqliteConnectionStore {
                 UPDATE connections
                    SET name = ?,
                        url = ?,
+                       provider_type = ?,
                        api_flavor = ?,
+                       transport = ?,
+                       azure_api_version = ?,
                        api_key = ?,
+                       bearer_token = ?,
+                       headers_json = ?,
                        updated_at = ?
                  WHERE connection_id = ?
                 ",
                 params![
                     connection_record.name,
                     connection_record.url,
+                    connection_record.provider_type.as_str(),
                     connection_record.api_flavor.as_str(),
+                    connection_record.transport.as_str(),
+                    connection_record.azure_api_version,
                     connection_record.api_key,
+                    connection_record.bearer_token,
+                    secrets_json(&connection_record.headers)?,
                     connection_record.updated_at,
                     connection_record.connection_id,
                 ],
@@ -777,21 +792,32 @@ impl SqliteConnectionStore {
             connection.execute(
                 "
                 INSERT INTO connections (
-                    connection_id, name, url, api_flavor, api_key, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    connection_id, name, url, provider_type, api_flavor, transport,
+                    azure_api_version, api_key, bearer_token, headers_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(connection_id) DO UPDATE SET
                     name = excluded.name,
                     url = excluded.url,
+                    provider_type = excluded.provider_type,
                     api_flavor = excluded.api_flavor,
+                    transport = excluded.transport,
+                    azure_api_version = excluded.azure_api_version,
                     api_key = excluded.api_key,
+                    bearer_token = excluded.bearer_token,
+                    headers_json = excluded.headers_json,
                     updated_at = excluded.updated_at
                 ",
                 params![
                     connection_record.connection_id,
                     connection_record.name,
                     connection_record.url,
+                    connection_record.provider_type.as_str(),
                     connection_record.api_flavor.as_str(),
+                    connection_record.transport.as_str(),
+                    connection_record.azure_api_version,
                     connection_record.api_key,
+                    connection_record.bearer_token,
+                    secrets_json(&connection_record.headers)?,
                     connection_record.created_at,
                     connection_record.updated_at,
                 ],
@@ -1481,6 +1507,7 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
             "workspace_mounts_json",
             "workspace_mounts_json TEXT NOT NULL DEFAULT '[]'",
         )?;
+        migrate_legacy_copilot_agents(connection)?;
         ensure_column(
             connection,
             "workspaces",
@@ -1493,9 +1520,99 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
             "api_flavor",
             "api_flavor TEXT NOT NULL DEFAULT 'chat_completions'",
         )?;
+        ensure_column(
+            connection,
+            "connections",
+            "provider_type",
+            "provider_type TEXT NOT NULL DEFAULT 'openai'",
+        )?;
+        ensure_column(
+            connection,
+            "connections",
+            "transport",
+            "transport TEXT NOT NULL DEFAULT 'http'",
+        )?;
+        ensure_column(
+            connection,
+            "connections",
+            "azure_api_version",
+            "azure_api_version TEXT",
+        )?;
+        ensure_column(
+            connection,
+            "connections",
+            "bearer_token",
+            "bearer_token TEXT NOT NULL DEFAULT ''",
+        )?;
+        ensure_column(
+            connection,
+            "connections",
+            "headers_json",
+            "headers_json TEXT NOT NULL DEFAULT '{}'",
+        )?;
         info!("initialized sqlite store schema");
         Ok(())
     })
+}
+
+fn migrate_legacy_copilot_agents(connection: &Connection) -> Result<(), StoreError> {
+    let legacy_agents = {
+        let mut statement = connection
+            .prepare("SELECT agent_id, env_vars FROM agents WHERE harness = 'copilot-cli'")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (agent_id, env_vars) in &legacy_agents {
+        connection.execute(
+            "UPDATE agents SET harness = 'acp', env_vars = ? WHERE agent_id = ?",
+            params![
+                set_env_var(env_vars, "KERNEL_ACP_SERVER", "copilot"),
+                agent_id
+            ],
+        )?;
+    }
+    if !legacy_agents.is_empty() {
+        info!(
+            migrated_agent_count = legacy_agents.len(),
+            "migrated legacy copilot-cli agents to acp"
+        );
+    }
+    Ok(())
+}
+
+fn set_env_var(raw: &str, key: &str, value: &str) -> String {
+    let mut found = false;
+    let mut lines = raw
+        .split('\n')
+        .map(|raw_line| {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return raw_line.to_owned();
+            }
+            let env_key = line
+                .split_once('=')
+                .map_or(line, |(candidate, _value)| candidate)
+                .trim();
+            if env_key != key {
+                return raw_line.to_owned();
+            }
+            found = true;
+            format!("{key}={value}")
+        })
+        .collect::<Vec<_>>();
+    if !found {
+        if raw.is_empty() {
+            return format!("{key}={value}");
+        }
+        if raw.ends_with('\n') {
+            lines.insert(lines.len().saturating_sub(1), format!("{key}={value}"));
+        } else {
+            lines.push(format!("{key}={value}"));
+        }
+    }
+    lines.join("\n")
 }
 
 fn ensure_column(
@@ -1616,12 +1733,20 @@ fn row_to_git_agent_config(row: &Row<'_>) -> Result<GitAgentConfigRecord, StoreE
 
 fn row_to_connection(row: &Row<'_>) -> Result<ConnectionRecord, StoreError> {
     let api_flavor_raw: String = row.get("api_flavor")?;
+    let provider_type_raw: String = row.get("provider_type")?;
+    let transport_raw: String = row.get("transport")?;
+    let headers_json: String = row.get("headers_json")?;
     Ok(ConnectionRecord {
         connection_id: row.get("connection_id")?,
         name: row.get("name")?,
         url: row.get("url")?,
+        provider_type: ConnectionProviderType::from_str(&provider_type_raw).unwrap_or_default(),
         api_flavor: ConnectionApiFlavor::from_str(&api_flavor_raw).unwrap_or_default(),
+        transport: ConnectionTransport::from_str(&transport_raw).unwrap_or_default(),
+        azure_api_version: row.get("azure_api_version")?,
         api_key: row.get("api_key")?,
+        bearer_token: row.get("bearer_token")?,
+        headers: serde_json::from_str(&headers_json).map_err(json_error("connections"))?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
     })
@@ -1797,15 +1922,21 @@ fn insert_connection(
     connection.execute(
         "
         INSERT INTO connections (
-            connection_id, name, url, api_flavor, api_key, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            connection_id, name, url, provider_type, api_flavor, transport,
+            azure_api_version, api_key, bearer_token, headers_json, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             connection_record.connection_id,
             connection_record.name,
             connection_record.url,
+            connection_record.provider_type.as_str(),
             connection_record.api_flavor.as_str(),
+            connection_record.transport.as_str(),
+            connection_record.azure_api_version,
             connection_record.api_key,
+            connection_record.bearer_token,
+            secrets_json(&connection_record.headers)?,
             connection_record.created_at,
             connection_record.updated_at,
         ],
@@ -2010,4 +2141,91 @@ fn is_constraint(error: &RusqliteError) -> bool {
         RusqliteError::SqliteFailure(failure, _message)
             if failure.code == ErrorCode::ConstraintViolation
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{error::Error, io};
+
+    use crate::models::{HarnessName, parse_env_vars};
+
+    use super::{
+        AGENTS_SCHEMA, SESSIONS_SCHEMA, SqliteAgentStore, SqliteDatabase, SqliteSessionStore,
+        initialize_schema,
+    };
+
+    #[test]
+    fn legacy_copilot_agents_migrate_without_losing_history()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let database = SqliteDatabase::open(":memory:")?;
+        database.with_connection("test", |connection| {
+            connection.execute_batch(AGENTS_SCHEMA)?;
+            connection.execute_batch(SESSIONS_SCHEMA)?;
+            connection.execute_batch(
+                "
+                INSERT INTO agents (
+                    agent_id, name, harness, system_prompt, skills_json, env_vars,
+                    connection_id, workspace_mounts_json, created_at, updated_at
+                ) VALUES (
+                    'legacy', 'Legacy Copilot', 'copilot-cli', 'prompt', '[]',
+                    'EXISTING=value\nKERNEL_ACP_SERVER=opencode', NULL, '[]',
+                    '2024-01-01', '2024-01-02'
+                );
+                INSERT INTO agents (
+                    agent_id, name, harness, system_prompt, skills_json, env_vars,
+                    connection_id, workspace_mounts_json, created_at, updated_at
+                ) VALUES (
+                    'current', 'Current ACP', 'acp', 'prompt', '[]',
+                    'UNCHANGED=value', NULL, '[]', '2024-01-01', '2024-01-02'
+                );
+                INSERT INTO client_sessions (
+                    session_id, agent_id, agent_host_session_id, status,
+                    channel_name, client_type, created_at, updated_at
+                ) VALUES (
+                    'historical', 'legacy', 'host-session', 'idle',
+                    'cli', 'cli', '2024-01-03', '2024-01-04'
+                );
+                INSERT INTO client_messages (
+                    message_id, session_id, role, content, reasoning, created_at
+                ) VALUES (
+                    'historical-message', 'historical', 'assistant',
+                    'still readable', '', '2024-01-03'
+                );
+                ",
+            )?;
+            Ok(())
+        })?;
+
+        initialize_schema(&database)?;
+
+        let agents = SqliteAgentStore::new(database.clone());
+        let migrated = agents
+            .get("legacy")?
+            .ok_or_else(|| io::Error::other("migrated agent was not readable"))?;
+        assert_eq!(migrated.agent_id, "legacy");
+        assert_eq!(migrated.harness, HarnessName::Acp);
+        assert_eq!(migrated.created_at, "2024-01-01");
+        assert_eq!(migrated.updated_at, "2024-01-02");
+        let env = parse_env_vars(&migrated.env_vars);
+        assert_eq!(env.get("EXISTING").map(String::as_str), Some("value"));
+        assert_eq!(
+            env.get("KERNEL_ACP_SERVER").map(String::as_str),
+            Some("copilot")
+        );
+        assert_eq!(migrated.env_vars.matches("KERNEL_ACP_SERVER=").count(), 1);
+
+        let current = agents
+            .get("current")?
+            .ok_or_else(|| io::Error::other("current agent was not readable"))?;
+        assert_eq!(current.env_vars, "UNCHANGED=value");
+
+        let sessions = SqliteSessionStore::new(database);
+        let historical = sessions
+            .get("historical")?
+            .ok_or_else(|| io::Error::other("historical session was not readable"))?;
+        assert_eq!(historical.agent_id, "legacy");
+        assert_eq!(historical.messages.len(), 1);
+        assert_eq!(historical.messages[0].content, "still readable");
+        Ok(())
+    }
 }

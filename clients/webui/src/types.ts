@@ -278,9 +278,13 @@ export type Connection = {
   connection_id: string;
   name: string;
   url: string;
+  provider_type: "openai" | "azure" | "anthropic";
   api_flavor: "chat_completions" | "responses";
+  transport: "http" | "websockets";
+  azure_api_version: string | null;
   has_api_key: boolean;
-  api_key?: string;
+  has_bearer_token: boolean;
+  has_headers: boolean;
   created_at: string;
   updated_at: string;
 };

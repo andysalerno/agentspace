@@ -90,7 +90,6 @@ _COPILOT_CONNECTION_ENV_MAP = {
     "CONNECTION_BEARER_TOKEN": "COPILOT_PROVIDER_BEARER_TOKEN",
     "CONNECTION_TRANSPORT": "COPILOT_PROVIDER_TRANSPORT",
     "CONNECTION_AZURE_API_VERSION": "COPILOT_PROVIDER_AZURE_API_VERSION",
-    "CONNECTION_HEADERS": "COPILOT_PROVIDER_HEADERS",
 }
 _COPILOT_WIRE_API_BY_CONNECTION_FLAVOR = {
     "chat_completions": "completions",
@@ -172,7 +171,7 @@ class AcpKernel:
             cmd = self._build_command()
             self._prepare_server()
             env = self._build_env()
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
             return
@@ -330,7 +329,7 @@ class AcpKernel:
         return cmd
 
     def _acp_server(self) -> AcpServer:
-        raw = self._config.env.get("KERNEL_ACP_SERVER", DEFAULT_ACP_SERVER)
+        raw = self._config.env.get("KERNEL_ACP_SERVER") or DEFAULT_ACP_SERVER
         try:
             return AcpServer(raw)
         except ValueError as exc:
@@ -415,10 +414,34 @@ class AcpKernel:
 
         self._copy_mapped_env(source, sanitized, _COPILOT_CONNECTION_ENV_MAP)
         self._copy_mapped_env(source, sanitized, _COPILOT_MODEL_ENV_MAP)
+        headers = source.get("CONNECTION_HEADERS")
+        if headers:
+            sanitized["COPILOT_PROVIDER_HEADERS"] = self._copilot_provider_headers(
+                headers,
+            )
 
         sanitized["COPILOT_OFFLINE"] = "true"
         sanitized["COPILOT_HOME"] = str(self._copilot_home())
         return sanitized
+
+    def _copilot_provider_headers(self, raw: str) -> str:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            msg = "CONNECTION_HEADERS must be a JSON object"
+            raise ValueError(msg) from exc
+        if not isinstance(parsed, dict):
+            msg = "CONNECTION_HEADERS must be a JSON object with string values"
+            raise TypeError(msg)
+        parsed_dict = cast("dict[object, object]", parsed)
+        if not all(
+            isinstance(name, str) and isinstance(value, str)
+            for name, value in parsed_dict.items()
+        ):
+            msg = "CONNECTION_HEADERS must be a JSON object with string values"
+            raise ValueError(msg)
+        headers = cast("dict[str, str]", parsed_dict)
+        return "\n".join(f"{name}: {value}" for name, value in headers.items())
 
     def _copy_mapped_env(
         self,

@@ -167,6 +167,11 @@ class TestAcpMapping:
     def test_build_command_defaults_to_opencode_acp(self, kernel: AcpKernel) -> None:
         assert kernel._build_command() == ["opencode", "acp"]
 
+    def test_empty_server_defaults_to_opencode(self, kernel: AcpKernel) -> None:
+        kernel._config = KernelConfig(env={"KERNEL_ACP_SERVER": ""})
+
+        assert kernel._build_command() == ["opencode", "acp"]
+
     def test_build_command_from_env(self, kernel: AcpKernel) -> None:
         kernel._config = KernelConfig(
             env={
@@ -234,7 +239,7 @@ class TestAcpMapping:
                 "CONNECTION_API_FLAVOR": "responses",
                 "CONNECTION_API_KEY": "provider-secret",
                 "CONNECTION_TRANSPORT": "http",
-                "CONNECTION_HEADERS": "X-Tenant: example",
+                "CONNECTION_HEADERS": '{"X-Tenant":"example"}',
                 "KERNEL_ACP_MODEL_NAME": "claude-model",
                 "KERNEL_ACP_PROVIDER_MODEL_ID": "claude-sonnet-4",
                 "KERNEL_ACP_PROVIDER_WIRE_MODEL": "claude-model-wire",

@@ -27,11 +27,11 @@ use crate::{
     memory::{MEMORY_JSON_CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE, MemoryProxyError},
     models::{
         AgentRecord, BUILTIN_GIT_AGENT_WORKSPACE_ID, BUILTIN_GIT_AGENT_WORKSPACE_NAME, ClientType,
-        ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
-        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord, GatewayType, GitAgentConfigRecord,
-        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
-        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        ConnectionApiFlavor, ConnectionProviderType, ConnectionRecord, ConnectionTransport,
+        DEFAULT_AGENT_SYSTEM_PROMPT, DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord, GatewayType,
+        GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole, SessionRecord,
+        ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars,
+        utc_now, validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
         validate_workspace_id,
     },
 };
@@ -405,7 +405,7 @@ async fn list_connections(State(state): State<AppState>) -> Result<Json<Vec<Valu
         .connections
         .list()?
         .into_iter()
-        .map(|connection| connection.summary(false))
+        .map(|connection| connection.summary())
         .collect::<Vec<_>>();
     tracing::info!(
         route = "/connections",
@@ -429,7 +429,7 @@ async fn get_connection(
         has_api_key = !connection.api_key.is_empty(),
         "api handler completed"
     );
-    Ok(Json(connection.summary(false)))
+    Ok(Json(connection.summary()))
 }
 
 async fn list_connection_models(
@@ -444,14 +444,7 @@ async fn list_connection_models(
         api_flavor = connection.api_flavor.as_str(),
         "fetching connection models"
     );
-    let url = format!("{}/models", connection.url.trim_end_matches('/'));
-    let mut request = state
-        .http_client
-        .get(url)
-        .timeout(state.config.connection_models_timeout());
-    if !connection.api_key.is_empty() {
-        request = request.bearer_auth(&connection.api_key);
-    }
+    let request = connection_models_request(&state, &connection_id, &connection)?;
     let response = request.send().await.map_err(|error| {
         ApiError::bad_gateway(format!(
             "failed to fetch models for connection {connection_id}: {error}"
@@ -506,15 +499,76 @@ async fn list_connection_models(
     Ok(Json(value))
 }
 
+fn connection_models_request(
+    state: &AppState,
+    connection_id: &str,
+    connection: &ConnectionRecord,
+) -> Result<reqwest::RequestBuilder, ApiError> {
+    let url = format!("{}/models", connection.url.trim_end_matches('/'));
+    let mut url = reqwest::Url::parse(&url).map_err(|error| {
+        ApiError::bad_gateway(format!(
+            "failed to fetch models for connection {connection_id}: invalid URL: {error}"
+        ))
+    })?;
+    if connection.provider_type == ConnectionProviderType::Azure
+        && let Some(api_version) = connection.azure_api_version.as_deref()
+    {
+        url.query_pairs_mut()
+            .append_pair("api-version", api_version);
+    }
+    let provider_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| {
+            ApiError::bad_gateway(format!(
+                "failed to prepare model discovery for connection {connection_id}: {error}"
+            ))
+        })?;
+    let mut request = provider_client
+        .get(url)
+        .timeout(state.config.connection_models_timeout());
+    if !connection.bearer_token.is_empty() {
+        request = request.bearer_auth(&connection.bearer_token);
+    } else if !connection.api_key.is_empty() {
+        request = match connection.provider_type {
+            ConnectionProviderType::Openai => request.bearer_auth(&connection.api_key),
+            ConnectionProviderType::Azure => request.header("api-key", &connection.api_key),
+            ConnectionProviderType::Anthropic => request.header("x-api-key", &connection.api_key),
+        };
+    }
+    if connection.provider_type == ConnectionProviderType::Anthropic
+        && !connection
+            .headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("anthropic-version"))
+    {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
+    for (name, value) in &connection.headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    Ok(request)
+}
+
 async fn create_connection(
     State(state): State<AppState>,
     Json(payload): Json<CreateConnectionRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_connection_id(&payload.connection_id)?;
     let mut connection = ConnectionRecord::new(payload.connection_id, payload.name, payload.url);
+    connection.provider_type = payload.provider_type.ok_or_else(|| {
+        ApiError::unprocessable(
+            "provider_type is required and must be openai, azure, or anthropic".to_owned(),
+        )
+    })?;
     connection.api_flavor = payload.api_flavor;
+    connection.transport = payload.transport;
+    connection.azure_api_version = payload.azure_api_version;
     connection.api_key = payload.api_key;
-    let value = connection.summary(true);
+    connection.bearer_token = payload.bearer_token;
+    connection.headers = payload.headers;
+    validate_connection(&connection)?;
+    let value = connection.summary();
     state.connections.insert(connection)?;
     tracing::info!(
         route = "/connections",
@@ -539,14 +593,32 @@ async fn update_connection(
     if let Some(url) = payload.url {
         connection.url = url;
     }
+    if let Some(provider_type) = payload.provider_type {
+        connection.provider_type = provider_type;
+    }
     if let Some(api_flavor) = payload.api_flavor {
         connection.api_flavor = api_flavor;
+    }
+    if let Some(transport) = payload.transport {
+        connection.transport = transport;
+    }
+    match payload.azure_api_version {
+        NullableStringField::Missing => {}
+        NullableStringField::Null => connection.azure_api_version = None,
+        NullableStringField::Value(value) => connection.azure_api_version = Some(value),
     }
     if let Some(api_key) = payload.api_key {
         connection.api_key = api_key;
     }
+    if let Some(bearer_token) = payload.bearer_token {
+        connection.bearer_token = bearer_token;
+    }
+    if let Some(headers) = payload.headers {
+        connection.headers = headers;
+    }
+    validate_connection(&connection)?;
     connection.updated_at = utc_now();
-    let value = connection.summary(true);
+    let value = connection.summary();
     state.connections.update(connection)?;
     tracing::info!(
         route = "/connections/:connection_id",
@@ -598,6 +670,7 @@ async fn create_agent(
     agent.connection_id = payload.connection_id;
     validate_workspace_mounts(&state, &payload.workspace_mounts)?;
     agent.workspace_mounts = payload.workspace_mounts;
+    session_env(&state, &agent)?;
     let value = agent.summary();
     state.agents.insert(agent)?;
     tracing::info!(
@@ -680,6 +753,7 @@ async fn update_agent(
             agent.connection_id = Some(connection_id);
         }
     }
+    session_env(&state, &agent)?;
     agent.updated_at = utc_now();
     let value = agent.summary();
     state.agents.update(agent)?;
@@ -2120,11 +2194,34 @@ fn session_env(
         let connection = require_connection(state, connection_id)?;
         env.insert("CONNECTION_URL".to_owned(), connection.url);
         env.insert(
+            "CONNECTION_PROVIDER_TYPE".to_owned(),
+            connection.provider_type.as_str().to_owned(),
+        );
+        env.insert(
             "CONNECTION_API_FLAVOR".to_owned(),
             connection.api_flavor.as_str().to_owned(),
         );
+        env.insert(
+            "CONNECTION_TRANSPORT".to_owned(),
+            connection.transport.as_str().to_owned(),
+        );
+        if let Some(api_version) = connection.azure_api_version {
+            env.insert("CONNECTION_AZURE_API_VERSION".to_owned(), api_version);
+        }
         if !connection.api_key.is_empty() {
             env.insert("CONNECTION_API_KEY".to_owned(), connection.api_key);
+        }
+        if !connection.bearer_token.is_empty() {
+            env.insert(
+                "CONNECTION_BEARER_TOKEN".to_owned(),
+                connection.bearer_token,
+            );
+        }
+        if !connection.headers.is_empty() {
+            env.insert(
+                "CONNECTION_HEADERS".to_owned(),
+                serde_json::to_string(&connection.headers).unwrap_or_default(),
+            );
         }
     }
     env.extend(parse_env_vars(&agent.env_vars));
@@ -2144,6 +2241,7 @@ fn session_env(
             agent.system_prompt.clone(),
         );
     }
+    validate_copilot_agent_env(agent, &env)?;
     tracing::debug!(
         action = "session_env",
         agent_id = %agent.agent_id,
@@ -2154,6 +2252,34 @@ fn session_env(
         "session environment prepared"
     );
     Ok(env)
+}
+
+fn validate_copilot_agent_env(
+    agent: &AgentRecord,
+    env: &BTreeMap<String, String>,
+) -> Result<(), ApiError> {
+    if agent.harness != HarnessName::Acp
+        || env.get("KERNEL_ACP_SERVER").map(String::as_str) != Some("copilot")
+    {
+        return Ok(());
+    }
+    let mut missing = Vec::new();
+    if agent.connection_id.is_none() {
+        missing.push("Connection");
+    }
+    if env
+        .get("KERNEL_ACP_MODEL_NAME")
+        .is_none_or(|model| model.trim().is_empty())
+    {
+        missing.push("KERNEL_ACP_MODEL_NAME");
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(ApiError::unprocessable(format!(
+        "Copilot ACP agents require: {}",
+        missing.join(", ")
+    )))
 }
 
 struct StreamingTurn {
@@ -3192,6 +3318,44 @@ fn validate_non_empty_field(field: &'static str, value: &str) -> Result<(), ApiE
     Ok(())
 }
 
+fn validate_connection(connection: &ConnectionRecord) -> Result<(), ApiError> {
+    validate_non_empty_field("url", &connection.url)?;
+    if !connection.api_key.is_empty() && !connection.bearer_token.is_empty() {
+        return Err(ApiError::unprocessable(
+            "api_key and bearer_token are mutually exclusive; provide only one credential"
+                .to_owned(),
+        ));
+    }
+    if connection.transport == ConnectionTransport::Websockets
+        && connection.api_flavor != ConnectionApiFlavor::Responses
+    {
+        return Err(ApiError::unprocessable(
+            "transport websockets requires api_flavor responses".to_owned(),
+        ));
+    }
+    if let Some(api_version) = connection.azure_api_version.as_deref() {
+        validate_non_empty_field("azure_api_version", api_version)?;
+        if connection.provider_type != ConnectionProviderType::Azure {
+            return Err(ApiError::unprocessable(
+                "azure_api_version is only allowed when provider_type is azure".to_owned(),
+            ));
+        }
+    }
+    for (name, value) in &connection.headers {
+        if HeaderName::from_bytes(name.as_bytes()).is_err() {
+            return Err(ApiError::unprocessable(format!(
+                "headers contains invalid HTTP header name {name:?}"
+            )));
+        }
+        if HeaderValue::from_str(value).is_err() {
+            return Err(ApiError::unprocessable(format!(
+                "headers contains an invalid value for {name:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn require_agent(state: &AppState, agent_id: &str) -> Result<AgentRecord, ApiError> {
     state
         .agents
@@ -3305,18 +3469,32 @@ struct CreateConnectionRequest {
     connection_id: String,
     name: String,
     url: String,
+    provider_type: Option<ConnectionProviderType>,
     #[serde(default)]
     api_flavor: ConnectionApiFlavor,
     #[serde(default)]
+    transport: ConnectionTransport,
+    azure_api_version: Option<String>,
+    #[serde(default)]
     api_key: String,
+    #[serde(default)]
+    bearer_token: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateConnectionRequest {
     name: Option<String>,
     url: Option<String>,
+    provider_type: Option<ConnectionProviderType>,
     api_flavor: Option<ConnectionApiFlavor>,
+    transport: Option<ConnectionTransport>,
+    #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
+    azure_api_version: NullableStringField,
     api_key: Option<String>,
+    bearer_token: Option<String>,
+    headers: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3885,17 +4063,7 @@ mod tests {
 
         let (status, value) = get_json(app.clone(), "/harnesses").await?;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            value,
-            json!([
-                "claude-code",
-                "echo",
-                "copilot-cli",
-                "codex",
-                "opencode",
-                "acp"
-            ])
-        );
+        assert_eq!(value, json!(["acp"]));
 
         let (status, value) = get_json(app.clone(), "/kernel-configs/acp").await?;
         assert_eq!(status, StatusCode::OK);
@@ -3928,6 +4096,7 @@ mod tests {
             "connection_id": "main",
             "name": "Main",
             "url": "http://models.example.test",
+            "provider_type": "openai",
             "api_flavor": "responses",
             "api_key": "secret",
         });
@@ -3941,7 +4110,7 @@ mod tests {
         .await?;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["connection_id"], "main");
-        assert_eq!(value["api_key"], "secret");
+        assert!(value.get("api_key").is_none());
         assert_eq!(value["has_api_key"], true);
 
         let (status, value) =
@@ -3963,14 +4132,19 @@ mod tests {
         .await?;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(value["name"], "Renamed");
-        assert_eq!(value["api_key"], "");
+        assert!(value.get("api_key").is_none());
         assert_eq!(value["has_api_key"], false);
 
         let (status, value) = request_json(
             app.clone(),
             Method::POST,
             "/connections",
-            Some(json!({ "connection_id": "Bad", "name": "Bad", "url": "x" })),
+            Some(json!({
+                "connection_id": "Bad",
+                "name": "Bad",
+                "url": "x",
+                "provider_type": "openai"
+            })),
         )
         .await?;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -3997,6 +4171,7 @@ mod tests {
             "connection_id": "main",
             "name": "Main",
             "url": upstream.base_url,
+            "provider_type": "openai",
         });
         let (status, _value) =
             request_json(app.clone(), Method::POST, "/connections", Some(payload)).await?;
