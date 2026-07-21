@@ -169,6 +169,7 @@ class TestAcpMapping:
     def test_build_command_from_env(self, kernel: AcpKernel) -> None:
         kernel._config = KernelConfig(
             env={
+                "KERNEL_ACP_SERVER": "custom",
                 "KERNEL_ACP_COMMAND": "my-agent --acp",
                 "KERNEL_ACP_EXTRA_ARGS": "--debug\n--model=test",
             },
@@ -181,6 +182,169 @@ class TestAcpMapping:
             "--model=test",
         ]
 
+    def test_copilot_command_is_disabled_by_default(self, kernel: AcpKernel) -> None:
+        kernel._config = KernelConfig(env={"KERNEL_ACP_SERVER": "copilot"})
+
+        with pytest.raises(ValueError, match="github/copilot-cli#4016"):
+            kernel._build_command()
+
+    def test_copilot_command_uses_acp_yolo_and_hardening(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_ACP_SERVER": "copilot",
+                "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED": "true",
+                "KERNEL_SYSTEM_PROMPT": "be concise",
+            },
+        )
+
+        assert kernel._build_command() == [
+            "copilot",
+            "--acp",
+            "--yolo",
+            "--disable-builtin-mcps",
+            "--no-auto-update",
+            (
+                "--secret-env-vars=COPILOT_PROVIDER_API_KEY,"
+                "COPILOT_PROVIDER_BEARER_TOKEN,COPILOT_PROVIDER_HEADERS"
+            ),
+            "--agent",
+            "agentspace",
+        ]
+
+    def test_copilot_env_uses_connection_and_forces_offline(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(acp_module, "COPILOT_RUNTIME_ROOT", tmp_path)
+        monkeypatch.setenv("GH_TOKEN", "inherited-github-token")
+        monkeypatch.setenv("COPILOT_PROVIDER_BASE_URL", "https://raw.test")
+        monkeypatch.setenv("COPILOT_MODEL", "raw-model")
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_ACP_SERVER": "copilot",
+                "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED": "true",
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_PROVIDER_TYPE": "anthropic",
+                "CONNECTION_API_FLAVOR": "responses",
+                "CONNECTION_API_KEY": "provider-secret",
+                "CONNECTION_TRANSPORT": "http",
+                "CONNECTION_HEADERS": "X-Tenant: example",
+                "KERNEL_ACP_MODEL_NAME": "claude-model",
+                "KERNEL_ACP_PROVIDER_MODEL_ID": "claude-sonnet-4",
+                "KERNEL_ACP_PROVIDER_WIRE_MODEL": "claude-model-wire",
+                "COPILOT_OFFLINE": "false",
+            },
+        )
+
+        env = kernel._build_env()
+
+        assert env["COPILOT_PROVIDER_BASE_URL"] == "https://connection.test/v1"
+        assert env["COPILOT_PROVIDER_TYPE"] == "anthropic"
+        assert env["COPILOT_PROVIDER_WIRE_API"] == "responses"
+        assert env["COPILOT_PROVIDER_API_KEY"] == "provider-secret"
+        assert env["COPILOT_PROVIDER_TRANSPORT"] == "http"
+        assert env["COPILOT_PROVIDER_HEADERS"] == "X-Tenant: example"
+        assert env["COPILOT_MODEL"] == "claude-model"
+        assert env["COPILOT_PROVIDER_MODEL_ID"] == "claude-sonnet-4"
+        assert env["COPILOT_PROVIDER_WIRE_MODEL"] == "claude-model-wire"
+        assert env["COPILOT_OFFLINE"] == "true"
+        assert env["COPILOT_HOME"] == str(tmp_path / "test-session")
+        assert "GH_TOKEN" not in env
+        assert "CONNECTION_API_KEY" not in env
+
+    def test_copilot_env_maps_chat_completions_and_allows_no_key(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_ACP_SERVER": "copilot",
+                "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED": "true",
+                "CONNECTION_URL": "http://localhost:11434/v1",
+                "CONNECTION_API_FLAVOR": "chat_completions",
+                "KERNEL_ACP_MODEL_NAME": "local-model",
+            },
+        )
+
+        env = kernel._build_env()
+
+        assert env["COPILOT_PROVIDER_WIRE_API"] == "completions"
+        assert env["COPILOT_PROVIDER_TYPE"] == "openai"
+        assert "COPILOT_PROVIDER_API_KEY" not in env
+
+    def test_copilot_env_requires_connection_and_model(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_ACP_SERVER": "copilot",
+                "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED": "true",
+            },
+        )
+
+        with pytest.raises(ValueError, match="CONNECTION_URL") as exc_info:
+            kernel._build_env()
+
+        assert "KERNEL_ACP_MODEL_NAME" in str(exc_info.value)
+
+    def test_copilot_preparation_writes_agent_and_links_skills(
+        self,
+        kernel: AcpKernel,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime = tmp_path / "runtime"
+        skills = tmp_path / "skills"
+        skills.mkdir()
+        (skills / "example").mkdir()
+        monkeypatch.setattr(acp_module, "COPILOT_RUNTIME_ROOT", runtime)
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_ACP_SERVER": "copilot",
+                "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED": "true",
+                "KERNEL_SYSTEM_PROMPT": "be concise",
+                "KERNEL_SKILLS_DIR": str(skills),
+            },
+        )
+
+        kernel._prepare_server()
+
+        home = runtime / "test-session"
+        agent = home / "agents" / "agentspace.agent.md"
+        assert "be concise" in agent.read_text(encoding="utf-8")
+        assert (home / "skills").is_symlink()
+        assert (home / "skills").resolve() == skills.resolve()
+
+    def test_terminal_env_excludes_provider_secrets(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(
+            env={
+                "KERNEL_ACP_SERVER": "copilot",
+                "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED": "true",
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_API_KEY": "provider-secret",
+                "KERNEL_ACP_MODEL_NAME": "model-a",
+            },
+        )
+
+        env = kernel._terminal_env(None)
+
+        assert "COPILOT_PROVIDER_API_KEY" not in env
+        assert "CONNECTION_API_KEY" not in env
+
+        with pytest.raises(ValueError, match="provider secret"):
+            kernel._terminal_env(
+                [{"name": "COPILOT_PROVIDER_API_KEY", "value": "leak"}],
+            )
+
     def test_build_env_uses_custom_default_agent_for_system_prompt(
         self,
         kernel: AcpKernel,
@@ -190,14 +354,14 @@ class TestAcpMapping:
         monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
         monkeypatch.setattr(
             acp_module,
-            "CUSTOM_AGENT_PATH",
+            "OPENCODE_CUSTOM_AGENT_PATH",
             tmp_path / ".config" / "opencode" / "agents" / "custom.md",
         )
         kernel._config = KernelConfig(env={"KERNEL_SYSTEM_PROMPT": "be concise"})
 
-        kernel._write_custom_agent_prompt()
+        kernel._write_opencode_custom_agent_prompt()
 
-        custom_agent = acp_module.CUSTOM_AGENT_PATH.read_text()
+        custom_agent = acp_module.OPENCODE_CUSTOM_AGENT_PATH.read_text()
         assert "mode: primary" in custom_agent
         assert "be concise" in custom_agent
         assert kernel._build_command() == ["opencode", "acp"]
@@ -212,7 +376,7 @@ class TestAcpMapping:
     ) -> None:
         monkeypatch.setattr(
             acp_module,
-            "CUSTOM_AGENT_PATH",
+            "OPENCODE_CUSTOM_AGENT_PATH",
             tmp_path / ".config" / "opencode" / "agents" / "custom.md",
         )
         kernel._config = KernelConfig(
@@ -222,7 +386,7 @@ class TestAcpMapping:
             },
         )
 
-        kernel._write_custom_agent_prompt()
+        kernel._write_opencode_custom_agent_prompt()
 
         opencode_config = json.loads(kernel._build_env()["OPENCODE_CONFIG_CONTENT"])
         assert opencode_config == {"share": "disabled", "default_agent": "custom"}
@@ -235,11 +399,15 @@ class TestAcpMapping:
     ) -> None:
         monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
         custom_agent_path = tmp_path / ".config" / "opencode" / "agents" / "custom.md"
-        monkeypatch.setattr(acp_module, "CUSTOM_AGENT_PATH", custom_agent_path)
+        monkeypatch.setattr(
+            acp_module,
+            "OPENCODE_CUSTOM_AGENT_PATH",
+            custom_agent_path,
+        )
         custom_agent_path.parent.mkdir(parents=True)
         custom_agent_path.write_text("stale prompt")
 
-        kernel._write_custom_agent_prompt()
+        kernel._write_opencode_custom_agent_prompt()
 
         assert custom_agent_path.read_text() == ""
         assert kernel._build_command() == ["opencode", "acp"]
