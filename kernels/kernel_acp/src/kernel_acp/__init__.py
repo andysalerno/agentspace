@@ -297,7 +297,10 @@ class AcpKernel:
     def _build_command(self) -> list[str]:
         server = self._acp_server()
         if server == AcpServer.OPENCODE:
-            return ["opencode", "acp"]
+            cmd = ["opencode", "acp"]
+            if not self._config.env.get("KERNEL_ACP_SERVER"):
+                self._append_extra_args(cmd)
+            return cmd
         if server == AcpServer.COPILOT:
             self._require_copilot_experimental_enabled()
             cmd = [
@@ -313,6 +316,8 @@ class AcpKernel:
             return cmd
 
         raw = self._config.env.get("KERNEL_ACP_COMMAND", "")
+        if not raw and not self._config.env.get("KERNEL_ACP_SERVER"):
+            raw = "opencode acp"
         cmd = shlex.split(raw)
         if not cmd:
             msg = (
@@ -321,15 +326,18 @@ class AcpKernel:
             )
             raise ValueError(msg)
 
-        extra_args = self._config.env.get("KERNEL_ACP_EXTRA_ARGS", "")
-        for arg in extra_args.splitlines():
-            if arg:
-                cmd.append(arg)
-
+        self._append_extra_args(cmd)
         return cmd
 
+    def _append_extra_args(self, cmd: list[str]) -> None:
+        extra_args = self._config.env.get("KERNEL_ACP_EXTRA_ARGS", "")
+        cmd.extend(arg for arg in extra_args.splitlines() if arg)
+
     def _acp_server(self) -> AcpServer:
-        raw = self._config.env.get("KERNEL_ACP_SERVER") or DEFAULT_ACP_SERVER
+        raw = self._config.env.get("KERNEL_ACP_SERVER")
+        if not raw and self._config.env.get("KERNEL_ACP_COMMAND"):
+            return AcpServer.CUSTOM
+        raw = raw or DEFAULT_ACP_SERVER
         try:
             return AcpServer(raw)
         except ValueError as exc:

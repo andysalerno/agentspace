@@ -15,7 +15,7 @@ use crate::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionProviderType, ConnectionRecord,
         ConnectionTransport, GatewayRecord, GatewayType, GitAgentConfigRecord, HarnessName,
         KernelConfigRecord, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
     },
 };
 use tracing::{debug, info, warn};
@@ -1556,6 +1556,13 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
 }
 
 fn migrate_legacy_copilot_agents(connection: &Connection) -> Result<(), StoreError> {
+    let legacy_kernel_env = connection
+        .query_row(
+            "SELECT env_vars FROM kernel_configs WHERE harness = 'copilot-cli'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
     let legacy_agents = {
         let mut statement = connection
             .prepare("SELECT agent_id, env_vars FROM agents WHERE harness = 'copilot-cli'")?;
@@ -1565,19 +1572,37 @@ fn migrate_legacy_copilot_agents(connection: &Connection) -> Result<(), StoreErr
         rows.collect::<Result<Vec<_>, _>>()?
     };
     for (agent_id, env_vars) in &legacy_agents {
+        let mut migrated_env = legacy_kernel_env.clone().unwrap_or_default();
+        if !env_vars.is_empty() {
+            if !migrated_env.is_empty() && !migrated_env.ends_with('\n') {
+                migrated_env.push('\n');
+            }
+            migrated_env.push_str(env_vars);
+        }
+        let parsed = parse_env_vars(&migrated_env);
+        if !parsed.contains_key("KERNEL_ACP_MODEL_NAME")
+            && let Some(model) = parsed.get("COPILOT_MODEL")
+        {
+            migrated_env = set_env_var(&migrated_env, "KERNEL_ACP_MODEL_NAME", model);
+        }
+        migrated_env = set_env_var(&migrated_env, "KERNEL_ACP_SERVER", "copilot");
         connection.execute(
             "UPDATE agents SET harness = 'acp', env_vars = ? WHERE agent_id = ?",
-            params![
-                set_env_var(env_vars, "KERNEL_ACP_SERVER", "copilot"),
-                agent_id
-            ],
+            params![migrated_env, agent_id],
         )?;
     }
+    let removed_config = connection.execute(
+        "DELETE FROM kernel_configs WHERE harness = 'copilot-cli'",
+        [],
+    )?;
     if !legacy_agents.is_empty() {
         info!(
             migrated_agent_count = legacy_agents.len(),
             "migrated legacy copilot-cli agents to acp"
         );
+    }
+    if removed_config > 0 {
+        info!("removed migrated legacy copilot-cli kernel config");
     }
     Ok(())
 }
@@ -2150,8 +2175,8 @@ mod tests {
     use crate::models::{HarnessName, parse_env_vars};
 
     use super::{
-        AGENTS_SCHEMA, SESSIONS_SCHEMA, SqliteAgentStore, SqliteDatabase, SqliteSessionStore,
-        initialize_schema,
+        AGENTS_SCHEMA, KERNEL_CONFIGS_SCHEMA, SESSIONS_SCHEMA, SqliteAgentStore, SqliteDatabase,
+        SqliteSessionStore, initialize_schema,
     };
 
     #[test]
@@ -2160,9 +2185,12 @@ mod tests {
         let database = SqliteDatabase::open(":memory:")?;
         database.with_connection("test", |connection| {
             connection.execute_batch(AGENTS_SCHEMA)?;
+            connection.execute_batch(KERNEL_CONFIGS_SCHEMA)?;
             connection.execute_batch(SESSIONS_SCHEMA)?;
             connection.execute_batch(
                 "
+                INSERT INTO kernel_configs (harness, env_vars, updated_at)
+                VALUES ('copilot-cli', 'COPILOT_MODEL=legacy-model', '2024-01-01');
                 INSERT INTO agents (
                     agent_id, name, harness, system_prompt, skills_json, env_vars,
                     connection_id, workspace_mounts_json, created_at, updated_at
@@ -2212,7 +2240,20 @@ mod tests {
             env.get("KERNEL_ACP_SERVER").map(String::as_str),
             Some("copilot")
         );
+        assert_eq!(
+            env.get("KERNEL_ACP_MODEL_NAME").map(String::as_str),
+            Some("legacy-model")
+        );
         assert_eq!(migrated.env_vars.matches("KERNEL_ACP_SERVER=").count(), 1);
+        database.with_connection("test", |connection| {
+            let legacy_configs = connection.query_row(
+                "SELECT COUNT(*) FROM kernel_configs WHERE harness = 'copilot-cli'",
+                [],
+                |row| row.get::<_, usize>(0),
+            )?;
+            assert_eq!(legacy_configs, 0);
+            Ok(())
+        })?;
 
         let current = agents
             .get("current")?

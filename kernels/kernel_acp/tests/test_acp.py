@@ -188,6 +188,31 @@ class TestAcpMapping:
             "--model=test",
         ]
 
+    def test_legacy_custom_command_selects_custom_server(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(
+            env={"KERNEL_ACP_COMMAND": "my-agent --acp"},
+        )
+
+        assert kernel._build_command() == ["my-agent", "--acp"]
+
+    def test_legacy_extra_args_extend_default_opencode_command(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(
+            env={"KERNEL_ACP_EXTRA_ARGS": "--debug\n--model=test"},
+        )
+
+        assert kernel._build_command() == [
+            "opencode",
+            "acp",
+            "--debug",
+            "--model=test",
+        ]
+
     def test_copilot_command_is_disabled_by_default(self, kernel: AcpKernel) -> None:
         kernel._config = KernelConfig(env={"KERNEL_ACP_SERVER": "copilot"})
 
