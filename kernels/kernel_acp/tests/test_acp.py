@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from typing import TYPE_CHECKING
 
@@ -344,6 +345,38 @@ class TestAcpMapping:
             kernel._terminal_env(
                 [{"name": "COPILOT_PROVIDER_API_KEY", "value": "leak"}],
             )
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        os.environ.get("RUN_COPILOT_ACP_COMPATIBILITY") != "1",
+        reason="requires the installed Copilot CLI compatibility probe",
+    )
+    async def test_copilot_offline_byok_can_create_acp_session(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(acp_module, "COPILOT_RUNTIME_ROOT", tmp_path)
+        kernel = AcpKernel()
+
+        await kernel.start(
+            KernelConfig(
+                env={
+                    "KERNEL_ACP_SERVER": "copilot",
+                    "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED": "true",
+                    "CONNECTION_URL": "http://127.0.0.1:9/v1",
+                    "CONNECTION_PROVIDER_TYPE": "openai",
+                    "CONNECTION_API_FLAVOR": "responses",
+                    "KERNEL_ACP_MODEL_NAME": "gpt-5.4",
+                },
+            ),
+        )
+        events = await _drain(kernel)
+        await kernel.stop()
+
+        errors = [event.message for event in events if event.type == EventType.ERROR]
+        assert errors == []
+        assert any(event.type == EventType.SESSION_START for event in events)
 
     def test_build_env_uses_custom_default_agent_for_system_prompt(
         self,
