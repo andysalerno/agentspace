@@ -21,13 +21,8 @@ cleanup
 trap cleanup EXIT
 
 echo "Building kernel image..." >&2
-docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" build kernel setup >&2
+docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" build kernel >&2
 
-if [[ "${1:-}" == "setup" ]]; then
-    echo "Starting interactive copilot session (run /login to authenticate)..." >&2
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" run --rm setup
-else
-    MESSAGE="${1:?Usage: spawn-kernel.sh <message|setup>}"
-    echo "Running kernel..." >&2
-    docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" run --rm kernel "$MESSAGE"
-fi
+MESSAGE="${1:?Usage: spawn-kernel.sh <message>}"
+echo "Running kernel..." >&2
+docker compose -p "$PROJECT_NAME" -f "$COMPOSE_FILE" run --rm kernel "$MESSAGE"

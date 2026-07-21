@@ -14,7 +14,6 @@ from kernel_acp import AcpKernel
 class HarnessName(StrEnum):
     CLAUDE_CODE = "claude-code"
     ECHO = "echo"
-    COPILOT_CLI = "copilot-cli"
     CODEX = "codex"
     OPENCODE = "opencode"
     ACP = "acp"
