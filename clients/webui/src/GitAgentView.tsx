@@ -910,7 +910,7 @@ export default function GitAgentView() {
                         <label>
                             Kernel
                             <Input
-                                placeholder="copilot-cli"
+                                placeholder="acp"
                                 value={configForm.reviewer_harness}
                                 onChange={(event) =>
                                     setConfigForm({ ...configForm, reviewer_harness: event.target.value })}

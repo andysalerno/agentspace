@@ -2,7 +2,8 @@
 
 ## Status
 
-**Proposed, with an upstream compatibility gate.**
+**Implemented as a disabled experimental path; production enablement remains
+blocked by the upstream compatibility gate.**
 
 AgentSpace should expose GitHub Copilot CLI through the existing canonical
 `acp` harness and run it as:
@@ -17,11 +18,17 @@ be supported. Every Copilot-backed agent must use an AgentSpace Connection for
 its model provider, and the child process must always run with
 `COPILOT_OFFLINE=true`.
 
-Implementation must not begin until a released Copilot CLI version passes the
-no-login ACP compatibility gate described below. Copilot CLI 1.0.73 does not:
+Production enablement must not occur until a released Copilot CLI version
+passes the no-login ACP compatibility gate described below. Copilot CLI 1.0.73
+does not:
 it advertises only `copilot-login` during ACP initialization and rejects
 `authenticate` and `session/new` with `-32000 Authentication required`, even
 when a complete offline BYOK provider is configured.
+
+At the user's direction, the integration was implemented behind
+`KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED`, which defaults off. This permits
+review and compatibility testing without presenting the currently broken
+upstream path as supported.
 
 ## Goals
 
@@ -564,5 +571,7 @@ Likely files:
 
 Which stable Copilot CLI release will make BYOK-only ACP sessions pass
 `session/new` without GitHub authentication? Until that is answered by a
-release and verified locally, this plan is ready for implementation design but
-the feature is intentionally blocked.
+release and verified with
+`RUN_COPILOT_ACP_COMPATIBILITY=1 uv run pytest
+kernels/kernel_acp/tests/test_acp.py`, the experimental profile remains
+intentionally disabled.

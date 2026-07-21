@@ -3,7 +3,7 @@
 // see what they need to set. The kernel itself enforces these at runtime;
 // this map only drives UI affordances.
 const REQUIRED_ENV_KEYS_BY_HARNESS: Record<string, string[]> = {
-    acp: ["KERNEL_ACP_MODEL_NAME"],
+    acp: ["KERNEL_ACP_SERVER", "KERNEL_ACP_MODEL_NAME"],
     opencode: ["KERNEL_OPENCODE_MODEL_NAME"],
 };
 
@@ -17,6 +17,7 @@ export function modelEnvKeyForHarness(harness: string): string | null {
 }
 
 export function getEnvValue(envVars: string, key: string): string {
+    let value = "";
     for (const rawLine of envVars.split("\n")) {
         const line = rawLine.trim();
         if (line === "" || line.startsWith("#")) {
@@ -25,10 +26,10 @@ export function getEnvValue(envVars: string, key: string): string {
         const eq = line.indexOf("=");
         const envKey = (eq === -1 ? line : line.slice(0, eq)).trim();
         if (envKey === key) {
-            return eq === -1 ? "" : line.slice(eq + 1);
+            value = eq === -1 ? "" : line.slice(eq + 1);
         }
     }
-    return "";
+    return value;
 }
 
 export function setEnvValue(envVars: string, key: string, value: string): string {

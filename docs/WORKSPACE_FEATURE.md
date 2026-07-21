@@ -290,7 +290,7 @@ The client-service-to-agent-host boundary sends `workspace_mounts` in
 
 ```json
 {
-  "harness": "copilot-cli",
+  "harness": "acp",
   "skills": [],
   "env": {},
   "workspace_mounts": [
