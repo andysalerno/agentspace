@@ -29,6 +29,7 @@ export const queryKeys = {
     ["git-agent", "requests", requestId] as const,
   kernelConfig: (harness: string) => ["kernel-configs", harness] as const,
   connections: ["connections"] as const,
+  secrets: ["secrets"] as const,
   connectionModels: (connectionId: string) =>
     ["connections", connectionId, "models"] as const,
   systemInfo: ["info"] as const,
@@ -178,6 +179,12 @@ export const useConnections = () =>
   useQuery({
     queryKey: queryKeys.connections,
     queryFn: api.listConnections,
+  });
+
+export const useSecrets = () =>
+  useQuery({
+    queryKey: queryKeys.secrets,
+    queryFn: api.listSecrets,
   });
 
 export const useConnectionModels = (connectionId: string | null) =>

@@ -15,6 +15,8 @@ import GatewaysView from "./GatewaysView";
 import InfoView from "./InfoView";
 import ConfigKernelsView from "./ConfigKernelsView";
 import MemoryView from "./MemoryView";
+import ConfigurationView from "./ConfigurationView";
+import SecretsView from "./SecretsView";
 import { useErrorContext } from "./ErrorContext";
 import { Button, FluentProvider } from "./fluent";
 import { useWebuiInfo } from "./queries";
@@ -85,6 +87,10 @@ export default function App() {
         return <InfoView />;
       case "config-kernels":
         return <ConfigKernelsView />;
+      case "config":
+        return <ConfigurationView />;
+      case "config-secrets":
+        return <SecretsView />;
     }
   }
 

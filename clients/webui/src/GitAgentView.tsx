@@ -736,6 +736,18 @@ export default function GitAgentView() {
                     </span>
                 </div>
                 <div className="view-header-actions">
+                    <Button
+                        className="secondary-button"
+                        onClick={() => {
+                            void api.downloadConfigResource(
+                                "git-agent-config",
+                                "default",
+                            ).catch(reportError);
+                        }}
+                        type="button"
+                    >
+                        Export YAML
+                    </Button>
                     <Button className="secondary-button" onClick={refresh} type="button">
                         Refresh
                     </Button>

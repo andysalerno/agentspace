@@ -1,5 +1,6 @@
 import type {
   Agent,
+  ConfigOperationResult,
   Connection,
   ConnectionModels,
   Gateway,
@@ -27,6 +28,7 @@ import type {
   ServiceInfoSection,
   SessionDetail,
   SessionSummary,
+  SecretStatus,
   Skill,
   SkillVersion,
   SystemInfo,
@@ -67,7 +69,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
       payload = undefined;
     }
     const envelope = payload as Partial<MemoryErrorEnvelope> | undefined;
+    const generic = payload as { detail?: unknown } | undefined;
     const message = envelope?.error?.message
+      || (typeof generic?.detail === "string" ? generic.detail : undefined)
       || text
       || `${response.status} ${response.statusText}`;
     throw new ApiError(message, response.status, payload);
@@ -78,6 +82,31 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+async function requestDownload(path: string): Promise<void> {
+  const response = await fetch(`${apiBase}${path}`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new ApiError(
+      text || `${response.status} ${response.statusText}`,
+      response.status,
+      text,
+    );
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filenameMatch = /filename="?([^";]+)"?/i.exec(disposition);
+  const filename = filenameMatch?.[1] ?? "agentspace-config.yaml";
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename.replaceAll(/[\\/]/g, "-");
+    anchor.click();
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function parseChunk(line: string): MessageStreamChunk {
@@ -155,6 +184,49 @@ async function consumeMessageStream(
 }
 
 export const api = {
+  validateConfig: (source: string) =>
+    requestJson<ConfigOperationResult>("/config/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/yaml" },
+      body: source,
+    }),
+  planConfig: (source: string) =>
+    requestJson<ConfigOperationResult>("/config/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/yaml" },
+      body: source,
+    }),
+  applyConfig: (source: string) =>
+    requestJson<ConfigOperationResult>("/config/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/yaml" },
+      body: source,
+    }),
+  downloadConfig: (mode: "source" | "canonical") =>
+    requestDownload(`/config/export?mode=${mode}`),
+  downloadConfigResource: (kind: string, name: string) =>
+    requestDownload(
+      `/config/export/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`,
+    ),
+  listSecrets: () => requestJson<SecretStatus[]>("/secrets"),
+  createSecret: (payload: { name: string; description?: string | null }) =>
+    requestJson<SecretStatus>("/secrets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteSecret: (name: string) =>
+    requestJson<void>(`/secrets/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  setSecretValue: (name: string, value: string) =>
+    requestJson<void>(`/secrets/${encodeURIComponent(name)}/value`, {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
+  clearSecretValue: (name: string) =>
+    requestJson<void>(`/secrets/${encodeURIComponent(name)}/value`, {
+      method: "DELETE",
+    }),
   listHarnesses: () => requestJson<string[]>("/harnesses"),
   listWorkspaces: () => requestJson<Workspace[]>("/workspaces"),
   createWorkspace: (payload: { workspace_id: string; name: string }) =>
