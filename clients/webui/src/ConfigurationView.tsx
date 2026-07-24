@@ -20,18 +20,20 @@ spec:
 `;
 
 type ConfigAction = "validate" | "plan" | "apply";
+type ConfigInput = string | Blob;
 
 export default function ConfigurationView() {
   const [source, setSource] = useState(EMPTY_CONFIG);
+  const [bundle, setBundle] = useState<File | null>(null);
   const [result, setResult] = useState<object | null>(null);
   const queryClient = useQueryClient();
   const { reportError } = useErrorContext();
 
   const mutation = useMutation({
-    mutationFn: ({ action, yaml }: { action: ConfigAction; yaml: string }) => {
-      if (action === "validate") return api.validateConfig(yaml);
-      if (action === "plan") return api.planConfig(yaml);
-      return api.applyConfig(yaml);
+    mutationFn: ({ action, input }: { action: ConfigAction; input: ConfigInput }) => {
+      if (action === "validate") return api.validateConfig(input);
+      if (action === "plan") return api.planConfig(input);
+      return api.applyConfig(input);
     },
     onSuccess: (value, variables) => {
       setResult(value);
@@ -45,7 +47,12 @@ export default function ConfigurationView() {
   async function loadFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
-    setSource(await file.text());
+    if (file.name.toLowerCase().endsWith(".zip")) {
+      setBundle(file);
+    } else {
+      setSource(await file.text());
+      setBundle(null);
+    }
     setResult(null);
   }
 
@@ -88,16 +95,22 @@ export default function ConfigurationView() {
         <label>
           Load YAML
           <input
-            accept=".yaml,.yml,text/yaml"
+            accept=".yaml,.yml,.zip,text/yaml,application/zip"
             onChange={(event) => { void loadFile(event); }}
             type="file"
           />
         </label>
+        {bundle !== null && (
+          <p className="muted">
+            Loaded config-set bundle: <code>{bundle.name}</code>
+          </p>
+        )}
         <CodeEditor
           height="480px"
           language="yaml"
           onChange={(value) => {
             setSource(value);
+            setBundle(null);
             setResult(null);
           }}
           value={source}
@@ -106,7 +119,7 @@ export default function ConfigurationView() {
           <Button
             className="secondary-button"
             disabled={mutation.isPending}
-            onClick={() => mutation.mutate({ action: "validate", yaml: source })}
+            onClick={() => mutation.mutate({ action: "validate", input: bundle ?? source })}
             type="button"
           >
             Validate
@@ -114,14 +127,14 @@ export default function ConfigurationView() {
           <Button
             className="secondary-button"
             disabled={mutation.isPending}
-            onClick={() => mutation.mutate({ action: "plan", yaml: source })}
+            onClick={() => mutation.mutate({ action: "plan", input: bundle ?? source })}
             type="button"
           >
             Preview Replacement
           </Button>
           <Button
             disabled={mutation.isPending}
-            onClick={() => mutation.mutate({ action: "apply", yaml: source })}
+            onClick={() => mutation.mutate({ action: "apply", input: bundle ?? source })}
             type="button"
           >
             {mutation.isPending ? "Working…" : "Apply Replacement"}

@@ -38,6 +38,7 @@ import type {
 } from "./types";
 
 const apiBase = "/api";
+type ConfigSource = string | Blob;
 
 export class ApiError extends Error {
   readonly status: number;
@@ -94,6 +95,7 @@ async function requestDownload(path: string): Promise<void> {
       text,
     );
   }
+
   const disposition = response.headers.get("Content-Disposition") ?? "";
   const filenameMatch = /filename="?([^";]+)"?/i.exec(disposition);
   const filename = filenameMatch?.[1] ?? "agentspace-config.yaml";
@@ -107,6 +109,21 @@ async function requestDownload(path: string): Promise<void> {
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+function configRequest(
+  path: string,
+  source: ConfigSource,
+): Promise<ConfigOperationResult> {
+  return requestJson<ConfigOperationResult>(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": typeof source === "string"
+        ? "application/yaml"
+        : source.type || "application/zip",
+    },
+    body: source,
+  });
 }
 
 function parseChunk(line: string): MessageStreamChunk {
@@ -184,24 +201,9 @@ async function consumeMessageStream(
 }
 
 export const api = {
-  validateConfig: (source: string) =>
-    requestJson<ConfigOperationResult>("/config/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/yaml" },
-      body: source,
-    }),
-  planConfig: (source: string) =>
-    requestJson<ConfigOperationResult>("/config/plan", {
-      method: "POST",
-      headers: { "Content-Type": "application/yaml" },
-      body: source,
-    }),
-  applyConfig: (source: string) =>
-    requestJson<ConfigOperationResult>("/config/apply", {
-      method: "POST",
-      headers: { "Content-Type": "application/yaml" },
-      body: source,
-    }),
+  validateConfig: (source: ConfigSource) => configRequest("/config/validate", source),
+  planConfig: (source: ConfigSource) => configRequest("/config/plan", source),
+  applyConfig: (source: ConfigSource) => configRequest("/config/apply", source),
   downloadConfig: (mode: "source" | "canonical") =>
     requestDownload(`/config/export?mode=${mode}`),
   downloadConfigResource: (kind: string, name: string) =>
