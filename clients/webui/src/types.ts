@@ -298,6 +298,7 @@ export type ConnectionModels = {
 export type ConfigOperationResult = {
   valid?: boolean;
   generation?: number;
+  active_generation?: number;
   source_sha256?: string;
   semantic_sha256?: string;
   creates?: string[];

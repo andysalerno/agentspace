@@ -109,6 +109,7 @@ async function requestDownload(path: string): Promise<void> {
 function configRequest(
   path: string,
   source: ConfigSource,
+  expectedGeneration?: number,
 ): Promise<ConfigOperationResult> {
   return requestJson<ConfigOperationResult>(path, {
     method: "POST",
@@ -116,6 +117,9 @@ function configRequest(
       "Content-Type": typeof source === "string"
         ? "application/yaml"
         : source.type || "application/zip",
+      ...(expectedGeneration === undefined
+        ? {}
+        : { "If-Match": String(expectedGeneration) }),
     },
     body: source,
   });
@@ -198,7 +202,8 @@ async function consumeMessageStream(
 export const api = {
   validateConfig: (source: ConfigSource) => configRequest("/config/validate", source),
   planConfig: (source: ConfigSource) => configRequest("/config/plan", source),
-  applyConfig: (source: ConfigSource) => configRequest("/config/apply", source),
+  applyConfig: (source: ConfigSource, expectedGeneration?: number) =>
+    configRequest("/config/apply", source, expectedGeneration),
   downloadConfig: (mode: "source" | "canonical") =>
     requestDownload(`/config/export?mode=${mode}`),
   downloadConfigResource: (kind: string, name: string) =>

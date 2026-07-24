@@ -49,6 +49,7 @@ afterEach(() => {
 describe("ConfigurationView", () => {
   it("validates and applies the exact editor source", async () => {
     const validate = vi.spyOn(api, "validateConfig").mockResolvedValue({ valid: true });
+    vi.spyOn(api, "planConfig").mockResolvedValue({ active_generation: 7 });
     const apply = vi.spyOn(api, "applyConfig").mockResolvedValue({ generation: 2 });
     const user = userEvent.setup();
     render(<ConfigurationView />, { wrapper: wrapper() });
@@ -60,9 +61,11 @@ describe("ConfigurationView", () => {
       expect(validate).toHaveBeenCalledWith("kind: AgentSpaceConfig\n");
     });
 
+    await user.click(screen.getByRole("button", { name: "Preview Replacement" }));
+    expect(await screen.findByText("Applying against generation 7")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Apply Replacement" }));
     await waitFor(() => {
-      expect(apply).toHaveBeenCalledWith("kind: AgentSpaceConfig\n");
+      expect(apply).toHaveBeenCalledWith("kind: AgentSpaceConfig\n", 7);
     });
     expect(await screen.findByText(/"generation": 2/)).toBeTruthy();
   });

@@ -26,18 +26,34 @@ export default function ConfigurationView() {
   const [source, setSource] = useState(EMPTY_CONFIG);
   const [bundle, setBundle] = useState<File | null>(null);
   const [result, setResult] = useState<object | null>(null);
+  const [expectedGeneration, setExpectedGeneration] = useState<number | null>(null);
   const queryClient = useQueryClient();
   const { reportError } = useErrorContext();
 
   const mutation = useMutation({
-    mutationFn: ({ action, input }: { action: ConfigAction; input: ConfigInput }) => {
+    mutationFn: ({
+      action,
+      input,
+      generation,
+    }: {
+      action: ConfigAction;
+      input: ConfigInput;
+      generation?: number;
+    }) => {
       if (action === "validate") return api.validateConfig(input);
       if (action === "plan") return api.planConfig(input);
-      return api.applyConfig(input);
+      return api.applyConfig(input, generation);
     },
     onSuccess: (value, variables) => {
       setResult(value);
+      if (
+        variables.action === "plan"
+        && typeof value.active_generation === "number"
+      ) {
+        setExpectedGeneration(value.active_generation);
+      }
       if (variables.action === "apply") {
+        setExpectedGeneration(null);
         void queryClient.invalidateQueries();
       }
     },
@@ -54,6 +70,7 @@ export default function ConfigurationView() {
       setBundle(null);
     }
     setResult(null);
+    setExpectedGeneration(null);
   }
 
   function download(mode: "source" | "canonical") {
@@ -112,6 +129,7 @@ export default function ConfigurationView() {
             setSource(value);
             setBundle(null);
             setResult(null);
+            setExpectedGeneration(null);
           }}
           value={source}
         />
@@ -134,11 +152,20 @@ export default function ConfigurationView() {
           </Button>
           <Button
             disabled={mutation.isPending}
-            onClick={() => mutation.mutate({ action: "apply", input: bundle ?? source })}
+            onClick={() => mutation.mutate({
+              action: "apply",
+              input: bundle ?? source,
+              generation: expectedGeneration ?? undefined,
+            })}
             type="button"
           >
             {mutation.isPending ? "Working…" : "Apply Replacement"}
           </Button>
+          {expectedGeneration !== null && (
+            <span className="muted">
+              Applying against generation {expectedGeneration}
+            </span>
+          )}
         </div>
       </div>
 

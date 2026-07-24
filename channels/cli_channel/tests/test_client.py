@@ -30,6 +30,7 @@ async def test_config_apply_posts_yaml_bytes() -> None:
         assert request.method == "POST"
         assert request.url.path == "/config/apply"
         assert request.headers["content-type"] == "application/yaml"
+        assert request.headers["if-match"] == "7"
         assert request.content == source
         return httpx.Response(200, json={"generation": 2})
 
@@ -37,7 +38,7 @@ async def test_config_apply_posts_yaml_bytes() -> None:
         base_url="http://test",
         transport=httpx.MockTransport(handler),
     )
-    response = await client.apply_config(source)
+    response = await client.apply_config(source, expected_generation=7)
 
     assert response == {"generation": 2}
 
