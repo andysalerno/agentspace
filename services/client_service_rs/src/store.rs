@@ -940,6 +940,8 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    use rusqlite::Connection;
+
     use crate::{
         errors::StoreError,
         models::{
@@ -1374,6 +1376,77 @@ mod tests {
             assert_eq!(message.tool_calls[0].tool, "shell");
             assert_eq!(message.tool_calls[0].content_offset, Some(3));
         }
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_session_control_hash_persists_across_reopen()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = sqlite_test_path()?;
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            let mut session = session("session", "2024-01-01");
+            session.session_control_token_hash = Some("control-hash".to_owned());
+            stores.sessions.insert(session)?;
+        }
+
+        let stores = StoreSet::sqlite(&path)?;
+        let session =
+            stores
+                .sessions
+                .get("session")?
+                .ok_or_else(|| StoreError::SessionNotFound {
+                    session_id: "session".to_owned(),
+                })?;
+        assert_eq!(
+            session.session_control_token_hash.as_deref(),
+            Some("control-hash")
+        );
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_migrates_legacy_sessions_without_control_capabilities()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = sqlite_test_path()?;
+        {
+            let connection = Connection::open(&path)?;
+            connection.execute_batch(
+                "
+                CREATE TABLE client_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    agent_host_session_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    channel_name TEXT,
+                    client_type TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO client_sessions (
+                    session_id, agent_id, agent_host_session_id, status,
+                    created_at, updated_at
+                ) VALUES (
+                    'legacy', 'agent', 'host-session', 'idle',
+                    '2024-01-01', '2024-01-01'
+                );
+                ",
+            )?;
+        }
+
+        let stores = StoreSet::sqlite(&path)?;
+        let session =
+            stores
+                .sessions
+                .get("legacy")?
+                .ok_or_else(|| StoreError::SessionNotFound {
+                    session_id: "legacy".to_owned(),
+                })?;
+        assert!(session.session_control_token_hash.is_none());
 
         cleanup_sqlite_path(&path);
         Ok(())

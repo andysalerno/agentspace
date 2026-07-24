@@ -1471,6 +1471,8 @@ mod tests {
                 state.created[0].additional_paths,
                 vec!["/srv/original", "/srv/published"]
             );
+            assert_eq!(state.created[0].skills, vec!["memory", "published"]);
+            assert!(state.created[1].skills.is_empty());
             assert!(state.created[1].skill_volumes.is_empty());
             drop(state);
         }

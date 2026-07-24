@@ -51,6 +51,13 @@ agent-host-check:
   cargo test --quiet --manifest-path services/agent_host_rs/Cargo.toml
   cargo clippy --manifest-path services/agent_host_rs/Cargo.toml --all-targets --all-features
 
+# Check only the session-tools Rust crate.
+[group('check')]
+session-tools-check:
+  cargo fmt --check --manifest-path services/session_tools_rs/Cargo.toml
+  cargo test --quiet --manifest-path services/session_tools_rs/Cargo.toml
+  cargo clippy --manifest-path services/session_tools_rs/Cargo.toml --all-targets --all-features
+
 # Build the client-service container image.
 [group('build')]
 client-service-build-image:

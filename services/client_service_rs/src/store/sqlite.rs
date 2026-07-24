@@ -103,6 +103,7 @@ CREATE TABLE IF NOT EXISTS client_sessions (
     session_id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL,
     agent_host_session_id TEXT NOT NULL,
+    session_control_token_hash TEXT,
     status TEXT NOT NULL,
     channel_name TEXT,
     client_type TEXT,
@@ -1257,6 +1258,7 @@ impl SqliteSessionStore {
                 UPDATE client_sessions
                    SET agent_id = ?,
                        agent_host_session_id = ?,
+                       session_control_token_hash = ?,
                        status = ?,
                        channel_name = ?,
                        client_type = ?,
@@ -1266,6 +1268,7 @@ impl SqliteSessionStore {
                 params![
                     session.agent_id,
                     session.agent_host_session_id,
+                    session.session_control_token_hash,
                     session.status,
                     session.channel_name,
                     session.client_type.map(ClientType::as_str),
@@ -1297,12 +1300,14 @@ impl SqliteSessionStore {
             connection.execute(
                 "
                 INSERT INTO client_sessions (
-                    session_id, agent_id, agent_host_session_id, status,
-                    channel_name, client_type, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    session_id, agent_id, agent_host_session_id,
+                    session_control_token_hash, status, channel_name, client_type,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     agent_host_session_id = excluded.agent_host_session_id,
+                    session_control_token_hash = excluded.session_control_token_hash,
                     status = excluded.status,
                     channel_name = excluded.channel_name,
                     client_type = excluded.client_type,
@@ -1312,6 +1317,7 @@ impl SqliteSessionStore {
                     session.session_id,
                     session.agent_id,
                     session.agent_host_session_id,
+                    session.session_control_token_hash,
                     session.status,
                     session.channel_name,
                     session.client_type.map(ClientType::as_str),
@@ -1493,6 +1499,12 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
             "api_flavor",
             "api_flavor TEXT NOT NULL DEFAULT 'chat_completions'",
         )?;
+        ensure_column(
+            connection,
+            "client_sessions",
+            "session_control_token_hash",
+            "session_control_token_hash TEXT",
+        )?;
         info!("initialized sqlite store schema");
         Ok(())
     })
@@ -1655,6 +1667,7 @@ fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, Store
         session_id: row.get("session_id")?,
         agent_id: row.get("agent_id")?,
         agent_host_session_id: row.get("agent_host_session_id")?,
+        session_control_token_hash: row.get("session_control_token_hash")?,
         status: row.get("status")?,
         channel_name: row.get("channel_name")?,
         client_type: client_type_raw
@@ -1844,14 +1857,16 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
     connection.execute(
         "
         INSERT INTO client_sessions (
-            session_id, agent_id, agent_host_session_id, status,
-            channel_name, client_type, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            session_id, agent_id, agent_host_session_id,
+            session_control_token_hash, status, channel_name, client_type,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             session.session_id,
             session.agent_id,
             session.agent_host_session_id,
+            session.session_control_token_hash,
             session.status,
             session.channel_name,
             session.client_type.map(ClientType::as_str),

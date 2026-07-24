@@ -15,6 +15,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -108,6 +110,7 @@ pub fn router() -> Router<AppState> {
             get(stream_turn),
         )
         .route("/sessions/{session_id}/reset", post(reset_session))
+        .merge(session_control_router())
         .route("/kernels", get(list_kernels))
         .route("/kernels/{kernel_session_id}", delete(kill_kernel))
         .route("/kernels/{kernel_session_id}/logs", get(kernel_logs))
@@ -141,6 +144,13 @@ pub fn router() -> Router<AppState> {
         .route("/gateways/{gateway_id}/start", post(start_gateway))
         .route("/gateways/{gateway_id}/stop", post(stop_gateway))
         .route("/gateways/{gateway_id}/logs", get(gateway_logs))
+}
+
+fn session_control_router() -> Router<AppState> {
+    Router::new().route(
+        "/internal/session-control/start-new",
+        post(request_start_new_session),
+    )
 }
 
 fn memory_router() -> Router<AppState> {
@@ -321,6 +331,7 @@ async fn info(State(state): State<AppState>) -> Json<Value> {
         }
     };
 
+    let [requested, completed, failed, loop_prevented] = state.handoff_metrics.snapshot();
     Json(json!({
         "client_service": {
             "service": "client_service",
@@ -330,6 +341,12 @@ async fn info(State(state): State<AppState>) -> Json<Value> {
             "env": state.config.client_service_env,
             "instance_id": state.instance_id,
             "started_at": state.started_at,
+            "session_handoffs": {
+                "requested": requested,
+                "completed": completed,
+                "failed": failed,
+                "loop_prevented": loop_prevented,
+            },
         },
         "agent_host": agent_host,
     }))
@@ -1004,7 +1021,9 @@ async fn create_session(
     let session_mounts =
         session_workspace_mounts(&agent.workspace_mounts, &payload.workspace_mounts);
     validate_workspace_mounts(&state, &session_mounts)?;
-    let env = session_env(&state, &agent)?;
+    let session_id = Uuid::now_v7().simple().to_string();
+    let session_control_token = generate_session_control_token()?;
+    let env = session_env(&state, &agent, &session_id, &session_control_token)?;
     tracing::info!(
         route = "/sessions",
         action = "create_session",
@@ -1028,14 +1047,15 @@ async fn create_session(
         .await?;
     let upstream_session_id = string_field(&upstream, "session_id")?;
     let status = string_field(&upstream, "status")?;
-    let session = SessionRecord::new(
-        Uuid::now_v7().simple().to_string(),
+    let mut session = SessionRecord::new(
+        session_id,
         payload.agent_id,
         upstream_session_id.clone(),
         status.clone(),
         payload.channel_name,
         payload.client_type,
     );
+    session.session_control_token_hash = Some(hash_session_control_token(&session_control_token));
     let value = session_summary(&state, &session)?;
     state.sessions.insert(session)?;
     tracing::info!(
@@ -1048,6 +1068,64 @@ async fn create_session(
         "api handler completed"
     );
     Ok(Json(value))
+}
+
+async fn request_start_new_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<StartNewSessionRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let token = bearer_token(&headers)?;
+    let session = authenticate_session_control(&state, &payload.session_id, token)?;
+    let mut active_turns = state
+        .active_turns
+        .lock()
+        .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
+    let turn = active_turns
+        .get_mut(&session.session_id)
+        .ok_or_else(|| ApiError::conflict("session does not have an active turn".to_owned()))?;
+    if turn.automatic_restart_count > 0 {
+        let total = state.handoff_metrics.increment_loop_prevented();
+        tracing::warn!(
+            action = "request_start_new_session",
+            metric = "session_handoff_loop_prevented",
+            total,
+            session_id = %session.session_id,
+            turn_id = %turn.turn_id,
+            "additional fresh-session handoff prevented"
+        );
+        return Err(ApiError::conflict(
+            "fresh-session handoff already occurred for this turn".to_owned(),
+        ));
+    }
+    if turn.restart_requests_closed {
+        return Err(ApiError::conflict(
+            "active turn is already completing".to_owned(),
+        ));
+    }
+    let newly_requested = !turn.start_new_requested;
+    turn.start_new_requested = true;
+    let turn_id = turn.turn_id.clone();
+    drop(active_turns);
+
+    let total = newly_requested.then(|| state.handoff_metrics.increment_requested());
+    tracing::info!(
+        route = "/internal/session-control/start-new",
+        action = "request_start_new_session",
+        session_id = %session.session_id,
+        turn_id = %turn_id,
+        idempotent = !newly_requested,
+        metric = "session_handoff_requested",
+        total,
+        "fresh-session handoff accepted"
+    );
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "accepted": true,
+            "turn_id": turn_id,
+        })),
+    ))
 }
 
 async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
@@ -1168,7 +1246,15 @@ async fn reset_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut session = require_session(&state, &session_id)?;
+    let session = reset_session_internal(&state, &session_id).await?;
+    Ok(Json(session_summary(&state, &session)?))
+}
+
+async fn reset_session_internal(
+    state: &AppState,
+    session_id: &str,
+) -> Result<SessionRecord, ApiError> {
+    let mut session = require_session(state, session_id)?;
     let upstream = state
         .agent_host
         .reset_session(&session.agent_host_session_id)
@@ -1176,7 +1262,8 @@ async fn reset_session(
     session.agent_host_session_id = string_field(&upstream, "session_id")?;
     session.status = string_field(&upstream, "status")?;
     session.updated_at = utc_now();
-    state.sessions.clear_messages(&session_id)?;
+    state.sessions.clear_messages(session_id)?;
+    session.messages.clear();
     state.sessions.update(session.clone())?;
     tracing::info!(
         route = "/sessions/:session_id/reset",
@@ -1187,7 +1274,7 @@ async fn reset_session(
         status = %session.status,
         "api handler completed"
     );
-    Ok(Json(session_summary(&state, &session)?))
+    Ok(session)
 }
 
 async fn save_session_workspace(
@@ -2108,9 +2195,66 @@ async fn require_kernel(state: &AppState, kernel_session_id: &str) -> Result<(),
     }
 }
 
+fn generate_session_control_token() -> Result<String, ApiError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        ApiError::internal(format!("failed to generate session capability: {error}"))
+    })?;
+    Ok(hex_encode(&bytes))
+}
+
+fn hash_session_control_token(token: &str) -> String {
+    hex_encode(&Sha256::digest(token.as_bytes()))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _written = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(invalid_session_control_credentials)
+}
+
+fn authenticate_session_control(
+    state: &AppState,
+    session_id: &str,
+    token: &str,
+) -> Result<SessionRecord, ApiError> {
+    let session = state
+        .sessions
+        .get(session_id)?
+        .ok_or_else(invalid_session_control_credentials)?;
+    let expected_hash = session
+        .session_control_token_hash
+        .as_deref()
+        .ok_or_else(invalid_session_control_credentials)?;
+    let actual_hash = hash_session_control_token(token);
+    if !bool::from(actual_hash.as_bytes().ct_eq(expected_hash.as_bytes())) {
+        return Err(invalid_session_control_credentials());
+    }
+    Ok(session)
+}
+
+fn invalid_session_control_credentials() -> ApiError {
+    ApiError::unauthorized("invalid session control credentials".to_owned())
+}
+
 fn session_env(
     state: &AppState,
     agent: &AgentRecord,
+    session_id: &str,
+    session_control_token: &str,
 ) -> Result<BTreeMap<String, String>, ApiError> {
     let mut env = BTreeMap::new();
     if let Some(config) = state.kernel_configs.get(agent.harness)? {
@@ -2129,6 +2273,11 @@ fn session_env(
     }
     env.extend(parse_env_vars(&agent.env_vars));
     env.insert("AGENTSPACE_AGENT_ID".to_owned(), agent.agent_id.clone());
+    env.insert("AGENTSPACE_SESSION_ID".to_owned(), session_id.to_owned());
+    env.insert(
+        "AGENTSPACE_SESSION_CONTROL_TOKEN".to_owned(),
+        session_control_token.to_owned(),
+    );
     env.insert(
         "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
         state
@@ -2156,14 +2305,15 @@ fn session_env(
     Ok(env)
 }
 
-struct StreamingTurn {
+struct TurnExecution {
     turn_id: String,
     session_id: String,
     agent_host_session_id: String,
     message: String,
+    user_message_id: String,
     assistant_message_id: String,
     assistant_created_at: String,
-    stream: Arc<Mutex<ActiveTurnStreamState>>,
+    stream: Option<Arc<Mutex<ActiveTurnStreamState>>>,
     _active_turn: ActiveTurnGuard,
 }
 
@@ -2209,7 +2359,19 @@ fn start_streaming_turn(
     state: &AppState,
     session_id: &str,
     message: String,
-) -> Result<(StreamingTurn, NdjsonReceiver), ApiError> {
+) -> Result<(TurnExecution, NdjsonReceiver), ApiError> {
+    let (turn, receiver) = start_turn(state, session_id, message, true)?;
+    let receiver =
+        receiver.ok_or_else(|| ApiError::internal("streaming turn receiver missing".to_owned()))?;
+    Ok((turn, receiver))
+}
+
+fn start_turn(
+    state: &AppState,
+    session_id: &str,
+    message: String,
+    streaming: bool,
+) -> Result<(TurnExecution, Option<NdjsonReceiver>), ApiError> {
     let mut session = require_session(state, session_id)?;
     let turn_id = Uuid::now_v7().simple().to_string();
     let user_message = MessageRecord::new(
@@ -2231,6 +2393,7 @@ fn start_streaming_turn(
         subscribers: Vec::new(),
         final_payload: None,
     }));
+    let active_stream = streaming.then(|| stream.clone());
     let active_turn = begin_active_turn(
         state,
         &session.session_id,
@@ -2238,10 +2401,15 @@ fn start_streaming_turn(
             turn_id: turn_id.clone(),
             user_message_id: user_message.message_id.clone(),
             assistant_message_id: assistant_message_id.clone(),
-            stream: Some(stream.clone()),
+            start_new_requested: false,
+            automatic_restart_count: 0,
+            restart_requests_closed: false,
+            stream: active_stream,
         },
     )?;
-    let receiver = subscribe_stream_state(&stream)?;
+    let receiver = streaming
+        .then(|| subscribe_stream_state(&stream))
+        .transpose()?;
 
     "busy".clone_into(&mut session.status);
     session.updated_at = utc_now();
@@ -2259,14 +2427,15 @@ fn start_streaming_turn(
     );
 
     Ok((
-        StreamingTurn {
+        TurnExecution {
             turn_id,
             session_id: session.session_id,
             agent_host_session_id: session.agent_host_session_id,
             message,
+            user_message_id: user_message.message_id,
             assistant_message_id,
             assistant_created_at,
-            stream,
+            stream: streaming.then_some(stream),
             _active_turn: active_turn,
         },
         receiver,
@@ -2314,180 +2483,366 @@ fn begin_active_turn(
     })
 }
 
-#[allow(clippy::too_many_lines)]
-async fn run_streaming_turn(state: AppState, turn: StreamingTurn) {
-    let mut events = Vec::new();
-    let mut completed = false;
-    let mut error = None;
+struct TurnOutcome {
+    events: Vec<KernelEvent>,
+    completed: bool,
+    error: Option<String>,
+    error_status: Option<StatusCode>,
+    automatic_restart_count: u8,
+}
 
+enum RestartHandling {
+    NotRequested,
+    Restarted,
+    Failed,
+}
+
+async fn run_streaming_turn(state: AppState, mut turn: TurnExecution) {
+    let outcome = execute_turn(&state, &mut turn).await;
+    let final_payload = match finalize_turn(&state, &turn, &outcome, true).await {
+        Ok(payload) => payload,
+        Err(finalize_error) => {
+            tracing::error!(
+                action = "run_streaming_turn",
+                session_id = %turn.session_id,
+                turn_id = %turn.turn_id,
+                kernel_session_id = %turn.agent_host_session_id,
+                error_kind = finalize_error.error_kind(),
+                status = finalize_error.status.as_u16(),
+                "streaming turn finalization failed"
+            );
+            json!({
+                "type": "final",
+                "turn_id": turn.turn_id,
+                "completed": false,
+                "error": finalize_error.detail,
+            })
+        }
+    };
+    let sent = send_turn_item(&turn, &final_payload, true);
     tracing::info!(
         action = "run_streaming_turn",
         session_id = %turn.session_id,
         turn_id = %turn.turn_id,
         kernel_session_id = %turn.agent_host_session_id,
-        "upstream stream starting"
-    );
-
-    match state
-        .agent_host
-        .stream_message(&turn.agent_host_session_id, &turn.message)
-        .await
-    {
-        Ok(mut stream) => {
-            tracing::info!(
-                action = "run_streaming_turn",
-                session_id = %turn.session_id,
-                turn_id = %turn.turn_id,
-                kernel_session_id = %turn.agent_host_session_id,
-                "upstream stream opened"
-            );
-            loop {
-                match stream.next_event().await {
-                    Ok(Some(event)) => {
-                        let event_type = kernel_event_type(&event).to_owned();
-                        let update_type = kernel_event_update_type(&event).map(ToOwned::to_owned);
-                        events.push(event);
-                        let assistant_message = assistant_message_from_events(
-                            &turn.session_id,
-                            &turn.assistant_message_id,
-                            &turn.assistant_created_at,
-                            &events,
-                        );
-                        if let Err(store_error) = state.sessions.update_message(&assistant_message)
-                        {
-                            error = Some(store_error.to_string());
-                            tracing::error!(
-                                action = "run_streaming_turn",
-                                session_id = %turn.session_id,
-                                turn_id = %turn.turn_id,
-                                kernel_session_id = %turn.agent_host_session_id,
-                                event_count = events.len(),
-                                error_kind = "store_update_message",
-                                "streaming turn failed to persist event"
-                            );
-                            break;
-                        }
-
-                        tracing::debug!(
-                            action = "run_streaming_turn",
-                            session_id = %turn.session_id,
-                            turn_id = %turn.turn_id,
-                            kernel_session_id = %turn.agent_host_session_id,
-                            event_count = events.len(),
-                            event_type = %event_type,
-                            update_type = ?update_type,
-                            "streaming event processed"
-                        );
-
-                        let event = Value::Object(events.last().cloned().unwrap_or_default());
-                        let sent = send_stream_item(
-                            &turn.stream,
-                            &json!({
-                                "type": "event",
-                                "event": event,
-                            }),
-                            false,
-                        );
-                        if !sent {
-                            tracing::warn!(
-                                action = "run_streaming_turn",
-                                session_id = %turn.session_id,
-                                turn_id = %turn.turn_id,
-                                kernel_session_id = %turn.agent_host_session_id,
-                                event_count = events.len(),
-                                error_kind = "stream_receiver_closed",
-                                "streaming event send failed"
-                            );
-                        }
-                    }
-                    Ok(None) => {
-                        completed = true;
-                        tracing::info!(
-                            action = "run_streaming_turn",
-                            session_id = %turn.session_id,
-                            turn_id = %turn.turn_id,
-                            kernel_session_id = %turn.agent_host_session_id,
-                            event_count = events.len(),
-                            "upstream stream completed"
-                        );
-                        break;
-                    }
-                    Err(stream_error) => {
-                        error = Some(stream_error.to_string());
-                        tracing::warn!(
-                            action = "run_streaming_turn",
-                            session_id = %turn.session_id,
-                            turn_id = %turn.turn_id,
-                            kernel_session_id = %turn.agent_host_session_id,
-                            event_count = events.len(),
-                            error_kind = "upstream_stream_event",
-                            "upstream stream event failed"
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-        Err(stream_error) => {
-            error = Some(stream_error.to_string());
-            tracing::warn!(
-                action = "run_streaming_turn",
-                session_id = %turn.session_id,
-                turn_id = %turn.turn_id,
-                kernel_session_id = %turn.agent_host_session_id,
-                error_kind = "upstream_stream_start",
-                "upstream stream failed to start"
-            );
-        }
-    }
-
-    let final_payload =
-        match finalize_streaming_turn(&state, &turn, &events, completed, error.as_deref()).await {
-            Ok(payload) => payload,
-            Err(finalize_error) => {
-                tracing::error!(
-                    action = "run_streaming_turn",
-                    session_id = %turn.session_id,
-                    turn_id = %turn.turn_id,
-                    kernel_session_id = %turn.agent_host_session_id,
-                    error_kind = finalize_error.error_kind(),
-                    status = finalize_error.status.as_u16(),
-                    "streaming turn finalization failed"
-                );
-                json!({
-                    "type": "final",
-                    "turn_id": turn.turn_id.clone(),
-                    "completed": false,
-                    "error": finalize_error.detail,
-                })
-            }
-        };
-    let sent = send_stream_item(&turn.stream, &final_payload, true);
-    tracing::info!(
-        action = "run_streaming_turn",
-        session_id = %turn.session_id,
-        turn_id = %turn.turn_id,
-        kernel_session_id = %turn.agent_host_session_id,
-        completed,
-        has_error = error.is_some(),
-        event_count = events.len(),
+        completed = outcome.completed,
+        has_error = outcome.error.is_some(),
+        event_count = outcome.events.len(),
+        automatic_restart_count = outcome.automatic_restart_count,
         final_sent = sent,
         "streaming turn finished"
     );
 }
 
-async fn finalize_streaming_turn(
+async fn execute_turn(state: &AppState, turn: &mut TurnExecution) -> TurnOutcome {
+    let mut outcome = TurnOutcome {
+        events: Vec::new(),
+        completed: false,
+        error: None,
+        error_status: None,
+        automatic_restart_count: 0,
+    };
+
+    'attempt: loop {
+        tracing::info!(
+            action = "execute_turn",
+            session_id = %turn.session_id,
+            turn_id = %turn.turn_id,
+            kernel_session_id = %turn.agent_host_session_id,
+            automatic_restart_count = outcome.automatic_restart_count,
+            "upstream stream starting"
+        );
+        let stream_result = state
+            .agent_host
+            .stream_message(&turn.agent_host_session_id, &turn.message)
+            .await;
+        let mut stream = match stream_result {
+            Ok(stream) => stream,
+            Err(stream_error) => {
+                match handle_restart_request(state, turn, &mut outcome, true).await {
+                    RestartHandling::Restarted => continue 'attempt,
+                    RestartHandling::Failed => break,
+                    RestartHandling::NotRequested => {}
+                }
+                let error = ApiError::from(stream_error);
+                outcome.error_status = Some(error.status);
+                outcome.error = Some(error.detail);
+                break;
+            }
+        };
+
+        loop {
+            match stream.next_event().await {
+                Ok(Some(event)) => {
+                    if restart_requested(state, turn) {
+                        drop(stream);
+                        match handle_restart_request(state, turn, &mut outcome, false).await {
+                            RestartHandling::Restarted => continue 'attempt,
+                            RestartHandling::NotRequested | RestartHandling::Failed => {
+                                break 'attempt;
+                            }
+                        }
+                    }
+                    if let Err(error) = process_turn_event(state, turn, &mut outcome.events, event)
+                    {
+                        match handle_restart_request(state, turn, &mut outcome, true).await {
+                            RestartHandling::Restarted => continue 'attempt,
+                            RestartHandling::Failed => break 'attempt,
+                            RestartHandling::NotRequested => {}
+                        }
+                        outcome.error_status = Some(error.status);
+                        outcome.error = Some(error.detail);
+                        break 'attempt;
+                    }
+                }
+                Ok(None) => {
+                    match handle_restart_request(state, turn, &mut outcome, true).await {
+                        RestartHandling::Restarted => continue 'attempt,
+                        RestartHandling::Failed => break 'attempt,
+                        RestartHandling::NotRequested => {}
+                    }
+                    outcome.completed = true;
+                    break 'attempt;
+                }
+                Err(stream_error) => {
+                    match handle_restart_request(state, turn, &mut outcome, true).await {
+                        RestartHandling::Restarted => continue 'attempt,
+                        RestartHandling::Failed => break 'attempt,
+                        RestartHandling::NotRequested => {}
+                    }
+                    let error = ApiError::from(stream_error);
+                    outcome.error_status = Some(error.status);
+                    outcome.error = Some(error.detail);
+                    break 'attempt;
+                }
+            }
+        }
+    }
+
+    record_handoff_outcome(state, turn, &outcome);
+    outcome
+}
+
+fn record_handoff_outcome(state: &AppState, turn: &TurnExecution, outcome: &TurnOutcome) {
+    if outcome.automatic_restart_count == 0 {
+        return;
+    }
+    if outcome.completed && outcome.error.is_none() {
+        let total = state.handoff_metrics.increment_completed();
+        tracing::info!(
+            action = "execute_turn",
+            metric = "session_handoff_completed",
+            total,
+            session_id = %turn.session_id,
+            turn_id = %turn.turn_id,
+            kernel_session_id = %turn.agent_host_session_id,
+            "fresh-session handoff replay completed"
+        );
+    } else {
+        let total = state.handoff_metrics.increment_failed();
+        tracing::warn!(
+            action = "execute_turn",
+            metric = "session_handoff_failed",
+            total,
+            session_id = %turn.session_id,
+            turn_id = %turn.turn_id,
+            kernel_session_id = %turn.agent_host_session_id,
+            "fresh-session handoff replay failed"
+        );
+    }
+}
+
+fn restart_requested(state: &AppState, turn: &TurnExecution) -> bool {
+    state
+        .active_turns
+        .lock()
+        .ok()
+        .and_then(|active_turns| active_turns.get(&turn.session_id).cloned())
+        .is_some_and(|active| active.turn_id == turn.turn_id && active.start_new_requested)
+}
+
+async fn handle_restart_request(
     state: &AppState,
-    turn: &StreamingTurn,
-    events: &[KernelEvent],
-    completed: bool,
-    error: Option<&str>,
-) -> Result<Value, ApiError> {
+    turn: &mut TurnExecution,
+    outcome: &mut TurnOutcome,
+    close_if_absent: bool,
+) -> RestartHandling {
+    let requested = match take_restart_request(state, turn, close_if_absent) {
+        Ok(requested) => requested,
+        Err(error) => {
+            outcome.error_status = Some(error.status);
+            outcome.error = Some(error.detail);
+            return RestartHandling::Failed;
+        }
+    };
+    if !requested {
+        return RestartHandling::NotRequested;
+    }
+
+    outcome.automatic_restart_count = 1;
+    outcome.events.clear();
+    match restart_turn(state, turn).await {
+        Ok(restart_event) => {
+            outcome.events.push(restart_event.clone());
+            send_turn_event(turn, &restart_event);
+            RestartHandling::Restarted
+        }
+        Err(error) => {
+            outcome.error_status = Some(error.status);
+            outcome.error = Some(error.detail);
+            RestartHandling::Failed
+        }
+    }
+}
+
+fn take_restart_request(
+    state: &AppState,
+    turn: &TurnExecution,
+    close_if_absent: bool,
+) -> Result<bool, ApiError> {
+    let mut active_turns = state
+        .active_turns
+        .lock()
+        .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
+    let active = active_turns
+        .get_mut(&turn.session_id)
+        .filter(|active| active.turn_id == turn.turn_id)
+        .ok_or_else(|| ApiError::internal("active turn disappeared during execution".to_owned()))?;
+    let requested = if !active.start_new_requested {
+        if close_if_absent {
+            active.restart_requests_closed = true;
+        }
+        false
+    } else if active.automatic_restart_count > 0 {
+        active.start_new_requested = false;
+        false
+    } else {
+        active.start_new_requested = false;
+        active.automatic_restart_count = 1;
+        true
+    };
+    drop(active_turns);
+    Ok(requested)
+}
+
+async fn restart_turn(state: &AppState, turn: &mut TurnExecution) -> Result<KernelEvent, ApiError> {
+    let reset_result = reset_session_internal(state, &turn.session_id).await;
+    let new_session = match reset_result {
+        Ok(session) => session,
+        Err(error) => {
+            let _replacement_messages = replace_turn_messages(state, turn)?;
+            return Err(error);
+        }
+    };
+    turn.agent_host_session_id = new_session.agent_host_session_id;
+    let (user_message, assistant_message) = replace_turn_messages(state, turn)?;
+
+    tracing::info!(
+        action = "restart_turn",
+        session_id = %turn.session_id,
+        turn_id = %turn.turn_id,
+        kernel_session_id = %turn.agent_host_session_id,
+        automatic_restart_count = 1,
+        "fresh-session handoff completed; replay starting"
+    );
+    Ok([
+        ("type".to_owned(), json!("agentspace/session-restarted")),
+        ("restart_count".to_owned(), json!(1)),
+        ("user_message".to_owned(), user_message.summary()),
+        ("assistant_message".to_owned(), assistant_message.summary()),
+    ]
+    .into_iter()
+    .collect())
+}
+
+fn replace_turn_messages(
+    state: &AppState,
+    turn: &mut TurnExecution,
+) -> Result<(MessageRecord, MessageRecord), ApiError> {
+    state.sessions.clear_messages(&turn.session_id)?;
+    let user_message = MessageRecord::new(
+        Uuid::now_v7().simple().to_string(),
+        turn.session_id.clone(),
+        MessageRole::User,
+        turn.message.clone(),
+    );
+    let assistant_message = MessageRecord::new(
+        Uuid::now_v7().simple().to_string(),
+        turn.session_id.clone(),
+        MessageRole::Assistant,
+        "",
+    );
+    turn.user_message_id.clone_from(&user_message.message_id);
+    turn.assistant_message_id
+        .clone_from(&assistant_message.message_id);
+    turn.assistant_created_at
+        .clone_from(&assistant_message.created_at);
+    state.sessions.append_message(&user_message)?;
+    state.sessions.append_message(&assistant_message)?;
+
+    let mut active_turns = state
+        .active_turns
+        .lock()
+        .map_err(|_error| ApiError::internal("active turn lock poisoned".to_owned()))?;
+    let active = active_turns
+        .get_mut(&turn.session_id)
+        .filter(|active| active.turn_id == turn.turn_id)
+        .ok_or_else(|| ApiError::internal("active turn disappeared during restart".to_owned()))?;
+    turn.user_message_id.clone_into(&mut active.user_message_id);
+    turn.assistant_message_id
+        .clone_into(&mut active.assistant_message_id);
+    drop(active_turns);
+    Ok((user_message, assistant_message))
+}
+
+fn process_turn_event(
+    state: &AppState,
+    turn: &TurnExecution,
+    events: &mut Vec<KernelEvent>,
+    event: KernelEvent,
+) -> Result<(), ApiError> {
+    events.push(event);
     let assistant_message = assistant_message_from_events(
         &turn.session_id,
         &turn.assistant_message_id,
         &turn.assistant_created_at,
         events,
+    );
+    state.sessions.update_message(&assistant_message)?;
+    if let Some(event) = events.last() {
+        send_turn_event(turn, event);
+    }
+    Ok(())
+}
+
+fn send_turn_event(turn: &TurnExecution, event: &KernelEvent) {
+    let _sent = send_turn_item(
+        turn,
+        &json!({
+            "type": "event",
+            "event": Value::Object(event.clone()),
+        }),
+        false,
+    );
+}
+
+fn send_turn_item(turn: &TurnExecution, value: &Value, close: bool) -> bool {
+    turn.stream
+        .as_ref()
+        .is_some_and(|stream| send_stream_item(stream, value, close))
+}
+
+async fn finalize_turn(
+    state: &AppState,
+    turn: &TurnExecution,
+    outcome: &TurnOutcome,
+    streaming: bool,
+) -> Result<Value, ApiError> {
+    let assistant_message = assistant_message_from_events(
+        &turn.session_id,
+        &turn.assistant_message_id,
+        &turn.assistant_created_at,
+        &outcome.events,
     );
     state.sessions.update_message(&assistant_message.clone())?;
 
@@ -2496,11 +2851,11 @@ async fn finalize_streaming_turn(
         .agent_host
         .get_session(&turn.agent_host_session_id)
         .await
+        && let Ok(status) = string_field(&upstream, "status")
     {
-        if let Ok(status) = string_field(&upstream, "status") {
-            session.status = status;
-        }
-    } else if error.is_some() {
+        session.status = status;
+    }
+    if outcome.error.is_some() {
         "error".clone_into(&mut session.status);
     }
     session.updated_at = utc_now();
@@ -2512,25 +2867,34 @@ async fn finalize_streaming_turn(
         turn_id = %turn.turn_id,
         kernel_session_id = %turn.agent_host_session_id,
         status = %session.status,
-        completed,
-        has_error = error.is_some(),
-        event_count = events.len(),
+        completed = outcome.completed,
+        has_error = outcome.error.is_some(),
+        event_count = outcome.events.len(),
+        automatic_restart_count = outcome.automatic_restart_count,
         tool_call_count = assistant_message.tool_calls.len(),
         "streaming turn finalized"
     );
 
     let mut payload = json!({
-        "type": "final",
         "session": session.summary(),
         "assistant_message": assistant_message.summary(),
-        "events": events,
+        "events": outcome.events,
         "turn_id": turn.turn_id,
-        "completed": completed,
+        "completed": outcome.completed,
     });
-    if let Some(error) = error
-        && let Value::Object(object) = &mut payload
-    {
-        object.insert("error".to_owned(), json!(error));
+    if let Value::Object(object) = &mut payload {
+        if streaming {
+            object.insert("type".to_owned(), json!("final"));
+        }
+        if let Some(error) = &outcome.error {
+            object.insert("error".to_owned(), json!(error));
+        }
+        if outcome.automatic_restart_count > 0 {
+            object.insert(
+                "automatic_restart_count".to_owned(),
+                json!(outcome.automatic_restart_count),
+            );
+        }
     }
     Ok(payload)
 }
@@ -2621,97 +2985,28 @@ fn send_stream_item(
 }
 
 async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<Value, ApiError> {
-    let mut session = require_session(state, session_id)?;
-    let turn_id = Uuid::now_v7().simple().to_string();
-    let user_message = MessageRecord::new(
-        Uuid::now_v7().simple().to_string(),
-        session.session_id.clone(),
-        MessageRole::User,
-        message,
-    );
-    let assistant_message_id = Uuid::now_v7().simple().to_string();
-    let assistant_created_at = utc_now();
-    let _active_turn = begin_active_turn(
-        state,
-        &session.session_id,
-        ActiveTurnRecord {
-            turn_id: turn_id.clone(),
-            user_message_id: user_message.message_id.clone(),
-            assistant_message_id: assistant_message_id.clone(),
-            stream: None,
-        },
-    )?;
+    let (mut turn, receiver) = start_turn(state, session_id, message.to_owned(), false)?;
+    debug_assert!(receiver.is_none());
     tracing::info!(
         action = "run_turn",
-        session_id = %session.session_id,
-        turn_id = %turn_id,
-        kernel_session_id = %session.agent_host_session_id,
+        session_id = %turn.session_id,
+        turn_id = %turn.turn_id,
+        kernel_session_id = %turn.agent_host_session_id,
         message_char_count = message.chars().count(),
         "synchronous turn started"
     );
-    "busy".clone_into(&mut session.status);
-    session.updated_at = utc_now();
-    state.sessions.update(session.clone())?;
-    state.sessions.append_message(&user_message)?;
-
-    let events = state
-        .agent_host
-        .send_message(&session.agent_host_session_id, message)
-        .await?;
-    tracing::info!(
-        action = "run_turn",
-        session_id = %session.session_id,
-        turn_id = %turn_id,
-        kernel_session_id = %session.agent_host_session_id,
-        event_count = events.len(),
-        "synchronous turn upstream completed"
-    );
-    let assistant_message = assistant_message_from_events(
-        &session.session_id,
-        &assistant_message_id,
-        &assistant_created_at,
-        &events,
-    );
-    state.sessions.append_message(&assistant_message.clone())?;
-    let mut session = require_session(state, session_id)?;
-    if let Ok(upstream) = state
-        .agent_host
-        .get_session(&session.agent_host_session_id)
-        .await
-        && let Ok(status) = string_field(&upstream, "status")
+    let outcome = execute_turn(state, &mut turn).await;
+    if outcome.automatic_restart_count == 0
+        && let Some(error) = &outcome.error
     {
-        session.status = status;
+        return Err(ApiError {
+            status: outcome
+                .error_status
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            detail: error.clone(),
+        });
     }
-    session.updated_at = utc_now();
-    state.sessions.update(session.clone())?;
-    tracing::info!(
-        action = "run_turn",
-        session_id = %session.session_id,
-        turn_id = %turn_id,
-        kernel_session_id = %session.agent_host_session_id,
-        status = %session.status,
-        event_count = events.len(),
-        tool_call_count = assistant_message.tool_calls.len(),
-        "synchronous turn completed"
-    );
-    Ok(json!({
-        "session": session.summary(),
-        "assistant_message": assistant_message.summary(),
-        "events": events,
-        "turn_id": turn_id,
-        "completed": true,
-    }))
-}
-
-fn kernel_event_type(event: &KernelEvent) -> &str {
-    event
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-}
-
-fn kernel_event_update_type(event: &KernelEvent) -> Option<&str> {
-    session_update(event).and_then(|update| update.get("sessionUpdate").and_then(Value::as_str))
+    finalize_turn(state, &turn, &outcome, false).await
 }
 
 fn assistant_message_from_events(
@@ -3398,6 +3693,11 @@ struct SendMessageRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct StartNewSessionRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct ContainerLogsQuery {
     tail: Option<u64>,
     #[serde(default, rename = "all")]
@@ -3472,6 +3772,13 @@ struct ApiError {
 }
 
 impl ApiError {
+    const fn unauthorized(detail: String) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            detail,
+        }
+    }
+
     const fn not_found(detail: String) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -3531,6 +3838,7 @@ impl ApiError {
     fn error_kind(&self) -> &'static str {
         match self.status {
             StatusCode::NOT_FOUND => "not_found",
+            StatusCode::UNAUTHORIZED => "unauthorized",
             StatusCode::CONFLICT => "conflict",
             StatusCode::UNPROCESSABLE_ENTITY => "validation",
             StatusCode::BAD_GATEWAY => "bad_gateway",
@@ -3652,13 +3960,21 @@ mod tests {
     };
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
-    use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::sleep};
+    use tokio::{
+        net::TcpListener,
+        sync::{Semaphore, mpsc},
+        task::JoinHandle,
+        time::sleep,
+    };
     use tokio_stream::wrappers::ReceiverStream;
     use tower::ServiceExt;
 
     use super::send_stream_item;
     use crate::{
-        ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient, build_router,
+        ActiveTurnRecord, ActiveTurnStreamState, AppConfig, AppState,
+        agent_host::AgentHostClient,
+        build_router,
+        models::{MessageRecord, MessageRole},
     };
 
     fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
@@ -3690,6 +4006,118 @@ mod tests {
     struct StreamingUpstream {
         base_url: String,
         handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    struct SessionControlUpstream {
+        base_url: String,
+        create_payload: Arc<Mutex<Option<Value>>>,
+        handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    #[derive(Clone)]
+    struct RestartingUpstreamState {
+        create_payload: Arc<Mutex<Option<Value>>>,
+        message_requests: Arc<Mutex<Vec<(String, String)>>>,
+        reset_requests: Arc<Mutex<Vec<String>>>,
+        old_started: Arc<Semaphore>,
+        release_old: Arc<Semaphore>,
+        fresh_started: Arc<Semaphore>,
+        release_fresh: Arc<Semaphore>,
+        reset_fails: bool,
+        replay_fails: bool,
+        old_termination: OldStreamTermination,
+    }
+
+    #[derive(Clone, Copy)]
+    enum OldStreamTermination {
+        Event,
+        End,
+        MalformedEvent,
+    }
+
+    struct RestartingUpstream {
+        base_url: String,
+        state: RestartingUpstreamState,
+        handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    impl RestartingUpstream {
+        async fn start(
+            reset_fails: bool,
+            replay_fails: bool,
+        ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+            Self::start_with_termination(reset_fails, replay_fails, OldStreamTermination::Event)
+                .await
+        }
+
+        async fn start_with_termination(
+            reset_fails: bool,
+            replay_fails: bool,
+            old_termination: OldStreamTermination,
+        ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+            let state = RestartingUpstreamState {
+                create_payload: Arc::new(Mutex::new(None)),
+                message_requests: Arc::new(Mutex::new(Vec::new())),
+                reset_requests: Arc::new(Mutex::new(Vec::new())),
+                old_started: Arc::new(Semaphore::new(0)),
+                release_old: Arc::new(Semaphore::new(0)),
+                fresh_started: Arc::new(Semaphore::new(0)),
+                release_fresh: Arc::new(Semaphore::new(0)),
+                reset_fails,
+                replay_fails,
+                old_termination,
+            };
+            let app = Router::new()
+                .route("/sessions", post(restarting_create_session))
+                .route("/sessions/{session_id}", get(upstream_get_session))
+                .route(
+                    "/sessions/{session_id}/reset",
+                    post(restarting_reset_session),
+                )
+                .route(
+                    "/sessions/{session_id}/messages/stream",
+                    post(restarting_stream_message),
+                )
+                .with_state(state.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let handle = tokio::spawn(axum::serve(listener, app).into_future());
+            Ok(Self {
+                base_url: format_base_url(address),
+                state,
+                handle,
+            })
+        }
+    }
+
+    impl Drop for RestartingUpstream {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
+    }
+
+    impl SessionControlUpstream {
+        async fn start() -> Result<Self, Box<dyn Error + Send + Sync>> {
+            let create_payload = Arc::new(Mutex::new(None));
+            let app = Router::new()
+                .route("/sessions", post(capture_upstream_create_session))
+                .with_state(create_payload.clone());
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let handle = tokio::spawn(axum::serve(listener, app).into_future());
+
+            Ok(Self {
+                base_url: format_base_url(address),
+                create_payload,
+                handle,
+            })
+        }
+    }
+
+    impl Drop for SessionControlUpstream {
+        fn drop(&mut self) {
+            self.handle.abort();
+        }
     }
 
     impl StreamingUpstream {
@@ -3727,6 +4155,108 @@ mod tests {
 
     async fn upstream_create_session(Json(_body): Json<Value>) -> Json<Value> {
         Json(json!({ "session_id": "upstream-session", "status": "idle" }))
+    }
+
+    async fn capture_upstream_create_session(
+        State(create_payload): State<Arc<Mutex<Option<Value>>>>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        if let Ok(mut payload) = create_payload.lock() {
+            *payload = Some(body);
+        }
+        Json(json!({ "session_id": "upstream-session", "status": "idle" }))
+    }
+
+    async fn restarting_create_session(
+        State(state): State<RestartingUpstreamState>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        if let Ok(mut payload) = state.create_payload.lock() {
+            *payload = Some(body);
+        }
+        Json(json!({ "session_id": "old-session", "status": "idle" }))
+    }
+
+    async fn restarting_reset_session(
+        State(state): State<RestartingUpstreamState>,
+        Path(session_id): Path<String>,
+    ) -> Response {
+        if let Ok(mut requests) = state.reset_requests.lock() {
+            requests.push(session_id);
+        }
+        if state.reset_fails {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "detail": "reset failed" })),
+            )
+                .into_response();
+        }
+        (
+            StatusCode::OK,
+            Json(json!({ "session_id": "fresh-session", "status": "idle" })),
+        )
+            .into_response()
+    }
+
+    async fn restarting_stream_message(
+        State(state): State<RestartingUpstreamState>,
+        Path(session_id): Path<String>,
+        Json(body): Json<Value>,
+    ) -> Response {
+        let message = body["message"].as_str().unwrap_or_default().to_owned();
+        if let Ok(mut requests) = state.message_requests.lock() {
+            requests.push((session_id.clone(), message));
+        }
+        if session_id == "fresh-session" && state.replay_fails {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "detail": "replay failed" })),
+            )
+                .into_response();
+        }
+
+        let (sender, receiver) = mpsc::channel::<Result<Vec<u8>, Infallible>>(4);
+        tokio::spawn(async move {
+            if session_id == "old-session" {
+                let _sent = sender
+                    .send(Ok(test_ndjson_line(
+                        &json!({ "type": "text_delta", "content": "old-before" }),
+                    )))
+                    .await;
+                state.old_started.add_permits(1);
+                if state.release_old.acquire().await.is_err() {
+                    return;
+                }
+                match state.old_termination {
+                    OldStreamTermination::Event => {
+                        let _sent = sender
+                            .send(Ok(test_ndjson_line(
+                                &json!({ "type": "text_delta", "content": "old-after" }),
+                            )))
+                            .await;
+                    }
+                    OldStreamTermination::End => {}
+                    OldStreamTermination::MalformedEvent => {
+                        let _sent = sender.send(Ok(Vec::from("{invalid-json}\n"))).await;
+                    }
+                }
+            } else {
+                state.fresh_started.add_permits(1);
+                if state.release_fresh.acquire().await.is_err() {
+                    return;
+                }
+                let _sent = sender
+                    .send(Ok(test_ndjson_line(
+                        &json!({ "type": "text_delta", "content": "fresh-answer" }),
+                    )))
+                    .await;
+            }
+        });
+        (
+            StatusCode::OK,
+            Body::from_stream(ReceiverStream::new(receiver)),
+        )
+            .into_response()
     }
 
     async fn upstream_get_session(Path(session_id): Path<String>) -> Json<Value> {
@@ -3857,6 +4387,70 @@ mod tests {
         Ok((status, value))
     }
 
+    async fn request_json_with_authorization(
+        app: Router,
+        path: &str,
+        body: Value,
+        authorization: Option<&str>,
+    ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
+        let mut builder = Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(authorization) = authorization {
+            builder = builder.header(header::AUTHORIZATION, authorization);
+        }
+        let response = app
+            .oneshot(builder.body(Body::from(serde_json::to_vec(&body)?))?)
+            .await?;
+        let status = response.status();
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let value = serde_json::from_slice(&body)
+            .unwrap_or_else(|_error| Value::String(String::from_utf8_lossy(&body).into_owned()));
+        Ok((status, value))
+    }
+
+    async fn restart_test_app(
+        upstream: &RestartingUpstream,
+    ) -> Result<(AppState, Router, String, String), Box<dyn Error + Send + Sync>> {
+        let config = AppConfig::new("127.0.0.1", 0, &upstream.base_url, BTreeMap::new());
+        let agent_host = AgentHostClient::new(&upstream.base_url, Duration::from_secs(1))?;
+        let state = AppState::with_agent_host(config, agent_host);
+        let app = build_router(state.clone());
+        let (status, _agent) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, session) = request_json(
+            app.clone(),
+            Method::POST,
+            "/sessions",
+            Some(json!({ "agent_id": "agent-one" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let session_id = session["session_id"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("session id missing"))?
+            .to_owned();
+        let create_payload = upstream
+            .state
+            .create_payload
+            .lock()
+            .map_err(|_error| std::io::Error::other("create payload lock poisoned"))?
+            .clone()
+            .ok_or_else(|| std::io::Error::other("create payload missing"))?;
+        let token = create_payload["env"]["AGENTSPACE_SESSION_CONTROL_TOKEN"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("control token missing"))?
+            .to_owned();
+        Ok((state, app, session_id, token))
+    }
+
     async fn get_json(
         app: Router,
         path: &str,
@@ -3916,6 +4510,485 @@ mod tests {
         let (status, value) = get_json(app, "/kernel-configs/unknown").await?;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(value["detail"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_control_identity_and_endpoint_are_private_authenticated_and_idempotent()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = SessionControlUpstream::start().await?;
+        let config = AppConfig::new("127.0.0.1", 0, &upstream.base_url, BTreeMap::new());
+        let agent_host = AgentHostClient::new(&upstream.base_url, Duration::from_secs(1))?;
+        let state = AppState::with_agent_host(config, agent_host);
+        let app = build_router(state.clone());
+
+        let (status, _agent) = request_json(
+            app.clone(),
+            Method::POST,
+            "/agents",
+            Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let (status, session_summary) = request_json(
+            app.clone(),
+            Method::POST,
+            "/sessions",
+            Some(json!({ "agent_id": "agent-one" })),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        let session_id = session_summary["session_id"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("session_id missing"))?
+            .to_owned();
+        let create_payload = upstream
+            .create_payload
+            .lock()
+            .map_err(|_error| std::io::Error::other("create payload lock poisoned"))?
+            .clone()
+            .ok_or_else(|| std::io::Error::other("upstream create payload missing"))?;
+        let env = create_payload["env"]
+            .as_object()
+            .ok_or_else(|| std::io::Error::other("upstream environment missing"))?;
+        let token = env["AGENTSPACE_SESSION_CONTROL_TOKEN"]
+            .as_str()
+            .ok_or_else(|| std::io::Error::other("session control token missing"))?
+            .to_owned();
+        assert_eq!(env["AGENTSPACE_SESSION_ID"], session_id);
+        assert_eq!(token.len(), 64);
+
+        let stored = state
+            .sessions
+            .get(&session_id)?
+            .ok_or_else(|| std::io::Error::other("stored session missing"))?;
+        let stored_hash = stored
+            .session_control_token_hash
+            .as_deref()
+            .ok_or_else(|| std::io::Error::other("stored capability hash missing"))?;
+        assert_eq!(stored_hash, super::hash_session_control_token(&token));
+        let public_summary = serde_json::to_string(&session_summary)?;
+        assert!(!public_summary.contains(&token));
+        assert!(!public_summary.contains(stored_hash));
+
+        let endpoint = "/internal/session-control/start-new";
+        let payload = json!({ "session_id": session_id });
+        let expected_auth_error = json!({ "detail": "invalid session control credentials" });
+        for (authorization, request_payload) in [
+            (None, payload.clone()),
+            (Some("Basic invalid".to_owned()), payload.clone()),
+            (Some("Bearer wrong-token".to_owned()), payload.clone()),
+            (
+                Some(format!("Bearer {token}")),
+                json!({ "session_id": "missing-session" }),
+            ),
+        ] {
+            let (status, response) = request_json_with_authorization(
+                app.clone(),
+                endpoint,
+                request_payload,
+                authorization.as_deref(),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(response, expected_auth_error);
+        }
+
+        let authorization = format!("Bearer {token}");
+        let (status, _response) =
+            request_json_with_authorization(app.clone(), endpoint, json!({}), Some(&authorization))
+                .await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, response) = request_json_with_authorization(
+            app.clone(),
+            endpoint,
+            payload.clone(),
+            Some(&authorization),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            response,
+            json!({ "detail": "session does not have an active turn" })
+        );
+
+        state
+            .active_turns
+            .lock()
+            .map_err(|_error| std::io::Error::other("active turn lock poisoned"))?
+            .insert(
+                session_id.clone(),
+                ActiveTurnRecord {
+                    turn_id: "turn-one".to_owned(),
+                    user_message_id: "user-one".to_owned(),
+                    assistant_message_id: "assistant-one".to_owned(),
+                    start_new_requested: false,
+                    automatic_restart_count: 0,
+                    restart_requests_closed: false,
+                    stream: None,
+                },
+            );
+        for _request_number in 0..2 {
+            let (status, response) = request_json_with_authorization(
+                app.clone(),
+                endpoint,
+                payload.clone(),
+                Some(&authorization),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            assert_eq!(response, json!({ "accepted": true, "turn_id": "turn-one" }));
+        }
+        let active_turns = state
+            .active_turns
+            .try_lock()
+            .map_err(|_error| std::io::Error::other("active turn mutex remained locked"))?;
+        assert!(active_turns[&session_id].start_new_requested);
+        drop(active_turns);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn streaming_turn_restarts_once_and_keeps_original_subscription()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = RestartingUpstream::start(false, false).await?;
+        let (state, app, session_id, token) = restart_test_app(&upstream).await?;
+        state.sessions.append_message(&MessageRecord::new(
+            "prior-user",
+            &session_id,
+            MessageRole::User,
+            "prior topic",
+        ))?;
+        state.sessions.append_message(&MessageRecord::new(
+            "prior-assistant",
+            &session_id,
+            MessageRole::Assistant,
+            "prior answer",
+        ))?;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/sessions/{session_id}/messages/stream"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "message": "new topic" }),
+            )?))?;
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        let first = body
+            .frame()
+            .await
+            .ok_or_else(|| std::io::Error::other("old event missing"))??
+            .into_data()
+            .map_err(|_frame| std::io::Error::other("old event was not data"))?;
+        let first = serde_json::from_slice::<Value>(&first)?;
+        assert_eq!(first["event"]["content"], "old-before");
+
+        let authorization = format!("Bearer {token}");
+        let (status, accepted) = request_json_with_authorization(
+            app.clone(),
+            "/internal/session-control/start-new",
+            json!({ "session_id": session_id }),
+            Some(&authorization),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let original_turn_id = accepted["turn_id"].clone();
+        upstream.state.release_old.add_permits(1);
+
+        let restart = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await?
+            .ok_or_else(|| std::io::Error::other("restart event missing"))??
+            .into_data()
+            .map_err(|_frame| std::io::Error::other("restart event was not data"))?;
+        let restart = serde_json::from_slice::<Value>(&restart)?;
+        assert_eq!(restart["event"]["type"], "agentspace/session-restarted");
+        assert_eq!(restart["event"]["user_message"]["content"], "new topic");
+        assert_ne!(restart["event"]["user_message"]["message_id"], "prior-user");
+        let replacement_assistant_id = restart["event"]["assistant_message"]["message_id"].clone();
+        upstream.state.fresh_started.acquire().await?.forget();
+
+        let (status, repeated) = request_json_with_authorization(
+            app.clone(),
+            "/internal/session-control/start-new",
+            json!({ "session_id": session_id }),
+            Some(&authorization),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            repeated["detail"],
+            "fresh-session handoff already occurred for this turn"
+        );
+        upstream.state.release_fresh.add_permits(1);
+
+        let rest = tokio::time::timeout(Duration::from_secs(1), body.collect())
+            .await??
+            .to_bytes();
+        let chunks = std::str::from_utf8(&rest)?
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0]["event"]["content"], "fresh-answer");
+        let final_payload = &chunks[1];
+        assert_eq!(final_payload["type"], "final");
+        assert_eq!(final_payload["turn_id"], original_turn_id);
+        assert_eq!(final_payload["completed"], true);
+        assert_eq!(final_payload["automatic_restart_count"], 1);
+        assert_eq!(
+            final_payload["assistant_message"]["content"],
+            "fresh-answer"
+        );
+        assert_eq!(
+            final_payload["assistant_message"]["message_id"],
+            replacement_assistant_id
+        );
+        assert_eq!(final_payload["session"]["session_id"], session_id);
+        assert_eq!(
+            final_payload["session"]["agent_host_session_id"],
+            "fresh-session"
+        );
+
+        let stored = state
+            .sessions
+            .get(&session_id)?
+            .ok_or_else(|| std::io::Error::other("stored session missing"))?;
+        assert_eq!(stored.agent_host_session_id, "fresh-session");
+        assert_eq!(stored.messages.len(), 2);
+        assert_eq!(stored.messages[0].content, "new topic");
+        assert_eq!(stored.messages[1].content, "fresh-answer");
+        let message_requests = upstream
+            .state
+            .message_requests
+            .lock()
+            .map_err(|_error| std::io::Error::other("message request lock poisoned"))?
+            .clone();
+        assert_eq!(
+            message_requests,
+            vec![
+                ("old-session".to_owned(), "new topic".to_owned()),
+                ("fresh-session".to_owned(), "new topic".to_owned()),
+            ]
+        );
+        let reset_requests = upstream
+            .state
+            .reset_requests
+            .lock()
+            .map_err(|_error| std::io::Error::other("reset request lock poisoned"))?
+            .clone();
+        assert_eq!(reset_requests, vec!["old-session"]);
+        assert_eq!(state.handoff_metrics.snapshot(), [1, 1, 0, 1]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn synchronous_turn_restarts_and_returns_only_fresh_answer()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = RestartingUpstream::start(false, false).await?;
+        let (state, app, session_id, token) = restart_test_app(&upstream).await?;
+        let request_app = app.clone();
+        let request_session_id = session_id.clone();
+        let response_task = tokio::spawn(async move {
+            request_json(
+                request_app,
+                Method::POST,
+                &format!("/sessions/{request_session_id}/messages"),
+                Some(json!({ "message": "new topic" })),
+            )
+            .await
+        });
+        upstream.state.old_started.acquire().await?.forget();
+
+        let authorization = format!("Bearer {token}");
+        let (status, accepted) = request_json_with_authorization(
+            app.clone(),
+            "/internal/session-control/start-new",
+            json!({ "session_id": session_id }),
+            Some(&authorization),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        upstream.state.release_old.add_permits(1);
+        upstream.state.fresh_started.acquire().await?.forget();
+
+        let (status, repeated) = request_json_with_authorization(
+            app,
+            "/internal/session-control/start-new",
+            json!({ "session_id": session_id }),
+            Some(&authorization),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            repeated["detail"],
+            "fresh-session handoff already occurred for this turn"
+        );
+        upstream.state.release_fresh.add_permits(1);
+        let (status, response) = response_task.await??;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["turn_id"], accepted["turn_id"]);
+        assert_eq!(response["completed"], true);
+        assert_eq!(response["automatic_restart_count"], 1);
+        assert_eq!(response["assistant_message"]["content"], "fresh-answer");
+        assert_eq!(response["session"]["session_id"], session_id);
+        assert_eq!(
+            response["session"]["agent_host_session_id"],
+            "fresh-session"
+        );
+        let stored = state
+            .sessions
+            .get(&session_id)?
+            .ok_or_else(|| std::io::Error::other("stored session missing"))?;
+        assert_eq!(stored.messages.len(), 2);
+        assert_eq!(stored.messages[1].content, "fresh-answer");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upstream_end_or_error_after_request_still_replays()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        for termination in [
+            OldStreamTermination::End,
+            OldStreamTermination::MalformedEvent,
+        ] {
+            let upstream =
+                RestartingUpstream::start_with_termination(false, false, termination).await?;
+            let (_state, app, session_id, token) = restart_test_app(&upstream).await?;
+            let request_app = app.clone();
+            let request_session_id = session_id.clone();
+            let response_task = tokio::spawn(async move {
+                request_json(
+                    request_app,
+                    Method::POST,
+                    &format!("/sessions/{request_session_id}/messages"),
+                    Some(json!({ "message": "new topic" })),
+                )
+                .await
+            });
+            upstream.state.old_started.acquire().await?.forget();
+            let authorization = format!("Bearer {token}");
+            let (status, _accepted) = request_json_with_authorization(
+                app,
+                "/internal/session-control/start-new",
+                json!({ "session_id": session_id }),
+                Some(&authorization),
+            )
+            .await?;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            upstream.state.release_old.add_permits(1);
+            upstream.state.fresh_started.acquire().await?.forget();
+            upstream.state.release_fresh.add_permits(1);
+
+            let (status, response) = response_task.await??;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(response["completed"], true);
+            assert_eq!(response["automatic_restart_count"], 1);
+            assert_eq!(response["assistant_message"]["content"], "fresh-answer");
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_reset_keeps_client_session_and_clears_history()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let upstream = RestartingUpstream::start(false, false).await?;
+        let (state, app, session_id, _token) = restart_test_app(&upstream).await?;
+        state.sessions.append_message(&MessageRecord::new(
+            "prior-user",
+            &session_id,
+            MessageRole::User,
+            "prior topic",
+        ))?;
+
+        let (status, response) = request_json(
+            app,
+            Method::POST,
+            &format!("/sessions/{session_id}/reset"),
+            None,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["session_id"], session_id);
+        assert_eq!(response["agent_host_session_id"], "fresh-session");
+        let stored = state
+            .sessions
+            .get(&session_id)?
+            .ok_or_else(|| std::io::Error::other("stored session missing"))?;
+        assert!(stored.messages.is_empty());
+        assert_eq!(stored.agent_host_session_id, "fresh-session");
+        assert_eq!(state.handoff_metrics.snapshot(), [0, 0, 0, 0]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn restart_and_replay_failures_are_terminal_without_old_context_fallback()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        for termination in [
+            OldStreamTermination::Event,
+            OldStreamTermination::End,
+            OldStreamTermination::MalformedEvent,
+        ] {
+            for (reset_fails, replay_fails) in [(true, false), (false, true)] {
+                let upstream = RestartingUpstream::start_with_termination(
+                    reset_fails,
+                    replay_fails,
+                    termination,
+                )
+                .await?;
+                let (state, app, session_id, token) = restart_test_app(&upstream).await?;
+                let request_app = app.clone();
+                let request_session_id = session_id.clone();
+                let response_task = tokio::spawn(async move {
+                    request_json(
+                        request_app,
+                        Method::POST,
+                        &format!("/sessions/{request_session_id}/messages"),
+                        Some(json!({ "message": "new topic" })),
+                    )
+                    .await
+                });
+                upstream.state.old_started.acquire().await?.forget();
+                let authorization = format!("Bearer {token}");
+                let (status, _accepted) = request_json_with_authorization(
+                    app,
+                    "/internal/session-control/start-new",
+                    json!({ "session_id": session_id }),
+                    Some(&authorization),
+                )
+                .await?;
+                assert_eq!(status, StatusCode::ACCEPTED);
+                upstream.state.release_old.add_permits(1);
+
+                let (status, response) = response_task.await??;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(response["completed"], false);
+                assert_eq!(response["automatic_restart_count"], 1);
+                assert!(
+                    response["error"]
+                        .as_str()
+                        .is_some_and(|error| !error.is_empty())
+                );
+                assert_eq!(response["assistant_message"]["content"], "");
+                let stored = state
+                    .sessions
+                    .get(&session_id)?
+                    .ok_or_else(|| std::io::Error::other("stored session missing"))?;
+                assert_eq!(stored.status, "error");
+                assert_eq!(stored.messages.len(), 2);
+                assert_eq!(stored.messages[0].content, "new topic");
+                assert_eq!(stored.messages[1].content, "");
+                assert_eq!(state.handoff_metrics.snapshot(), [1, 0, 1, 0]);
+            }
+        }
 
         Ok(())
     }

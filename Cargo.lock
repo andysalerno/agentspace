@@ -391,12 +391,15 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "getrandom 0.3.4",
  "http-body-util",
  "memory_rs",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "tokio",
  "tokio-stream",
  "tower",
@@ -1721,6 +1724,18 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "session_tools_rs"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
