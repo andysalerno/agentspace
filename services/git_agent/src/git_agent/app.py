@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import subprocess
 import uuid
 from contextlib import asynccontextmanager
@@ -12,6 +13,11 @@ from fastapi.responses import PlainTextResponse, Response
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from git_agent.config import Settings
+from git_agent.effective_config import (
+    EffectiveConfigError,
+    EffectiveConfigUnresolvedError,
+    load_effective_settings,
+)
 from git_agent.git_backend import (
     GitBackend,
     PatchApplyError,
@@ -44,6 +50,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 
 class PatchRequestBody(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -63,14 +71,92 @@ class PatchRequestBody(BaseModel):
 
 class AppState:
     def __init__(self, settings: Settings, reviewer: Reviewer | None) -> None:
+        # ``_base_settings`` is the immutable environment-derived baseline. Every
+        # refresh rebuilds the effective settings from this base (never from the
+        # currently-resolved settings) so that a config apply, secret rotation,
+        # or a switch to ``configured: false`` reliably *clears* previously
+        # resolved policy/URLs instead of leaking stale (decrypted) values.
+        self._base_settings = settings
         self.settings = settings
         self.git = GitBackend(settings.repo_path, settings.scratch_path)
         self.store = PatchStore(settings.db_path)
+        self._reviewer_injected = reviewer is not None
         self.reviewer = reviewer or reviewer_from_settings(settings)
 
     def initialize(self) -> None:
         self.git.initialize()
         self.store.initialize()
+        # Keep the bare repo's symbolic HEAD pointed at the effective default
+        # branch so a fresh clone checks out the configured trunk.
+        self.git.set_head_branch(self.settings.default_branch)
+
+    async def refresh_effective_config(self) -> None:
+        """Rebuild the effective config from immutable env defaults each call.
+
+        When an internal token is configured, the declaratively-authored Git
+        Agent config (branch/ref policy, URLs, validation command, review agent)
+        is fetched and applied *on top of the immutable base settings* so it
+        actually drives behavior. This is invoked at the start of every patch
+        operation (not just startup) so a secret rotation or config apply takes
+        effect on the next operation without a restart.
+
+        Fail-closed semantics: rebuilding from the base means a ``configured:
+        false`` payload or a config that no longer sets a field reverts that
+        field to its base default (revoking any previously resolved value).
+        Unset secrets (HTTP 409) also revert to base defaults so a resolved
+        secret value is never preserved after it becomes unresolvable. Only a
+        *transient* fetch error (unreachable endpoint, invalid response) leaves
+        the current settings in place so an operation never crashes on a blip.
+        Resolved values are never logged.
+        """
+        try:
+            enriched = await load_effective_settings(self._base_settings)
+        except EffectiveConfigUnresolvedError as exc:
+            # Unset secrets: fail closed. Never keep previously resolved values.
+            logger.warning(
+                "Git Agent config references unset secrets; reverting to "
+                "environment defaults: %s",
+                exc,
+            )
+            enriched = self._base_settings
+        except EffectiveConfigError as exc:
+            # Transient failure: keep operating with the current settings.
+            logger.warning("could not refresh effective Git Agent config: %s", exc)
+            return
+        if enriched == self.settings:
+            return
+        self.settings = enriched
+        if not self._reviewer_injected:
+            self.reviewer = reviewer_from_settings(enriched)
+        # Keep the bare repo HEAD synchronized with the effective default branch.
+        self.git.set_head_branch(enriched.default_branch)
+
+
+def _require_enabled(state: AppState) -> None:
+    """Reject patch operations when the Git Agent is disabled by config.
+
+    ``gitAgent.enabled: false`` in the ConfigDocument turns the service off:
+    Git patch submission and re-review must fail with an explicit, actionable
+    disabled response rather than silently accepting or rejecting work.
+    """
+    if not state.settings.enabled:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Git Agent is disabled (gitAgent.enabled is false); "
+                "patch submission and review are unavailable"
+            ),
+        )
+
+
+def _ref_policy_kwargs(
+    settings: Settings,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    return (
+        settings.default_branch,
+        tuple(settings.allowed_ref_prefixes),
+        tuple(settings.allowed_refs),
+    )
 
 
 def create_app(  # noqa: C901
@@ -82,6 +168,7 @@ def create_app(  # noqa: C901
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         state.initialize()
+        await state.refresh_effective_config()
         yield
 
     application = FastAPI(title="GitAgent", version="0.1.0", lifespan=lifespan)
@@ -158,6 +245,10 @@ async def _handle_patch_request(
     payload: PatchRequestBody,
     state: AppState,
 ) -> dict[str, object]:
+    # Refresh per operation so config apply / secret rotation drives the next
+    # operation without a restart (best-effort; failures keep current settings).
+    await state.refresh_effective_config()
+    _require_enabled(state)
     request_id = uuid.uuid4().hex
     raw_patch = payload.raw_patch
     patch_hash = hashlib.sha256(raw_patch.encode()).hexdigest()
@@ -166,7 +257,13 @@ async def _handle_patch_request(
     normalized_ref: str | None = None
     target_error: PatchValidationError | None = None
     try:
-        normalized_ref = normalize_target_ref(target_ref)
+        branch, prefixes, exact_refs = _ref_policy_kwargs(state.settings)
+        normalized_ref = normalize_target_ref(
+            target_ref,
+            default_branch=branch,
+            allowed_prefixes=prefixes,
+            allowed_refs=exact_refs,
+        )
     except PatchValidationError as exc:
         target_error = exc
 
@@ -216,7 +313,7 @@ async def _handle_patch_request(
         msg = "target ref normalization unexpectedly failed"
         raise RuntimeError(msg)
 
-    if is_protected_ref(normalized_ref):
+    if is_protected_ref(normalized_ref, default_branch=state.settings.default_branch):
         result = await _process_protected_patch(
             payload=payload,
             state=state,
@@ -239,6 +336,9 @@ async def _handle_patch_request(
 
 
 async def _rerun_review(request_id: str, state: AppState) -> dict[str, object]:
+    # Refresh per operation so config apply / secret rotation takes effect.
+    await state.refresh_effective_config()
+    _require_enabled(state)
     row = state.store.get(request_id)
     if row is None:
         raise HTTPException(status_code=404, detail="patch request not found")
@@ -249,7 +349,13 @@ async def _rerun_review(request_id: str, state: AppState) -> dict[str, object]:
         )
 
     try:
-        target_ref = normalize_target_ref(row.target_ref)
+        branch, prefixes, exact_refs = _ref_policy_kwargs(state.settings)
+        target_ref = normalize_target_ref(
+            row.target_ref,
+            default_branch=branch,
+            allowed_prefixes=prefixes,
+            allowed_refs=exact_refs,
+        )
         base_sha = validate_sha(row.base_sha) if row.base_sha is not None else None
         analysis = analyze_patch(row.raw_patch)
         validate_patch_paths(analysis)
@@ -264,7 +370,7 @@ async def _rerun_review(request_id: str, state: AppState) -> dict[str, object]:
         )
         return updated.to_dict(include_raw_patch=True)
 
-    if not is_protected_ref(target_ref):
+    if not is_protected_ref(target_ref, default_branch=state.settings.default_branch):
         raise HTTPException(
             status_code=409,
             detail="wip patch requests skip review and cannot be re-reviewed",

@@ -166,14 +166,47 @@ def make_client(
     *,
     review_mode: Literal["auto_accept", "auto_reject", "invalid"] = "auto_accept",
     reviewer: Reviewer | None = None,
+    enabled: bool = True,
+    default_branch: str = "main",
 ) -> TestClient:
     settings = Settings(
         repo_path=workspace / "repo.git",
         db_path=workspace / "requests.sqlite3",
         scratch_path=workspace / "worktrees",
         review_mode=review_mode,
+        enabled=enabled,
+        default_branch=default_branch,
     )
     return TestClient(create_app(settings=settings, reviewer=reviewer))
+
+
+def test_disabled_git_agent_rejects_patch_and_rerun(workspace: Path) -> None:
+    # gitAgent.enabled=false must reject Git/PatchRequest and re-review with an
+    # explicit service-disabled response rather than silently (de)accepting work.
+    with make_client(workspace, enabled=False) as client:
+        submit = client.post(
+            "/PatchRequest",
+            json={
+                "target_ref": "wip/demo",
+                "base_sha": EMPTY_TREE_SHA,
+                "raw_patch": ADD_README_PATCH,
+                "commit_message": "Add README",
+            },
+        )
+        assert submit.status_code == 503
+        assert "disabled" in submit.json()["detail"]
+
+        rerun = client.post("/patch-requests/does-not-matter/rerun-review")
+        assert rerun.status_code == 503
+        assert "disabled" in rerun.json()["detail"]
+
+
+def test_head_synced_to_custom_default_branch(workspace: Path) -> None:
+    # The bare repo's symbolic HEAD must track the effective default branch so a
+    # clone checks out the configured trunk.
+    with make_client(workspace, default_branch="trunk") as client:
+        head = client.get("/status").json()["head_ref"]
+        assert head == "refs/heads/trunk"
 
 
 def test_empty_repo_init_status_and_receive_pack_denied(workspace: Path) -> None:

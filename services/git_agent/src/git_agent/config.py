@@ -19,6 +19,13 @@ class Settings:
     review_mode: ReviewMode = "auto_reject"
     review_agent_id: str | None = None
     client_service_url: str = "http://client-service:8002"
+    client_service_internal_token: str | None = None
+    enabled: bool = True
+    default_branch: str = "main"
+    allowed_ref_prefixes: tuple[str, ...] = ("wip/",)
+    allowed_refs: tuple[str, ...] = ()
+    remote_url: str | None = None
+    patch_url: str | None = None
     validation_command: tuple[str, ...] | None = None
     validation_timeout_seconds: float = 300.0
 
@@ -52,6 +59,8 @@ class Settings:
 
         validation_command = _validation_command_from_env()
         timeout = float(os.environ.get("GITAGENT_VALIDATION_TIMEOUT_SECONDS", "300"))
+        default_branch = os.environ.get("GITAGENT_DEFAULT_BRANCH", cls.default_branch)
+        enabled = _env_flag("GITAGENT_ENABLED", default=cls.enabled)
         return cls(
             repo_path=repo_path,
             db_path=db_path,
@@ -64,9 +73,21 @@ class Settings:
                 "GITAGENT_CLIENT_SERVICE_URL",
                 cls.client_service_url,
             ),
+            client_service_internal_token=(
+                os.environ.get("GITAGENT_CLIENT_SERVICE_INTERNAL_TOKEN") or None
+            ),
+            enabled=enabled,
+            default_branch=default_branch,
             validation_command=validation_command,
             validation_timeout_seconds=timeout,
         )
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _validation_command_from_env() -> tuple[str, ...] | None:

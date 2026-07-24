@@ -99,6 +99,29 @@ class GitBackend:
             ["--git-dir", str(self.repo_path), "config", "http.receivepack", "false"],
         )
 
+    def set_head_branch(self, branch: str) -> None:
+        """Point the bare repo's symbolic HEAD at ``branch``.
+
+        A clone of a bare repository checks out whichever branch ``HEAD`` names,
+        so keeping ``HEAD`` synchronized with the effective default branch makes
+        a custom trunk clone/checkout correctly. Pointing at a branch that does
+        not yet exist is valid; the first commit/push to it creates the ref.
+        """
+        if not branch:
+            return
+        if not (self.repo_path / "HEAD").exists():
+            # The bare repo has not been initialized yet; HEAD is synchronized
+            # explicitly after initialize() and on subsequent config refreshes.
+            return
+        target = branch if branch.startswith("refs/") else f"refs/heads/{branch}"
+        current = _run_git(
+            ["--git-dir", str(self.repo_path), "symbolic-ref", "-q", "HEAD"],
+            check=False,
+        ).stdout.strip()
+        if current == target:
+            return
+        _run_git(["--git-dir", str(self.repo_path), "symbolic-ref", "HEAD", target])
+
     def status(self) -> dict[str, object]:
         head_ref = _run_git(
             ["--git-dir", str(self.repo_path), "symbolic-ref", "-q", "HEAD"],

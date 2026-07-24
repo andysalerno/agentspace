@@ -51,28 +51,85 @@ class PatchAnalysis:
         return [line.to_json() for line in sorted(self.changed_lines)]
 
 
-def normalize_target_ref(raw_ref: str) -> str:
+def _canonical_head_ref(ref: str) -> str:
+    """Return the canonical full ref for a branch reference.
+
+    A bare branch name (``wip/x``) is expanded to ``refs/heads/wip/x``. A ref
+    that already carries a ``refs/`` prefix (``refs/heads/wip/x``) is returned
+    unchanged so the ``refs/heads/`` prefix is never doubled up.
+    """
+    if ref.startswith("refs/"):
+        return ref
+    return f"refs/heads/{ref}"
+
+
+def _branch_relative(prefix: str) -> str:
+    """Normalize an allowed prefix to its branch-relative form.
+
+    Both ``wip/`` and ``refs/heads/wip/`` normalize to ``wip/`` so a policy may
+    be authored with or without the ``refs/heads/`` prefix without changing
+    matching behavior.
+    """
+    return prefix.removeprefix("refs/heads/")
+
+
+def normalize_target_ref(
+    raw_ref: str,
+    *,
+    default_branch: str = "main",
+    allowed_prefixes: tuple[str, ...] = ("wip/",),
+    allowed_refs: tuple[str, ...] = (),
+) -> str:
+    """Normalize and authorize a target ref against the configured policy.
+
+    The default branch is always permitted (protected). Exact ``allowed_refs``
+    are matched against the canonical full ref, and ``allowed_prefixes`` match
+    the branch-relative portion. Inputs may be bare (``wip/x``) or full
+    (``refs/heads/wip/x``); the canonical full ref is returned in every case and
+    the ``refs/heads/`` prefix is never doubled. An empty prefix and ref policy
+    permits only the default branch (it is never implicitly permissive).
+    """
     ref = raw_ref.strip()
-    if ref == "main":
-        return "refs/heads/main"
-    if ref == "refs/heads/main":
-        return ref
-    if ref.startswith("wip/"):
-        ref = f"refs/heads/{ref}"
-    if ref.startswith("refs/heads/wip/"):
-        name = ref.removeprefix("refs/heads/wip/")
-        if not _safe_wip_ref_name(name):
-            msg = "wip ref names may contain only safe git path characters"
-            raise PatchValidationError(msg)
-        return ref
-    msg = (
-        "target_ref must be main, refs/heads/main, wip/<name>, or refs/heads/wip/<name>"
+    if not ref:
+        msg = "target_ref must not be empty"
+        raise PatchValidationError(msg)
+
+    protected = f"refs/heads/{default_branch}"
+    if ref in {default_branch, protected}:
+        return protected
+
+    full = _canonical_head_ref(ref)
+
+    # Exact allowed refs are honored as-is (matched on the canonical full ref).
+    for allowed in allowed_refs:
+        if full == _canonical_head_ref(allowed.strip()):
+            return full
+
+    # Prefix matches operate on the branch-relative name so a heads-only policy
+    # is enforced and the remainder (user-controlled) is validated.
+    if full.startswith("refs/heads/"):
+        name = full.removeprefix("refs/heads/")
+        for prefix in allowed_prefixes:
+            relative = _branch_relative(prefix)
+            if not relative or not name.startswith(relative):
+                continue
+            remainder = name.removeprefix(relative)
+            if not _safe_wip_ref_name(remainder):
+                msg = "branch names may contain only safe git path characters"
+                raise PatchValidationError(msg)
+            return full
+
+    allowed_desc: list[str] = [default_branch, protected]
+    allowed_desc.extend(sorted(allowed_refs))
+    allowed_desc.extend(
+        f"{_branch_relative(prefix)}<name>" for prefix in allowed_prefixes
     )
+    msg = f"target_ref must be one of: {', '.join(allowed_desc)}"
     raise PatchValidationError(msg)
 
 
-def is_protected_ref(ref: str) -> bool:
-    return ref == "refs/heads/main"
+def is_protected_ref(ref: str, *, default_branch: str = "main") -> bool:
+    return ref == f"refs/heads/{default_branch}"
 
 
 def validate_sha(value: str) -> str:
