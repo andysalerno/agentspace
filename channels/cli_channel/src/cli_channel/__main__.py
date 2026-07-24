@@ -35,6 +35,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             required=True,
             type=Path,
         )
+        if command == "apply":
+            command_parser.add_argument("--expected-generation", type=int)
 
     export = config_commands.add_parser("export")
     export.add_argument("resource", nargs="?")
@@ -132,7 +134,11 @@ async def _run_config(
     elif args.config_command == "plan":
         result = await client.plan_config(source, content_type)
     else:
-        result = await client.apply_config(source, content_type)
+        result = await client.apply_config(
+            source,
+            content_type,
+            args.expected_generation,
+        )
     _write_json(result)
 
 

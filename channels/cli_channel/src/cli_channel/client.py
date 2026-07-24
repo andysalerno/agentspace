@@ -111,13 +111,18 @@ class ClientServiceSessionClient:
         self,
         source: bytes,
         content_type: str = "application/yaml",
+        expected_generation: int | None = None,
     ) -> object:
-        return await self._request_json(
+        headers = {"content-type": content_type}
+        if expected_generation is not None:
+            headers["if-match"] = str(expected_generation)
+        response = await self._request(
             "POST",
             "/config/apply",
             content=source,
-            content_type=content_type,
+            headers=headers,
         )
+        return response.json()
 
     async def export_config(self, mode: str) -> ConfigDownload:
         return await self._download(f"/config/export?mode={mode}")
@@ -163,7 +168,7 @@ class ClientServiceSessionClient:
             path,
             json=json,
             content=content,
-            content_type=content_type,
+            headers=(None if content_type is None else {"content-type": content_type}),
         )
         return response.json()
 
@@ -188,10 +193,9 @@ class ClientServiceSessionClient:
         *,
         json: dict[str, object] | None = None,
         content: bytes | None = None,
-        content_type: str | None = None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
         logger.info("cli_channel -> client_service %s %s", method, path)
-        headers = None if content_type is None else {"content-type": content_type}
         async with httpx.AsyncClient(
             base_url=self.base_url,
             timeout=self.timeout,
