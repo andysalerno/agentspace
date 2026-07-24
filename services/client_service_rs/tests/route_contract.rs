@@ -31,7 +31,7 @@ impl Drop for StubAgentHost {
 fn test_router(agent_host_base_url: &str) -> Result<Router, Box<dyn Error + Send + Sync>> {
     let config = AppConfig::new("127.0.0.1", 0, agent_host_base_url, BTreeMap::new());
     let agent_host = AgentHostClient::new(agent_host_base_url, Duration::from_millis(100))?;
-    Ok(build_router(AppState::with_agent_host(config, agent_host)))
+    Ok(build_router(AppState::with_agent_host(config, agent_host)?))
 }
 
 async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send + Sync>> {

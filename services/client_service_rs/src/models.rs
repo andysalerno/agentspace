@@ -465,6 +465,19 @@ impl AgentRecord {
         }
     }
 
+    /// Construct the installation-owned reserved Git Agent reviewer. This agent
+    /// is synthesized on demand and is never authored into the desired
+    /// [`crate::config::document::ConfigDocument`].
+    #[must_use]
+    pub fn git_agent_reviewer() -> Self {
+        Self::new(
+            DEFAULT_GIT_AGENT_REVIEW_AGENT_ID,
+            "Git Agent Reviewer",
+            HarnessName::Acp,
+            "Review submitted patches for correctness, safety, and repository policy before GitAgent commits them.",
+        )
+    }
+
     #[must_use]
     pub fn summary(&self) -> Value {
         json!({

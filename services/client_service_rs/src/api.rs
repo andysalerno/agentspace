@@ -7,8 +7,8 @@ use std::{
 
 use axum::{
     Json, Router,
-    body::{Body, to_bytes},
-    extract::{OriginalUri, Path, Query, State},
+    body::{Body, Bytes, to_bytes},
+    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -30,10 +30,20 @@ use crate::{
         ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
         DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord, GatewayType, GitAgentConfigRecord,
         HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
-        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
-        validate_workspace_id,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now, validate_agent_id,
+        validate_connection_id, validate_gateway_id, validate_skill_id, validate_workspace_id,
     },
+};
+
+use crate::config::{
+    self,
+    canonical::to_canonical_yaml,
+    document::SecretDeclaration,
+    error::{ConfigError, ValidationIssue},
+    resolver::ResolveError,
+    secrets::SecretStoreError,
+    snapshot::SourceKind,
+    value::SecretName,
 };
 
 const DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL: &str = "http://client-service:8002";
@@ -42,6 +52,13 @@ const GATEWAY_AUTOSTART_ATTEMPTS: usize = 5;
 const GATEWAY_AUTOSTART_RETRY_DELAY: Duration = Duration::from_secs(2);
 const MEMORY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MEMORY_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Request body limit for the config endpoints that accept uploaded bundles.
+///
+/// A config bundle is a ZIP whose decompressed contents may total up to 32 MiB
+/// (`bundle::MAX_TOTAL_BYTES`). The compressed upload is smaller, but we set the
+/// limit comfortably above the declared bundle size so large-but-valid bundles
+/// are accepted while other routes keep the framework's smaller default limit.
+const CONFIG_BODY_LIMIT_BYTES: usize = 40 * 1024 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -141,6 +158,29 @@ pub fn router() -> Router<AppState> {
         .route("/gateways/{gateway_id}/start", post(start_gateway))
         .route("/gateways/{gateway_id}/stop", post(stop_gateway))
         .route("/gateways/{gateway_id}/logs", get(gateway_logs))
+        .merge(config_router())
+}
+
+fn config_router() -> Router<AppState> {
+    // Bundle-accepting endpoints may receive large ZIP uploads, so they get an
+    // explicit body limit above the declared bundle size. The remaining config
+    // endpoints (export + secrets) keep the framework's smaller default limit.
+    let bundle_routes = Router::new()
+        .route("/config/validate", post(validate_config))
+        .route("/config/plan", post(plan_config))
+        .route("/config/apply", post(apply_config))
+        .layer(DefaultBodyLimit::max(CONFIG_BODY_LIMIT_BYTES));
+
+    Router::new()
+        .route("/config/export", get(export_config))
+        .route("/config/export/{kind}/{name}", get(export_config_resource))
+        .route("/secrets", get(list_secrets).post(create_secret))
+        .route("/secrets/{name}", delete(delete_secret))
+        .route(
+            "/secrets/{name}/value",
+            axum::routing::put(set_secret_value).delete(clear_secret_value),
+        )
+        .merge(bundle_routes)
 }
 
 fn memory_router() -> Router<AppState> {
@@ -173,6 +213,10 @@ fn git_agent_router() -> Router<AppState> {
         .route(
             "/git-agent/requests/{request_id}/rerun-review",
             post(rerun_git_agent_review),
+        )
+        .route(
+            "/internal/git-agent/effective-config",
+            get(get_git_agent_effective_config),
         )
 }
 
@@ -327,7 +371,7 @@ async fn info(State(state): State<AppState>) -> Json<Value> {
             "title": "Client Service",
             "version": env!("CARGO_PKG_VERSION"),
             "env_prefix": ENV_PREFIX,
-            "env": state.config.client_service_env,
+            "env": state.config.redacted_env(),
             "instance_id": state.instance_id,
             "started_at": state.started_at,
         },
@@ -437,6 +481,19 @@ async fn list_connection_models(
     Path(connection_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let connection = require_connection(&state, &connection_id)?;
+    let mut missing = Vec::new();
+    let resolved =
+        config::resolver::resolve_connection(&state.config_state, &connection_id, &mut missing)
+            .map_err(resolve_error_to_api)?;
+    if !missing.is_empty() {
+        return Err(resolve_error_to_api(ResolveError::Missing(missing)));
+    }
+    let base_url = resolved.url.ok_or_else(|| {
+        ApiError::unprocessable(format!(
+            "connection {connection_id} has no resolvable URL configured"
+        ))
+    })?;
+    let api_key = resolved.api_key;
     tracing::info!(
         route = "/connections/:connection_id/models",
         action = "list_connection_models",
@@ -444,13 +501,13 @@ async fn list_connection_models(
         api_flavor = connection.api_flavor.as_str(),
         "fetching connection models"
     );
-    let url = format!("{}/models", connection.url.trim_end_matches('/'));
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut request = state
         .http_client
         .get(url)
         .timeout(state.config.connection_models_timeout());
-    if !connection.api_key.is_empty() {
-        request = request.bearer_auth(&connection.api_key);
+    if let Some(api_key) = api_key.filter(|value| !value.is_empty()) {
+        request = request.bearer_auth(&api_key);
     }
     let response = request.send().await.map_err(|error| {
         ApiError::bad_gateway(format!(
@@ -515,7 +572,7 @@ async fn create_connection(
     connection.api_flavor = payload.api_flavor;
     connection.api_key = payload.api_key;
     let value = connection.summary(true);
-    state.connections.insert(connection)?;
+    state.connections.insert(&connection)?;
     tracing::info!(
         route = "/connections",
         action = "create_connection",
@@ -547,7 +604,7 @@ async fn update_connection(
     }
     connection.updated_at = utc_now();
     let value = connection.summary(true);
-    state.connections.update(connection)?;
+    state.connections.update(&connection)?;
     tracing::info!(
         route = "/connections/:connection_id",
         action = "update_connection",
@@ -584,6 +641,8 @@ async fn create_agent(
     Json(payload): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_agent_id(&payload.agent_id)?;
+    reject_reserved_agent_id(&payload.agent_id)?;
+    validate_agent_skill_refs(&state, &payload.skills).await?;
     if let Some(connection_id) = payload.connection_id.as_deref() {
         require_connection(&state, connection_id)?;
     }
@@ -599,7 +658,7 @@ async fn create_agent(
     validate_workspace_mounts(&state, &payload.workspace_mounts)?;
     agent.workspace_mounts = payload.workspace_mounts;
     let value = agent.summary();
-    state.agents.insert(agent)?;
+    state.agents.insert(&agent)?;
     tracing::info!(
         route = "/agents",
         action = "create_agent",
@@ -650,6 +709,7 @@ async fn update_agent(
     Path(agent_id): Path<String>,
     Json(payload): Json<UpdateAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    reject_reserved_agent_id(&agent_id)?;
     let mut agent = require_agent(&state, &agent_id)?;
     if let Some(name) = payload.name {
         agent.name = name;
@@ -661,6 +721,7 @@ async fn update_agent(
         agent.system_prompt = system_prompt;
     }
     if let Some(skills) = payload.skills {
+        validate_agent_skill_refs(&state, &skills).await?;
         agent.skills = skills;
     }
     if let Some(env_vars) = payload.env_vars {
@@ -682,7 +743,7 @@ async fn update_agent(
     }
     agent.updated_at = utc_now();
     let value = agent.summary();
-    state.agents.update(agent)?;
+    state.agents.update(&agent)?;
     tracing::info!(
         route = "/agents/:agent_id",
         action = "update_agent",
@@ -699,6 +760,7 @@ async fn delete_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    reject_reserved_agent_id(&agent_id)?;
     if !state.agents.delete(&agent_id)? {
         return Err(ApiError::not_found(format!("agent {agent_id:?} not found")));
     }
@@ -731,8 +793,13 @@ async fn delete_agent(
 }
 
 async fn get_git_agent_config(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = get_or_init_git_agent_config(&state)?;
-    ensure_git_agent_review_agent(&state, &config.review_agent_id)?;
+    // Reading the Git Agent config must never mutate the authored document. If
+    // no `gitAgent` block has been authored, synthesize read-only installation
+    // defaults; the reserved reviewer is synthesized on demand elsewhere.
+    let config = state
+        .git_agent_config
+        .get()?
+        .unwrap_or_else(GitAgentConfigRecord::new_default);
     tracing::info!(
         route = "/git-agent/config",
         action = "get_git_agent_config",
@@ -744,6 +811,84 @@ async fn get_git_agent_config(State(state): State<AppState>) -> Result<Json<Valu
     Ok(Json(config.summary()))
 }
 
+/// Internal service-to-service endpoint that returns the resolved effective Git
+/// Agent configuration (with `secretRef` leaves resolved to their values) for
+/// the Git Agent to consume. This is NOT a public endpoint: it requires the
+/// shared `CLIENT_SERVICE_INTERNAL_TOKEN` and is disabled when no token is
+/// configured, so resolved secret values are never exposed without
+/// authentication. Values are never logged.
+async fn get_git_agent_effective_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    authorize_internal(&state, &headers)?;
+    let resolved =
+        config::resolver::resolve_git_agent(&state.config_state).map_err(resolve_error_to_api)?;
+    let body = resolved.map_or_else(
+        || json!({ "configured": false }),
+        |git_agent| {
+            json!({
+                "configured": true,
+                "enabled": git_agent.enabled,
+                "defaultBranch": git_agent.default_branch,
+                "allowedRefPrefixes": git_agent.allowed_ref_prefixes,
+                "allowedRefs": git_agent.allowed_refs,
+                "remoteUrl": git_agent.remote_url,
+                "patchUrl": git_agent.patch_url,
+                "reviewAgent": git_agent.review_agent,
+                "validationCommand": git_agent.validation_command,
+            })
+        },
+    );
+    tracing::info!(
+        route = "/internal/git-agent/effective-config",
+        action = "get_git_agent_effective_config",
+        "internal handler completed"
+    );
+    Ok(Json(body))
+}
+
+/// Authorize an internal service-to-service request against the shared internal
+/// token. Returns 503 when no token is configured (the endpoint is disabled so
+/// resolved secrets are never exposed unauthenticated) and 401 for a
+/// missing/incorrect token. The token is compared in constant time.
+fn authorize_internal(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(expected) = state.config.internal_token() else {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            detail: "internal endpoints are disabled; set CLIENT_SERVICE_INTERNAL_TOKEN to enable"
+                .to_owned(),
+            extra: None,
+        });
+    };
+    let presented = headers
+        .get("x-internal-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
+        Ok(())
+    } else {
+        Err(ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            detail: "missing or invalid internal token".to_owned(),
+            extra: None,
+        })
+    }
+}
+
+/// Compare two byte slices in constant time to avoid leaking token length or
+/// content through timing.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 async fn update_git_agent_config(
     State(state): State<AppState>,
     Json(payload): Json<UpdateGitAgentConfigRequest>,
@@ -751,8 +896,7 @@ async fn update_git_agent_config(
     let mut config = get_or_init_git_agent_config(&state)?;
     apply_git_agent_config_update(&state, &mut config, payload)?;
     config.updated_at = utc_now();
-    let config = state.git_agent_config.upsert(config)?;
-    ensure_git_agent_review_agent(&state, &config.review_agent_id)?;
+    let config = state.git_agent_config.upsert(&config)?;
     tracing::info!(
         route = "/git-agent/config",
         action = "update_git_agent_config",
@@ -1386,14 +1530,36 @@ async fn create_skill(
     Json(payload): Json<CreateSkillRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_skill_id(&payload.skill_id)?;
+    // Serialize with /config/apply and every other skill mutation so upstream
+    // staging and document commits cannot interleave into a host/document
+    // split-brain.
+    let _apply_guard = state.apply_lock.lock().await;
+    // A user skill must not collide with an installation-owned builtin id.
+    let builtins = builtin_skill_ids(&state).await;
+    if builtins.contains(&payload.skill_id) {
+        return Err(ApiError::conflict(format!(
+            "skill id {:?} collides with an installation-owned builtin skill",
+            payload.skill_id
+        )));
+    }
     if let Some(creator_agent_id) = payload.creator_agent_id.as_deref() {
         validate_agent_id(creator_agent_id)?;
         require_agent(&state, creator_agent_id)?;
     }
+    // Stage the upstream skill first so the document is never committed while
+    // agent_host is stale. If the document commit fails, compensate upstream.
     let skill = state
         .agent_host
         .create_skill(&payload.skill_id, &payload.files)
         .await?;
+    if let Err(error) = config::adapter::upsert_skill(
+        &state.config_state,
+        &payload.skill_id,
+        payload.files.clone(),
+    ) {
+        let _ = state.agent_host.delete_skill(&payload.skill_id).await;
+        return Err(error.into());
+    }
     let auto_enabled = payload
         .creator_agent_id
         .as_deref()
@@ -1413,13 +1579,43 @@ async fn create_skill(
 }
 
 async fn list_skills(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
-    let skills = state
-        .agent_host
-        .list_skills()
-        .await?
+    // User skills are authoritative from the ConfigDocument; only builtins are
+    // sourced from agent_host. Runtime agent_host user-skill state is never a
+    // read/export source of truth.
+    let mut skills: Vec<Value> = config::adapter::list_skills(&state.config_state)?
         .into_iter()
-        .map(Value::Object)
-        .collect::<Vec<_>>();
+        .map(|skill| {
+            json!({
+                "skill_id": skill.id,
+                "source": "user",
+                "files": skill.files,
+            })
+        })
+        .collect();
+    match state.agent_host.list_skills().await {
+        Ok(entries) => {
+            for entry in entries {
+                let is_builtin = entry
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source| source == "builtin");
+                if is_builtin {
+                    skills.push(Value::Object(entry));
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                route = "/skills",
+                action = "list_skills",
+                error_kind = "agent_host_error",
+                error = %error,
+                "could not list builtin skills from agent_host; returning user skills only"
+            );
+        }
+    }
+    // User skills are listed first in document order, then installation-owned
+    // builtins; document skills are already deterministically ordered.
     tracing::info!(
         route = "/skills",
         action = "list_skills",
@@ -1433,11 +1629,28 @@ async fn get_skill(
     State(state): State<AppState>,
     Path(skill_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    // Authored user skills are served from the document; anything else is a
+    // builtin proxied from agent_host.
+    if let Some(skill) = config::adapter::get_skill(&state.config_state, &skill_id)? {
+        tracing::info!(
+            route = "/skills/:skill_id",
+            action = "get_skill",
+            skill_id = %skill_id,
+            source = "user",
+            "api handler completed"
+        );
+        return Ok(Json(json!({
+            "skill_id": skill.id,
+            "source": "user",
+            "files": skill.files,
+        })));
+    }
     let skill = state.agent_host.get_skill(&skill_id).await?;
     tracing::info!(
         route = "/skills/:skill_id",
         action = "get_skill",
         skill_id = %skill_id,
+        source = "builtin",
         "api handler completed"
     );
     Ok(Json(Value::Object(skill)))
@@ -1448,6 +1661,30 @@ async fn download_skill(
     Path(skill_id): Path<String>,
 ) -> Result<Response, ApiError> {
     validate_skill_id(&skill_id)?;
+    // Authored user skills download from the authoritative document contents,
+    // never from potentially stale agent_host runtime state.
+    if let Some(skill) = config::adapter::get_skill(&state.config_state, &skill_id)? {
+        let body = zip_skill_files(&skill.files)?;
+        let mut response = Body::from(body).into_response();
+        insert_download_header(
+            response.headers_mut(),
+            header::CONTENT_TYPE,
+            "application/zip",
+        )?;
+        insert_download_header(
+            response.headers_mut(),
+            header::CONTENT_DISPOSITION,
+            &format!("attachment; filename=\"{skill_id}.zip\""),
+        )?;
+        tracing::info!(
+            route = "/skills/:skill_id/download",
+            action = "download_skill",
+            skill_id = %skill_id,
+            source = "user",
+            "api handler completed"
+        );
+        return Ok(response);
+    }
     let download = state.agent_host.download_skill(&skill_id).await?;
     let mut response = Body::from(download.body).into_response();
     insert_download_header(
@@ -1464,6 +1701,7 @@ async fn download_skill(
         route = "/skills/:skill_id/download",
         action = "download_skill",
         skill_id = %skill_id,
+        source = "builtin",
         "api handler completed"
     );
     Ok(response)
@@ -1496,10 +1734,24 @@ async fn update_skill(
     Json(payload): Json<UpdateSkillRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_skill_id(&skill_id)?;
+    // Serialize with /config/apply and every other skill mutation.
+    let _apply_guard = state.apply_lock.lock().await;
+    // Capture the previously authored files so the upstream skill can be
+    // restored if the document commit fails after a successful upstream update.
+    let previous =
+        config::adapter::get_skill(&state.config_state, &skill_id)?.map(|skill| skill.files);
     let skill = state
         .agent_host
         .update_skill(&skill_id, &payload.files)
         .await?;
+    if let Err(error) =
+        config::adapter::upsert_skill(&state.config_state, &skill_id, payload.files.clone())
+    {
+        if let Some(previous) = previous {
+            let _ = state.agent_host.update_skill(&skill_id, &previous).await;
+        }
+        return Err(error.into());
+    }
     tracing::info!(
         route = "/skills/:skill_id",
         action = "update_skill",
@@ -1515,10 +1767,27 @@ async fn rollback_skill_version(
     Path((skill_id, version)): Path<(String, u64)>,
 ) -> Result<Json<Value>, ApiError> {
     validate_skill_id(&skill_id)?;
+    // Serialize with /config/apply and every other skill mutation.
+    let _apply_guard = state.apply_lock.lock().await;
+    // Capture the currently authored files so the upstream skill can be restored
+    // if the document commit fails after a successful upstream rollback.
+    let previous =
+        config::adapter::get_skill(&state.config_state, &skill_id)?.map(|skill| skill.files);
     let skill = state
         .agent_host
         .rollback_skill_version(&skill_id, version)
         .await?;
+    // Keep the authoritative document in sync with the rolled-back files, but
+    // only for skills already authored as user skills (never author builtins).
+    if previous.is_some() {
+        let files = skill_files_from_object(&skill);
+        if let Err(error) = config::adapter::upsert_skill(&state.config_state, &skill_id, files) {
+            if let Some(previous) = previous {
+                let _ = state.agent_host.update_skill(&skill_id, &previous).await;
+            }
+            return Err(error.into());
+        }
+    }
     tracing::info!(
         route = "/skills/:skill_id/versions/:version/rollback",
         action = "rollback_skill_version",
@@ -1533,7 +1802,27 @@ async fn delete_skill(
     State(state): State<AppState>,
     Path(skill_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    validate_skill_id(&skill_id)?;
+    // Serialize with /config/apply and every other skill mutation.
+    let _apply_guard = state.apply_lock.lock().await;
+    // A skill referenced by any authored agent cannot be deleted; the reference
+    // would dangle in the desired document.
+    if let Some(agent_id) = agent_referencing_skill(&state, &skill_id) {
+        return Err(ApiError::conflict(format!(
+            "skill {skill_id:?} is referenced by agent {agent_id:?} and cannot be deleted"
+        )));
+    }
+    // Capture files so the upstream skill can be recreated if the document
+    // commit fails after a successful upstream delete.
+    let previous =
+        config::adapter::get_skill(&state.config_state, &skill_id)?.map(|skill| skill.files);
     state.agent_host.delete_skill(&skill_id).await?;
+    if let Err(error) = config::adapter::delete_skill(&state.config_state, &skill_id) {
+        if let Some(previous) = previous {
+            let _ = state.agent_host.create_skill(&skill_id, &previous).await;
+        }
+        return Err(error.into());
+    }
     tracing::info!(
         route = "/skills/:skill_id",
         action = "delete_skill",
@@ -1669,7 +1958,7 @@ async fn create_gateway(
     gateway.env_vars = payload.env_vars;
     gateway.secrets = payload.secrets;
     let gateway_id = gateway.gateway_id.clone();
-    state.gateways.insert(gateway)?;
+    state.gateways.insert(&gateway)?;
     tracing::info!(
         route = "/gateways",
         action = "create_gateway",
@@ -1755,7 +2044,7 @@ async fn update_gateway(
     let enabled = gateway.enabled;
     let gateway_type = gateway.gateway_type;
     let agent_id = gateway.agent_id.clone();
-    state.gateways.update(gateway)?;
+    state.gateways.update(&gateway)?;
     tracing::info!(
         route = "/gateways/:gateway_id",
         action = "update_gateway",
@@ -1936,17 +2225,265 @@ async fn start_enabled_gateway_with_retries(state: &AppState, gateway_id: &str) 
     }
 }
 
+/// Reconcile every gateway container to the desired `ConfigDocument` on startup.
+///
+/// Unlike [`start_enabled_gateways`] (which only starts enabled gateways), this
+/// performs a complete reconcile against the state observed in `agent_host`:
+/// enabled gateways are started (with retries), disabled-but-running gateways
+/// are stopped, and upstream gateways that are absent from the desired document
+/// (orphans) are destroyed (with retries). It runs under the apply lock so it
+/// never races a concurrent apply or interactive gateway mutation.
+pub async fn reconcile_gateways_on_startup(state: AppState) {
+    let _guard = state.apply_lock.lock().await;
+    reconcile_gateways_locked(&state).await;
+}
+
+async fn reconcile_gateways_locked(state: &AppState) {
+    let desired = match state.gateways.list() {
+        Ok(gateways) => gateways,
+        Err(error) => {
+            tracing::error!(
+                action = "reconcile_gateways_on_startup",
+                error = %error,
+                "failed to list desired gateways for startup reconcile"
+            );
+            return;
+        }
+    };
+    let observed_ids = match state.agent_host.list_gateways().await {
+        Ok(list) => list
+            .iter()
+            .filter_map(|gateway| gateway.get("gateway_id").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<String>>(),
+        Err(error) => {
+            // The observed state is unknown, so we cannot safely stop or destroy
+            // anything. Still start enabled gateways (idempotent) and log so the
+            // orphan/stop reconcile can be retried on the next startup or apply.
+            tracing::error!(
+                action = "reconcile_gateways_on_startup",
+                error = %error,
+                "failed to list agent_host gateways; only starting enabled gateways"
+            );
+            for gateway in desired.iter().filter(|gateway| gateway.enabled) {
+                start_enabled_gateway_with_retries(state, &gateway.gateway_id).await;
+            }
+            return;
+        }
+    };
+
+    let desired_ids: BTreeSet<&str> = desired
+        .iter()
+        .map(|gateway| gateway.gateway_id.as_str())
+        .collect();
+
+    for gateway in &desired {
+        if gateway.enabled {
+            start_enabled_gateway_with_retries(state, &gateway.gateway_id).await;
+        } else if observed_ids.contains(&gateway.gateway_id) {
+            tracing::info!(
+                action = "reconcile_gateways_on_startup",
+                gateway_id = %gateway.gateway_id,
+                "stopping disabled gateway that is still running"
+            );
+            if let Err(error) = stop_gateway_by_id(state, &gateway.gateway_id).await {
+                tracing::warn!(
+                    action = "reconcile_gateways_on_startup",
+                    gateway_id = %gateway.gateway_id,
+                    error = %error.detail,
+                    "failed to stop disabled gateway during startup reconcile"
+                );
+            }
+        }
+    }
+
+    for id in &observed_ids {
+        if desired_ids.contains(id.as_str()) {
+            continue;
+        }
+        destroy_orphan_gateway_with_retries(state, id).await;
+    }
+}
+
+async fn destroy_orphan_gateway_with_retries(state: &AppState, gateway_id: &str) {
+    for attempt in 1..=GATEWAY_AUTOSTART_ATTEMPTS {
+        match state.agent_host.destroy_gateway(gateway_id).await {
+            Ok(()) => {
+                tracing::info!(
+                    action = "reconcile_gateways_on_startup",
+                    gateway_id = %gateway_id,
+                    attempt,
+                    "destroyed orphaned gateway not present in desired config"
+                );
+                return;
+            }
+            Err(error) if attempt < GATEWAY_AUTOSTART_ATTEMPTS => {
+                tracing::warn!(
+                    action = "reconcile_gateways_on_startup",
+                    gateway_id = %gateway_id,
+                    attempt,
+                    error = %error,
+                    retry_delay_ms = GATEWAY_AUTOSTART_RETRY_DELAY.as_millis(),
+                    "failed to destroy orphaned gateway; retrying"
+                );
+                sleep(GATEWAY_AUTOSTART_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    action = "reconcile_gateways_on_startup",
+                    gateway_id = %gateway_id,
+                    attempt,
+                    error = %error,
+                    "failed to destroy orphaned gateway"
+                );
+                return;
+            }
+        }
+    }
+}
+
+/// Reconcile `agent_host` user skills to the active `ConfigDocument` on startup.
+///
+/// The active document is authoritative: every declared user skill is created
+/// or updated in `agent_host` (unchanged skills are compared and skipped) and
+/// user skills present upstream but absent from the document are removed. If the
+/// upstream skill state cannot be determined the reconcile is retried and, if it
+/// still fails, an error is logged (nothing is committed because the document is
+/// already the source of truth). Runs under the apply lock so it never races a
+/// concurrent apply or interactive skill mutation.
+pub async fn reconcile_skills_on_startup(state: AppState) {
+    let _guard = state.apply_lock.lock().await;
+    reconcile_skills_locked(&state).await;
+}
+
+async fn reconcile_skills_locked(state: &AppState) {
+    let document = state.config_state.active();
+    let Some(host_user) = agent_host_user_skills_with_retries(state).await else {
+        tracing::error!(
+            action = "reconcile_skills_on_startup",
+            "could not determine agent_host user-skill state; skipping startup skill \
+             reconcile (will retry on next apply)"
+        );
+        return;
+    };
+
+    let mut performed: Vec<StagedSkillOp> = Vec::new();
+    for skill in &document.spec.skills {
+        let result = match host_user.get(&skill.id) {
+            None => state
+                .agent_host
+                .create_skill(&skill.id, &skill.files)
+                .await
+                .map(|_| Some(StagedSkillOp::Created(skill.id.clone()))),
+            Some(existing) if existing != &skill.files => state
+                .agent_host
+                .update_skill(&skill.id, &skill.files)
+                .await
+                .map(|_| Some(StagedSkillOp::Updated(skill.id.clone(), existing.clone()))),
+            Some(_) => Ok(None),
+        };
+        match result {
+            Ok(Some(op)) => performed.push(op),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(
+                    action = "reconcile_skills_on_startup",
+                    skill_id = %skill.id,
+                    error = %error,
+                    "failed to materialize skill during startup reconcile; compensating"
+                );
+                compensate_skills(state, &performed).await;
+                return;
+            }
+        }
+    }
+
+    let desired: BTreeSet<&str> = document
+        .spec
+        .skills
+        .iter()
+        .map(|skill| skill.id.as_str())
+        .collect();
+    for (id, files) in &host_user {
+        if desired.contains(id.as_str()) {
+            continue;
+        }
+        if let Err(error) = state.agent_host.delete_skill(id).await {
+            tracing::error!(
+                action = "reconcile_skills_on_startup",
+                skill_id = %id,
+                error = %error,
+                "failed to remove stale skill during startup reconcile; compensating"
+            );
+            compensate_skills(state, &performed).await;
+            return;
+        }
+        performed.push(StagedSkillOp::Deleted(id.clone(), files.clone()));
+    }
+
+    tracing::info!(
+        action = "reconcile_skills_on_startup",
+        reconciled = performed.len(),
+        "startup skill reconcile complete"
+    );
+}
+
+async fn agent_host_user_skills_with_retries(
+    state: &AppState,
+) -> Option<BTreeMap<String, BTreeMap<String, String>>> {
+    for attempt in 1..=GATEWAY_AUTOSTART_ATTEMPTS {
+        match agent_host_user_skills(state).await {
+            Ok(map) => return Some(map),
+            Err(error) if attempt < GATEWAY_AUTOSTART_ATTEMPTS => {
+                tracing::warn!(
+                    action = "reconcile_skills_on_startup",
+                    attempt,
+                    error = %error.detail,
+                    retry_delay_ms = GATEWAY_AUTOSTART_RETRY_DELAY.as_millis(),
+                    "could not determine agent_host user-skill state; retrying"
+                );
+                sleep(GATEWAY_AUTOSTART_RETRY_DELAY).await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    action = "reconcile_skills_on_startup",
+                    attempt,
+                    error = %error.detail,
+                    "could not determine agent_host user-skill state"
+                );
+                return None;
+            }
+        }
+    }
+    None
+}
+
+/// Reconcile skills and gateways to the desired `ConfigDocument` on startup.
+///
+/// Both reconcilers run under a single acquisition of the apply lock so they
+/// never race a concurrent apply or interactive mutation.
+pub async fn reconcile_on_startup(state: AppState) {
+    let _guard = state.apply_lock.lock().await;
+    reconcile_skills_locked(&state).await;
+    reconcile_gateways_locked(&state).await;
+}
+
 async fn start_gateway_by_id(
     state: &AppState,
     gateway_id: &str,
     failure_mode: GatewayStartFailureMode,
 ) -> Result<Value, ApiError> {
     let mut gateway = require_gateway(state, gateway_id)?;
+    let env = config::resolver::resolve_gateway_env(&state.config_state, gateway_id)
+        .map_err(resolve_error_to_api)?;
     "starting".clone_into(&mut gateway.status);
     gateway.last_error = None;
-    gateway.updated_at = utc_now();
-    state.gateways.update(gateway.clone())?;
-    let env = gateway.effective_env();
+    state.gateways.set_runtime_status(
+        gateway_id,
+        &gateway.status,
+        gateway.last_error.clone(),
+        gateway.container_name.clone(),
+    );
     tracing::info!(
         action = "start_gateway_by_id",
         gateway_id = %gateway_id,
@@ -1958,8 +2495,12 @@ async fn start_gateway_by_id(
     match create_agent_host_gateway(state, &gateway, &env).await {
         Ok(response) => {
             apply_gateway_start_response(&mut gateway, &response);
-            gateway.updated_at = utc_now();
-            state.gateways.update(gateway.clone())?;
+            state.gateways.set_runtime_status(
+                gateway_id,
+                &gateway.status,
+                gateway.last_error.clone(),
+                gateway.container_name.clone(),
+            );
             tracing::info!(
                 action = "start_gateway_by_id",
                 gateway_id = %gateway_id,
@@ -1975,8 +2516,12 @@ async fn start_gateway_by_id(
             let detail = error.to_string();
             "error".clone_into(&mut gateway.status);
             gateway.last_error = Some(detail);
-            gateway.updated_at = utc_now();
-            state.gateways.update(gateway.clone())?;
+            state.gateways.set_runtime_status(
+                gateway_id,
+                &gateway.status,
+                gateway.last_error.clone(),
+                gateway.container_name.clone(),
+            );
             tracing::warn!(
                 action = "start_gateway_by_id",
                 gateway_id = %gateway_id,
@@ -2065,8 +2610,12 @@ async fn stop_gateway_by_id(state: &AppState, gateway_id: &str) -> Result<Value,
     }
     "stopped".clone_into(&mut gateway.status);
     gateway.container_name = None;
-    gateway.updated_at = utc_now();
-    state.gateways.update(gateway.clone())?;
+    state.gateways.set_runtime_status(
+        gateway_id,
+        &gateway.status,
+        gateway.last_error.clone(),
+        None,
+    );
     tracing::info!(
         action = "stop_gateway_by_id",
         gateway_id = %gateway_id,
@@ -2112,22 +2661,32 @@ fn session_env(
     state: &AppState,
     agent: &AgentRecord,
 ) -> Result<BTreeMap<String, String>, ApiError> {
+    let mut missing = Vec::new();
     let mut env = BTreeMap::new();
-    if let Some(config) = state.kernel_configs.get(agent.harness)? {
-        env.extend(parse_env_vars(&config.env_vars));
-    }
+    env.extend(
+        config::resolver::resolve_kernel_env(&state.config_state, agent.harness, &mut missing)
+            .map_err(resolve_error_to_api)?,
+    );
     if let Some(connection_id) = agent.connection_id.as_deref() {
         let connection = require_connection(state, connection_id)?;
-        env.insert("CONNECTION_URL".to_owned(), connection.url);
+        let resolved =
+            config::resolver::resolve_connection(&state.config_state, connection_id, &mut missing)
+                .map_err(resolve_error_to_api)?;
+        if let Some(url) = resolved.url {
+            env.insert("CONNECTION_URL".to_owned(), url);
+        }
         env.insert(
             "CONNECTION_API_FLAVOR".to_owned(),
             connection.api_flavor.as_str().to_owned(),
         );
-        if !connection.api_key.is_empty() {
-            env.insert("CONNECTION_API_KEY".to_owned(), connection.api_key);
+        if let Some(api_key) = resolved.api_key {
+            env.insert("CONNECTION_API_KEY".to_owned(), api_key);
         }
     }
-    env.extend(parse_env_vars(&agent.env_vars));
+    env.extend(
+        config::resolver::resolve_agent_env(&state.config_state, &agent.agent_id, &mut missing)
+            .map_err(resolve_error_to_api)?,
+    );
     env.insert("AGENTSPACE_AGENT_ID".to_owned(), agent.agent_id.clone());
     env.insert(
         "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
@@ -2138,19 +2697,61 @@ fn session_env(
             .cloned()
             .unwrap_or_else(|| DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL.to_owned()),
     );
-    if !agent.system_prompt.is_empty() {
-        env.insert(
-            "KERNEL_SYSTEM_PROMPT".to_owned(),
-            agent.system_prompt.clone(),
-        );
+    let system_prompt = config::resolver::resolve_agent_system_prompt(
+        &state.config_state,
+        &agent.agent_id,
+        &mut missing,
+    )
+    .map_err(resolve_error_to_api)?
+    // Fall back to the record's literal prompt for installation-owned agents
+    // (e.g. the synthesized Git Agent reviewer) that are not authored into the
+    // desired document.
+    .or_else(|| {
+        if agent.system_prompt.is_empty() {
+            None
+        } else {
+            Some(agent.system_prompt.clone())
+        }
+    });
+    if let Some(system_prompt) = system_prompt
+        && !system_prompt.is_empty()
+    {
+        env.insert("KERNEL_SYSTEM_PROMPT".to_owned(), system_prompt);
     }
+
+    // Inject the resolved Git Agent discovery URLs so runtime agents reach the
+    // authored (and possibly secret-backed) endpoints. These take precedence
+    // over the static AGENT_HOST_GITAGENT_* process vars in agent_host, and
+    // because they are resolved at session-create time a secret rotation or
+    // config apply takes effect on the next session. When no Git Agent is
+    // authored, nothing is injected and agent_host falls back to its defaults.
+    match config::resolver::resolve_git_agent(&state.config_state) {
+        Ok(Some(git_agent)) => {
+            if let Some(remote_url) = git_agent.remote_url {
+                env.insert("GITAGENT_REMOTE_URL".to_owned(), remote_url);
+            }
+            if let Some(patch_url) = git_agent.patch_url {
+                env.insert("GITAGENT_PATCH_URL".to_owned(), patch_url);
+            }
+            if let Some(default_branch) = git_agent.default_branch {
+                env.insert("GITAGENT_DEFAULT_BRANCH".to_owned(), default_branch);
+            }
+        }
+        Ok(None) => {}
+        Err(ResolveError::Missing(mut git_missing)) => missing.append(&mut git_missing),
+        Err(err) => return Err(resolve_error_to_api(err)),
+    }
+
+    if !missing.is_empty() {
+        return Err(resolve_error_to_api(ResolveError::Missing(missing)));
+    }
+
     tracing::debug!(
         action = "session_env",
         agent_id = %agent.agent_id,
         harness = agent.harness.as_str(),
         env_var_count = env.len(),
         has_connection = agent.connection_id.is_some(),
-        has_system_prompt = !agent.system_prompt.is_empty(),
         "session environment prepared"
     );
     Ok(env)
@@ -3068,7 +3669,7 @@ fn get_or_init_git_agent_config(state: &AppState) -> Result<GitAgentConfigRecord
         return Ok(config);
     }
     let config = GitAgentConfigRecord::new_default();
-    state.git_agent_config.upsert(config).map_err(Into::into)
+    state.git_agent_config.upsert(&config).map_err(Into::into)
 }
 
 fn apply_git_agent_config_update(
@@ -3105,14 +3706,8 @@ fn apply_git_agent_config_update(
     }
     if let Some(review_agent_id) = payload.review_agent_id {
         validate_agent_id(&review_agent_id)?;
-        if review_agent_id == DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
-            ensure_git_agent_review_agent(state, &review_agent_id)?;
-        } else {
-            require_agent(state, &review_agent_id)?;
-        }
+        require_agent(state, &review_agent_id)?;
         config.review_agent_id = review_agent_id;
-    } else if config.review_agent_id == DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
-        ensure_git_agent_review_agent(state, &config.review_agent_id)?;
     } else {
         require_agent(state, &config.review_agent_id)?;
     }
@@ -3120,28 +3715,6 @@ fn apply_git_agent_config_update(
         config.validation_command = validation_command;
     }
     Ok(())
-}
-
-fn ensure_git_agent_review_agent(state: &AppState, agent_id: &str) -> Result<(), ApiError> {
-    if agent_id != DEFAULT_GIT_AGENT_REVIEW_AGENT_ID || state.agents.get(agent_id)?.is_some() {
-        return Ok(());
-    }
-    state.agents.insert(default_git_agent_review_agent())?;
-    tracing::info!(
-        action = "ensure_git_agent_review_agent",
-        agent_id,
-        "created default git agent reviewer"
-    );
-    Ok(())
-}
-
-fn default_git_agent_review_agent() -> AgentRecord {
-    AgentRecord::new(
-        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID,
-        "Git Agent Reviewer",
-        HarnessName::Acp,
-        "Review submitted patches for correctness, safety, and repository policy before GitAgent commits them.",
-    )
 }
 
 fn validate_git_branch(value: &str) -> Result<(), ApiError> {
@@ -3197,6 +3770,18 @@ fn require_agent(state: &AppState, agent_id: &str) -> Result<AgentRecord, ApiErr
         .agents
         .get(agent_id)?
         .ok_or_else(|| ApiError::not_found(format!("agent {agent_id:?} not found")))
+}
+
+/// Reject mutations targeting the reserved, installation-owned Git Agent
+/// reviewer id, which is synthesized on demand and never authored by users.
+fn reject_reserved_agent_id(agent_id: &str) -> Result<(), ApiError> {
+    if agent_id == DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
+        return Err(ApiError::conflict(format!(
+            "agent id {agent_id:?} is reserved for the installation-owned Git Agent reviewer and \
+             cannot be created, modified, or deleted"
+        )));
+    }
+    Ok(())
 }
 
 fn require_connection(state: &AppState, connection_id: &str) -> Result<ConnectionRecord, ApiError> {
@@ -3465,10 +4050,887 @@ where
         .map(|value| value.map_or(NullableStringField::Null, NullableStringField::Value))
 }
 
+const CONFIG_YAML_CONTENT_TYPE: &str = "application/yaml";
+
+#[derive(Debug, Deserialize)]
+struct ExportQuery {
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSecretRequest {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SetSecretValueRequest {
+    value: String,
+}
+
+fn yaml_response(filename: &str, bytes: Vec<u8>) -> Result<Response, ApiError> {
+    let mut response = (StatusCode::OK, bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(CONFIG_YAML_CONTENT_TYPE),
+    );
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    let value = HeaderValue::from_str(&disposition)
+        .map_err(|error| ApiError::internal(format!("invalid content-disposition: {error}")))?;
+    headers.insert(header::CONTENT_DISPOSITION, value);
+    Ok(response)
+}
+
+fn bundle_response(filename: &str, bytes: Vec<u8>) -> Result<Response, ApiError> {
+    let mut response = (StatusCode::OK, bytes).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/zip"),
+    );
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    let value = HeaderValue::from_str(&disposition)
+        .map_err(|error| ApiError::internal(format!("invalid content-disposition: {error}")))?;
+    headers.insert(header::CONTENT_DISPOSITION, value);
+    Ok(response)
+}
+
+async fn export_config(
+    State(state): State<AppState>,
+    Query(query): Query<ExportQuery>,
+) -> Result<Response, ApiError> {
+    match query.mode.as_deref() {
+        Some("canonical") => {
+            let bytes = to_canonical_yaml(&state.config_state.active())?.into_bytes();
+            yaml_response("agentspace-config.canonical.yaml", bytes)
+        }
+        None | Some("source") => {
+            let (bytes, kind) = state.config_state.source_export()?;
+            match kind {
+                SourceKind::Bundle => bundle_response("agentspace-config.zip", bytes),
+                SourceKind::Yaml => yaml_response("agentspace-config.yaml", bytes),
+            }
+        }
+        Some(other) => Err(ApiError::unprocessable(format!(
+            "unsupported export mode {other:?}; expected \"source\" or \"canonical\""
+        ))),
+    }
+}
+
+fn spec_without<T: Serialize>(value: &T, drop_key: &str) -> Result<serde_yaml_ng::Value, ApiError> {
+    let mut value = serde_yaml_ng::to_value(value)
+        .map_err(|error| ApiError::internal(format!("failed to serialize resource: {error}")))?;
+    if let serde_yaml_ng::Value::Mapping(map) = &mut value {
+        map.remove(serde_yaml_ng::Value::String(drop_key.to_owned()));
+    }
+    Ok(value)
+}
+
+fn standalone_manifest(
+    kind: &str,
+    name: &str,
+    spec: serde_yaml_ng::Value,
+) -> Result<Vec<u8>, ApiError> {
+    use serde_yaml_ng::Value;
+    let mut metadata = serde_yaml_ng::Mapping::new();
+    metadata.insert(
+        Value::String("name".to_owned()),
+        Value::String(name.to_owned()),
+    );
+    let mut root = serde_yaml_ng::Mapping::new();
+    root.insert(
+        Value::String("apiVersion".to_owned()),
+        Value::String(config::document::API_VERSION.to_owned()),
+    );
+    root.insert(
+        Value::String("kind".to_owned()),
+        Value::String(kind.to_owned()),
+    );
+    root.insert(
+        Value::String("metadata".to_owned()),
+        Value::Mapping(metadata),
+    );
+    root.insert(Value::String("spec".to_owned()), spec);
+    let text = serde_yaml_ng::to_string(&Value::Mapping(root))
+        .map_err(|error| ApiError::internal(format!("failed to serialize manifest: {error}")))?;
+    Ok(text.into_bytes())
+}
+
+async fn export_config_resource(
+    State(state): State<AppState>,
+    Path((kind, name)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let document = state.config_state.active();
+    let missing = || {
+        ApiError::not_found(format!(
+            "{kind}/{name} was not found in the config document"
+        ))
+    };
+    let (manifest_kind, spec) = match kind.as_str() {
+        "secret" => {
+            let item = document
+                .spec
+                .secrets
+                .iter()
+                .find(|item| item.name.as_str() == name)
+                .ok_or_else(missing)?;
+            ("SecretDeclaration", spec_without(item, "name")?)
+        }
+        "kernel-config" => {
+            let item = document
+                .spec
+                .kernel_configs
+                .iter()
+                .find(|item| item.harness.as_str() == name)
+                .ok_or_else(missing)?;
+            ("KernelConfig", spec_without(item, "harness")?)
+        }
+        "connection" => {
+            let item = document.connection(&name).ok_or_else(missing)?;
+            ("Connection", spec_without(item, "id")?)
+        }
+        "skill" => {
+            let item = document
+                .spec
+                .skills
+                .iter()
+                .find(|item| item.id == name)
+                .ok_or_else(missing)?;
+            ("Skill", spec_without(item, "id")?)
+        }
+        "agent" => {
+            let item = document
+                .spec
+                .agents
+                .iter()
+                .find(|item| item.id == name)
+                .ok_or_else(missing)?;
+            ("Agent", spec_without(item, "id")?)
+        }
+        "gateway" => {
+            let item = document.gateway(&name).ok_or_else(missing)?;
+            ("Gateway", spec_without(item, "id")?)
+        }
+        "git-agent-config" => {
+            let item = document.spec.git_agent.as_ref().ok_or_else(missing)?;
+            let spec = serde_yaml_ng::to_value(item).map_err(|error| {
+                ApiError::internal(format!("failed to serialize resource: {error}"))
+            })?;
+            ("GitAgentConfig", spec)
+        }
+        other => {
+            return Err(ApiError::not_found(format!(
+                "unknown resource kind {other:?}"
+            )));
+        }
+    };
+    let bytes = standalone_manifest(manifest_kind, &name, spec)?;
+    yaml_response(&format!("{kind}-{name}.yaml"), bytes)
+}
+
+async fn validate_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let kind = source_kind_from_headers(&headers);
+    let builtins = builtin_skill_ids(&state).await;
+    let unset = state.config_state.validate_source(&body, kind, &builtins)?;
+    tracing::info!(
+        route = "/config/validate",
+        action = "validate_config",
+        source_kind = kind.as_str(),
+        "api handler completed"
+    );
+    Ok(Json(json!({ "valid": true, "unset_secrets": unset })))
+}
+
+async fn plan_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let kind = source_kind_from_headers(&headers);
+    let builtins = builtin_skill_ids(&state).await;
+    let (plan, unset) = state.config_state.plan_source(&body, kind, &builtins)?;
+    tracing::info!(
+        route = "/config/plan",
+        action = "plan_config",
+        source_kind = kind.as_str(),
+        "api handler completed"
+    );
+    Ok(Json(json!({
+        "plan": plan.to_json(),
+        "unset_secrets": unset,
+        // Callers may pass this back as `If-Match` to `/config/apply` for an
+        // optimistic-concurrency check.
+        "active_generation": state.config_state.active_generation(),
+    })))
+}
+
+async fn apply_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let kind = source_kind_from_headers(&headers);
+    let expected_generation = parse_if_match_generation(&headers)?;
+    let builtins = builtin_skill_ids(&state).await;
+
+    // Serialize the whole apply (prepare → stage skills → commit → reconcile
+    // gateways) so two applies cannot interleave reconciliation.
+    let _apply_guard = state.apply_lock.lock().await;
+
+    let prepared = state
+        .config_state
+        .prepare(&body, kind, &builtins, expected_generation)?;
+
+    // Stage every changed user skill in agent_host BEFORE the snapshot is
+    // activated, so a fully-successful apply is never reported while agent_host
+    // is stale. If staging fails, the snapshot is never committed and staged
+    // skills are compensated back to their prior agent_host state.
+    let mut reconciliation = Reconciliation::default();
+    let staged = match stage_skills(&state, &prepared, &mut reconciliation).await {
+        Ok(staged) => staged,
+        Err(error) => return Err(error),
+    };
+
+    let outcome = match state.config_state.commit(prepared.clone()) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // Commit failed after skills were staged; restore agent_host to the
+            // state it had before staging so it does not drift from the still
+            // active document.
+            compensate_skills(&state, &staged).await;
+            return Err(error.into());
+        }
+    };
+
+    reconcile_gateways(&state, &outcome, &mut reconciliation).await;
+
+    tracing::info!(
+        route = "/config/apply",
+        action = "apply_config",
+        generation = outcome.snapshot.generation,
+        change_count = outcome.plan.entries.len(),
+        source_kind = kind.as_str(),
+        reconcile_failures = reconciliation.failures.len(),
+        "configuration applied"
+    );
+    Ok(Json(json!({
+        "generation": outcome.snapshot.generation,
+        "source_sha256": outcome.snapshot.source_sha256,
+        "semantic_sha256": outcome.snapshot.semantic_sha256,
+        "plan": outcome.plan.to_json(),
+        "unset_secrets": outcome.unset_secrets,
+        "reconciliation": reconciliation.to_json(),
+    })))
+}
+
+/// Parse an optional `If-Match` header carrying the expected active generation
+/// for an optimistic-concurrency apply. Accepts a bare integer or a quoted `ETag`.
+fn parse_if_match_generation(headers: &HeaderMap) -> Result<Option<i64>, ApiError> {
+    let Some(value) = headers.get(header::IF_MATCH) else {
+        return Ok(None);
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| ApiError::unprocessable("If-Match header is not valid text".to_owned()))?
+        .trim()
+        .trim_matches('"');
+    if raw.is_empty() || raw == "*" {
+        return Ok(None);
+    }
+    let generation = raw.parse::<i64>().map_err(|_| {
+        ApiError::unprocessable(format!(
+            "If-Match must be the expected integer generation, got {raw:?}"
+        ))
+    })?;
+    Ok(Some(generation))
+}
+
+/// Determine the source kind of a `/config/apply` body from its content type.
+fn source_kind_from_headers(headers: &HeaderMap) -> SourceKind {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if content_type.contains("zip") || content_type.contains("octet-stream") {
+        SourceKind::Bundle
+    } else {
+        SourceKind::Yaml
+    }
+}
+
+/// Extract the inline file map from an `agent_host` skill JSON object.
+fn skill_files_from_object(object: &JsonObject) -> BTreeMap<String, String> {
+    object
+        .get("files")
+        .and_then(Value::as_object)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|(name, value)| {
+                    value.as_str().map(|text| (name.clone(), text.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Build a deterministic ZIP archive from an authored skill's inline files so a
+/// user skill can be downloaded straight from the `ConfigDocument`.
+fn zip_skill_files(files: &BTreeMap<String, String>) -> Result<Vec<u8>, ApiError> {
+    use std::io::Write as _;
+
+    let mut buffer = Vec::new();
+    {
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buffer));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(
+                zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0)
+                    .unwrap_or_else(|_| zip::DateTime::default()),
+            );
+        for (name, contents) in files {
+            writer.start_file(name, options).map_err(|error| {
+                ApiError::internal(format!("could not encode skill zip: {error}"))
+            })?;
+            writer.write_all(contents.as_bytes()).map_err(|error| {
+                ApiError::internal(format!("could not write skill zip: {error}"))
+            })?;
+        }
+        writer.finish().map_err(|error| {
+            ApiError::internal(format!("could not finalize skill zip: {error}"))
+        })?;
+    }
+    Ok(buffer)
+}
+
+/// Validate that every skill referenced by an agent resolves to either a user
+/// skill declared in the document or an installation-owned builtin.
+///
+/// The builtin set is sourced from `agent_host`. When `agent_host` is
+/// unreachable the builtin set is unknowable, so a reference that is not in the
+/// document is accepted here and deferred to the authoritative apply/validate
+/// gate rather than blocking an interactive edit on a transient outage.
+async fn validate_agent_skill_refs(state: &AppState, skills: &[String]) -> Result<(), ApiError> {
+    if skills.is_empty() {
+        return Ok(());
+    }
+    let builtins = match state.agent_host.list_skills().await {
+        Ok(entries) => entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source| source == "builtin")
+            })
+            .filter_map(|entry| {
+                entry
+                    .get("skill_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect::<BTreeSet<String>>(),
+        Err(error) => {
+            tracing::warn!(
+                action = "validate_agent_skill_refs",
+                error_kind = "agent_host_error",
+                error = %error,
+                "could not list builtin skills; deferring skill-reference validation to apply"
+            );
+            return Ok(());
+        }
+    };
+    for skill_id in skills {
+        let in_document = config::adapter::skill_exists(&state.config_state, skill_id)?;
+        if !in_document && !builtins.contains(skill_id) {
+            return Err(ApiError::unprocessable(format!(
+                "agent references unknown skill {skill_id:?}; it is neither a declared user skill \
+                 nor an installation-owned builtin"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Return the id of an authored agent that references `skill_id`, if any.
+fn agent_referencing_skill(state: &AppState, skill_id: &str) -> Option<String> {
+    let document = state.config_state.active();
+    document
+        .spec
+        .agents
+        .iter()
+        .find(|agent| agent.skills.iter().any(|skill| skill == skill_id))
+        .map(|agent| agent.id.clone())
+}
+
+/// Collect installation-owned builtin skill IDs from `agent_host` so agents may
+/// reference them without declaring them in the config document. Typos in
+/// non-builtin skill references still fail validation.
+///
+/// If `agent_host` is unreachable the builtin set cannot be determined; a
+/// warning is logged and an empty set is returned, which conservatively rejects
+/// unknown skill references rather than accepting them blindly.
+async fn builtin_skill_ids(state: &AppState) -> BTreeSet<String> {
+    match state.agent_host.list_skills().await {
+        Ok(skills) => skills
+            .into_iter()
+            .filter(|skill| {
+                skill
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .is_some_and(|source| source == "builtin")
+            })
+            .filter_map(|skill| {
+                skill
+                    .get("skill_id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(
+                action = "builtin_skill_ids",
+                error_kind = "agent_host_error",
+                error = %error,
+                "could not list builtin skills; treating builtin set as empty"
+            );
+            BTreeSet::new()
+        }
+    }
+}
+
+/// Result of reconciling `agent_host` after a full-document apply.
+#[derive(Default)]
+struct Reconciliation {
+    skills: Vec<String>,
+    gateways: Vec<String>,
+    failures: Vec<ReconcileFailure>,
+}
+
+struct ReconcileFailure {
+    resource: String,
+    detail: String,
+}
+
+impl Reconciliation {
+    fn fail(&mut self, resource: impl Into<String>, detail: impl Into<String>) {
+        self.failures.push(ReconcileFailure {
+            resource: resource.into(),
+            detail: detail.into(),
+        });
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "ok": self.failures.is_empty(),
+            "reconciled_skills": self.skills,
+            "reconciled_gateways": self.gateways,
+            "failures": self
+                .failures
+                .iter()
+                .map(|failure| json!({
+                    "resource": failure.resource,
+                    "detail": failure.detail,
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// Stage every changed user skill in `agent_host` from the prepared replacement
+/// document, using the plan so unchanged skills are never rewritten. On any
+/// failure the already-staged operations are compensated back to the previously
+/// active skill set and an error is returned so the apply aborts before the
+/// snapshot is committed.
+/// A skill mutation staged in `agent_host`, recorded so it can be reverted if a
+/// later step of the apply fails.
+enum StagedSkillOp {
+    Created(String),
+    Updated(String, BTreeMap<String, String>),
+    Deleted(String, BTreeMap<String, String>),
+}
+
+/// Reconcile `agent_host` user skills to the prepared replacement document
+/// BEFORE the snapshot is activated. Every user skill in the document is
+/// created or updated (unchanged skills are compared and skipped so they are
+/// never rewritten), and user skills present in `agent_host` but absent from the
+/// document are removed. On any failure the already-staged operations are
+/// compensated back to their prior state and an error is returned so the apply
+/// aborts before the snapshot is committed. Builtin skills are never touched.
+async fn stage_skills(
+    state: &AppState,
+    prepared: &config::state::PreparedApply,
+    reconciliation: &mut Reconciliation,
+) -> Result<Vec<StagedSkillOp>, ApiError> {
+    let host_user = match agent_host_user_skills(state).await {
+        Ok(map) => map,
+        Err(error) => {
+            // The upstream user-skill state is unknown. We cannot safely compute
+            // orphan removals (or even confirm nothing needs staging) without a
+            // listing, so we must NOT commit a "successful" apply. Fail even when
+            // the desired list is empty rather than silently proceeding and
+            // leaving agent_host in an unknown/stale state.
+            return Err(error);
+        }
+    };
+    let mut performed: Vec<StagedSkillOp> = Vec::new();
+
+    for skill in &prepared.document.spec.skills {
+        let result = match host_user.get(&skill.id) {
+            None => state
+                .agent_host
+                .create_skill(&skill.id, &skill.files)
+                .await
+                .map(|_| Some(StagedSkillOp::Created(skill.id.clone()))),
+            Some(existing) if existing != &skill.files => state
+                .agent_host
+                .update_skill(&skill.id, &skill.files)
+                .await
+                .map(|_| Some(StagedSkillOp::Updated(skill.id.clone(), existing.clone()))),
+            Some(_) => Ok(None),
+        };
+        match result {
+            Ok(Some(op)) => {
+                reconciliation.skills.push(skill.id.clone());
+                performed.push(op);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                compensate_skills(state, &performed).await;
+                return Err(ApiError::bad_gateway(format!(
+                    "failed to materialize skill {:?} in agent_host; apply aborted and staged \
+                     skills were rolled back: {error}",
+                    skill.id
+                )));
+            }
+        }
+    }
+
+    let desired: BTreeSet<&str> = prepared
+        .document
+        .spec
+        .skills
+        .iter()
+        .map(|skill| skill.id.as_str())
+        .collect();
+    for (id, files) in &host_user {
+        if desired.contains(id.as_str()) {
+            continue;
+        }
+        if let Err(error) = state.agent_host.delete_skill(id).await {
+            compensate_skills(state, &performed).await;
+            return Err(ApiError::bad_gateway(format!(
+                "failed to remove stale skill {id:?} from agent_host; apply aborted and staged \
+                 skills were rolled back: {error}"
+            )));
+        }
+        reconciliation.skills.push(id.clone());
+        performed.push(StagedSkillOp::Deleted(id.clone(), files.clone()));
+    }
+
+    Ok(performed)
+}
+
+/// Collect the current user-sourced skills from `agent_host` as an id → files
+/// map. Builtin skills are excluded because they are installation-owned.
+///
+/// The list endpoint returns only summaries (which in production omit file
+/// contents), so the full files for every user skill are fetched with
+/// `GET /skills/{id}` before comparison/staging/compensation. A summary that
+/// lacks files is never treated as an empty skill, which would otherwise cause
+/// spurious rewrites or destructive comparisons.
+async fn agent_host_user_skills(
+    state: &AppState,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, ApiError> {
+    let listed = state.agent_host.list_skills().await.map_err(|error| {
+        ApiError::bad_gateway(format!(
+            "could not list agent_host skills to reconcile the apply: {error}"
+        ))
+    })?;
+    let mut user_ids = Vec::new();
+    for skill in listed {
+        let is_builtin = skill
+            .get("source")
+            .and_then(Value::as_str)
+            .is_some_and(|source| source == "builtin");
+        if is_builtin {
+            continue;
+        }
+        if let Some(id) = skill.get("skill_id").and_then(Value::as_str) {
+            user_ids.push(id.to_owned());
+        }
+    }
+    let mut user = BTreeMap::new();
+    for id in user_ids {
+        let detail = state.agent_host.get_skill(&id).await.map_err(|error| {
+            ApiError::bad_gateway(format!(
+                "could not fetch skill {id:?} details from agent_host to reconcile the apply: \
+                 {error}"
+            ))
+        })?;
+        let files = detail.get("files").and_then(Value::as_object).ok_or_else(|| {
+            ApiError::bad_gateway(format!(
+                "agent_host skill {id:?} details did not include a files map; refusing to treat \
+                 it as empty"
+            ))
+        })?;
+        let files = files
+            .iter()
+            .filter_map(|(name, value)| value.as_str().map(|text| (name.clone(), text.to_owned())))
+            .collect::<BTreeMap<String, String>>();
+        user.insert(id, files);
+    }
+    Ok(user)
+}
+
+/// Best-effort revert of previously staged skill operations after a staging or
+/// commit failure, restoring `agent_host` to the state it had before staging.
+async fn compensate_skills(state: &AppState, performed: &[StagedSkillOp]) {
+    for op in performed.iter().rev() {
+        let restore = match op {
+            StagedSkillOp::Created(id) => state.agent_host.delete_skill(id).await,
+            StagedSkillOp::Updated(id, files) => {
+                state.agent_host.update_skill(id, files).await.map(|_| ())
+            }
+            StagedSkillOp::Deleted(id, files) => {
+                state.agent_host.create_skill(id, files).await.map(|_| ())
+            }
+        };
+        if let Err(error) = restore {
+            let id = match op {
+                StagedSkillOp::Created(id)
+                | StagedSkillOp::Updated(id, _)
+                | StagedSkillOp::Deleted(id, _) => id,
+            };
+            tracing::warn!(
+                action = "compensate_skills",
+                skill_id = %id,
+                error = %error,
+                "failed to compensate a staged skill after an aborted apply"
+            );
+        }
+    }
+}
+/// Reconcile gateway containers to the applied document. Start/stop transitions
+/// are driven by the plan, so a no-op or unrelated apply never restarts an
+/// unchanged gateway. Any `agent_host` gateway absent from the applied document
+/// is destroyed (orphan removal), which also covers plan deletions. Per-resource
+/// failures are reported (not silently swallowed).
+async fn reconcile_gateways(
+    state: &AppState,
+    outcome: &config::state::ApplyOutcome,
+    result: &mut Reconciliation,
+) {
+    let document = outcome.document.as_ref();
+    let upstream_gateways = match state.agent_host.list_gateways().await {
+        Ok(list) => list
+            .iter()
+            .filter_map(|gateway| gateway.get("gateway_id").and_then(Value::as_str))
+            .map(ToOwned::to_owned)
+            .collect::<BTreeSet<String>>(),
+        Err(error) => {
+            result.fail("gateways", error.to_string());
+            BTreeSet::new()
+        }
+    };
+
+    // Destroy every upstream gateway that is no longer present in the applied
+    // document (covers both plan deletions and orphans left in agent_host).
+    let desired: BTreeSet<&str> = document
+        .spec
+        .gateways
+        .iter()
+        .map(|gateway| gateway.id.as_str())
+        .collect();
+    for id in &upstream_gateways {
+        if desired.contains(id.as_str()) {
+            continue;
+        }
+        if let Err(error) = state.agent_host.destroy_gateway(id).await {
+            result.fail(format!("gateway/{id}"), error.to_string());
+        } else {
+            result.gateways.push(id.clone());
+        }
+    }
+
+    for entry in &outcome.plan.entries {
+        if entry.kind != "gateway" {
+            continue;
+        }
+        match entry.action {
+            config::plan::PlanAction::Create | config::plan::PlanAction::Update => {
+                let Some(gateway) = document.gateway(&entry.id) else {
+                    continue;
+                };
+                if gateway.enabled {
+                    match start_gateway_by_id(
+                        state,
+                        &gateway.id,
+                        GatewayStartFailureMode::Propagate,
+                    )
+                    .await
+                    {
+                        Ok(_) => result.gateways.push(gateway.id.clone()),
+                        Err(error) => {
+                            result.fail(format!("gateway/{}", gateway.id), error.detail.clone());
+                        }
+                    }
+                } else if upstream_gateways.contains(&gateway.id) {
+                    match stop_gateway_by_id(state, &gateway.id).await {
+                        Ok(_) => result.gateways.push(gateway.id.clone()),
+                        Err(error) => {
+                            result.fail(format!("gateway/{}", gateway.id), error.detail.clone());
+                        }
+                    }
+                }
+            }
+            config::plan::PlanAction::Delete | config::plan::PlanAction::NoOp => {}
+        }
+    }
+}
+
+async fn list_secrets(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let document = state.config_state.active();
+    let secrets = state.config_state.secrets();
+    let mut out = Vec::new();
+    for declaration in &document.spec.secrets {
+        let name = declaration.name.as_str();
+        let is_set = secrets.is_set(name)?;
+        let references = state.config_state.secret_reference_fields(name);
+        let reference_count = references.len();
+        out.push(json!({
+            "name": name,
+            "description": declaration.description,
+            "is_set": is_set,
+            "references": references,
+            "reference_count": reference_count,
+        }));
+    }
+    tracing::info!(
+        route = "/secrets",
+        action = "list_secrets",
+        secret_count = out.len(),
+        "api handler completed"
+    );
+    Ok(Json(Value::Array(out)))
+}
+
+async fn create_secret(
+    State(state): State<AppState>,
+    Json(payload): Json<CreateSecretRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let name = SecretName::new(payload.name.clone())
+        .map_err(|error| ApiError::unprocessable(error.to_string()))?;
+    let declaration = SecretDeclaration {
+        name: name.clone(),
+        description: payload.description.clone(),
+    };
+    let created = state.config_state.declare_secret(declaration)?;
+    if !created {
+        return Err(ApiError::conflict(format!(
+            "secret {} is already declared",
+            name.as_str()
+        )));
+    }
+    tracing::info!(
+        route = "/secrets",
+        action = "create_secret",
+        secret_name = name.as_str(),
+        "api handler completed"
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "name": name.as_str(),
+            "description": payload.description,
+            "is_set": false,
+            "references": Vec::<String>::new(),
+            "reference_count": 0,
+        })),
+    ))
+}
+
+async fn delete_secret(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    match state.config_state.undeclare_secret(&name)? {
+        config::state::SecretRemoval::Removed => {
+            tracing::info!(
+                route = "/secrets/:name",
+                action = "delete_secret",
+                secret_name = %name,
+                "api handler completed"
+            );
+            Ok(StatusCode::NO_CONTENT)
+        }
+        config::state::SecretRemoval::NotDeclared => Err(ApiError::not_found(format!(
+            "secret {name} is not declared"
+        ))),
+        config::state::SecretRemoval::ValueSet => Err(ApiError::conflict(format!(
+            "secret {name} has a value set; clear the value before deleting the declaration"
+        ))),
+        config::state::SecretRemoval::Referenced(references) => Err(ApiError::conflict(format!(
+            "secret {name} is referenced by {} field(s)",
+            references.len()
+        ))
+        .with_extra(json!({ "references": references }))),
+    }
+}
+
+async fn set_secret_value(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Json(payload): Json<SetSecretValueRequest>,
+) -> Result<StatusCode, ApiError> {
+    let declared = state.config_state.set_secret_value(&name, &payload.value)?;
+    if !declared {
+        return Err(ApiError::not_found(format!(
+            "secret {name} must be declared before a value can be set"
+        )));
+    }
+    tracing::info!(
+        route = "/secrets/:name/value",
+        action = "set_secret_value",
+        secret_name = %name,
+        "api handler completed"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn clear_secret_value(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let removed = state.config_state.clear_secret_value(&name)?;
+    tracing::info!(
+        route = "/secrets/:name/value",
+        action = "clear_secret_value",
+        secret_name = %name,
+        removed,
+        "api handler completed"
+    );
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::not_found(format!(
+            "secret {name} has no value set"
+        )))
+    }
+}
+
 #[derive(Debug)]
 struct ApiError {
     status: StatusCode,
     detail: String,
+    extra: Option<Value>,
 }
 
 impl ApiError {
@@ -3476,6 +4938,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             detail,
+            extra: None,
         }
     }
 
@@ -3483,6 +4946,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             detail,
+            extra: None,
         }
     }
 
@@ -3490,6 +4954,7 @@ impl ApiError {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             detail,
+            extra: None,
         }
     }
 
@@ -3497,6 +4962,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_GATEWAY,
             detail,
+            extra: None,
         }
     }
 
@@ -3504,6 +4970,7 @@ impl ApiError {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
             detail,
+            extra: None,
         }
     }
 
@@ -3511,6 +4978,7 @@ impl ApiError {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,
             detail,
+            extra: None,
         }
     }
 
@@ -3518,6 +4986,7 @@ impl ApiError {
         Self {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             detail,
+            extra: None,
         }
     }
 
@@ -3525,7 +4994,22 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             detail,
+            extra: None,
         }
+    }
+
+    const fn not_implemented(detail: String) -> Self {
+        Self {
+            status: StatusCode::NOT_IMPLEMENTED,
+            detail,
+            extra: None,
+        }
+    }
+
+    #[must_use]
+    fn with_extra(mut self, extra: Value) -> Self {
+        self.extra = Some(extra);
+        self
     }
 
     fn error_kind(&self) -> &'static str {
@@ -3555,7 +5039,13 @@ impl IntoResponse for ApiError {
         } else {
             tracing::warn!(status = status.as_u16(), error_kind, "api error response");
         }
-        (status, Json(json!({ "detail": detail }))).into_response()
+        let mut body = json!({ "detail": detail });
+        if let (Some(Value::Object(extra)), Some(map)) = (self.extra, body.as_object_mut()) {
+            for (key, value) in extra {
+                map.insert(key, value);
+            }
+        }
+        (status, Json(body)).into_response()
     }
 }
 
@@ -3585,6 +5075,75 @@ impl From<StoreError> for ApiError {
     }
 }
 
+impl From<SecretStoreError> for ApiError {
+    fn from(error: SecretStoreError) -> Self {
+        Self::internal(error.to_string())
+    }
+}
+
+fn issue_json(issue: &ValidationIssue) -> Value {
+    json!({
+        "code": issue.code,
+        "detail": issue.detail,
+        "resource": issue.resource,
+        "field": issue.field,
+    })
+}
+
+impl From<ConfigError> for ApiError {
+    fn from(error: ConfigError) -> Self {
+        match error {
+            ConfigError::Validation { issues } => {
+                let detail = format!("configuration is invalid: {} issue(s)", issues.len());
+                let rendered: Vec<Value> = issues.iter().map(issue_json).collect();
+                Self::unprocessable(detail).with_extra(json!({ "issues": rendered }))
+            }
+            ConfigError::Parse { .. }
+            | ConfigError::UnsupportedApiVersion { .. }
+            | ConfigError::UnsupportedKind { .. }
+            | ConfigError::Bundle { .. }
+            | ConfigError::DuplicateResource { .. } => Self::unprocessable(error.to_string()),
+            ConfigError::UnsupportedBundle => Self::not_implemented(error.to_string()),
+            ConfigError::SecretDeclarationRemovalBlocked { ref names } => {
+                Self::conflict(error.to_string())
+                    .with_extra(json!({ "blocked_secrets": names.clone() }))
+            }
+            ConfigError::GenerationConflict { expected, actual } => {
+                Self::conflict(error.to_string()).with_extra(json!({
+                    "error": "generation_conflict",
+                    "expected_generation": expected,
+                    "active_generation": actual,
+                }))
+            }
+            ConfigError::Serialize { .. } | ConfigError::CanonicalDrift => {
+                Self::internal(error.to_string())
+            }
+        }
+    }
+}
+
+fn resolve_error_to_api(error: ResolveError) -> ApiError {
+    match error {
+        ResolveError::Missing(missing) => {
+            let names: BTreeSet<String> = missing.iter().map(|item| item.name.clone()).collect();
+            let detail = format!(
+                "cannot resolve configuration: {} secret value(s) are not set: {}",
+                names.len(),
+                names.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+            let rendered: Vec<Value> = missing
+                .iter()
+                .map(|item| json!({ "name": item.name, "field": item.field }))
+                .collect();
+            ApiError::conflict(detail).with_extra(json!({
+                "error": "secret_values_unset",
+                "missing_secrets": rendered,
+            }))
+        }
+        ResolveError::Store(error) => ApiError::internal(error.to_string()),
+    }
+}
+
 impl From<AgentHostError> for ApiError {
     fn from(error: AgentHostError) -> Self {
         match error {
@@ -3594,6 +5153,7 @@ impl From<AgentHostError> for ApiError {
             AgentHostError::HttpStatus { status, .. } if status.is_client_error() => Self {
                 status,
                 detail: format!("agent_host returned HTTP {status}"),
+                extra: None,
             },
             other => Self::bad_gateway(other.to_string()),
         }
@@ -3610,6 +5170,7 @@ impl From<GitAgentError> for ApiError {
             GitAgentError::HttpStatus { status, .. } if status.is_client_error() => Self {
                 status,
                 detail: format!("git_agent returned HTTP {status}"),
+                extra: None,
             },
             other => Self::bad_gateway(other.to_string()),
         }
@@ -3673,7 +5234,7 @@ mod tests {
         env.insert("CLIENT_SERVICE_TEST".to_owned(), "enabled".to_owned());
         let config = AppConfig::new("127.0.0.1", 0, agent_host_base_url, env);
         let agent_host = AgentHostClient::new(agent_host_base_url, timeout)?;
-        Ok(build_router(AppState::with_agent_host(config, agent_host)))
+        Ok(build_router(AppState::with_agent_host(config, agent_host)?))
     }
 
     fn test_router_with_connection_models_timeout(
@@ -3684,7 +5245,7 @@ mod tests {
         let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env)
             .with_connection_models_timeout(timeout);
         let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
-        Ok(build_router(AppState::with_agent_host(config, agent_host)))
+        Ok(build_router(AppState::with_agent_host(config, agent_host)?))
     }
 
     struct StreamingUpstream {
@@ -3921,6 +5482,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn info_redacts_secret_env_values() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let secret_key_value = "super-secret-master-key-value";
+        let internal_token_value = "internal-service-token-value";
+        let api_key_value = "sk-openai-connection-api-key";
+
+        let mut env = BTreeMap::new();
+        env.insert("CLIENT_SERVICE_TEST".to_owned(), "enabled".to_owned());
+        env.insert(
+            "CLIENT_SERVICE_SECRET_KEY".to_owned(),
+            secret_key_value.to_owned(),
+        );
+        env.insert(
+            "CLIENT_SERVICE_INTERNAL_TOKEN".to_owned(),
+            internal_token_value.to_owned(),
+        );
+        env.insert(
+            "CLIENT_SERVICE_OPENAI_API_KEY".to_owned(),
+            api_key_value.to_owned(),
+        );
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let app = build_router(AppState::with_agent_host(config, agent_host)?);
+
+        let (status, value) = get_json(app, "/info").await?;
+        assert_eq!(status, StatusCode::OK);
+
+        let env = &value["client_service"]["env"];
+        assert_eq!(env["CLIENT_SERVICE_TEST"], "enabled");
+        assert_eq!(env["CLIENT_SERVICE_SECRET_KEY"], "***redacted***");
+        assert_eq!(env["CLIENT_SERVICE_INTERNAL_TOKEN"], "***redacted***");
+        assert_eq!(env["CLIENT_SERVICE_OPENAI_API_KEY"], "***redacted***");
+
+        // The exact secret material must never appear anywhere in the response.
+        let serialized = serde_json::to_string(&value)?;
+        assert!(!serialized.contains(secret_key_value));
+        assert!(!serialized.contains(internal_token_value));
+        assert!(!serialized.contains(api_key_value));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn connection_routes_handle_crud_and_status_codes()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let app = test_router()?;
@@ -4025,7 +5628,6 @@ mod tests {
                 "agent_id": "agent-one",
                 "name": "Agent One",
                 "system_prompt": "help",
-                "skills": ["skill-a"],
                 "env_vars": "A=B",
                 "connection_id": "missing",
             })),

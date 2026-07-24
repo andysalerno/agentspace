@@ -153,7 +153,12 @@ impl DockerKernelRuntime {
             "KERNEL_FREE_PORT".to_owned(),
             self.config.free_port_container_port.to_string(),
         );
-        environment.extend(self.config.gitagent_env.clone());
+        // Only fill Git Agent discovery vars that the caller (client_service)
+        // did not already resolve, so authored/secret-backed URLs from the
+        // ConfigDocument take precedence over these static process defaults.
+        for (key, value) in self.config.gitagent_env.clone() {
+            environment.entry(key).or_insert(value);
+        }
         environment
     }
 
@@ -1622,6 +1627,46 @@ mod tests {
             );
             drop(state);
         }
+    }
+
+    #[tokio::test]
+    async fn client_provided_gitagent_env_takes_precedence_over_static_defaults() {
+        let backend = FakeDockerBackend::default();
+        let config = DockerRuntimeConfig {
+            gitagent_env: btree_map([
+                ("GITAGENT_REMOTE_URL", "http://static/repo.git"),
+                ("GITAGENT_PATCH_URL", "http://static/PatchRequest"),
+                ("GITAGENT_DEFAULT_BRANCH", "main"),
+            ]),
+            ..DockerRuntimeConfig::default()
+        };
+        let runtime = DockerKernelRuntime::new(config, Arc::new(backend.clone()));
+        let request = RuntimeCreateSession {
+            session_id: "gitagent".to_owned(),
+            harness: HarnessName::Echo,
+            env: btree_map([
+                ("GITAGENT_REMOTE_URL", "http://resolved/repo.git"),
+                ("GITAGENT_DEFAULT_BRANCH", "trunk"),
+            ]),
+            additional_paths: Vec::new(),
+            skills: Vec::new(),
+            skill_volumes: Vec::new(),
+            workspace_mounts: Vec::new(),
+        };
+
+        runtime
+            .run_kernel_container("agentspace-kernel-gitagent", &request)
+            .await
+            .unwrap_or_else(|error| panic!("run failed: {error}"));
+
+        let state = backend.state();
+        let env = state.run_specs[0].environment.clone();
+        drop(state);
+        // Client-resolved (possibly secret-backed) values win over static defaults.
+        assert_eq!(env["GITAGENT_REMOTE_URL"], "http://resolved/repo.git");
+        assert_eq!(env["GITAGENT_DEFAULT_BRANCH"], "trunk");
+        // Values the client did not resolve fall back to the static default.
+        assert_eq!(env["GITAGENT_PATCH_URL"], "http://static/PatchRequest");
     }
 
     #[tokio::test]

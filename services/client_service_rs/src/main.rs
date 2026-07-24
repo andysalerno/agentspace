@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use client_service_rs::{AppConfig, AppState, api::start_enabled_gateways, build_router};
+use client_service_rs::{AppConfig, AppState, api::reconcile_on_startup, build_router};
 use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let state = AppState::new(config)?;
     let app = build_router(state.clone());
     let listener = TcpListener::bind((bind_host.as_str(), bind_port)).await?;
-    let _gateway_autostart_task = tokio::spawn(start_enabled_gateways(state));
+    let _startup_reconcile_task = tokio::spawn(reconcile_on_startup(state));
 
     tracing::info!(
         address = %listener.local_addr()?,

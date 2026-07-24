@@ -92,7 +92,7 @@ impl Drop for StubGitAgent {
 }
 
 fn test_router(git_agent_base_url: &str) -> Result<Router, Box<dyn Error + Send + Sync>> {
-    test_router_with_stores(git_agent_base_url, StoreSet::in_memory())
+    test_router_with_stores(git_agent_base_url, StoreSet::in_memory()?)
 }
 
 fn test_router_with_stores(
@@ -282,14 +282,14 @@ async fn git_agent_config_get_update_and_reserved_agent_work()
     assert_eq!(agent["agent_id"], "git-agent");
     assert_eq!(agent["harness"], "acp");
 
-    let (status, updated_agent) = patch_json(
+    // The reserved reviewer is installation-owned and cannot be mutated.
+    let (status, _rejected) = patch_json(
         &app,
         "/agents/git-agent",
         json!({ "name": "Custom Git Reviewer" }),
     )
     .await?;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(updated_agent["name"], "Custom Git Reviewer");
+    assert_eq!(status, StatusCode::CONFLICT);
 
     let (status, updated) = put_json(
         &app,
@@ -317,7 +317,11 @@ async fn git_agent_config_get_update_and_reserved_agent_work()
 
     let (status, preserved_agent) = get_json(&app, "/agents/git-agent").await?;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(preserved_agent["name"], "Custom Git Reviewer");
+    assert_eq!(preserved_agent["name"], "Git Agent Reviewer");
+
+    // Deleting the reserved reviewer is likewise rejected.
+    let (status, _rejected) = request_json(&app, Method::DELETE, "/agents/git-agent", None).await?;
+    assert_eq!(status, StatusCode::CONFLICT);
 
     let (status, error) = put_json(
         &app,
@@ -407,7 +411,7 @@ async fn git_agent_workspace_is_builtin_reserved_and_openable()
     let app = test_router_with_agent_host_and_stores(
         "http://127.0.0.1:9",
         &agent_host.base_url,
-        StoreSet::in_memory(),
+        StoreSet::in_memory()?,
     )?;
 
     let (status, workspaces) = get_json(&app, "/workspaces").await?;
@@ -464,7 +468,7 @@ async fn git_agent_workspace_mount_uses_git_agent_volume()
     let app = test_router_with_agent_host_and_stores(
         "http://127.0.0.1:9",
         &agent_host.base_url,
-        StoreSet::in_memory(),
+        StoreSet::in_memory()?,
     )?;
 
     let (status, agent) = request_json(
@@ -521,7 +525,7 @@ async fn session_request_can_add_git_agent_workspace_mount()
     let app = test_router_with_agent_host_and_stores(
         "http://127.0.0.1:9",
         &agent_host.base_url,
-        StoreSet::in_memory(),
+        StoreSet::in_memory()?,
     )?;
     let (status, _config) = get_json(&app, "/git-agent/config").await?;
     assert_eq!(status, StatusCode::OK);

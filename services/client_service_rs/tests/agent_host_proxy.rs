@@ -100,7 +100,7 @@ impl TestServer {
     fn app_state(&self) -> Result<AppState, Box<dyn Error + Send + Sync>> {
         let config = AppConfig::new("127.0.0.1", 0, &self.base_url, BTreeMap::new());
         let agent_host = AgentHostClient::new(&self.base_url, Duration::from_secs(5))?;
-        Ok(AppState::with_agent_host(config, agent_host))
+        AppState::with_agent_host(config, agent_host)
     }
 
     fn recorded(&self) -> Result<Vec<RecordedRequest>, Box<dyn Error + Send + Sync>> {
@@ -268,6 +268,11 @@ async fn list_host_skills(State(state): State<StubState>) -> Result<Json<Value>,
         {
             "skill_id": "stub-skill",
             "files": { "SKILL.md": "content" }
+        },
+        {
+            "skill_id": "skill-a",
+            "source": "builtin",
+            "files": {}
         }
     ])))
 }
@@ -610,27 +615,35 @@ async fn create_session_merges_environment_for_agent_host()
 
     assert_eq!(
         server.recorded()?,
-        vec![RecordedRequest {
-            method: Method::POST,
-            path: "/sessions".to_owned(),
-            query: None,
-            body: Some(json!({
-                "harness": "acp",
-                "skills": ["skill-a"],
-                "env": {
-                    "AGENTSPACE_AGENT_ID": "stub-agent",
-                    "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
-                    "AGENT_ONLY": "agent",
-                    "CONNECTION_API_FLAVOR": "responses",
-                    "CONNECTION_API_KEY": "agent-secret",
-                    "CONNECTION_URL": "http://agent-override.example",
-                    "KERNEL_ONLY": "kernel",
-                    "KERNEL_SYSTEM_PROMPT": "final system prompt",
-                    "SHARED": "agent"
-                },
-                "workspace_mounts": [{ "workspace_id": "todo-list-code", "mode": "rw" }]
-            })),
-        }]
+        vec![
+            RecordedRequest {
+                method: Method::GET,
+                path: "/skills".to_owned(),
+                query: None,
+                body: None,
+            },
+            RecordedRequest {
+                method: Method::POST,
+                path: "/sessions".to_owned(),
+                query: None,
+                body: Some(json!({
+                    "harness": "acp",
+                    "skills": ["skill-a"],
+                    "env": {
+                        "AGENTSPACE_AGENT_ID": "stub-agent",
+                        "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                        "AGENT_ONLY": "agent",
+                        "CONNECTION_API_FLAVOR": "responses",
+                        "CONNECTION_API_KEY": "agent-secret",
+                        "CONNECTION_URL": "http://agent-override.example",
+                        "KERNEL_ONLY": "kernel",
+                        "KERNEL_SYSTEM_PROMPT": "final system prompt",
+                        "SHARED": "agent"
+                    },
+                    "workspace_mounts": [{ "workspace_id": "todo-list-code", "mode": "rw" }]
+                })),
+            }
+        ]
     );
 
     Ok(())
@@ -672,6 +685,12 @@ async fn skill_routes_proxy_versions_and_auto_enable_creator()
     assert_eq!(
         server.recorded()?,
         vec![
+            RecordedRequest {
+                method: Method::GET,
+                path: "/skills".to_owned(),
+                query: None,
+                body: None,
+            },
             RecordedRequest {
                 method: Method::POST,
                 path: "/skills".to_owned(),
