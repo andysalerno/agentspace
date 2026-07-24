@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import io
 import json
 import logging
 import os
 import sys
+import zipfile
 from pathlib import Path
 
 from cli_channel.client import ClientServiceSessionClient, ConfigDownload
@@ -124,13 +126,13 @@ async def _run_config(
         _write_download(download, output)
         return
 
-    source = _read_config_file(args.file)
+    source, content_type = _read_config_source(args.file)
     if args.config_command == "validate":
-        result = await client.validate_config(source)
+        result = await client.validate_config(source, content_type)
     elif args.config_command == "plan":
-        result = await client.plan_config(source)
+        result = await client.plan_config(source, content_type)
     else:
-        result = await client.apply_config(source)
+        result = await client.apply_config(source, content_type)
     _write_json(result)
 
 
@@ -180,11 +182,37 @@ async def _run_secret(
     _write_line(f"{args.secret_name}: cleared")
 
 
-def _read_config_file(path: Path) -> bytes:
-    if not path.is_file():
-        msg = f"config file not found: {path}"
+def _read_config_source(path: Path) -> tuple[bytes, str]:
+    if path.is_dir():
+        return _bundle_directory(path), "application/zip"
+    if path.is_file():
+        content_type = (
+            "application/zip"
+            if path.suffix.casefold() == ".zip"
+            else "application/yaml"
+        )
+        return path.read_bytes(), content_type
+    msg = f"config path not found: {path}"
+    raise SystemExit(msg)
+
+
+def _bundle_directory(path: Path) -> bytes:
+    files = sorted(candidate for candidate in path.rglob("*") if not candidate.is_dir())
+    if not any(candidate.suffix.casefold() in {".yaml", ".yml"} for candidate in files):
+        msg = f"config directory contains no YAML files: {path}"
         raise SystemExit(msg)
-    return path.read_bytes()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for candidate in files:
+            if candidate.is_symlink():
+                msg = f"config bundles cannot contain symlinks: {candidate}"
+                raise SystemExit(msg)
+            relative = candidate.relative_to(path).as_posix()
+            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            archive.writestr(info, candidate.read_bytes())
+    return buffer.getvalue()
 
 
 def _write_download(download: ConfigDownload, output: Path) -> None:
