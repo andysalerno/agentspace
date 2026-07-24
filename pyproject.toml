@@ -48,7 +48,6 @@ testpaths = [
 norecursedirs = [
     "kernels/kernel_claude_code",
     "kernels/kernel_codex",
-    "kernels/kernel_copilot",
     "kernels/kernel_echo",
     "kernels/kernel_opencode",
 ]
@@ -58,7 +57,6 @@ target-version = "py313"
 extend-exclude = [
     "kernels/kernel_claude_code",
     "kernels/kernel_codex",
-    "kernels/kernel_copilot",
     "kernels/kernel_echo",
     "kernels/kernel_opencode",
 ]
@@ -102,7 +100,6 @@ exclude = [
     "clients/webui/node_modules",
     "kernels/kernel_claude_code",
     "kernels/kernel_codex",
-    "kernels/kernel_copilot",
     "kernels/kernel_echo",
     "kernels/kernel_opencode",
 ]

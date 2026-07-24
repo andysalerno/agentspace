@@ -936,7 +936,6 @@ fn validate_skill_id(skill_id: &str) -> Result<(), SkillError> {
 fn validate_skill_mount_path(skill_id: &str, mount_path: &str) -> Result<(), SkillError> {
     const RESERVED_PATHS: &[&str] = &[
         "/workspace",
-        "/root/.copilot",
         "/mnt/all-skills",
         "/skills",
         "/root/.config/opencode/skills",

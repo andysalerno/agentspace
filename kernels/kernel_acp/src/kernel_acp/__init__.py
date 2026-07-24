@@ -9,6 +9,7 @@ import os
 import shlex
 import uuid
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, cast
@@ -31,11 +32,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
-DEFAULT_ACP_COMMAND = "opencode acp"
-CUSTOM_AGENT_NAME = "custom"
-CUSTOM_AGENT_PATH = (
-    Path.home() / ".config" / "opencode" / "agents" / f"{CUSTOM_AGENT_NAME}.md"
+DEFAULT_ACP_SERVER = "opencode"
+OPENCODE_CUSTOM_AGENT_NAME = "custom"
+OPENCODE_CUSTOM_AGENT_PATH = (
+    Path.home() / ".config" / "opencode" / "agents" / f"{OPENCODE_CUSTOM_AGENT_NAME}.md"
 )
+COPILOT_CUSTOM_AGENT_NAME = "agentspace"
+COPILOT_RUNTIME_ROOT = Path("/tmp/agentspace-copilot")  # noqa: S108
+COPILOT_EXPERIMENTAL_ENV = "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED"
 PROTOCOL_VERSION = 1
 _STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
 _DEFAULT_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
@@ -60,6 +64,43 @@ _OPENCODE_PERMISSION_CONFIG = {
     "question": "deny",
     "lsp": "deny",
 }
+_COPILOT_SECRET_ENV_VARS = (
+    "COPILOT_PROVIDER_API_KEY",
+    "COPILOT_PROVIDER_BEARER_TOKEN",
+    "COPILOT_PROVIDER_HEADERS",
+)
+_CONNECTION_SECRET_ENV_VARS = (
+    "CONNECTION_API_KEY",
+    "CONNECTION_BEARER_TOKEN",
+    "CONNECTION_HEADERS",
+)
+_GITHUB_AUTH_ENV_VARS = (
+    "COPILOT_GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+)
+_COPILOT_MODEL_ENV_MAP = {
+    "KERNEL_ACP_PROVIDER_MODEL_ID": "COPILOT_PROVIDER_MODEL_ID",
+    "KERNEL_ACP_PROVIDER_WIRE_MODEL": "COPILOT_PROVIDER_WIRE_MODEL",
+    "KERNEL_ACP_MAX_PROMPT_TOKENS": "COPILOT_PROVIDER_MAX_PROMPT_TOKENS",
+    "KERNEL_ACP_MAX_OUTPUT_TOKENS": "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS",
+}
+_COPILOT_CONNECTION_ENV_MAP = {
+    "CONNECTION_API_KEY": "COPILOT_PROVIDER_API_KEY",
+    "CONNECTION_BEARER_TOKEN": "COPILOT_PROVIDER_BEARER_TOKEN",
+    "CONNECTION_TRANSPORT": "COPILOT_PROVIDER_TRANSPORT",
+    "CONNECTION_AZURE_API_VERSION": "COPILOT_PROVIDER_AZURE_API_VERSION",
+}
+_COPILOT_WIRE_API_BY_CONNECTION_FLAVOR = {
+    "chat_completions": "completions",
+    "responses": "responses",
+}
+
+
+class AcpServer(StrEnum):
+    OPENCODE = "opencode"
+    COPILOT = "copilot"
+    CUSTOM = "custom"
 
 
 class AcpRequestError(ValueError):
@@ -127,19 +168,18 @@ class AcpKernel:
         self._terminals = {}
 
         try:
-            self._write_opencode_config()
-            self._write_custom_agent_prompt()
             cmd = self._build_command()
-            env = self._build_env(cmd)
-        except ValueError as exc:
+            self._prepare_server()
+            env = self._build_env()
+        except (TypeError, ValueError) as exc:
             await self._queue.put(error(str(exc)))
             await self._finish(KernelStatus.ERROR)
             return
         except OSError as exc:
-            logger.exception("failed to write opencode config")
+            logger.exception("failed to prepare ACP server")
             detail = exc.strerror or type(exc).__name__
             await self._queue.put(
-                error(f"failed to write opencode config: {detail}"),
+                error(f"failed to prepare ACP server: {detail}"),
             )
             await self._finish(KernelStatus.ERROR)
             return
@@ -255,33 +295,175 @@ class AcpKernel:
         self._status = KernelStatus.DONE
 
     def _build_command(self) -> list[str]:
-        raw = self._config.env.get("KERNEL_ACP_COMMAND", DEFAULT_ACP_COMMAND)
+        server = self._acp_server()
+        if server == AcpServer.OPENCODE:
+            cmd = ["opencode", "acp"]
+            if not self._config.env.get("KERNEL_ACP_SERVER"):
+                self._append_extra_args(cmd)
+            return cmd
+        if server == AcpServer.COPILOT:
+            self._require_copilot_experimental_enabled()
+            cmd = [
+                "copilot",
+                "--acp",
+                "--yolo",
+                "--disable-builtin-mcps",
+                "--no-auto-update",
+                f"--secret-env-vars={','.join(_COPILOT_SECRET_ENV_VARS)}",
+            ]
+            if self._config.env.get("KERNEL_SYSTEM_PROMPT", "").strip():
+                cmd.extend(["--agent", COPILOT_CUSTOM_AGENT_NAME])
+            return cmd
+
+        raw = self._config.env.get("KERNEL_ACP_COMMAND", "")
+        if not raw and not self._config.env.get("KERNEL_ACP_SERVER"):
+            raw = "opencode acp"
         cmd = shlex.split(raw)
         if not cmd:
-            msg = "KERNEL_ACP_COMMAND must contain an executable"
+            msg = (
+                "KERNEL_ACP_COMMAND must contain an executable when "
+                "KERNEL_ACP_SERVER=custom"
+            )
             raise ValueError(msg)
 
-        extra_args = self._config.env.get("KERNEL_ACP_EXTRA_ARGS", "")
-        for arg in extra_args.splitlines():
-            if arg:
-                cmd.append(arg)
-
+        self._append_extra_args(cmd)
         return cmd
 
-    def _should_use_custom_opencode_default_agent(self, cmd: list[str]) -> bool:
-        if not self._has_custom_agent_prompt():
-            return False
-        executable = Path(cmd[0]).name if cmd else ""
-        return executable == "opencode" and "acp" in cmd[1:]
+    def _append_extra_args(self, cmd: list[str]) -> None:
+        extra_args = self._config.env.get("KERNEL_ACP_EXTRA_ARGS", "")
+        cmd.extend(arg for arg in extra_args.splitlines() if arg)
 
-    def _build_env(self, cmd: list[str] | None = None) -> dict[str, str]:
+    def _acp_server(self) -> AcpServer:
+        raw = self._config.env.get("KERNEL_ACP_SERVER")
+        if not raw and self._config.env.get("KERNEL_ACP_COMMAND"):
+            return AcpServer.CUSTOM
+        raw = raw or DEFAULT_ACP_SERVER
+        try:
+            return AcpServer(raw)
+        except ValueError as exc:
+            valid = ", ".join(server.value for server in AcpServer)
+            msg = f"KERNEL_ACP_SERVER must be one of: {valid}"
+            raise ValueError(msg) from exc
+
+    def _require_copilot_experimental_enabled(self) -> None:
+        raw = self._config.env.get(COPILOT_EXPERIMENTAL_ENV, "")
+        if raw.casefold() in {"1", "true", "yes", "on"}:
+            return
+        msg = (
+            "Copilot ACP support is disabled because Copilot CLI 1.0.73 requires "
+            "GitHub authentication for ACP sessions even with offline BYOK "
+            "configuration (github/copilot-cli#4016). Set "
+            f"{COPILOT_EXPERIMENTAL_ENV}=true only to test the experimental "
+            "integration before the upstream fix is available."
+        )
+        raise ValueError(msg)
+
+    def _prepare_server(self) -> None:
+        server = self._acp_server()
+        if server == AcpServer.OPENCODE:
+            self._write_opencode_config()
+            self._write_opencode_custom_agent_prompt()
+        elif server == AcpServer.COPILOT:
+            self._write_copilot_custom_agent_prompt()
+            self._link_copilot_skills()
+
+    def _build_env(self) -> dict[str, str]:
         env = {**os.environ}
         env.update({key: value for key, value in self._config.env.items() if value})
-        if self._should_use_custom_opencode_default_agent(cmd or self._build_command()):
+        server = self._acp_server()
+        if server == AcpServer.OPENCODE and self._has_opencode_custom_agent_prompt():
             env["OPENCODE_CONFIG_CONTENT"] = self._opencode_config_content(
                 env.get("OPENCODE_CONFIG_CONTENT"),
             )
+        elif server == AcpServer.COPILOT:
+            env = self._build_copilot_env(env)
         return env
+
+    def _build_copilot_env(self, env: dict[str, str]) -> dict[str, str]:
+        source = self._config.env
+        base_url = source.get("CONNECTION_URL")
+        model = source.get("KERNEL_ACP_MODEL_NAME")
+        missing = [
+            name
+            for name, value in (
+                ("CONNECTION_URL", base_url),
+                ("KERNEL_ACP_MODEL_NAME", model),
+            )
+            if not value
+        ]
+        if missing:
+            msg = (
+                "Copilot ACP is missing required environment variable(s): "
+                f"{', '.join(missing)}. Assign a Connection and model to the agent."
+            )
+            raise ValueError(msg)
+
+        sanitized = {
+            key: value
+            for key, value in env.items()
+            if not key.startswith("COPILOT_PROVIDER_")
+            and key != "COPILOT_MODEL"
+            and not key.startswith("CONNECTION_")
+            and key not in _GITHUB_AUTH_ENV_VARS
+        }
+        sanitized["COPILOT_PROVIDER_BASE_URL"] = cast("str", base_url)
+        sanitized["COPILOT_PROVIDER_TYPE"] = source.get(
+            "CONNECTION_PROVIDER_TYPE",
+            "openai",
+        )
+        api_flavor = source.get("CONNECTION_API_FLAVOR", _DEFAULT_API_FLAVOR)
+        wire_api = _COPILOT_WIRE_API_BY_CONNECTION_FLAVOR.get(api_flavor)
+        if wire_api is None:
+            valid = ", ".join(_COPILOT_WIRE_API_BY_CONNECTION_FLAVOR)
+            msg = f"CONNECTION_API_FLAVOR must be one of: {valid}"
+            raise ValueError(msg)
+        sanitized["COPILOT_PROVIDER_WIRE_API"] = wire_api
+        sanitized["COPILOT_MODEL"] = cast("str", model)
+
+        self._copy_mapped_env(source, sanitized, _COPILOT_CONNECTION_ENV_MAP)
+        self._copy_mapped_env(source, sanitized, _COPILOT_MODEL_ENV_MAP)
+        headers = source.get("CONNECTION_HEADERS")
+        if headers:
+            sanitized["COPILOT_PROVIDER_HEADERS"] = self._copilot_provider_headers(
+                headers,
+            )
+
+        sanitized["COPILOT_OFFLINE"] = "true"
+        sanitized["COPILOT_HOME"] = str(self._copilot_home())
+        return sanitized
+
+    def _copilot_provider_headers(self, raw: str) -> str:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            msg = "CONNECTION_HEADERS must be a JSON object"
+            raise ValueError(msg) from exc
+        if not isinstance(parsed, dict):
+            msg = "CONNECTION_HEADERS must be a JSON object with string values"
+            raise TypeError(msg)
+        parsed_dict = cast("dict[object, object]", parsed)
+        if not all(
+            isinstance(name, str) and isinstance(value, str)
+            for name, value in parsed_dict.items()
+        ):
+            msg = "CONNECTION_HEADERS must be a JSON object with string values"
+            raise ValueError(msg)
+        headers = cast("dict[str, str]", parsed_dict)
+        return "\n".join(f"{name}: {value}" for name, value in headers.items())
+
+    def _copy_mapped_env(
+        self,
+        source: dict[str, str],
+        target: dict[str, str],
+        mapping: dict[str, str],
+    ) -> None:
+        for source_key, target_key in mapping.items():
+            value = source.get(source_key)
+            if value:
+                target[target_key] = value
+
+    def _copilot_home(self) -> Path:
+        return COPILOT_RUNTIME_ROOT / self._session_id
 
     def _opencode_config_content(self, raw: str | None) -> str:
         config: dict[str, object] = {}
@@ -291,7 +473,7 @@ class AcpKernel:
                 msg = "OPENCODE_CONFIG_CONTENT must be a JSON object"
                 raise ValueError(msg)
             config = cast("dict[str, object]", parsed)
-        config["default_agent"] = CUSTOM_AGENT_NAME
+        config["default_agent"] = OPENCODE_CUSTOM_AGENT_NAME
         return json.dumps(config, separators=(",", ":"))
 
     def _write_opencode_config(self) -> None:
@@ -374,9 +556,9 @@ class AcpKernel:
             raise ValueError(msg)
         return provider_npm
 
-    def _write_custom_agent_prompt(self) -> None:
+    def _write_opencode_custom_agent_prompt(self) -> None:
         prompt = self._config.env.get("KERNEL_SYSTEM_PROMPT", "")
-        CUSTOM_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        OPENCODE_CUSTOM_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
         content = ""
         if prompt.strip():
             content = (
@@ -386,18 +568,58 @@ class AcpKernel:
                 "---\n"
                 f"{prompt}"
             )
-        CUSTOM_AGENT_PATH.write_text(content)
+        OPENCODE_CUSTOM_AGENT_PATH.write_text(content)
         logger.info(
             "wrote opencode custom agent prompt to %s (%d chars)",
-            CUSTOM_AGENT_PATH,
+            OPENCODE_CUSTOM_AGENT_PATH,
             len(prompt),
         )
 
-    def _has_custom_agent_prompt(self) -> bool:
+    def _has_opencode_custom_agent_prompt(self) -> bool:
         try:
-            return bool(CUSTOM_AGENT_PATH.read_text().strip())
+            return bool(OPENCODE_CUSTOM_AGENT_PATH.read_text().strip())
         except OSError:
             return False
+
+    def _write_copilot_custom_agent_prompt(self) -> None:
+        prompt = self._config.env.get("KERNEL_SYSTEM_PROMPT", "")
+        if not prompt.strip():
+            return
+        path = self._copilot_home() / "agents" / f"{COPILOT_CUSTOM_AGENT_NAME}.agent.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            "name: agentspace\n"
+            "description: AgentSpace session agent\n"
+            "---\n"
+            f"{prompt}",
+            encoding="utf-8",
+        )
+        logger.info(
+            "wrote Copilot custom agent prompt to %s (%d chars)",
+            path,
+            len(prompt),
+        )
+
+    def _link_copilot_skills(self) -> None:
+        source_raw = self._config.env.get("KERNEL_SKILLS_DIR")
+        if not source_raw:
+            return
+        source = Path(source_raw)
+        if not source.is_dir():
+            return
+        target = self._copilot_home() / "skills"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            if target.resolve() == source.resolve():
+                return
+            msg = f"Copilot skills link points to an unexpected path: {target}"
+            raise ValueError(msg)
+        if target.exists():
+            msg = f"Copilot skills path already exists and is not a symlink: {target}"
+            raise ValueError(msg)
+        target.symlink_to(source.resolve(), target_is_directory=True)
+        logger.info("linked Copilot skills %s -> %s", target, source)
 
     async def _initialize(self) -> None:
         result = await self._request(
@@ -850,6 +1072,8 @@ class AcpKernel:
 
     def _terminal_env(self, value: object) -> dict[str, str]:
         env = self._build_env()
+        for key in (*_COPILOT_SECRET_ENV_VARS, *_CONNECTION_SECRET_ENV_VARS):
+            env.pop(key, None)
         if value is None:
             return env
         if not isinstance(value, list):
@@ -862,6 +1086,11 @@ class AcpKernel:
                 raise AcpRequestError(
                     -32602,
                     "env entries must contain string name and value",
+                )
+            if name in (*_COPILOT_SECRET_ENV_VARS, *_CONNECTION_SECRET_ENV_VARS):
+                raise AcpRequestError(
+                    -32602,
+                    f"terminal environment cannot include provider secret {name}",
                 )
             env[name] = item_value
         return env

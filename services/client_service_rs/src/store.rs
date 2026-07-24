@@ -943,9 +943,9 @@ mod tests {
     use crate::{
         errors::StoreError,
         models::{
-            AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord,
-            GatewayType, GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole,
-            SessionRecord, ToolCallRecord,
+            AgentRecord, ClientType, ConnectionApiFlavor, ConnectionProviderType, ConnectionRecord,
+            ConnectionTransport, GatewayRecord, GatewayType, GitAgentConfigRecord, HarnessName,
+            MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
         },
     };
 
@@ -1373,6 +1373,99 @@ mod tests {
             assert_eq!(message.tool_calls.len(), 1);
             assert_eq!(message.tool_calls[0].tool, "shell");
             assert_eq!(message.tool_calls[0].content_offset, Some(3));
+        }
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_migrates_legacy_connections_with_defaults() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let path = sqlite_test_path()?;
+        {
+            let connection = rusqlite::Connection::open(&path)?;
+            connection.execute_batch(
+                "
+                CREATE TABLE connections (
+                    connection_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    api_flavor TEXT NOT NULL DEFAULT 'chat_completions',
+                    api_key TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO connections (
+                    connection_id, name, url, api_flavor, api_key, created_at, updated_at
+                ) VALUES (
+                    'legacy', 'Legacy', 'http://legacy.example', 'chat_completions',
+                    'legacy-secret', '2024-01-01', '2024-01-01'
+                );
+                ",
+            )?;
+        }
+
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            let connection = stores.connections.get("legacy")?.ok_or_else(|| {
+                StoreError::ConnectionNotFound {
+                    connection_id: "legacy".to_owned(),
+                }
+            })?;
+            assert_eq!(connection.connection_id, "legacy");
+            assert_eq!(connection.provider_type, ConnectionProviderType::Openai);
+            assert_eq!(connection.api_flavor, ConnectionApiFlavor::ChatCompletions);
+            assert_eq!(connection.transport, ConnectionTransport::Http);
+            assert!(connection.azure_api_version.is_none());
+            assert_eq!(connection.api_key, "legacy-secret");
+            assert!(connection.bearer_token.is_empty());
+            assert!(connection.headers.is_empty());
+        }
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_persists_advanced_connection_fields() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = sqlite_test_path()?;
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            let mut connection = connection("advanced", "2024-01-01");
+            connection.provider_type = ConnectionProviderType::Azure;
+            connection.api_flavor = ConnectionApiFlavor::Responses;
+            connection.transport = ConnectionTransport::Websockets;
+            connection.azure_api_version = Some("2025-04-01-preview".to_owned());
+            connection.bearer_token = "bearer-secret".to_owned();
+            connection
+                .headers
+                .insert("x-provider-secret".to_owned(), "header-secret".to_owned());
+            stores.connections.insert(connection)?;
+        }
+
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            let connection = stores.connections.get("advanced")?.ok_or_else(|| {
+                StoreError::ConnectionNotFound {
+                    connection_id: "advanced".to_owned(),
+                }
+            })?;
+            assert_eq!(connection.provider_type, ConnectionProviderType::Azure);
+            assert_eq!(connection.api_flavor, ConnectionApiFlavor::Responses);
+            assert_eq!(connection.transport, ConnectionTransport::Websockets);
+            assert_eq!(
+                connection.azure_api_version.as_deref(),
+                Some("2025-04-01-preview")
+            );
+            assert_eq!(connection.bearer_token, "bearer-secret");
+            assert_eq!(
+                connection
+                    .headers
+                    .get("x-provider-secret")
+                    .map(String::as_str),
+                Some("header-secret")
+            );
         }
 
         cleanup_sqlite_path(&path);

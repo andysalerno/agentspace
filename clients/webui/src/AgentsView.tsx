@@ -27,7 +27,7 @@ type AgentsViewProps = {
     onSessionCreated: (sessionId: string) => void;
 };
 
-const DEFAULT_HARNESS = "copilot-cli";
+const DEFAULT_HARNESS = "acp";
 const DEFAULT_AGENT_SYSTEM_PROMPT =
     "You are a helpful assistant. Despite living inside a coding agent harness, you are not strictly a coding assistant. Instead, you help the user with any and all tasks they give you (possibly including coding!) using the tools and skills at your disposal. Pro tip: always prefer your skills and tools over generic CLI tools (though you can use those, too!)";
 
@@ -88,6 +88,45 @@ function formatHarnessLabel(harness: string): string {
         .split("-")
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
         .join(" ");
+}
+
+type AcpServerFieldProps = {
+    envVars: string;
+    harness: string;
+    onEnvVarsChange: (envVars: string) => void;
+};
+
+function AcpServerField({
+    envVars,
+    harness,
+    onEnvVarsChange,
+}: AcpServerFieldProps) {
+    if (harness !== "acp") {
+        return null;
+    }
+    const server = getEnvValue(envVars, "KERNEL_ACP_SERVER") || "opencode";
+    return (
+        <label>
+            ACP Server
+            <Select
+                value={server}
+                onChange={(event) =>
+                    onEnvVarsChange(
+                        setEnvValue(envVars, "KERNEL_ACP_SERVER", event.target.value),
+                    )}
+            >
+                <option value="opencode">OpenCode</option>
+                <option value="copilot">GitHub Copilot CLI (experimental)</option>
+                <option value="custom">Custom ACP command</option>
+            </Select>
+            {server === "copilot" && (
+                <span className="field-help">
+                    Disabled by default until Copilot CLI supports offline BYOK ACP
+                    sessions without GitHub login.
+                </span>
+            )}
+        </label>
+    );
 }
 
 function upsertWorkspaceMount(
@@ -473,6 +512,11 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                     <label>
                         Connection
                         <Select
+                            required={
+                                form.harness === "acp"
+                                && getEnvValue(form.env_vars, "KERNEL_ACP_SERVER")
+                                    === "copilot"
+                            }
                             value={form.connection_id ?? ""}
                             onChange={(e) => setForm({ ...form, connection_id: e.target.value || null })}
                         >
@@ -484,6 +528,14 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             ))}
                         </Select>
                     </label>
+                    <AcpServerField
+                        envVars={form.env_vars}
+                        harness={form.harness}
+                        onEnvVarsChange={(envVars) => {
+                            setForm({ ...form, env_vars: envVars });
+                            setEnvDirty(true);
+                        }}
+                    />
                     <ModelNameField
                         connectionId={form.connection_id}
                         envVars={form.env_vars}
@@ -659,6 +711,13 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                     <label>
                                         Connection
                                         <Select
+                                            required={
+                                                editForm.harness === "acp"
+                                                && getEnvValue(
+                                                    editForm.env_vars,
+                                                    "KERNEL_ACP_SERVER",
+                                                ) === "copilot"
+                                            }
                                             value={editForm.connection_id ?? ""}
                                             onChange={(e) =>
                                                 setEditForm({
@@ -674,6 +733,12 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                             ))}
                                         </Select>
                                     </label>
+                                    <AcpServerField
+                                        envVars={editForm.env_vars}
+                                        harness={editForm.harness}
+                                        onEnvVarsChange={(envVars) =>
+                                            setEditForm({ ...editForm, env_vars: envVars })}
+                                    />
                                     <ModelNameField
                                         connectionId={editForm.connection_id}
                                         envVars={editForm.env_vars}

@@ -7,13 +7,14 @@ import { queryKeys, useHarnesses, useKernelConfig } from "./queries";
 import { useErrorContext } from "./ErrorContext";
 import { Button } from "./fluent";
 
-const CONFIGURABLE_HARNESSES = new Set(["opencode"]);
+const CONFIGURABLE_HARNESSES = new Set(["acp"]);
 
-const OPENCODE_ENV_KEYS = [
-    "OPENCODE_MODEL",
-    "OPENCODE_VARIANT",
-    "OPENCODE_AGENT",
-    "OPENCODE_EXTRA_ARGS",
+const ACP_ENV_KEYS = [
+    "KERNEL_ACP_SERVER",
+    "KERNEL_ACP_MODEL_NAME",
+    "KERNEL_ACP_COPILOT_EXPERIMENTAL_ENABLED",
+    "KERNEL_ACP_COMMAND",
+    "KERNEL_ACP_EXTRA_ARGS",
 ];
 
 function formatHarnessLabel(harness: string): string {
@@ -151,7 +152,7 @@ export default function ConfigKernelsView() {
                         <div>
                             <h3>{formatHarnessLabel(effectiveSelected)}</h3>
                             <p className="muted">
-                                Recognized keys: {OPENCODE_ENV_KEYS.map((k) => (
+                                Recognized keys: {ACP_ENV_KEYS.map((k) => (
                                     <code key={k} style={{ marginRight: 6 }}>{k}</code>
                                 ))}
                             </p>

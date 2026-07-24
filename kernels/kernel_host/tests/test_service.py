@@ -161,7 +161,7 @@ async def test_service_reuses_resume_token(
     monkeypatch.setattr("kernel_host.service.get_kernel", fake_get_kernel)
 
     service = KernelSessionService(
-        harness=HarnessName.COPILOT_CLI,
+        harness=HarnessName.ACP,
         env={"COPILOT_MODEL": "gpt-5.2"},
         additional_paths=("/srv/kernel",),
     )

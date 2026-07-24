@@ -1317,7 +1317,7 @@ mod tests {
 
         let session = registry
             .create_session(CreateSessionRequest {
-                harness: HarnessName::CopilotCli,
+                harness: HarnessName::Acp,
                 env,
                 additional_paths: vec!["/srv/agent".to_owned()],
                 skills: Vec::new(),
@@ -1340,7 +1340,7 @@ mod tests {
 
         {
             let state = runtime.state();
-            assert_eq!(state.created[0].harness, HarnessName::CopilotCli);
+            assert_eq!(state.created[0].harness, HarnessName::Acp);
             assert_eq!(state.created[0].additional_paths, vec!["/srv/agent"]);
             assert_eq!(state.created[0].env["COPILOT_MODEL"], "gpt-5.2");
             assert_eq!(state.sent[0].1, "hello");
@@ -1377,7 +1377,7 @@ mod tests {
 
         let session = registry
             .create_session(CreateSessionRequest {
-                harness: HarnessName::CopilotCli,
+                harness: HarnessName::Acp,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1427,7 +1427,7 @@ mod tests {
 
         let enabled = registry
             .create_session(CreateSessionRequest {
-                harness: HarnessName::CopilotCli,
+                harness: HarnessName::Acp,
                 env: BTreeMap::new(),
                 additional_paths: vec!["/srv/original".to_owned()],
                 skills: vec!["memory".to_owned(), "published".to_owned()],
@@ -1437,7 +1437,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("failed to create enabled session: {error}"));
         registry
             .create_session(CreateSessionRequest {
-                harness: HarnessName::CopilotCli,
+                harness: HarnessName::Acp,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1704,7 +1704,7 @@ mod tests {
             status_request(&app, Method::GET, &format!("/sessions/{session_id}")).await;
 
         assert_eq!(created_status, StatusCode::OK);
-        assert_eq!(created["harness"], "copilot-cli");
+        assert_eq!(created["harness"], "acp");
         assert_eq!(
             created["workspace_mounts"][0]["volume_name"],
             "agentspace-workspace-todo-list-code"
@@ -1893,7 +1893,7 @@ mod tests {
             Method::POST,
             "/sessions",
             json!({
-                "harness": "copilot-cli",
+                "harness": "acp",
                 "workspace_mounts": [
                     {"workspace_id": "todo-list-code", "mode": "rw"}
                 ]

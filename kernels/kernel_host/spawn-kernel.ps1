@@ -38,20 +38,15 @@ Invoke-Cleanup
 
 try {
     Write-Error "Building kernel image..."
-    docker compose -p $projectName -f $composeFile build kernel setup
+    docker compose -p $projectName -f $composeFile build kernel
 
     if ($args.Length -eq 0) {
-        throw "Usage: .\spawn-kernel.ps1 <message|setup>"
+        throw "Usage: .\spawn-kernel.ps1 <message>"
     }
 
-    if ($args[0] -eq "setup") {
-        Write-Error "Starting interactive copilot session (run /login to authenticate)..."
-        docker compose -p $projectName -f $composeFile run --rm setup
-    } else {
-        $message = $args[0]
-        Write-Error "Running kernel..."
-        docker compose -p $projectName -f $composeFile run --rm kernel $message
-    }
+    $message = $args[0]
+    Write-Error "Running kernel..."
+    docker compose -p $projectName -f $composeFile run --rm kernel $message
 } finally {
     Invoke-Cleanup
 }

@@ -5,8 +5,7 @@ Agents: see `AGENTS.md`.
 The repo is currently centered on the kernel milestone:
 
 - `kernel`: shared protocol and JSONL event schema
-- `kernel_echo`: reference in-process kernel
-- `kernel_copilot`: `copilot-cli` kernel adapter
+- `kernel_acp`: canonical ACP transport for OpenCode, Copilot, and custom servers
 - `kernel_host`: runner plus one-session HTTP service mode for kernel containers
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
 - `client_service` (`services/client_service_rs`): client-facing API over `agent_host`
@@ -15,39 +14,30 @@ The repo is currently centered on the kernel milestone:
 - `webui`: TypeScript dashboard over `client_service`
 - `cli_channel`: proof-of-concept CLI session client over `client_service`
 
-For now, keep `copilot-cli` as the only real kernel path.
+`acp` is the only active kernel path.
 
 ## Validate
 
-```powershell
-$env:UV_CACHE_DIR='C:\Users\andys\AppData\Local\Temp\uv-cache'
-uv run pytest
-uv run ruff check .
-uv run pyright
+```shell
+just check
 ```
 
-## Dockerized Copilot Flow
+## Dockerized ACP Flow
 
-Authenticate Copilot once inside the container environment:
-
-```powershell
-.\kernels\kernel_host\spawn-kernel.ps1 setup
-```
-
-Then run a prompt through the kernel host:
+Run a prompt through the kernel host:
 
 ```powershell
 .\kernels\kernel_host\spawn-kernel.ps1 "Summarize this repository"
 ```
 
-The launcher now:
-
-- brings down previous compose resources before every run
-- persists Copilot config and session state in the `copilot-config` volume
-
 Before using the Docker flow, set `KERNEL_WORKDIR` in [kernels/kernel_host/.env.example](/C:/repos/agentspace/kernels/kernel_host/.env.example) or your local `.env`. It is intentionally not defaulted by compose.
 
-To resume a previous Copilot session, set `COPILOT_SESSION_ID` in [kernels/kernel_host/.env.example](/C:/repos/agentspace/kernels/kernel_host/.env.example).
+The default ACP server is OpenCode. GitHub Copilot CLI is available as an
+experimental ACP server through `KERNEL_ACP_SERVER=copilot`, but remains
+disabled by default because Copilot CLI 1.0.73 requires GitHub authentication
+for ACP sessions even with offline BYOK configuration. AgentSpace does not
+support GitHub login; see `COPILOT_ACP_CLI_PLAN.md` for the upstream gate and
+Connection mapping.
 
 ## Agent Host
 
@@ -67,11 +57,8 @@ Stop it with:
 
 Default endpoint: `http://127.0.0.1:8001`
 
-Architecture note:
-
-- `agent_host` does not mount Copilot login state directly
-- spawned `kernel_host` containers mount the shared Copilot config volume instead
-- `agent_host` talks to those kernel containers over an internal HTTP API
+`agent_host` talks to kernel containers over an internal HTTP API. No Copilot
+login state is mounted or persisted.
 
 Currently implemented endpoints:
 

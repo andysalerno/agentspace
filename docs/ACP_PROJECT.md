@@ -4,17 +4,18 @@
 
 Make Agent Client Protocol (ACP) the canonical streaming format for AgentSpace. The service should no longer translate ACP into the older custom `KernelEvent` stream (`text_delta`, `tool_call`, etc.). Instead, kernels emit ACP-shaped events and downstream services/clients consume those events directly.
 
-For this migration, ACP/opencode is the only supported kernel path. Other kernel implementations may be left broken or removed later; this pass should remove them from active registries and defaults where practical.
+ACP is the only supported kernel path. OpenCode is the default ACP server;
+GitHub Copilot CLI and custom commands are selected as ACP server profiles.
 
 ## Current Findings
 
 - `kernel.events.KernelEvent` is now an ACP-friendly envelope. It still keeps legacy custom fields and constructors for compatibility, but the active lifecycle/control names are `session/start`, `session/status`, `session/error`, and `session/end`.
-- `kernel_acp.AcpKernel` now speaks ACP to opencode and passes ACP `session/update` payloads through as `session/update` events. It emits `session/prompt/result` when a prompt completes.
+- `kernel_acp.AcpKernel` speaks ACP to named server profiles and passes ACP `session/update` payloads through as `session/update` events. It emits `session/prompt/result` when a prompt completes.
 - `agent_host` and `client_service` type and serialize streams as `KernelEvent` objects.
 - `client_service` now builds assistant messages from ACP `session/update` events, including text, reasoning, plan JSON, and tool calls keyed by `toolCallId`. It retains legacy flattening fallback for old event histories/stubs.
 - The web UI and CLI UI apply ACP `session/update` events while streaming and keep legacy fallback handling.
 - `kernel_host.registry.KERNEL_REGISTRY` registers only ACP. `HarnessName` still contains older enum values temporarily, but `available_harnesses()` and client-facing APIs advertise only `acp`.
-- The active `uv`/pytest/ruff/pyright workspace excludes non-ACP kernel packages (`kernel_claude_code`, `kernel_codex`, `kernel_copilot`, `kernel_echo`, and `kernel_opencode`). Their files remain in the tree but are no longer part of verification.
+- The active `uv`/pytest/ruff/pyright workspace excludes retired non-ACP kernel packages. The legacy `kernel_copilot` parser package has been removed.
 
 ## Target Shape
 
@@ -49,7 +50,7 @@ This keeps ACP events intact while retaining the minimum non-ACP envelope needed
 3. Make ACP the only active kernel.
    - Update `kernel_host.registry` to import/register only `AcpKernel`.
    - Reduce `HarnessName` to `ACP = "acp"` if tests and services can be updated cleanly.
-   - Change defaults from `copilot-cli` or `echo` to `acp`.
+   - Change user-facing defaults to `acp`.
    - Update package dependencies for `kernel_host` so it no longer depends on non-ACP kernels.
 
 4. Update `agent_host` to serialize and stream the new `KernelEvent` shape.

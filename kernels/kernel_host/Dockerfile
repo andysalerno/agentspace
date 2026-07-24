@@ -25,6 +25,8 @@ RUN --mount=type=cache,id=agentspace-kernel-cargo-registry,target=/usr/local/car
 
 FROM docker.io/library/python:3.13-slim
 
+ARG COPILOT_CLI_VERSION=v1.0.73
+
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 COPY --from=ghcr.io/casey/just:latest /just /usr/local/bin/
 COPY --from=memory-builder /usr/local/bin/memory /usr/local/bin/memory
@@ -56,7 +58,7 @@ RUN apt-get update && \
         zip && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
-    curl -fsSL https://gh.io/copilot-install | bash && \
+    curl -fsSL https://gh.io/copilot-install | VERSION="${COPILOT_CLI_VERSION}" bash && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     curl -fsSL https://opencode.ai/install | bash -s -- --version 1.17.20 && \
     npm install -g firecrawl-cli && \
@@ -81,7 +83,6 @@ COPY kernels/kernel kernels/kernel
 COPY kernels/kernel_claude_code kernels/kernel_claude_code
 COPY kernels/kernel_echo kernels/kernel_echo
 COPY kernels/kernel_codex kernels/kernel_codex
-COPY kernels/kernel_copilot kernels/kernel_copilot
 COPY kernels/kernel_opencode kernels/kernel_opencode
 COPY kernels/kernel_acp kernels/kernel_acp
 COPY kernels/kernel_host kernels/kernel_host

@@ -5,8 +5,8 @@ use std::{collections::BTreeMap, error::Error, io, time::Duration};
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::Path,
-    http::{Method, Request, StatusCode},
+    extract::{Path, Query},
+    http::{HeaderMap, Method, Request, StatusCode},
     routing::{get, post},
 };
 use client_service_rs::{
@@ -101,6 +101,37 @@ async fn stub_workspace_vscode(Json(payload): Json<Value>) -> Json<Value> {
     }))
 }
 
+async fn stub_models(
+    headers: HeaderMap,
+    Query(query): Query<BTreeMap<String, String>>,
+) -> Json<Value> {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned)
+    };
+    Json(json!({
+        "authorization_is_bearer": header("authorization")
+            .is_some_and(|value| value.starts_with("Bearer ")),
+        "has_api_key": header("api-key").is_some(),
+        "has_anthropic_api_key": header("x-api-key").is_some(),
+        "anthropic_version": header("anthropic-version"),
+        "has_custom": header("x-custom-provider").is_some(),
+        "api_version": query.get("api-version"),
+    }))
+}
+
+async fn spawn_models_server() -> Result<(String, JoinHandle<()>), Box<dyn Error + Send + Sync>> {
+    let app = Router::new().route("/models", get(stub_models));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let handle = tokio::spawn(async move {
+        let _ignored = axum::serve(listener, app).await;
+    });
+    Ok((format!("http://{address}"), handle))
+}
+
 async fn request_json(
     app: Router,
     method: Method,
@@ -160,6 +191,7 @@ async fn basic_routes_and_kernel_configs_match_contract() -> Result<(), Box<dyn 
         .ok_or_else(|| io::Error::other("harness list was not an array"))?;
     assert!(harnesses.iter().all(Value::is_string));
     assert!(harnesses.contains(&json!("acp")));
+    assert!(!harnesses.contains(&json!("copilot-cli")));
 
     let (status, value) = get_json(app.clone(), "/gateway-types").await?;
     assert_eq!(status, StatusCode::OK);
@@ -314,8 +346,12 @@ async fn connection_routes_match_contract() -> Result<(), Box<dyn Error + Send +
         "connection_id": "main",
         "name": "Main",
         "url": "http://models.example.test",
+        "provider_type": "azure",
         "api_flavor": "responses",
+        "transport": "websockets",
+        "azure_api_version": "2025-04-01-preview",
         "api_key": "secret",
+        "headers": {"x-tenant-secret": "header-secret"},
     });
 
     let (status, value) = get_json(app.clone(), "/connections").await?;
@@ -331,8 +367,12 @@ async fn connection_routes_match_contract() -> Result<(), Box<dyn Error + Send +
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["connection_id"], "main");
-    assert_eq!(value["api_key"], "secret");
+    assert!(value.get("api_key").is_none());
+    assert!(value.get("bearer_token").is_none());
+    assert!(value.get("headers").is_none());
     assert_eq!(value["has_api_key"], json!(true));
+    assert_eq!(value["has_bearer_token"], json!(false));
+    assert_eq!(value["has_headers"], json!(true));
 
     let (status, value) =
         request_json(app.clone(), Method::POST, "/connections", Some(connection)).await?;
@@ -343,6 +383,9 @@ async fn connection_routes_match_contract() -> Result<(), Box<dyn Error + Send +
     assert_eq!(status, StatusCode::OK);
     assert!(value.get("api_key").is_none());
     assert_eq!(value["api_flavor"], "responses");
+    assert_eq!(value["provider_type"], "azure");
+    assert_eq!(value["transport"], "websockets");
+    assert_eq!(value["azure_api_version"], "2025-04-01-preview");
     assert_eq!(value["has_api_key"], json!(true));
 
     let (status, value) = get_json(app.clone(), "/connections").await?;
@@ -352,6 +395,8 @@ async fn connection_routes_match_contract() -> Result<(), Box<dyn Error + Send +
         .ok_or_else(|| io::Error::other("connection list was not an array"))?;
     assert_eq!(connections.len(), 1);
     assert!(connections[0].get("api_key").is_none());
+    assert!(connections[0].get("bearer_token").is_none());
+    assert!(connections[0].get("headers").is_none());
     assert_eq!(connections[0]["has_api_key"], json!(true));
 
     let (status, value) = request_json(
@@ -361,21 +406,188 @@ async fn connection_routes_match_contract() -> Result<(), Box<dyn Error + Send +
         Some(json!({
             "name": "Renamed",
             "url": "http://renamed.example.test",
+            "provider_type": "openai",
             "api_flavor": "chat_completions",
+            "transport": "http",
+            "azure_api_version": null,
             "api_key": "",
+            "bearer_token": "bearer-secret",
         })),
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["name"], "Renamed");
-    assert_eq!(value["api_key"], "");
+    assert!(value.get("api_key").is_none());
+    assert!(value.get("bearer_token").is_none());
     assert_eq!(value["has_api_key"], json!(false));
+    assert_eq!(value["has_bearer_token"], json!(true));
+    assert_eq!(value["has_headers"], json!(true));
+    assert_eq!(value["azure_api_version"], Value::Null);
+
+    let invalid_connections = [
+        json!({
+            "connection_id": "missing-provider",
+            "name": "Bad",
+            "url": "http://example.test"
+        }),
+        json!({
+            "connection_id": "empty-url",
+            "name": "Bad",
+            "url": " ",
+            "provider_type": "openai"
+        }),
+        json!({
+            "connection_id": "double-auth",
+            "name": "Bad",
+            "url": "http://example.test",
+            "provider_type": "openai",
+            "api_key": "api-secret",
+            "bearer_token": "bearer-secret"
+        }),
+        json!({
+            "connection_id": "bad-websocket",
+            "name": "Bad",
+            "url": "http://example.test",
+            "provider_type": "openai",
+            "transport": "websockets",
+            "api_flavor": "chat_completions"
+        }),
+        json!({
+            "connection_id": "bad-azure-setting",
+            "name": "Bad",
+            "url": "http://example.test",
+            "provider_type": "anthropic",
+            "azure_api_version": "2025-04-01-preview"
+        }),
+    ];
+    for invalid in invalid_connections {
+        let (status, value) =
+            request_json(app.clone(), Method::POST, "/connections", Some(invalid)).await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_error_detail(&value);
+        let serialized = value.to_string();
+        assert!(!serialized.contains("api-secret"));
+        assert!(!serialized.contains("bearer-secret"));
+    }
+
+    let verify_connection_model_discovery_uses_provider_auth = async {
+        let (base_url, server) = spawn_models_server().await?;
+        let app = test_router("http://127.0.0.1:9")?;
+        let cases = [
+            (
+                "openai-models",
+                json!({
+                    "connection_id": "openai-models",
+                    "name": "OpenAI",
+                    "url": base_url.clone(),
+                    "provider_type": "openai",
+                    "api_key": "openai-secret",
+                    "headers": {"x-custom-provider": "custom-secret"}
+                }),
+                json!({
+                    "authorization_is_bearer": true,
+                    "has_api_key": false,
+                    "has_anthropic_api_key": false,
+                    "anthropic_version": null,
+                    "has_custom": true,
+                    "api_version": null
+                }),
+            ),
+            (
+                "azure-models",
+                json!({
+                    "connection_id": "azure-models",
+                    "name": "Azure",
+                    "url": base_url.clone(),
+                    "provider_type": "azure",
+                    "api_key": "azure-secret",
+                    "azure_api_version": "2025-04-01-preview"
+                }),
+                json!({
+                    "authorization_is_bearer": false,
+                    "has_api_key": true,
+                    "has_anthropic_api_key": false,
+                    "anthropic_version": null,
+                    "has_custom": false,
+                    "api_version": "2025-04-01-preview"
+                }),
+            ),
+            (
+                "anthropic-models",
+                json!({
+                    "connection_id": "anthropic-models",
+                    "name": "Anthropic",
+                    "url": base_url.clone(),
+                    "provider_type": "anthropic",
+                    "api_key": "anthropic-secret"
+                }),
+                json!({
+                    "authorization_is_bearer": false,
+                    "has_api_key": false,
+                    "has_anthropic_api_key": true,
+                    "anthropic_version": "2023-06-01",
+                    "has_custom": false,
+                    "api_version": null
+                }),
+            ),
+            (
+                "bearer-models",
+                json!({
+                    "connection_id": "bearer-models",
+                    "name": "Bearer",
+                    "url": base_url.clone(),
+                    "provider_type": "openai",
+                    "bearer_token": "bearer-secret"
+                }),
+                json!({
+                    "authorization_is_bearer": true,
+                    "has_api_key": false,
+                    "has_anthropic_api_key": false,
+                    "anthropic_version": null,
+                    "has_custom": false,
+                    "api_version": null
+                }),
+            ),
+        ];
+
+        for (connection_id, payload, expected) in cases {
+            let (status, _value) =
+                request_json(app.clone(), Method::POST, "/connections", Some(payload)).await?;
+            assert_eq!(status, StatusCode::OK);
+            let (status, value) =
+                get_json(app.clone(), &format!("/connections/{connection_id}/models")).await?;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(value, expected);
+        }
+        server.abort();
+        Ok::<(), Box<dyn Error + Send + Sync>>(())
+    };
+    verify_connection_model_discovery_uses_provider_auth.await?;
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::PATCH,
+        "/connections/main",
+        Some(json!({ "transport": "websockets" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        value["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("requires api_flavor responses"))
+    );
 
     let (status, value) = request_json(
         app.clone(),
         Method::POST,
         "/connections",
-        Some(json!({ "connection_id": "Bad", "name": "Bad", "url": "x" })),
+        Some(json!({
+            "connection_id": "Bad",
+            "name": "Bad",
+            "url": "x",
+            "provider_type": "openai"
+        })),
     )
     .await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -414,11 +626,51 @@ async fn agent_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync
             "connection_id": "main",
             "name": "Main",
             "url": "http://models.example.test",
+            "provider_type": "openai",
             "api_key": "secret",
         })),
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "copilot-missing",
+            "name": "Incomplete Copilot",
+            "harness": "acp",
+            "env_vars": "KERNEL_ACP_SERVER=copilot",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        value["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Connection"))
+    );
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "copilot-no-model",
+            "name": "Model-less Copilot",
+            "harness": "acp",
+            "env_vars": "KERNEL_ACP_SERVER=copilot",
+            "connection_id": "main",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        value["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("KERNEL_ACP_MODEL_NAME"))
+    );
 
     let (status, value) = request_json(
         app.clone(),

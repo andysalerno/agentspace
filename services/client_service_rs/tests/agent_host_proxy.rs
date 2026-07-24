@@ -558,8 +558,12 @@ async fn create_session_merges_environment_for_agent_host()
             "connection_id": "main-connection",
             "name": "Main Connection",
             "url": "http://connection.example",
+            "provider_type": "azure",
             "api_flavor": "responses",
-            "api_key": "connection-secret"
+            "transport": "websockets",
+            "azure_api_version": "2025-04-01-preview",
+            "bearer_token": "connection-secret",
+            "headers": {"x-provider-secret": "header-secret"}
         }),
     )
     .await?;
@@ -588,7 +592,7 @@ async fn create_session_merges_environment_for_agent_host()
                 "SHARED=agent\n",
                 "AGENT_ONLY=agent\n",
                 "CONNECTION_URL=http://agent-override.example\n",
-                "CONNECTION_API_KEY=agent-secret\n",
+                "CONNECTION_BEARER_TOKEN=agent-secret\n",
                 "KERNEL_SYSTEM_PROMPT=agent env prompt\n"
             )
         }),
@@ -621,8 +625,12 @@ async fn create_session_merges_environment_for_agent_host()
                     "AGENTSPACE_AGENT_ID": "stub-agent",
                     "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
                     "AGENT_ONLY": "agent",
+                    "CONNECTION_AZURE_API_VERSION": "2025-04-01-preview",
                     "CONNECTION_API_FLAVOR": "responses",
-                    "CONNECTION_API_KEY": "agent-secret",
+                    "CONNECTION_BEARER_TOKEN": "agent-secret",
+                    "CONNECTION_HEADERS": "{\"x-provider-secret\":\"header-secret\"}",
+                    "CONNECTION_PROVIDER_TYPE": "azure",
+                    "CONNECTION_TRANSPORT": "websockets",
                     "CONNECTION_URL": "http://agent-override.example",
                     "KERNEL_ONLY": "kernel",
                     "KERNEL_SYSTEM_PROMPT": "final system prompt",

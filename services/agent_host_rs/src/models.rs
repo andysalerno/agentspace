@@ -14,7 +14,6 @@ use crate::errors::AgentHostError;
 pub enum HarnessName {
     ClaudeCode,
     Echo,
-    CopilotCli,
     Codex,
     Opencode,
     #[default]
@@ -27,7 +26,6 @@ impl HarnessName {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Echo => "echo",
-            Self::CopilotCli => "copilot-cli",
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::Acp => "acp",
@@ -48,7 +46,6 @@ impl FromStr for HarnessName {
         match value {
             "claude-code" => Ok(Self::ClaudeCode),
             "echo" => Ok(Self::Echo),
-            "copilot-cli" => Ok(Self::CopilotCli),
             "codex" => Ok(Self::Codex),
             "opencode" => Ok(Self::Opencode),
             "acp" => Ok(Self::Acp),

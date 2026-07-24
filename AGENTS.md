@@ -10,7 +10,7 @@ services managed by the Cargo workspace at the repository root.
 ### Key Components
 
 - **Kernels** (`kernels/`): Shared protocol and event schemas.
-  - `kernel_copilot`: Primary kernel path (uses `copilot-cli`).
+  - `kernel_acp`: Canonical kernel path for ACP-compatible agent CLIs.
   - `kernel_host`: Runner for kernel containers.
 - **Services** (`services/`):
   - `agent_host` (`services/agent_host_rs`): Manages sessions by spawning `kernel_host` containers.

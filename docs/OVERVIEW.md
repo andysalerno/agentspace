@@ -50,9 +50,9 @@ Inter-service communication uses HTTP APIs. Kernel containers are spawned dynami
 agentspace/
 ├── kernels/
 │   ├── kernel/              # Protocol, events, base class (the abstraction)
+│   ├── kernel_acp/          # Canonical ACP transport and server profiles
 │   ├── kernel_echo/         # In-process echo kernel (testing)
 │   ├── kernel_claude_code/  # Claude Code CLI adapter
-│   ├── kernel_copilot/      # GitHub Copilot CLI adapter
 │   ├── kernel_codex/        # OpenAI Codex CLI adapter
 │   └── kernel_host/         # Container entry point + HTTP service
 ├── services/
@@ -110,9 +110,13 @@ class Kernel(Protocol):
 
 Echoes input back word-by-word as `text_delta` events. No subprocess. Used for testing the infrastructure end-to-end without API keys or a real harness.
 
-#### `kernel_copilot` — GitHub Copilot CLI
+#### `kernel_acp` — Agent Client Protocol
 
-Wraps the `copilot` CLI in non-interactive prompt mode with JSON output. Supports session resumption via `--resume=SESSION_ID`, model selection, reasoning effort, and additional skill directories via `--add-dir`. Maps Copilot-specific events (`assistant.message_delta`, `assistant.tool_call`, etc.) into the standard event stream.
+Provides the canonical ACP JSON-RPC transport and preserves ACP
+`session/update` events. OpenCode is the default server profile. The
+experimental Copilot profile launches `copilot --acp --yolo`, maps AgentSpace
+Connections to Copilot BYOK environment variables, forces offline mode, and
+does not support GitHub login.
 
 #### `kernel_codex` — OpenAI Codex CLI
 
@@ -129,7 +133,7 @@ Runs inside each kernel container. Has two modes:
 - **Runner mode** (`python -m kernel_host.runner "prompt"`) — one-shot CLI that prints JSONL to stdout.
 - **Service mode** (`python -m kernel_host.app`) — long-lived FastAPI server (port 8000) exposing `/messages`, `/session`, `/history`, `/logs`, and `/reset` endpoints. This is the mode used in production; `agent_host` talks to each container over HTTP.
 
-A registry maps harness names (`echo`, `claude-code`, `copilot-cli`, `codex`) to kernel classes.
+The active registry maps the `acp` harness to `AcpKernel`.
 
 ### Service Layer
 
@@ -183,7 +187,9 @@ Key API endpoints (port 8002):
 | `GET /kernels/{id}/logs` | Kernel logs (proxied) |
 | `CRUD /skills` | Skills management (proxied) |
 
-Data models: `AgentRecord`, `SessionRecord`, `MessageRecord`, with `HarnessName` enum (`echo`, `claude-code`, `copilot-cli`, `codex`) and `ClientType` enum (`cli`, `webui`).
+Data models include `AgentRecord`, `SessionRecord`, and `MessageRecord`. The
+user-facing harness list contains only `acp`; legacy enum values remain internal
+for historical data compatibility.
 
 ### Client Layer
 
@@ -242,10 +248,7 @@ The `compose.yaml` defines four services:
 | `client-service` | 8002 | Public gateway |
 | `webui` | 8003 | Static React app + Nginx reverse proxy |
 
-Kernel containers are not defined in Compose — they are created dynamically by `agent_host` using the Docker API. They join the `agentspace-stack` network and share two named volumes:
-
-- `agentspace-kernel_copilot-config` — Copilot authentication data
-- `agentspace-skills` — skill files mounted read-only into kernels
+Kernel containers are not defined in Compose — they are created dynamically by `agent_host` using the Docker API. They join the `agentspace-stack` network and mount the `agentspace-skills` volume read-only. Copilot authentication state is not mounted.
 
 ## Development
 
@@ -289,7 +292,7 @@ The codebase uses strict pyright type-checking, ruff with all lint rules enabled
 **Implemented:**
 
 - Kernel abstraction with protocol, base class, and JSONL event contract
-- Four kernel implementations: echo, claude-code, copilot-cli, codex
+- Canonical ACP kernel with OpenCode, experimental Copilot, and custom profiles
 - Kernel host with both runner and HTTP service modes
 - Docker-based kernel container lifecycle
 - Agent host service with skills management

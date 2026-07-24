@@ -196,11 +196,6 @@ impl DockerKernelRuntime {
                 mode: "rw".to_owned(),
             },
             VolumeMount {
-                volume_name: self.config.copilot_volume.clone(),
-                bind: "/root/.copilot".to_owned(),
-                mode: "rw".to_owned(),
-            },
-            VolumeMount {
                 volume_name: self.config.skills_volume.clone(),
                 bind: "/mnt/all-skills".to_owned(),
                 mode: "ro".to_owned(),
@@ -666,7 +661,6 @@ pub struct DockerRuntimeConfig {
     pub free_port_host_ip: String,
     pub free_port_url_template: String,
     pub startup_timeout: Duration,
-    pub copilot_volume: String,
     pub skills_volume: String,
     pub skills_dir: String,
     pub skill_volume_overrides: BTreeMap<String, String>,
@@ -686,7 +680,6 @@ impl Default for DockerRuntimeConfig {
             free_port_host_ip: "0.0.0.0".to_owned(),
             free_port_url_template: "http://127.0.0.1:{host_port}".to_owned(),
             startup_timeout: Duration::from_mins(1),
-            copilot_volume: "agentspace-kernel_copilot-config".to_owned(),
             skills_volume: "agentspace-skills".to_owned(),
             skills_dir: "/skills".to_owned(),
             skill_volume_overrides: BTreeMap::new(),
@@ -728,7 +721,6 @@ impl DockerRuntimeConfig {
             "AGENT_HOST_KERNEL_STARTUP_TIMEOUT",
             config.startup_timeout.as_secs_f64(),
         ));
-        config.copilot_volume = env_or("AGENT_HOST_COPILOT_VOLUME", &config.copilot_volume);
         config.skills_volume = env_or("AGENT_HOST_SKILLS_VOLUME", &config.skills_volume);
         config.skills_dir = env_or("AGENT_HOST_SKILLS_DIR", &config.skills_dir);
         config.skill_volume_overrides = Self::skill_volume_overrides_from_process();
@@ -1349,7 +1341,6 @@ const fn skills_mount_path(harness: HarnessName) -> &'static str {
     match harness {
         HarnessName::Acp => "/workspace/.agents/skills",
         HarnessName::ClaudeCode | HarnessName::Codex | HarnessName::Echo => "/skills",
-        HarnessName::CopilotCli => "/root/.copilot/skills",
         HarnessName::Opencode => "/root/.config/opencode/skills",
     }
 }
@@ -1964,10 +1955,6 @@ mod tests {
         assert_eq!(
             skills_mount_path(HarnessName::Acp),
             "/workspace/.agents/skills"
-        );
-        assert_eq!(
-            skills_mount_path(HarnessName::CopilotCli),
-            "/root/.copilot/skills"
         );
         assert_eq!(
             skills_mount_path(HarnessName::Opencode),

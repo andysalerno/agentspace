@@ -11,6 +11,8 @@ use serde_json::{Map, Value, json};
 use crate::errors::ValidationError;
 
 pub const DEFAULT_CONNECTION_API_FLAVOR: ConnectionApiFlavor = ConnectionApiFlavor::ChatCompletions;
+pub const DEFAULT_CONNECTION_PROVIDER_TYPE: ConnectionProviderType = ConnectionProviderType::Openai;
+pub const DEFAULT_CONNECTION_TRANSPORT: ConnectionTransport = ConnectionTransport::Http;
 pub const DEFAULT_GIT_AGENT_REVIEW_AGENT_ID: &str = "git-agent";
 pub const DEFAULT_GIT_AGENT_REMOTE_URL: &str = "http://gitagent:8004/repo.git";
 pub const DEFAULT_GIT_AGENT_PATCH_URL: &str = "http://gitagent:8004/PatchRequest";
@@ -77,7 +79,6 @@ impl Display for ClientType {
 #[serde(rename_all = "kebab-case")]
 pub enum HarnessName {
     Acp,
-    CopilotCli,
     Codex,
     Opencode,
     ClaudeCode,
@@ -85,14 +86,7 @@ pub enum HarnessName {
 }
 
 impl HarnessName {
-    const ALL: [Self; 6] = [
-        Self::ClaudeCode,
-        Self::Echo,
-        Self::CopilotCli,
-        Self::Codex,
-        Self::Opencode,
-        Self::Acp,
-    ];
+    const ALL: [Self; 1] = [Self::Acp];
 
     #[must_use]
     pub const fn all() -> &'static [Self] {
@@ -103,7 +97,6 @@ impl HarnessName {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Acp => "acp",
-            Self::CopilotCli => "copilot-cli",
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::ClaudeCode => "claude-code",
@@ -124,7 +117,6 @@ impl FromStr for HarnessName {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "acp" => Ok(Self::Acp),
-            "copilot-cli" => Ok(Self::CopilotCli),
             "codex" => Ok(Self::Codex),
             "opencode" => Ok(Self::Opencode),
             "claude-code" => Ok(Self::ClaudeCode),
@@ -214,6 +206,81 @@ impl FromStr for ConnectionApiFlavor {
             _ => Err(ValidationError::InvalidConnectionApiFlavor {
                 value: value.to_owned(),
             }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionProviderType {
+    #[default]
+    Openai,
+    Azure,
+    Anthropic,
+}
+
+impl ConnectionProviderType {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Openai => "openai",
+            Self::Azure => "azure",
+            Self::Anthropic => "anthropic",
+        }
+    }
+}
+
+impl Display for ConnectionProviderType {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ConnectionProviderType {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "openai" => Ok(Self::Openai),
+            "azure" => Ok(Self::Azure),
+            "anthropic" => Ok(Self::Anthropic),
+            _ => Err(format!("unsupported connection provider_type {value:?}")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionTransport {
+    #[default]
+    Http,
+    Websockets,
+}
+
+impl ConnectionTransport {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Websockets => "websockets",
+        }
+    }
+}
+
+impl Display for ConnectionTransport {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ConnectionTransport {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "http" => Ok(Self::Http),
+            "websockets" => Ok(Self::Websockets),
+            _ => Err(format!("unsupported connection transport {value:?}")),
         }
     }
 }
@@ -692,10 +759,19 @@ pub struct ConnectionRecord {
     pub connection_id: String,
     pub name: String,
     pub url: String,
+    pub provider_type: ConnectionProviderType,
     #[serde(default)]
     pub api_flavor: ConnectionApiFlavor,
     #[serde(default)]
+    pub transport: ConnectionTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub azure_api_version: Option<String>,
+    #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub bearer_token: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -712,26 +788,42 @@ impl ConnectionRecord {
             connection_id: connection_id.into(),
             name: name.into(),
             url: url.into(),
+            provider_type: DEFAULT_CONNECTION_PROVIDER_TYPE,
             api_flavor: DEFAULT_CONNECTION_API_FLAVOR,
+            transport: DEFAULT_CONNECTION_TRANSPORT,
+            azure_api_version: None,
             api_key: String::new(),
+            bearer_token: String::new(),
+            headers: BTreeMap::new(),
             created_at: now.clone(),
             updated_at: now,
         }
     }
 
     #[must_use]
-    pub fn summary(&self, include_api_key: bool) -> Value {
+    pub fn summary(&self) -> Value {
         let mut data = Map::new();
         data.insert("connection_id".to_owned(), json!(self.connection_id));
         data.insert("name".to_owned(), json!(self.name));
         data.insert("url".to_owned(), json!(self.url));
+        data.insert(
+            "provider_type".to_owned(),
+            json!(self.provider_type.as_str()),
+        );
         data.insert("api_flavor".to_owned(), json!(self.api_flavor.as_str()));
+        data.insert("transport".to_owned(), json!(self.transport.as_str()));
+        data.insert(
+            "azure_api_version".to_owned(),
+            json!(self.azure_api_version),
+        );
         data.insert("has_api_key".to_owned(), json!(!self.api_key.is_empty()));
+        data.insert(
+            "has_bearer_token".to_owned(),
+            json!(!self.bearer_token.is_empty()),
+        );
+        data.insert("has_headers".to_owned(), json!(!self.headers.is_empty()));
         data.insert("created_at".to_owned(), json!(self.created_at));
         data.insert("updated_at".to_owned(), json!(self.updated_at));
-        if include_api_key {
-            data.insert("api_key".to_owned(), json!(self.api_key));
-        }
         Value::Object(data)
     }
 }
@@ -1044,37 +1136,35 @@ mod tests {
     }
 
     #[test]
-    fn connection_summary_hides_api_key_by_default() {
+    fn connection_summary_hides_secrets() {
         let mut connection = ConnectionRecord::new("conn", "Connection", "http://example.test");
         connection.created_at = "c".to_owned();
         connection.updated_at = "u".to_owned();
         connection.api_key = "secret".to_owned();
+        connection.bearer_token = "bearer-secret".to_owned();
+        connection
+            .headers
+            .insert("x-secret".to_owned(), "header-secret".to_owned());
 
         assert_eq!(
-            connection.summary(false),
+            connection.summary(),
             json!({
                 "connection_id": "conn",
                 "name": "Connection",
                 "url": "http://example.test",
+                "provider_type": "openai",
                 "api_flavor": "chat_completions",
+                "transport": "http",
+                "azure_api_version": null,
                 "has_api_key": true,
+                "has_bearer_token": true,
+                "has_headers": true,
                 "created_at": "c",
                 "updated_at": "u",
             })
         );
-        assert_eq!(
-            connection.summary(true),
-            json!({
-                "connection_id": "conn",
-                "name": "Connection",
-                "url": "http://example.test",
-                "api_flavor": "chat_completions",
-                "has_api_key": true,
-                "created_at": "c",
-                "updated_at": "u",
-                "api_key": "secret",
-            })
-        );
+        let serialized = connection.summary().to_string();
+        assert!(!serialized.contains("secret"));
     }
 
     #[test]
@@ -1133,14 +1223,7 @@ mod tests {
                 .iter()
                 .map(|harness| harness.as_str())
                 .collect::<Vec<_>>(),
-            vec![
-                "claude-code",
-                "echo",
-                "copilot-cli",
-                "codex",
-                "opencode",
-                "acp"
-            ]
+            vec!["acp"]
         );
         assert_eq!(
             GatewayType::all()
@@ -1158,6 +1241,7 @@ mod tests {
             ConnectionApiFlavor::from_str("responses")?,
             ConnectionApiFlavor::Responses
         );
+        assert!(HarnessName::from_str("copilot-cli").is_err());
         assert!(HarnessName::from_str("missing").is_err());
         Ok(())
     }
