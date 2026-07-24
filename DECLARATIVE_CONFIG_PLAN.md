@@ -892,3 +892,222 @@ The feature is complete when:
 13. an exported configuration applied to a clean installation reproduces the same effective
     in-scope configuration after installation-local secret values are set, modulo
     installation-owned builtins.
+
+## Implementation Errata and Deviations
+
+This section describes the implementation as shipped after the plan above was written. It is
+intended to be read as an addendum: where this section differs from an earlier section, this
+section describes the actual behavior.
+
+### Storage model and compatibility surfaces
+
+The document-centric storage design was implemented. The active desired configuration is one
+strict Rust `ConfigDocument`, and SQLite stores opaque source snapshots rather than field-level
+agent/connection/gateway tables. The snapshot envelope contains the source kind, exact source
+bytes, source and semantic hashes, generation, and active-generation pointer
+(`services/client_service_rs/src/config/`).
+
+There are two slight deviations from the clean-cut model described above:
+
+1. The existing JSON CRUD routes and record response shapes were retained so the current WebUI,
+   sessions, and service integrations did not need to switch atomically to a second set of typed
+   resource endpoints. Their stores are now facades/adapters over `ConfigDocument`; they are not
+   independent persistence or export sources (`config/adapter.rs`, `store.rs`).
+2. A database containing populated legacy config tables and no active config snapshot is rejected
+   at startup with reset guidance. The implementation does not migrate that data and does not
+   silently start with empty config. This is stricter than merely documenting a one-time reset.
+
+Workspace and session persistence remain relational runtime state, as planned.
+
+### Exact source and canonical exports
+
+The implementation exposes:
+
+- `GET /config/export` or `?mode=source` for the exact active source bytes;
+- `GET /config/export?mode=canonical` for deterministic aggregate YAML; and
+- `GET /config/export/{kind}/{name}` for canonical standalone resource YAML.
+
+A source imported as YAML exports as the identical YAML bytes. A source imported as a ZIP config
+set exports as the identical ZIP bytes and a `.zip` filename. Canonical export always returns one
+YAML document with skill sources inlined.
+
+Canonical YAML uses `serde_yaml_ng`, sorts identity-keyed resource collections, and preserves
+order-significant lists. The implementation asserts parse/serialize typed equality rather than
+preserving comments or YAML presentation in canonical output. Comments, anchors, key order, and
+scalar style are preserved only by source export, which returns the retained original bytes.
+
+### Config-set bundle convention
+
+The plan left the archive/multipart bundle format open. The implementation standardizes on ZIP:
+
+- config manifests are YAML files at the archive root or below a top-level `config/` directory;
+- a skill `source.path` is resolved relative to its declaring manifest;
+- `source.path` may name either a directory or a direct `SKILL.md` file;
+- YAML files inside a discovered skill source are skill content, not config manifests;
+- canonical export inlines all referenced skill files; and
+- entries must be UTF-8 text.
+
+The loader rejects absolute paths, `..` traversal, backslashes/Windows-style paths, symlinks,
+duplicate normalized paths, excessive entry counts, oversized decompressed entries/totals, and
+archives without a config manifest (`config/bundle.rs`). The apply/validate/plan endpoints accept
+request bodies up to 40 MiB; export and secret routes retain the framework's smaller default body
+limit. The uncompressed bundle contract remains capped below 40 MiB.
+
+The CLI accepts either one YAML/ZIP file or a directory. Directory input is converted into a
+deterministic ZIP. The WebUI accepts YAML or an already-created ZIP; browsers do not upload a
+directory directly.
+
+### Apply, concurrency, and reconciliation
+
+Apply remains complete replacement. A plan response also returns the active generation. The WebUI
+passes that generation through `If-Match`, and the CLI exposes `--expected-generation`. The server
+checks the generation both while preparing and while committing. `If-Match` remains optional for
+direct API callers, so an intentionally unconditional apply is still possible.
+
+The reconciliation order changed from the original commit-then-reconcile outline:
+
+1. parse, validate, and plan the replacement;
+2. stage changed user skills in `agent_host`;
+3. commit the exact source snapshot and activate its `ConfigDocument`;
+4. compensate staged skill changes if commit fails; and
+5. reconcile gateway runtime state.
+
+Skill staging happens before activation because allowing the document to commit while skill
+materialization failed created an unacceptable persistent split-brain. Interactive skill
+create/update/delete/rollback and config apply share the same async lock. User-skill reads and
+downloads come from `ConfigDocument`; `agent_host` is the runtime materialization and version
+history service, not the authored source.
+
+There is no durable apply-job table. Apply and interactive skill operations are synchronous and
+generation guarded. Full skill and gateway reconciliation also runs at client-service startup,
+with retries, to repair interrupted runtime drift. Gateway failures after snapshot activation are
+returned in the apply reconciliation result and retried by startup reconciliation.
+
+Semantically identical re-apply does not rewrite unchanged skills or restart unchanged gateways.
+
+### Skill validation
+
+The implementation added more validation than the original service had:
+
+- every user skill must contain `SKILL.md`;
+- all file names must be safe relative paths;
+- an optional `agentspace.json`, when present, must use schema version 1 and its current strict JSON
+  shape;
+- installation volume IDs must be unique;
+- volume mount paths must be normalized, must not overlap reserved kernel paths, and must not
+  collide across skills; and
+- user skill IDs may not collide with installation-owned builtin skill IDs.
+
+Builtin skill IDs are queried from `agent_host` for validate/plan/apply. Interactive CRUD checks
+references when that runtime inventory is available and fails conservatively at the authoritative
+apply boundary.
+
+### Secret reference coverage
+
+The YAML-native `{ secretRef: NAME }` syntax was implemented, but the generic "nearly every scalar"
+goal was narrowed to scalar fields that currently have a concrete runtime consumer:
+
+- connection URL and API key;
+- agent system prompt;
+- structured kernel, agent, and gateway environment values;
+- gateway secret fields; and
+- Git Agent default branch, exact refs, ref prefixes, remote URL, patch URL, and validation
+  command.
+
+Structural identifiers/references/discriminators remain literals, as planned. Boolean and numeric
+configuration fields are also currently literals; the implementation does not yet provide a
+generic `ConfigValue<bool>`/`ConfigValue<number>` surface.
+
+`envText` remains an opaque literal blob and cannot contain secret references. Structured `env`
+must be used for individually secret-backed environment values.
+
+The declarative YAML contains names and references only. Secret values are AES-256-GCM encrypted
+in a separate SQLite table. A persistent installation cannot set values unless
+`CLIENT_SERVICE_SECRET_KEY` is configured as a base64-encoded 32-byte key. If ciphertext exists,
+startup fails when the key is absent, malformed, or unable to decrypt every stored value. An
+in-memory test/service state may use an ephemeral key.
+
+Secret declaration changes, set/replace, clear, and full config replacement share a lock so an
+apply cannot orphan a concurrently written value. Removing a set declaration remains an explicit
+conflict.
+
+### Secret management UI
+
+The Configuration -> Secrets page was implemented as write-only: it lists names, descriptions,
+set/unset state, and referencing fields, and supports create, set/replace, clear, delete, and
+declaration export without ever fetching a value.
+
+The richer per-field Literal/Secret-reference toggle described in the WebUI plan was not added to
+all existing entity forms. Those forms continue to edit their legacy literal fields. Secret
+references for the broader scalar set are authored through declarative YAML, while secret values
+are supplied through the Secrets page or CLI. Existing form mutations preserve typed secret
+references and structured environments that their legacy payload cannot represent.
+
+### Import/plan WebUI
+
+The WebUI provides source/canonical downloads, YAML/ZIP selection, validate, preview, and
+generation-guarded replacement apply. The preview result is currently displayed as the server's
+structured JSON rather than the richer grouped create/update/delete/no-op diff UI proposed in the
+plan.
+
+Per-item Export YAML controls were added for agents, skills, connections, gateways, Git Agent
+config, kernel config, and secret declarations. Workspaces intentionally have no config export.
+
+### Git Agent integration
+
+Implementation uncovered a separate control-plane boundary: Git Agent runs as its own service and
+could not safely consume resolved secret-backed policy through the public config response.
+
+The implemented design adds a token-authenticated internal endpoint:
+
+`GET /internal/git-agent/effective-config`
+
+`CLIENT_SERVICE_INTERNAL_TOKEN` and `GITAGENT_CLIENT_SERVICE_INTERNAL_TOKEN` must match. The
+endpoint resolves Git Agent secret references inside client_service and never logs or publicly
+exports the resulting values. Git Agent refreshes effective config for each patch/re-review
+operation so secret rotation, disablement, and policy changes take effect without restart.
+Unresolved secret-backed policy fails closed instead of retaining old decrypted values.
+
+Git Agent now consumes declarative `enabled`, branch/ref policy, default branch, validation
+command, remote URL, patch URL, and review agent. Exact refs and full `refs/heads/...` prefixes are
+enforced without rewriting them. Changing the default branch also updates the bare repository's
+symbolic `HEAD`. Resolved Git Agent URLs are injected into newly created agent sessions and take
+precedence over static agent-host defaults.
+
+The reserved `git-agent` reviewer is installation-owned and synthesized/reserved outside the
+authored document; reading Git Agent config does not mutate source YAML.
+
+### Security hardening added during implementation
+
+The plan deferred some security work to a later hardening phase, but implementation required part
+of it immediately:
+
+- permissive CORS was replaced with a configurable browser-origin allowlist
+  (`CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`);
+- requests without an `Origin` header remain available to CLI and service-to-service callers;
+- the internal effective-config endpoint requires a shared token;
+- `/info` redacts secret-, token-, key-, and password-like environment variables; and
+- config ZIP request/decompression limits are enforced.
+
+Public config and secret mutation routes do not yet implement user authentication or authorization.
+CORS protects browser-origin access, but non-browser clients that can reach client_service can call
+those routes. Audit logging and external secret-manager providers also remain future work.
+
+### Schema publication and generated tooling
+
+The strict Rust/Serde DTOs and extensive golden/route tests were implemented, but the proposed
+generated/published JSON Schema was not added. `apiVersion: agentspace.dev/v1alpha1` remains the
+machine-readable schema version, and unknown fields are rejected by the Serde models.
+
+### Operational configuration added
+
+Deployments now have additional environment requirements and controls:
+
+- `CLIENT_SERVICE_SECRET_KEY`: persistent secret encryption master key;
+- `CLIENT_SERVICE_INTERNAL_TOKEN`: token protecting the resolved Git Agent endpoint;
+- `GITAGENT_CLIENT_SERVICE_INTERNAL_TOKEN`: matching Git Agent token;
+- `CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`: allowed browser origins; and
+- the existing client-service/Git Agent base URLs used for effective-config refresh.
+
+The root `.env.example` and `compose.yaml` document and wire these values. Without an internal
+token, Git Agent uses immutable environment defaults rather than resolved declarative policy.
