@@ -251,9 +251,11 @@ Kernel containers are not defined in Compose — they are created dynamically by
 
 ### Prerequisites
 
-- Python 3.13+, [uv](https://docs.astral.sh/uv/) package manager
-- Node.js 22.13+ with pnpm (for webui)
-- Docker
+For the fully containerized workflow, install only Podman and `just`.
+
+For a host-managed workflow, install Python 3.13 with
+[uv](https://docs.astral.sh/uv/), Node.js 22.13 with pnpm, and Rust 1.96 with
+rustfmt and Clippy.
 
 ### Workspace
 
@@ -268,13 +270,27 @@ kernels/*  services/git_agent  channels/*  clients/cli_ui
 
 ```bash
 just bootstrap       # uv sync + pnpm install
-just stack-up        # docker compose up -d --build
-just stack-down      # docker compose down + cleanup
+just stack-up        # podman compose up -d
+just stack-down      # podman compose down + cleanup
 just stack-logs      # tail logs
-just stack-status    # docker compose ps
+just stack-status    # podman compose ps
 ```
 
 ### Quality
+
+The complete suite requires only Podman and `just` on the host:
+
+```bash
+just check-containerized
+```
+
+The pinned development image runs the same checks as `just check`. Targeted
+containerized recipes include `test-containerized`, `rust-check-containerized`,
+`client-service-check-containerized`, `agent-host-check-containerized`,
+`webui-lint-containerized`, and `webui-build-containerized`. Set
+`CONTAINER_RUNTIME=docker` to use Docker instead of Podman.
+
+With the language toolchains installed directly on the host:
 
 ```bash
 uv run pytest        # tests
