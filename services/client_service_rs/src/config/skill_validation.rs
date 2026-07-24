@@ -2,7 +2,7 @@
 //! skill CRUD.
 //!
 //! The rules mirror the authoritative checks in `agent_host` so a skill that
-//! validates here is one `agent_host` will also accept: every skill must
+//! validates here is one that `agent_host` will also accept: every skill must
 //! contain a `SKILL.md`, file paths must be safe relative paths, and an
 //! optional `agentspace.json` must parse against schema version 1 with
 //! normalized, non-reserved volume mount paths. Mount paths must also be unique
