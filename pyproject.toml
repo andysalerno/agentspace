@@ -98,6 +98,7 @@ extraPaths = [
 ]
 exclude = [
     ".venv",
+    ".pnpm-store",
     "clients/webui/node_modules",
     "kernels/kernel_claude_code",
     "kernels/kernel_codex",
