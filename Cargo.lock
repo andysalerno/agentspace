@@ -389,13 +389,18 @@ name = "client_service_rs"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
+ "hex",
  "http-body-util",
  "memory_rs",
  "reqwest",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
+ "sha2",
  "tokio",
  "tokio-stream",
  "tower",
@@ -403,6 +408,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
+ "zip",
 ]
 
 [[package]]

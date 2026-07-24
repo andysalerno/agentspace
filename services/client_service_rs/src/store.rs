@@ -7,276 +7,15 @@ use std::{
 mod sqlite;
 
 use crate::{
+    config::{adapter, state::ConfigState},
     errors::StoreError,
     models::{
-        AgentRecord, ConnectionRecord, GatewayRecord, HarnessName, KernelConfigRecord,
-        MessageRecord, SessionRecord, WorkspaceRecord, utc_now,
+        AgentRecord, ConnectionRecord, GatewayRecord, GitAgentConfigRecord, HarnessName,
+        KernelConfigRecord, MessageRecord, SessionRecord, WorkspaceRecord,
     },
 };
 
 pub use sqlite::SqliteDatabase;
-
-#[derive(Clone, Debug, Default)]
-pub struct InMemoryAgentStore {
-    agents: Arc<RwLock<BTreeMap<String, AgentRecord>>>,
-}
-
-impl InMemoryAgentStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn list(&self) -> Result<Vec<AgentRecord>, StoreError> {
-        let mut records = with_read(&self.agents, "agents", |agents| {
-            agents.values().cloned().collect::<Vec<_>>()
-        })?;
-        records.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then_with(|| left.agent_id.cmp(&right.agent_id))
-        });
-        Ok(records)
-    }
-
-    pub fn get(&self, agent_id: &str) -> Result<Option<AgentRecord>, StoreError> {
-        with_read(&self.agents, "agents", |agents| {
-            agents.get(agent_id).cloned()
-        })
-    }
-
-    pub fn insert(&self, agent: AgentRecord) -> Result<(), StoreError> {
-        with_write(&self.agents, "agents", |agents| {
-            if agents.contains_key(&agent.agent_id) {
-                return Err(StoreError::AgentAlreadyExists {
-                    agent_id: agent.agent_id,
-                });
-            }
-            agents.insert(agent.agent_id.clone(), agent);
-            Ok(())
-        })?
-    }
-
-    pub fn update(&self, agent: AgentRecord) -> Result<(), StoreError> {
-        with_write(&self.agents, "agents", |agents| {
-            if !agents.contains_key(&agent.agent_id) {
-                return Err(StoreError::AgentNotFound {
-                    agent_id: agent.agent_id,
-                });
-            }
-            agents.insert(agent.agent_id.clone(), agent);
-            Ok(())
-        })?
-    }
-
-    pub fn add_skill(&self, agent_id: &str, skill_id: &str) -> Result<bool, StoreError> {
-        with_write(&self.agents, "agents", |agents| {
-            let agent = agents
-                .get_mut(agent_id)
-                .ok_or_else(|| StoreError::AgentNotFound {
-                    agent_id: agent_id.to_owned(),
-                })?;
-            if agent.skills.iter().any(|skill| skill == skill_id) {
-                return Ok(false);
-            }
-            agent.skills.push(skill_id.to_owned());
-            agent.updated_at = utc_now();
-            Ok(true)
-        })?
-    }
-
-    pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
-        with_write(&self.agents, "agents", |agents| {
-            agents.insert(agent.agent_id.clone(), agent);
-        })
-    }
-
-    pub fn delete(&self, agent_id: &str) -> Result<bool, StoreError> {
-        with_write(&self.agents, "agents", |agents| {
-            agents.remove(agent_id).is_some()
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct InMemoryKernelConfigStore {
-    configs: Arc<RwLock<BTreeMap<HarnessName, KernelConfigRecord>>>,
-}
-
-impl InMemoryKernelConfigStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn list(&self) -> Result<Vec<KernelConfigRecord>, StoreError> {
-        let mut records = with_read(&self.configs, "kernel_configs", |configs| {
-            configs.values().cloned().collect::<Vec<_>>()
-        })?;
-        records.sort_by(|left, right| left.harness.as_str().cmp(right.harness.as_str()));
-        Ok(records)
-    }
-
-    pub fn get(&self, harness: HarnessName) -> Result<Option<KernelConfigRecord>, StoreError> {
-        with_read(&self.configs, "kernel_configs", |configs| {
-            configs.get(&harness).cloned()
-        })
-    }
-
-    pub fn upsert(
-        &self,
-        harness: HarnessName,
-        env_vars: impl Into<String>,
-    ) -> Result<KernelConfigRecord, StoreError> {
-        let record = KernelConfigRecord {
-            harness,
-            env_vars: env_vars.into(),
-            updated_at: utc_now(),
-        };
-        with_write(&self.configs, "kernel_configs", |configs| {
-            configs.insert(harness, record.clone());
-        })?;
-        Ok(record)
-    }
-
-    pub fn delete(&self, harness: HarnessName) -> Result<bool, StoreError> {
-        with_write(&self.configs, "kernel_configs", |configs| {
-            configs.remove(&harness).is_some()
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct InMemoryConnectionStore {
-    connections: Arc<RwLock<BTreeMap<String, ConnectionRecord>>>,
-}
-
-impl InMemoryConnectionStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn list(&self) -> Result<Vec<ConnectionRecord>, StoreError> {
-        let mut records = with_read(&self.connections, "connections", |connections| {
-            connections.values().cloned().collect::<Vec<_>>()
-        })?;
-        records.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then_with(|| left.connection_id.cmp(&right.connection_id))
-        });
-        Ok(records)
-    }
-
-    pub fn get(&self, connection_id: &str) -> Result<Option<ConnectionRecord>, StoreError> {
-        with_read(&self.connections, "connections", |connections| {
-            connections.get(connection_id).cloned()
-        })
-    }
-
-    pub fn insert(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
-        with_write(&self.connections, "connections", |connections| {
-            if connections.contains_key(&connection.connection_id) {
-                return Err(StoreError::ConnectionAlreadyExists {
-                    connection_id: connection.connection_id,
-                });
-            }
-            connections.insert(connection.connection_id.clone(), connection);
-            Ok(())
-        })?
-    }
-
-    pub fn update(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
-        with_write(&self.connections, "connections", |connections| {
-            if !connections.contains_key(&connection.connection_id) {
-                return Err(StoreError::ConnectionNotFound {
-                    connection_id: connection.connection_id,
-                });
-            }
-            connections.insert(connection.connection_id.clone(), connection);
-            Ok(())
-        })?
-    }
-
-    pub fn upsert(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
-        with_write(&self.connections, "connections", |connections| {
-            connections.insert(connection.connection_id.clone(), connection);
-        })
-    }
-
-    pub fn delete(&self, connection_id: &str) -> Result<bool, StoreError> {
-        with_write(&self.connections, "connections", |connections| {
-            connections.remove(connection_id).is_some()
-        })
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct InMemoryGatewayStore {
-    gateways: Arc<RwLock<BTreeMap<String, GatewayRecord>>>,
-}
-
-impl InMemoryGatewayStore {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn list(&self) -> Result<Vec<GatewayRecord>, StoreError> {
-        let mut records = with_read(&self.gateways, "gateways", |gateways| {
-            gateways.values().cloned().collect::<Vec<_>>()
-        })?;
-        records.sort_by(|left, right| {
-            left.created_at
-                .cmp(&right.created_at)
-                .then_with(|| left.gateway_id.cmp(&right.gateway_id))
-        });
-        Ok(records)
-    }
-
-    pub fn get(&self, gateway_id: &str) -> Result<Option<GatewayRecord>, StoreError> {
-        with_read(&self.gateways, "gateways", |gateways| {
-            gateways.get(gateway_id).cloned()
-        })
-    }
-
-    pub fn insert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
-        with_write(&self.gateways, "gateways", |gateways| {
-            if gateways.contains_key(&gateway.gateway_id) {
-                return Err(StoreError::GatewayAlreadyExists {
-                    gateway_id: gateway.gateway_id,
-                });
-            }
-            gateways.insert(gateway.gateway_id.clone(), gateway);
-            Ok(())
-        })?
-    }
-
-    pub fn update(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
-        with_write(&self.gateways, "gateways", |gateways| {
-            if !gateways.contains_key(&gateway.gateway_id) {
-                return Err(StoreError::GatewayNotFound {
-                    gateway_id: gateway.gateway_id,
-                });
-            }
-            gateways.insert(gateway.gateway_id.clone(), gateway);
-            Ok(())
-        })?
-    }
-
-    pub fn upsert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
-        with_write(&self.gateways, "gateways", |gateways| {
-            gateways.insert(gateway.gateway_id.clone(), gateway);
-        })
-    }
-
-    pub fn delete(&self, gateway_id: &str) -> Result<bool, StoreError> {
-        with_write(&self.gateways, "gateways", |gateways| {
-            gateways.remove(gateway_id).is_some()
-        })
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct InMemoryWorkspaceStore {
@@ -451,7 +190,9 @@ impl InMemorySessionStore {
 
 #[derive(Clone, Debug)]
 pub struct StoreSet {
+    pub(crate) config: ConfigState,
     pub(crate) agents: AgentStore,
+    pub(crate) git_agent_config: GitAgentConfigStore,
     pub(crate) kernel_configs: KernelConfigStore,
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
@@ -460,127 +201,142 @@ pub struct StoreSet {
 }
 
 impl StoreSet {
-    #[must_use]
-    pub fn in_memory() -> Self {
-        Self {
-            agents: AgentStore::in_memory(),
-            kernel_configs: KernelConfigStore::in_memory(),
-            connections: ConnectionStore::in_memory(),
-            gateways: GatewayStore::in_memory(),
+    /// Build an in-memory store set backed by a single shared [`ConfigState`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] if the configuration state cannot be initialized.
+    pub fn in_memory() -> Result<Self, StoreError> {
+        let config = ConfigState::in_memory()?;
+        Ok(Self {
+            agents: AgentStore::new(config.clone()),
+            git_agent_config: GitAgentConfigStore::new(config.clone()),
+            kernel_configs: KernelConfigStore::new(config.clone()),
+            connections: ConnectionStore::new(config.clone()),
+            gateways: GatewayStore::new(config.clone()),
             workspaces: WorkspaceStore::in_memory(),
             sessions: SessionStore::in_memory(),
-        }
+            config,
+        })
     }
 
+    /// Build a SQLite-backed store set. Configuration is persisted only through
+    /// the opaque snapshot envelope and write-only secret store; runtime-only
+    /// workspaces and sessions keep their dedicated tables.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] on persistence or configuration failure.
     pub fn sqlite(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
         let in_memory = path == Path::new(":memory:");
         tracing::info!(in_memory, "creating sqlite-backed store set");
         let stores = sqlite::SqliteStoreSet::open(path)?;
+        let config = if in_memory {
+            ConfigState::in_memory()?
+        } else {
+            let env: BTreeMap<String, String> = std::env::vars().collect();
+            let path_str = path.to_str().ok_or_else(|| StoreError::Persistence {
+                store: "config",
+                detail: "database path is not valid UTF-8".to_owned(),
+            })?;
+            ConfigState::open(Some(path_str), &env)?
+        };
         tracing::info!(in_memory, "created sqlite-backed store set");
         Ok(Self {
-            agents: AgentStore::Sqlite(stores.agents),
-            kernel_configs: KernelConfigStore::Sqlite(stores.kernel_configs),
-            connections: ConnectionStore::Sqlite(stores.connections),
-            gateways: GatewayStore::Sqlite(stores.gateways),
+            agents: AgentStore::new(config.clone()),
+            git_agent_config: GitAgentConfigStore::new(config.clone()),
+            kernel_configs: KernelConfigStore::new(config.clone()),
+            connections: ConnectionStore::new(config.clone()),
+            gateways: GatewayStore::new(config.clone()),
             workspaces: WorkspaceStore::Sqlite(stores.workspaces),
             sessions: SessionStore::Sqlite(stores.sessions),
+            config,
         })
     }
 }
 
-impl Default for StoreSet {
-    fn default() -> Self {
-        Self::in_memory()
-    }
-}
-
+/// Agent store backed by the authoritative [`ConfigDocument`].
 #[derive(Clone, Debug)]
-pub enum AgentStore {
-    InMemory(InMemoryAgentStore),
-    Sqlite(sqlite::SqliteAgentStore),
+pub struct AgentStore {
+    config: ConfigState,
 }
 
 impl AgentStore {
     #[must_use]
-    pub fn in_memory() -> Self {
-        Self::InMemory(InMemoryAgentStore::new())
+    pub const fn new(config: ConfigState) -> Self {
+        Self { config }
     }
 
     pub fn list(&self) -> Result<Vec<AgentRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.list(),
-            Self::Sqlite(store) => store.list(),
-        }
+        adapter::list_agents(&self.config)
     }
 
     pub fn get(&self, agent_id: &str) -> Result<Option<AgentRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.get(agent_id),
-            Self::Sqlite(store) => store.get(agent_id),
-        }
+        adapter::get_agent(&self.config, agent_id)
     }
 
-    pub fn insert(&self, agent: AgentRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.insert(agent),
-            Self::Sqlite(store) => store.insert(agent),
-        }
+    pub fn insert(&self, agent: &AgentRecord) -> Result<(), StoreError> {
+        adapter::insert_agent(&self.config, agent)
     }
 
-    pub fn update(&self, agent: AgentRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.update(agent),
-            Self::Sqlite(store) => store.update(agent),
-        }
+    pub fn update(&self, agent: &AgentRecord) -> Result<(), StoreError> {
+        adapter::update_agent(&self.config, agent)
     }
 
     pub fn add_skill(&self, agent_id: &str, skill_id: &str) -> Result<bool, StoreError> {
-        match self {
-            Self::InMemory(store) => store.add_skill(agent_id, skill_id),
-            Self::Sqlite(store) => store.add_skill(agent_id, skill_id),
-        }
+        adapter::add_agent_skill(&self.config, agent_id, skill_id)
     }
 
-    pub fn upsert(&self, agent: AgentRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.upsert(agent),
-            Self::Sqlite(store) => store.upsert(agent),
-        }
+    pub fn upsert(&self, agent: &AgentRecord) -> Result<(), StoreError> {
+        adapter::upsert_agent(&self.config, agent)
     }
 
     pub fn delete(&self, agent_id: &str) -> Result<bool, StoreError> {
-        match self {
-            Self::InMemory(store) => store.delete(agent_id),
-            Self::Sqlite(store) => store.delete(agent_id),
-        }
+        adapter::delete_agent(&self.config, agent_id)
     }
 }
 
+/// Git Agent configuration store backed by the authoritative document.
 #[derive(Clone, Debug)]
-pub enum KernelConfigStore {
-    InMemory(InMemoryKernelConfigStore),
-    Sqlite(sqlite::SqliteKernelConfigStore),
+pub struct GitAgentConfigStore {
+    config: ConfigState,
+}
+
+impl GitAgentConfigStore {
+    #[must_use]
+    pub const fn new(config: ConfigState) -> Self {
+        Self { config }
+    }
+
+    pub fn get(&self) -> Result<Option<GitAgentConfigRecord>, StoreError> {
+        adapter::get_git_agent_config(&self.config)
+    }
+
+    pub fn upsert(
+        &self,
+        config: &GitAgentConfigRecord,
+    ) -> Result<GitAgentConfigRecord, StoreError> {
+        adapter::upsert_git_agent_config(&self.config, config)
+    }
+}
+
+/// Kernel configuration store backed by the authoritative document.
+#[derive(Clone, Debug)]
+pub struct KernelConfigStore {
+    config: ConfigState,
 }
 
 impl KernelConfigStore {
     #[must_use]
-    pub fn in_memory() -> Self {
-        Self::InMemory(InMemoryKernelConfigStore::new())
+    pub const fn new(config: ConfigState) -> Self {
+        Self { config }
     }
 
     pub fn list(&self) -> Result<Vec<KernelConfigRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.list(),
-            Self::Sqlite(store) => store.list(),
-        }
+        adapter::list_kernel_configs(&self.config)
     }
 
     pub fn get(&self, harness: HarnessName) -> Result<Option<KernelConfigRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.get(harness),
-            Self::Sqlite(store) => store.get(harness),
-        }
+        adapter::get_kernel_config(&self.config, harness)
     }
 
     pub fn upsert(
@@ -588,128 +344,104 @@ impl KernelConfigStore {
         harness: HarnessName,
         env_vars: impl Into<String>,
     ) -> Result<KernelConfigRecord, StoreError> {
-        let env_vars = env_vars.into();
-        match self {
-            Self::InMemory(store) => store.upsert(harness, env_vars),
-            Self::Sqlite(store) => store.upsert(harness, env_vars),
-        }
+        adapter::upsert_kernel_config(&self.config, harness, env_vars.into())
     }
 
     pub fn delete(&self, harness: HarnessName) -> Result<bool, StoreError> {
-        match self {
-            Self::InMemory(store) => store.delete(harness),
-            Self::Sqlite(store) => store.delete(harness),
-        }
+        adapter::delete_kernel_config(&self.config, harness)
     }
 }
 
+/// Connection store backed by the authoritative document.
 #[derive(Clone, Debug)]
-pub enum ConnectionStore {
-    InMemory(InMemoryConnectionStore),
-    Sqlite(sqlite::SqliteConnectionStore),
+pub struct ConnectionStore {
+    config: ConfigState,
 }
 
 impl ConnectionStore {
     #[must_use]
-    pub fn in_memory() -> Self {
-        Self::InMemory(InMemoryConnectionStore::new())
+    pub const fn new(config: ConfigState) -> Self {
+        Self { config }
     }
 
     pub fn list(&self) -> Result<Vec<ConnectionRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.list(),
-            Self::Sqlite(store) => store.list(),
-        }
+        adapter::list_connections(&self.config)
     }
 
     pub fn get(&self, connection_id: &str) -> Result<Option<ConnectionRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.get(connection_id),
-            Self::Sqlite(store) => store.get(connection_id),
-        }
+        adapter::get_connection(&self.config, connection_id)
     }
 
-    pub fn insert(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.insert(connection),
-            Self::Sqlite(store) => store.insert(connection),
-        }
+    pub fn insert(&self, connection: &ConnectionRecord) -> Result<(), StoreError> {
+        adapter::insert_connection(&self.config, connection)
     }
 
-    pub fn update(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.update(connection),
-            Self::Sqlite(store) => store.update(connection),
-        }
+    pub fn update(&self, connection: &ConnectionRecord) -> Result<(), StoreError> {
+        adapter::update_connection(&self.config, connection)
     }
 
-    pub fn upsert(&self, connection: ConnectionRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.upsert(connection),
-            Self::Sqlite(store) => store.upsert(connection),
-        }
+    pub fn upsert(&self, connection: &ConnectionRecord) -> Result<(), StoreError> {
+        adapter::upsert_connection(&self.config, connection)
     }
 
     pub fn delete(&self, connection_id: &str) -> Result<bool, StoreError> {
-        match self {
-            Self::InMemory(store) => store.delete(connection_id),
-            Self::Sqlite(store) => store.delete(connection_id),
-        }
+        adapter::delete_connection(&self.config, connection_id)
     }
 }
 
+/// Gateway store backed by the authoritative document.
 #[derive(Clone, Debug)]
-pub enum GatewayStore {
-    InMemory(InMemoryGatewayStore),
-    Sqlite(sqlite::SqliteGatewayStore),
+pub struct GatewayStore {
+    config: ConfigState,
 }
 
 impl GatewayStore {
     #[must_use]
-    pub fn in_memory() -> Self {
-        Self::InMemory(InMemoryGatewayStore::new())
+    pub const fn new(config: ConfigState) -> Self {
+        Self { config }
     }
 
     pub fn list(&self) -> Result<Vec<GatewayRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.list(),
-            Self::Sqlite(store) => store.list(),
-        }
+        adapter::list_gateways(&self.config)
     }
 
     pub fn get(&self, gateway_id: &str) -> Result<Option<GatewayRecord>, StoreError> {
-        match self {
-            Self::InMemory(store) => store.get(gateway_id),
-            Self::Sqlite(store) => store.get(gateway_id),
-        }
+        adapter::get_gateway(&self.config, gateway_id)
     }
 
-    pub fn insert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.insert(gateway),
-            Self::Sqlite(store) => store.insert(gateway),
-        }
+    pub fn insert(&self, gateway: &GatewayRecord) -> Result<(), StoreError> {
+        adapter::insert_gateway(&self.config, gateway)
     }
 
-    pub fn update(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.update(gateway),
-            Self::Sqlite(store) => store.update(gateway),
-        }
+    pub fn update(&self, gateway: &GatewayRecord) -> Result<(), StoreError> {
+        adapter::update_gateway(&self.config, gateway)
     }
 
-    pub fn upsert(&self, gateway: GatewayRecord) -> Result<(), StoreError> {
-        match self {
-            Self::InMemory(store) => store.upsert(gateway),
-            Self::Sqlite(store) => store.upsert(gateway),
-        }
+    /// Update only the observed runtime status (never the desired config).
+    pub fn set_runtime_status(
+        &self,
+        gateway_id: &str,
+        status: &str,
+        last_error: Option<String>,
+        container_name: Option<String>,
+    ) {
+        adapter::set_gateway_runtime_status(
+            &self.config,
+            gateway_id,
+            crate::config::state::GatewayRuntime {
+                status: status.to_owned(),
+                last_error,
+                container_name,
+            },
+        );
+    }
+
+    pub fn upsert(&self, gateway: &GatewayRecord) -> Result<(), StoreError> {
+        adapter::upsert_gateway(&self.config, gateway)
     }
 
     pub fn delete(&self, gateway_id: &str) -> Result<bool, StoreError> {
-        match self {
-            Self::InMemory(store) => store.delete(gateway_id),
-            Self::Sqlite(store) => store.delete(gateway_id),
-        }
+        adapter::delete_gateway(&self.config, gateway_id)
     }
 }
 
@@ -891,14 +623,16 @@ mod tests {
         errors::StoreError,
         models::{
             AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord,
-            GatewayType, HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+            GatewayType, GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole,
+            SessionRecord, ToolCallRecord,
         },
     };
 
     use super::{
-        InMemoryAgentStore, InMemoryConnectionStore, InMemoryGatewayStore,
-        InMemoryKernelConfigStore, InMemorySessionStore, StoreSet,
+        AgentStore, ConnectionStore, GatewayStore, GitAgentConfigStore, InMemorySessionStore,
+        KernelConfigStore, StoreSet,
     };
+    use crate::config::state::ConfigState;
 
     fn agent(agent_id: &str, created_at: &str) -> AgentRecord {
         let mut record = AgentRecord::new(agent_id, agent_id, HarnessName::Acp, "prompt");
@@ -952,9 +686,9 @@ mod tests {
     #[test]
     fn agent_store_sorts_and_reports_duplicate_and_missing()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        let store = InMemoryAgentStore::new();
-        store.insert(agent("second", "2024-01-02"))?;
-        store.insert(agent("first", "2024-01-01"))?;
+        let store = AgentStore::new(ConfigState::in_memory()?);
+        store.insert(&agent("second", "2024-01-02"))?;
+        store.insert(&agent("first", "2024-01-01"))?;
 
         let ids = store
             .list()?
@@ -963,13 +697,13 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["first", "second"]);
 
-        let duplicate = store.insert(agent("first", "2024-01-03"));
+        let duplicate = store.insert(&agent("first", "2024-01-03"));
         assert!(matches!(
             duplicate,
             Err(StoreError::AgentAlreadyExists { agent_id }) if agent_id == "first"
         ));
 
-        let missing = store.update(agent("missing", "2024-01-03"));
+        let missing = store.update(&agent("missing", "2024-01-03"));
         assert!(matches!(
             missing,
             Err(StoreError::AgentNotFound { agent_id }) if agent_id == "missing"
@@ -982,11 +716,11 @@ mod tests {
     #[test]
     fn agent_store_add_skill_preserves_other_fields_and_deduplicates()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        let store = InMemoryAgentStore::new();
+        let store = AgentStore::new(ConfigState::in_memory()?);
         let mut record = agent("agent", "2024-01-01");
         record.name = "Original Name".to_owned();
         record.env_vars = "A=B".to_owned();
-        store.insert(record)?;
+        store.insert(&record)?;
 
         assert!(store.add_skill("agent", "new-skill")?);
         assert!(!store.add_skill("agent", "new-skill")?);
@@ -1008,20 +742,20 @@ mod tests {
 
     #[test]
     fn connection_store_duplicate_missing_and_upsert() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let store = InMemoryConnectionStore::new();
-        store.insert(connection("conn", "2024-01-01"))?;
+        let store = ConnectionStore::new(ConfigState::in_memory()?);
+        store.insert(&connection("conn", "2024-01-01"))?;
         assert!(matches!(
-            store.insert(connection("conn", "2024-01-02")),
+            store.insert(&connection("conn", "2024-01-02")),
             Err(StoreError::ConnectionAlreadyExists { connection_id }) if connection_id == "conn"
         ));
         assert!(matches!(
-            store.update(connection("missing", "2024-01-02")),
+            store.update(&connection("missing", "2024-01-02")),
             Err(StoreError::ConnectionNotFound { connection_id }) if connection_id == "missing"
         ));
 
         let mut replacement = connection("conn", "2024-01-03");
         replacement.name = "renamed".to_owned();
-        store.upsert(replacement)?;
+        store.upsert(&replacement)?;
         assert!(matches!(
             store.get("conn")?,
             Some(record) if record.name == "renamed"
@@ -1031,9 +765,11 @@ mod tests {
 
     #[test]
     fn gateway_store_duplicate_missing_and_sorting() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let store = InMemoryGatewayStore::new();
-        store.insert(gateway("later", "2024-01-02"))?;
-        store.insert(gateway("earlier", "2024-01-01"))?;
+        let config = ConfigState::in_memory()?;
+        AgentStore::new(config.clone()).insert(&agent("agent", "2024-01-01"))?;
+        let store = GatewayStore::new(config);
+        store.insert(&gateway("later", "2024-01-02"))?;
+        store.insert(&gateway("earlier", "2024-01-01"))?;
 
         let ids = store
             .list()?
@@ -1042,11 +778,11 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["earlier", "later"]);
         assert!(matches!(
-            store.insert(gateway("earlier", "2024-01-03")),
+            store.insert(&gateway("earlier", "2024-01-03")),
             Err(StoreError::GatewayAlreadyExists { gateway_id }) if gateway_id == "earlier"
         ));
         assert!(matches!(
-            store.update(gateway("missing", "2024-01-03")),
+            store.update(&gateway("missing", "2024-01-03")),
             Err(StoreError::GatewayNotFound { gateway_id }) if gateway_id == "missing"
         ));
         Ok(())
@@ -1055,7 +791,7 @@ mod tests {
     #[test]
     fn kernel_config_store_upserts_and_sorts_by_harness() -> Result<(), Box<dyn Error + Send + Sync>>
     {
-        let store = InMemoryKernelConfigStore::new();
+        let store = KernelConfigStore::new(ConfigState::in_memory()?);
         store.upsert(HarnessName::Echo, "E=1")?;
         store.upsert(HarnessName::Acp, "A=1")?;
         store.upsert(HarnessName::Echo, "E=2")?;
@@ -1071,6 +807,35 @@ mod tests {
             Some(record) if record.env_vars == "E=2"
         ));
         assert!(store.delete(HarnessName::Acp)?);
+        Ok(())
+    }
+
+    #[test]
+    fn git_agent_config_store_upserts_singleton() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let config = ConfigState::in_memory()?;
+        AgentStore::new(config.clone()).insert(&agent("reviewer", "2024-01-01"))?;
+        let store = GitAgentConfigStore::new(config);
+        assert!(store.get()?.is_none());
+
+        let mut config = GitAgentConfigRecord::new_default();
+        config.enabled = false;
+        config.remote_url = "http://gitagent.example/repo.git".to_owned();
+        store.upsert(&config)?;
+
+        let mut replacement = GitAgentConfigRecord::new_default();
+        replacement.default_branch = "trunk".to_owned();
+        replacement.allowed_refs = vec!["refs/heads/trunk".to_owned()];
+        replacement.review_agent_id = "reviewer".to_owned();
+        store.upsert(&replacement)?;
+
+        assert!(matches!(
+            store.get()?,
+            Some(record)
+                if record.enabled
+                    && record.default_branch == "trunk"
+                    && record.allowed_refs == vec!["refs/heads/trunk".to_owned()]
+                    && record.review_agent_id == "reviewer"
+        ));
         Ok(())
     }
 
@@ -1140,6 +905,49 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_git_agent_config_persists_across_reopen() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let path = sqlite_test_path()?;
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            stores.agents.insert(&agent("reviewer", "2024-01-01"))?;
+            let mut config = GitAgentConfigRecord::new_default();
+            config.enabled = false;
+            config.default_branch = "trunk".to_owned();
+            config.allowed_ref_prefixes = vec!["refs/heads/dev/".to_owned()];
+            config.allowed_refs = vec!["refs/heads/trunk".to_owned()];
+            config.remote_url = "http://gitagent.example/repo.git".to_owned();
+            config.patch_url = "http://gitagent.example/PatchRequest".to_owned();
+            config.review_agent_id = "reviewer".to_owned();
+            config.validation_command = "just verify".to_owned();
+            stores.git_agent_config.upsert(&config)?;
+        }
+
+        {
+            let stores = StoreSet::sqlite(&path)?;
+            let config = stores
+                .git_agent_config
+                .get()?
+                .ok_or_else(|| StoreError::Persistence {
+                    store: "git_agent_config",
+                    detail: "missing git agent config".to_owned(),
+                })?;
+            assert!(!config.enabled);
+            assert_eq!(config.default_branch, "trunk");
+            assert_eq!(
+                config.allowed_ref_prefixes,
+                vec!["refs/heads/dev/".to_owned()]
+            );
+            assert_eq!(config.allowed_refs, vec!["refs/heads/trunk".to_owned()]);
+            assert_eq!(config.review_agent_id, "reviewer");
+            assert_eq!(config.validation_command, "just verify");
+        }
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
     fn sqlite_stores_persist_records_across_reopen() -> Result<(), Box<dyn Error + Send + Sync>> {
         let path = sqlite_test_path()?;
         {
@@ -1148,13 +956,13 @@ mod tests {
             let mut connection = connection("conn", "2024-01-01");
             connection.api_flavor = ConnectionApiFlavor::Responses;
             connection.api_key = "secret".to_owned();
-            stores.connections.insert(connection)?;
+            stores.connections.insert(&connection)?;
 
             let mut agent = agent("agent", "2024-01-02");
             agent.skills = vec!["skill-a".to_owned(), "skill-b".to_owned()];
             agent.env_vars = "A=B".to_owned();
             agent.connection_id = Some("conn".to_owned());
-            stores.agents.insert(agent)?;
+            stores.agents.insert(&agent)?;
 
             stores.kernel_configs.upsert(HarnessName::Acp, "K=V")?;
 
@@ -1166,7 +974,7 @@ mod tests {
                 .insert("TOKEN".to_owned(), "value".to_owned());
             gateway.status = "running".to_owned();
             gateway.container_name = Some("container".to_owned());
-            stores.gateways.insert(gateway)?;
+            stores.gateways.insert(&gateway)?;
 
             let mut session = session("session", "2024-01-04");
             session.channel_name = Some("cli".to_owned());
@@ -1234,7 +1042,7 @@ mod tests {
                 gateway.secrets.get("TOKEN").map(String::as_str),
                 Some("value")
             );
-            assert_eq!(gateway.container_name.as_deref(), Some("container"));
+            assert_eq!(gateway.container_name, None);
 
             let session =
                 stores
@@ -1262,7 +1070,7 @@ mod tests {
         let path = sqlite_test_path()?;
         {
             let stores = StoreSet::sqlite(&path)?;
-            stores.agents.insert(agent("agent", "2024-01-01"))?;
+            stores.agents.insert(&agent("agent", "2024-01-01"))?;
 
             let mut changed =
                 stores
@@ -1273,7 +1081,7 @@ mod tests {
                     })?;
             changed.name = "Renamed Agent".to_owned();
             changed.env_vars = "SHARED=updated".to_owned();
-            stores.agents.update(changed)?;
+            stores.agents.update(&changed)?;
 
             assert!(stores.agents.add_skill("agent", "new-skill")?);
             assert!(!stores.agents.add_skill("agent", "new-skill")?);
