@@ -83,29 +83,44 @@ class ClientServiceSessionClient:
         response = await self._request_json("POST", f"/sessions/{session_id}/reset")
         return self._parse_session_registration(response)
 
-    async def validate_config(self, source: bytes) -> object:
+    async def validate_config(
+        self,
+        source: bytes,
+        content_type: str = "application/yaml",
+    ) -> object:
         return await self._request_json(
             "POST",
             "/config/validate",
             content=source,
+            content_type=content_type,
         )
 
-    async def plan_config(self, source: bytes) -> object:
+    async def plan_config(
+        self,
+        source: bytes,
+        content_type: str = "application/yaml",
+    ) -> object:
         return await self._request_json(
             "POST",
             "/config/plan",
             content=source,
+            content_type=content_type,
         )
 
-    async def apply_config(self, source: bytes) -> object:
+    async def apply_config(
+        self,
+        source: bytes,
+        content_type: str = "application/yaml",
+    ) -> object:
         return await self._request_json(
             "POST",
             "/config/apply",
             content=source,
+            content_type=content_type,
         )
 
     async def export_config(self, mode: str) -> ConfigDownload:
-        return await self._download("/config/export", params={"mode": mode})
+        return await self._download(f"/config/export?mode={mode}")
 
     async def export_resource(self, kind: str, name: str) -> ConfigDownload:
         return await self._download(f"/config/export/{kind}/{name}")
@@ -141,22 +156,22 @@ class ClientServiceSessionClient:
         *,
         json: dict[str, object] | None = None,
         content: bytes | None = None,
+        content_type: str | None = None,
     ) -> object:
         response = await self._request(
             method,
             path,
             json=json,
             content=content,
+            content_type=content_type,
         )
         return response.json()
 
     async def _download(
         self,
         path: str,
-        *,
-        params: dict[str, str] | None = None,
     ) -> ConfigDownload:
-        response = await self._request("GET", path, params=params)
+        response = await self._request("GET", path)
         return ConfigDownload(
             content=response.content,
             filename=_response_filename(response),
@@ -173,10 +188,10 @@ class ClientServiceSessionClient:
         *,
         json: dict[str, object] | None = None,
         content: bytes | None = None,
-        params: dict[str, str] | None = None,
+        content_type: str | None = None,
     ) -> httpx.Response:
         logger.info("cli_channel -> client_service %s %s", method, path)
-        headers = None if content is None else {"content-type": "application/yaml"}
+        headers = None if content_type is None else {"content-type": content_type}
         async with httpx.AsyncClient(
             base_url=self.base_url,
             timeout=self.timeout,
@@ -188,7 +203,6 @@ class ClientServiceSessionClient:
                 json=json,
                 content=content,
                 headers=headers,
-                params=params,
             )
         response.raise_for_status()
         return response

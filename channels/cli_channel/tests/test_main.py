@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import zipfile
 from typing import TYPE_CHECKING
 
 import httpx
@@ -81,3 +82,35 @@ async def test_config_export_writes_server_filename(
 
     assert (tmp_path / "agentspace.yaml").read_bytes() == b"kind: AgentSpaceConfig\n"
     assert capsys.readouterr().out == "agentspace.yaml\n"
+
+
+async def test_config_directory_uploads_deterministic_zip(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "agentspace.yaml").write_text(
+        "apiVersion: agentspace.dev/v1alpha1\nkind: AgentSpaceConfig\n",
+    )
+    skill_dir = tmp_path / "skills" / "research"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Research\n")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/config/validate"
+        assert request.headers["content-type"] == "application/zip"
+        with zipfile.ZipFile(io.BytesIO(request.content)) as archive:
+            assert archive.namelist() == [
+                "agentspace.yaml",
+                "skills/research/SKILL.md",
+            ]
+            assert archive.read("skills/research/SKILL.md") == b"# Research\n"
+        return httpx.Response(200, json={"valid": True})
+
+    client = ClientServiceSessionClient(
+        base_url="http://test",
+        transport=httpx.MockTransport(handler),
+    )
+
+    await run(["config", "validate", "-f", str(tmp_path)], client)
+
+    assert '"valid": true' in capsys.readouterr().out
