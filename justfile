@@ -10,7 +10,7 @@ default:
 # Install Python and web dependencies.
 bootstrap:
   uv sync --all-packages --dev
-  pnpm --dir clients/webui install
+  cd clients/webui && pnpm install
 
 # Run the full repository verification suite.
 [group('check')]
@@ -20,9 +20,9 @@ check:
   uv run pyright
   uv run --all-packages pytest
   just rust-check
-  pnpm --dir clients/webui run lint
-  pnpm --dir clients/webui run --if-present test
-  pnpm --dir clients/webui run build
+  cd clients/webui && pnpm run lint
+  cd clients/webui && pnpm run --if-present test
+  cd clients/webui && pnpm run build
 
 # Run all Python and Rust tests.
 [group('check')]
@@ -64,12 +64,12 @@ agent-host-build-image:
 # Run webui ESLint and dependency/dead-code checks.
 [group('check')]
 webui-lint:
-  pnpm --dir clients/webui run lint
+  cd clients/webui && pnpm run lint
 
 # Check for outdated webui dependencies.
 [group('check')]
 webui-deps-outdated:
-  pnpm --dir clients/webui outdated
+  cd clients/webui && pnpm outdated
 
 # Build all stack container images with Compose.
 [group('build')]
