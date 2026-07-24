@@ -94,11 +94,10 @@ def normalize_target_ref(
         msg = "target_ref must not be empty"
         raise PatchValidationError(msg)
 
-    protected = f"refs/heads/{default_branch}"
-    if ref in {default_branch, protected}:
-        return protected
-
+    protected = _canonical_head_ref(default_branch)
     full = _canonical_head_ref(ref)
+    if full == protected:
+        return protected
 
     # Exact allowed refs are honored as-is (matched on the canonical full ref).
     for allowed in allowed_refs:
@@ -129,7 +128,7 @@ def normalize_target_ref(
 
 
 def is_protected_ref(ref: str, *, default_branch: str = "main") -> bool:
-    return ref == f"refs/heads/{default_branch}"
+    return _canonical_head_ref(ref) == _canonical_head_ref(default_branch)
 
 
 def validate_sha(value: str) -> str:

@@ -234,6 +234,21 @@ def test_ref_policy_honors_custom_default_branch_and_prefix() -> None:
         )
 
 
+def test_ref_policy_accepts_full_default_branch_ref() -> None:
+    default_branch = "refs/heads/trunk"
+    assert (
+        normalize_target_ref("trunk", default_branch=default_branch)
+        == "refs/heads/trunk"
+    )
+    assert (
+        normalize_target_ref("refs/heads/trunk", default_branch=default_branch)
+        == "refs/heads/trunk"
+    )
+    assert is_protected_ref("trunk", default_branch=default_branch)
+    assert is_protected_ref("refs/heads/trunk", default_branch=default_branch)
+    assert not is_protected_ref("refs/heads/main", default_branch=default_branch)
+
+
 def test_ref_policy_defaults_match_legacy_behavior() -> None:
     assert normalize_target_ref("main") == "refs/heads/main"
     assert normalize_target_ref("wip/x") == "refs/heads/wip/x"
