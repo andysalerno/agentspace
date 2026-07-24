@@ -161,6 +161,18 @@ export default function ConfigKernelsView() {
                             <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
                             <div className="form-actions" style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
                                 <Button
+                                    className="secondary-button"
+                                    onClick={() => {
+                                        void api.downloadConfigResource(
+                                            "kernel-config",
+                                            effectiveSelected,
+                                        ).catch(reportError);
+                                    }}
+                                    type="button"
+                                >
+                                    Export YAML
+                                </Button>
+                                <Button
                                     disabled={saveMutation.isPending || loading || !dirty}
                                     onClick={handleSave}
                                     type="button"

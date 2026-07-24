@@ -1,4 +1,4 @@
-export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "memory" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
+export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "memory" | "skills" | "connections" | "gateways" | "info" | "config-kernels" | "config" | "config-secrets";
 
 type Harness = string;
 
@@ -293,6 +293,25 @@ export type ConnectionModels = {
     [key: string]: unknown;
   }>;
   [key: string]: unknown;
+};
+
+export type ConfigOperationResult = {
+  valid?: boolean;
+  generation?: number;
+  source_sha256?: string;
+  semantic_sha256?: string;
+  creates?: string[];
+  updates?: string[];
+  deletes?: string[];
+  unchanged?: string[];
+  [key: string]: unknown;
+};
+
+export type SecretStatus = {
+  name: string;
+  description: string | null;
+  is_set: boolean;
+  references: string[];
 };
 
 export type GatewayType = string;

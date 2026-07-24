@@ -224,6 +224,16 @@
   white-space: nowrap;
 }
 
+.management-view .config-result {
+  background: var(--mgmt-code-bg);
+  border: 1px solid var(--mgmt-border);
+  border-radius: var(--mgmt-radius);
+  max-height: 360px;
+  overflow: auto;
+  padding: 12px;
+  white-space: pre-wrap;
+}
+
 .management-view .tag {
   background: var(--mgmt-code-bg);
   color: var(--mgmt-muted);

@@ -825,6 +825,18 @@ export default function GatewaysView() {
                                     : "View Logs"}
                             </Button>
                             <div className="card-footer-actions">
+                                <Button
+                                    className="secondary-button small"
+                                    onClick={() => {
+                                        void api.downloadConfigResource(
+                                            "gateway",
+                                            gateway.gateway_id,
+                                        ).catch(reportError);
+                                    }}
+                                    type="button"
+                                >
+                                    Export YAML
+                                </Button>
                                 {gateway.status === "running" ? (
                                     <Button
                                         className="secondary-button small"
