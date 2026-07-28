@@ -4,6 +4,8 @@ set windows-shell := ["bash", "-cu"]
 kernel_host_script := "kernels/kernel_host/spawn-kernel.sh"
 devbox_container := "agentspace-devbox"
 devbox_image := "localhost/agentspace-devbox:latest"
+devbox_home_volume := "agentspace-devbox-home"
+devbox_nix_volume := "agentspace-devbox-nix"
 
 # Show available recipes.
 default:
@@ -39,8 +41,8 @@ devbox-start home="":
     home_key="bind:$home_dir"
     home_volume=("$home_dir:/home/devbox:rw")
   else
-    home_key="volume:agentspace-devbox-home"
-    home_volume=("agentspace-devbox-home:/home/devbox:U")
+    home_key="volume:{{devbox_home_volume}}"
+    home_volume=("{{devbox_home_volume}}:/home/devbox:U")
   fi
   if ! podman image exists {{devbox_image}}; then
     just --justfile "{{justfile_directory()}}/justfile" devbox-build-image
@@ -73,7 +75,7 @@ devbox-start home="":
       --env USER=devbox \
       --env LOGNAME=devbox \
       --security-opt label=disable \
-      --volume agentspace-devbox-nix:/nix:U \
+      --volume {{devbox_nix_volume}}:/nix:U \
       --volume "${home_volume[0]}" \
       --volume "{{justfile_directory()}}:/workspace:rw" \
       --workdir /workspace \
@@ -81,6 +83,20 @@ devbox-start home="":
       sleep infinity \
       >/dev/null
   fi
+
+# Remove the development container and its persistent named volumes.
+[group('devbox')]
+devbox-clear-volumes:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if podman container exists {{devbox_container}}; then
+    podman rm --force {{devbox_container}} >/dev/null
+  fi
+  for volume in {{devbox_nix_volume}} {{devbox_home_volume}}; do
+    if podman volume exists "$volume"; then
+      podman volume rm "$volume" >/dev/null
+    fi
+  done
 
 # Enter an interactive Bash shell in the development container.
 [group('devbox')]
