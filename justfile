@@ -26,12 +26,22 @@ devbox-build-image:
 
 # Start the development container in the background.
 [group('devbox')]
-devbox-start:
+devbox-start home="":
   #!/usr/bin/env bash
   set -euo pipefail
   uid="$(id -u)"
   gid="$(id -g)"
   user="$uid:$gid"
+  home_dir={{quote(home)}}
+  if [[ -n "$home_dir" ]]; then
+    mkdir -p -- "$home_dir"
+    home_dir="$(cd "$home_dir" && pwd -P)"
+    home_key="bind:$home_dir"
+    home_volume=("$home_dir:/home/devbox:rw")
+  else
+    home_key="volume:agentspace-devbox-home"
+    home_volume=("agentspace-devbox-home:/home/devbox:U")
+  fi
   if ! podman image exists {{devbox_image}}; then
     just --justfile "{{justfile_directory()}}/justfile" devbox-build-image
   fi
@@ -40,7 +50,11 @@ devbox-start:
       podman inspect {{devbox_container}} \
         --format '{{ "{{.Config.User}}" }}'
     )"
-    if [[ "$container_user" != "$user" ]]; then
+    container_home="$(
+      podman inspect {{devbox_container}} \
+        --format '{{ "{{.Config.Labels.agentspace_devbox_home}}" }}'
+    )"
+    if [[ "$container_user" != "$user" || "$container_home" != "$home_key" ]]; then
       podman rm --force {{devbox_container}} >/dev/null
     fi
   fi
@@ -51,6 +65,7 @@ devbox-start:
       --detach \
       --name {{devbox_container}} \
       --hostname agentspace-dev \
+      --label agentspace_devbox_home="$home_key" \
       --userns keep-id \
       --user "$user" \
       --passwd-entry "devbox:x:$uid:$gid:Devbox User:/home/devbox:/bin/bash" \
@@ -59,7 +74,7 @@ devbox-start:
       --env LOGNAME=devbox \
       --security-opt label=disable \
       --volume agentspace-devbox-nix:/nix:U \
-      --volume agentspace-devbox-home:/home/devbox:U \
+      --volume "${home_volume[0]}" \
       --volume "{{justfile_directory()}}:/workspace:rw" \
       --workdir /workspace \
       {{devbox_image}} \
@@ -69,7 +84,7 @@ devbox-start:
 
 # Enter an interactive Bash shell in the development container.
 [group('devbox')]
-devbox-shell: devbox-start
+devbox-shell home="": (devbox-start home)
   #!/usr/bin/env bash
   exec podman exec \
     --interactive \
