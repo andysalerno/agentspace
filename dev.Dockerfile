@@ -1,8 +1,8 @@
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
-ENV CARGO_HOME="/opt/cargo" \
+ENV CARGO_HOME="/home/dev/.cargo" \
     LANG="C.UTF-8" \
-    PATH="/home/dev/.local/bin:${PATH}" \
+    PATH="/home/dev/.local/bin:/home/dev/.cargo/bin:${PATH}" \
     RUSTUP_HOME="/usr/local/lib/rustup"
 
 RUN zypper --non-interactive install --no-recommends \
@@ -32,11 +32,5 @@ RUN printf '%s\n' 'export PATH="/home/dev/.local/bin:$PATH"' \
     > /etc/bash.bashrc.local
 
 WORKDIR /workspace
-
-COPY . .
-
-RUN uv sync --all-packages --dev --locked \
-    && pnpm --dir clients/webui install --frozen-lockfile \
-    && just check
 
 CMD ["/bin/bash"]

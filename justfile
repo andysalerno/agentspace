@@ -4,11 +4,7 @@ set windows-shell := ["bash", "-cu"]
 kernel_host_script := "kernels/kernel_host/spawn-kernel.sh"
 dev_container := "agentspace-dev"
 dev_image := "localhost/agentspace-dev:latest"
-dev_cargo_volume := "agentspace-dev-cargo"
 dev_home_volume := "agentspace-dev-home"
-dev_node_modules_volume := "agentspace-dev-node-modules"
-dev_target_volume := "agentspace-dev-target"
-dev_venv_volume := "agentspace-dev-venv"
 
 # Show available recipes.
 default:
@@ -73,11 +69,7 @@ dev-start home="":
       --env USER=dev \
       --env LOGNAME=dev \
       --security-opt label=disable \
-      --volume {{dev_cargo_volume}}:/opt/cargo:U \
       --volume "${home_volume[0]}" \
-      --volume {{dev_node_modules_volume}}:/workspace/clients/webui/node_modules:U \
-      --volume {{dev_target_volume}}:/workspace/target:U \
-      --volume {{dev_venv_volume}}:/workspace/.venv:U \
       --volume "{{justfile_directory()}}:/workspace:rw" \
       --workdir /workspace \
       {{dev_image}} \
@@ -93,18 +85,9 @@ dev-clear-volumes:
   if podman container exists {{dev_container}}; then
     podman rm --force {{dev_container}} >/dev/null
   fi
-  volumes=(
-    {{dev_cargo_volume}}
-    {{dev_home_volume}}
-    {{dev_node_modules_volume}}
-    {{dev_target_volume}}
-    {{dev_venv_volume}}
-  )
-  for volume in "${volumes[@]}"; do
-    if podman volume exists "$volume"; then
-      podman volume rm "$volume" >/dev/null
-    fi
-  done
+  if podman volume exists {{dev_home_volume}}; then
+    podman volume rm {{dev_home_volume}} >/dev/null
+  fi
 
 # Enter an interactive Bash shell in the development container.
 [group('dev')]
