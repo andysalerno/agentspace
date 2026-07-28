@@ -1,6 +1,6 @@
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
-RUN zypper --non-interactive install --no-recommends ca-certificates curl git just \
+RUN zypper --non-interactive install --no-recommends ca-certificates curl git just vim \
     && zypper clean --all \
     && curl --proto '=https' --tlsv1.2 -sSfL https://install.determinate.systems/nix -o /tmp/install-nix.sh \
     && sh /tmp/install-nix.sh install linux \
