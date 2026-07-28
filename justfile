@@ -22,10 +22,10 @@ devbox-resolve:
 devbox-build-image:
   podman build --file devbox.Dockerfile --tag localhost/agentspace-devbox:latest .
 
-# Create and start the Distrobox from the locally built Devbox image.
+# Create the Distrobox with this repository mounted at /workspace.
 [group('devbox')]
-devbox-distrobox:
-  distrobox assemble create --file distrobox.ini
+distrobox-create:
+  distrobox create --name agentspace-dev --image localhost/agentspace-devbox:latest --volume "{{justfile_directory()}}:/workspace:rw"
 
 # Run the full repository verification suite.
 [group('check')]
