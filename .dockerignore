@@ -38,7 +38,7 @@
 !**/.env.example
 
 # Runtime data mounts — not needed at image build time
-mounts/
+mounts/data/
 
 # Docs and project notes
 docs/

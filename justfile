@@ -2,10 +2,13 @@ set shell := ["bash", "-cu"]
 set windows-shell := ["bash", "-cu"]
 
 kernel_host_script := "kernels/kernel_host/spawn-kernel.sh"
-devbox_container := "agentspace-devbox"
-devbox_image := "localhost/agentspace-devbox:latest"
-devbox_home_volume := "agentspace-devbox-home"
-devbox_nix_volume := "agentspace-devbox-nix"
+dev_container := "agentspace-dev"
+dev_image := "localhost/agentspace-dev:latest"
+dev_cargo_volume := "agentspace-dev-cargo"
+dev_home_volume := "agentspace-dev-home"
+dev_node_modules_volume := "agentspace-dev-node-modules"
+dev_target_volume := "agentspace-dev-target"
+dev_venv_volume := "agentspace-dev-venv"
 
 # Show available recipes.
 default:
@@ -16,19 +19,14 @@ bootstrap:
   uv sync --all-packages --dev
   cd clients/webui && pnpm install
 
-# Resolve and install the packages declared in devbox.json.
-[group('devbox')]
-devbox-resolve:
-  devbox install
-
-# Build the openSUSE-based Devbox image with Podman.
-[group('devbox')]
-devbox-build-image:
-  podman build --file devbox.Dockerfile --tag {{devbox_image}} .
+# Build the openSUSE development image with Podman.
+[group('dev')]
+dev-build-image:
+  podman build --file dev.Dockerfile --tag {{dev_image}} .
 
 # Start the development container in the background.
-[group('devbox')]
-devbox-start home="":
+[group('dev')]
+dev-start home="":
   #!/usr/bin/env bash
   set -euo pipefail
   uid="$(id -u)"
@@ -39,68 +37,78 @@ devbox-start home="":
     mkdir -p -- "$home_dir"
     home_dir="$(cd "$home_dir" && pwd -P)"
     home_key="bind:$home_dir"
-    home_volume=("$home_dir:/home/devbox:rw")
+    home_volume=("$home_dir:/home/dev:rw")
   else
-    home_key="volume:{{devbox_home_volume}}"
-    home_volume=("{{devbox_home_volume}}:/home/devbox:U")
+    home_key="volume:{{dev_home_volume}}"
+    home_volume=("{{dev_home_volume}}:/home/dev:U")
   fi
-  if ! podman image exists {{devbox_image}}; then
-    just --justfile "{{justfile_directory()}}/justfile" devbox-build-image
+  if ! podman image exists {{dev_image}}; then
+    just --justfile "{{justfile_directory()}}/justfile" dev-build-image
   fi
-  if podman container exists {{devbox_container}}; then
+  if podman container exists {{dev_container}}; then
     container_user="$(
-      podman inspect {{devbox_container}} \
+      podman inspect {{dev_container}} \
         --format '{{ "{{.Config.User}}" }}'
     )"
     container_home="$(
-      podman inspect {{devbox_container}} \
-        --format '{{ "{{.Config.Labels.agentspace_devbox_home}}" }}'
+      podman inspect {{dev_container}} \
+        --format '{{ "{{.Config.Labels.agentspace_dev_home}}" }}'
     )"
     if [[ "$container_user" != "$user" || "$container_home" != "$home_key" ]]; then
-      podman rm --force {{devbox_container}} >/dev/null
+      podman rm --force {{dev_container}} >/dev/null
     fi
   fi
-  if podman container exists {{devbox_container}}; then
-    podman start {{devbox_container}} >/dev/null
+  if podman container exists {{dev_container}}; then
+    podman start {{dev_container}} >/dev/null
   else
     podman run \
       --detach \
-      --name {{devbox_container}} \
+      --name {{dev_container}} \
       --hostname agentspace-dev \
-      --label agentspace_devbox_home="$home_key" \
+      --label agentspace_dev_home="$home_key" \
       --userns keep-id \
       --user "$user" \
-      --passwd-entry "devbox:x:$uid:$gid:Devbox User:/home/devbox:/bin/bash" \
-      --env HOME=/home/devbox \
-      --env USER=devbox \
-      --env LOGNAME=devbox \
+      --passwd-entry "dev:x:$uid:$gid:Development User:/home/dev:/bin/bash" \
+      --env HOME=/home/dev \
+      --env USER=dev \
+      --env LOGNAME=dev \
       --security-opt label=disable \
-      --volume {{devbox_nix_volume}}:/nix:U \
+      --volume {{dev_cargo_volume}}:/opt/cargo:U \
       --volume "${home_volume[0]}" \
+      --volume {{dev_node_modules_volume}}:/workspace/clients/webui/node_modules:U \
+      --volume {{dev_target_volume}}:/workspace/target:U \
+      --volume {{dev_venv_volume}}:/workspace/.venv:U \
       --volume "{{justfile_directory()}}:/workspace:rw" \
       --workdir /workspace \
-      {{devbox_image}} \
+      {{dev_image}} \
       sleep infinity \
       >/dev/null
   fi
 
 # Remove the development container and its persistent named volumes.
-[group('devbox')]
-devbox-clear-volumes:
+[group('dev')]
+dev-clear-volumes:
   #!/usr/bin/env bash
   set -euo pipefail
-  if podman container exists {{devbox_container}}; then
-    podman rm --force {{devbox_container}} >/dev/null
+  if podman container exists {{dev_container}}; then
+    podman rm --force {{dev_container}} >/dev/null
   fi
-  for volume in {{devbox_nix_volume}} {{devbox_home_volume}}; do
+  volumes=(
+    {{dev_cargo_volume}}
+    {{dev_home_volume}}
+    {{dev_node_modules_volume}}
+    {{dev_target_volume}}
+    {{dev_venv_volume}}
+  )
+  for volume in "${volumes[@]}"; do
     if podman volume exists "$volume"; then
       podman volume rm "$volume" >/dev/null
     fi
   done
 
 # Enter an interactive Bash shell in the development container.
-[group('devbox')]
-devbox-shell home="": (devbox-start home)
+[group('dev')]
+dev-shell home="": (dev-start home)
   #!/usr/bin/env bash
   exec podman exec \
     --interactive \
@@ -108,7 +116,7 @@ devbox-shell home="": (devbox-start home)
     --env TERM \
     --env COLORTERM \
     --workdir /workspace \
-    {{devbox_container}} \
+    {{dev_container}} \
     /bin/bash
 
 # Run the full repository verification suite.
