@@ -36,20 +36,49 @@ devbox-start:
     just --justfile "{{justfile_directory()}}/justfile" devbox-build-image
   fi
   if podman container exists {{devbox_container}}; then
-    if [[ "$(podman inspect {{devbox_container}} --format '{{ "{{.Config.User}}" }}')" != "$user" ]]; then
+    container_user="$(
+      podman inspect {{devbox_container}} \
+        --format '{{ "{{.Config.User}}" }}'
+    )"
+    if [[ "$container_user" != "$user" ]]; then
       podman rm --force {{devbox_container}} >/dev/null
     fi
   fi
   if podman container exists {{devbox_container}}; then
     podman start {{devbox_container}} >/dev/null
   else
-    podman run --detach --name {{devbox_container}} --hostname agentspace-dev --userns keep-id --user "$user" --passwd-entry "devbox:x:$uid:$gid:Devbox User:/home/devbox:/bin/bash" --env HOME=/home/devbox --env USER=devbox --env LOGNAME=devbox --security-opt label=disable --volume agentspace-devbox-nix:/nix:U --volume agentspace-devbox-home:/home/devbox:U --volume "{{justfile_directory()}}:/workspace:rw" --workdir /workspace {{devbox_image}} sleep infinity >/dev/null
+    podman run \
+      --detach \
+      --name {{devbox_container}} \
+      --hostname agentspace-dev \
+      --userns keep-id \
+      --user "$user" \
+      --passwd-entry "devbox:x:$uid:$gid:Devbox User:/home/devbox:/bin/bash" \
+      --env HOME=/home/devbox \
+      --env USER=devbox \
+      --env LOGNAME=devbox \
+      --security-opt label=disable \
+      --volume agentspace-devbox-nix:/nix:U \
+      --volume agentspace-devbox-home:/home/devbox:U \
+      --volume "{{justfile_directory()}}:/workspace:rw" \
+      --workdir /workspace \
+      {{devbox_image}} \
+      sleep infinity \
+      >/dev/null
   fi
 
 # Enter an interactive Bash shell in the development container.
 [group('devbox')]
 devbox-shell: devbox-start
-  podman exec --interactive --tty --env TERM --env COLORTERM --workdir /workspace {{devbox_container}} /bin/bash
+  #!/usr/bin/env bash
+  exec podman exec \
+    --interactive \
+    --tty \
+    --env TERM \
+    --env COLORTERM \
+    --workdir /workspace \
+    {{devbox_container}} \
+    /bin/bash
 
 # Run the full repository verification suite.
 [group('check')]
@@ -93,12 +122,38 @@ agent-host-check:
 # Build the client-service container image.
 [group('build')]
 client-service-build-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; rust_profile="${RUST_BUILD_PROFILE:-debug}"; version="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"; "$runtime" build --build-arg "AGENTSPACE_VERSION=$version" --build-arg "RUST_BUILD_PROFILE=$rust_profile" -f services/client_service_rs/Dockerfile -t agentspace-client-service:latest .
+  #!/usr/bin/env bash
+  set -euo pipefail
+  runtime="${CONTAINER_RUNTIME:-podman}"
+  if ! command -v "$runtime" >/dev/null 2>&1; then
+    runtime=docker
+  fi
+  rust_profile="${RUST_BUILD_PROFILE:-debug}"
+  version="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  "$runtime" build \
+    --build-arg "AGENTSPACE_VERSION=$version" \
+    --build-arg "RUST_BUILD_PROFILE=$rust_profile" \
+    --file services/client_service_rs/Dockerfile \
+    --tag agentspace-client-service:latest \
+    .
 
 # Build the agent-host container image.
 [group('build')]
 agent-host-build-image:
-  runtime="${CONTAINER_RUNTIME:-podman}"; command -v "$runtime" >/dev/null 2>&1 || runtime=docker; rust_profile="${RUST_BUILD_PROFILE:-debug}"; version="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"; "$runtime" build --build-arg "AGENTSPACE_VERSION=$version" --build-arg "RUST_BUILD_PROFILE=$rust_profile" -f services/agent_host_rs/Dockerfile -t agentspace-agent-host:latest .
+  #!/usr/bin/env bash
+  set -euo pipefail
+  runtime="${CONTAINER_RUNTIME:-podman}"
+  if ! command -v "$runtime" >/dev/null 2>&1; then
+    runtime=docker
+  fi
+  rust_profile="${RUST_BUILD_PROFILE:-debug}"
+  version="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  "$runtime" build \
+    --build-arg "AGENTSPACE_VERSION=$version" \
+    --build-arg "RUST_BUILD_PROFILE=$rust_profile" \
+    --file services/agent_host_rs/Dockerfile \
+    --tag agentspace-agent-host:latest \
+    .
 
 # Run webui ESLint and dependency/dead-code checks.
 [group('check')]
@@ -113,28 +168,64 @@ webui-deps-outdated:
 # Build all stack container images with Compose.
 [group('build')]
 stack-build-images:
-  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml build
+  #!/usr/bin/env bash
+  set -euo pipefail
+  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  podman compose \
+    --file compose.yaml \
+    build
 
 # Build stack container images with Compose without using cached layers.
 [group('build')]
 stack-build-images-no-cache *services:
-  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml build --no-cache {{services}}
+  #!/usr/bin/env bash
+  set -euo pipefail
+  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  podman compose \
+    --file compose.yaml \
+    build \
+    --no-cache {{services}}
 
 # Start the full Compose stack.
 [group('run')]
 stack-up:
-  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml up -d
+  #!/usr/bin/env bash
+  set -euo pipefail
+  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  podman compose \
+    --file compose.yaml \
+    up \
+    --detach
 
 # Start the stack with the rootless Podman override.
 [group('run')]
 stack-up-rootless-podman:
-  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml -f compose.podman.yaml up -d
+  #!/usr/bin/env bash
+  set -euo pipefail
+  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  podman compose \
+    --file compose.yaml \
+    --file compose.podman.yaml \
+    up \
+    --detach
 
 # Rebuild rootless Podman stack images without cache, then recreate containers.
 [group('run')]
 stack-rebuild-rootless-podman *services:
-  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml -f compose.podman.yaml build --no-cache {{services}}
-  AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}" podman compose -f compose.yaml -f compose.podman.yaml up -d --force-recreate {{services}}
+  #!/usr/bin/env bash
+  set -euo pipefail
+  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  podman compose \
+    --file compose.yaml \
+    --file compose.podman.yaml \
+    build \
+    --no-cache {{services}}
+  podman compose \
+    --file compose.yaml \
+    --file compose.podman.yaml \
+    up \
+    --detach \
+    --force-recreate {{services}}
 
 # Stop the Compose stack and clean spawned kernel/gateway containers.
 [group('run')]
