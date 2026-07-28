@@ -12,6 +12,21 @@ bootstrap:
   uv sync --all-packages --dev
   cd clients/webui && pnpm install
 
+# Resolve and install the packages declared in devbox.json.
+[group('devbox')]
+devbox-resolve:
+  devbox install
+
+# Build the openSUSE-based Devbox image with Podman.
+[group('devbox')]
+devbox-build-image:
+  podman build --file devbox.Dockerfile --tag localhost/agentspace-devbox:latest .
+
+# Create and start the Distrobox from the locally built Devbox image.
+[group('devbox')]
+devbox-distrobox:
+  distrobox assemble create --file distrobox.ini
+
 # Run the full repository verification suite.
 [group('check')]
 check:
