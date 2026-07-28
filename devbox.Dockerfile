@@ -12,8 +12,11 @@ RUN zypper --non-interactive install --no-recommends ca-certificates curl git ju
     && chmod 0755 /usr/local/bin/devbox \
     && rm /tmp/install-devbox.sh /tmp/install-nix.sh
 
+RUN printf '%s\n' 'export PATH="/home/devbox/.local/bin:$PATH"' \
+    > /etc/bash.bashrc.local
+
 ENV LANG="C.UTF-8" \
-    PATH="/nix/var/nix/profiles/default/bin:${PATH}"
+    PATH="/home/devbox/.local/bin:/nix/var/nix/profiles/default/bin:${PATH}"
 
 WORKDIR /workspace
 
