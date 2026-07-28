@@ -2,6 +2,8 @@ set shell := ["bash", "-cu"]
 set windows-shell := ["bash", "-cu"]
 
 kernel_host_script := "kernels/kernel_host/spawn-kernel.sh"
+devbox_container := "agentspace-devbox"
+devbox_image := "localhost/agentspace-devbox:latest"
 
 # Show available recipes.
 default:
@@ -20,12 +22,26 @@ devbox-resolve:
 # Build the openSUSE-based Devbox image with Podman.
 [group('devbox')]
 devbox-build-image:
-  podman build --file devbox.Dockerfile --tag localhost/agentspace-devbox:latest .
+  podman build --file devbox.Dockerfile --tag {{devbox_image}} .
 
-# Create the Distrobox with this repository mounted at /workspace.
+# Start the development container in the background.
 [group('devbox')]
-distrobox-create:
-  distrobox create --name agentspace-dev --image localhost/agentspace-devbox:latest --init --additional-packages "git just" --volume "{{justfile_directory()}}:/workspace:rw"
+devbox-start:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if ! podman image exists {{devbox_image}}; then
+    just --justfile "{{justfile_directory()}}/justfile" devbox-build-image
+  fi
+  if podman container exists {{devbox_container}}; then
+    podman start {{devbox_container}} >/dev/null
+  else
+    podman run --detach --name {{devbox_container}} --hostname agentspace-dev --security-opt label=disable --volume agentspace-devbox-nix:/nix --volume agentspace-devbox-home:/root --volume "{{justfile_directory()}}:/workspace:rw" --workdir /workspace {{devbox_image}} sleep infinity >/dev/null
+  fi
+
+# Enter an interactive Bash shell in the development container.
+[group('devbox')]
+devbox-shell: devbox-start
+  podman exec --interactive --tty --env TERM --env COLORTERM --workdir /workspace {{devbox_container}} /bin/bash
 
 # Run the full repository verification suite.
 [group('check')]
