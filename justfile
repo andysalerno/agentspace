@@ -29,13 +29,21 @@ devbox-build-image:
 devbox-start:
   #!/usr/bin/env bash
   set -euo pipefail
+  uid="$(id -u)"
+  gid="$(id -g)"
+  user="$uid:$gid"
   if ! podman image exists {{devbox_image}}; then
     just --justfile "{{justfile_directory()}}/justfile" devbox-build-image
   fi
   if podman container exists {{devbox_container}}; then
+    if [[ "$(podman inspect {{devbox_container}} --format '{{ "{{.Config.User}}" }}')" != "$user" ]]; then
+      podman rm --force {{devbox_container}} >/dev/null
+    fi
+  fi
+  if podman container exists {{devbox_container}}; then
     podman start {{devbox_container}} >/dev/null
   else
-    podman run --detach --name {{devbox_container}} --hostname agentspace-dev --security-opt label=disable --volume agentspace-devbox-nix:/nix --volume agentspace-devbox-home:/root --volume "{{justfile_directory()}}:/workspace:rw" --workdir /workspace {{devbox_image}} sleep infinity >/dev/null
+    podman run --detach --name {{devbox_container}} --hostname agentspace-dev --userns keep-id --user "$user" --passwd-entry "devbox:x:$uid:$gid:Devbox User:/home/devbox:/bin/bash" --env HOME=/home/devbox --env USER=devbox --env LOGNAME=devbox --security-opt label=disable --volume agentspace-devbox-nix:/nix:U --volume agentspace-devbox-home:/home/devbox:U --volume "{{justfile_directory()}}:/workspace:rw" --workdir /workspace {{devbox_image}} sleep infinity >/dev/null
   fi
 
 # Enter an interactive Bash shell in the development container.
