@@ -25,7 +25,7 @@ devbox-build-image:
 # Create the Distrobox with this repository mounted at /workspace.
 [group('devbox')]
 distrobox-create:
-  distrobox create --name agentspace-dev --image localhost/agentspace-devbox:latest --init --additional-packages just --volume "{{justfile_directory()}}:/workspace:rw"
+  distrobox create --name agentspace-dev --image localhost/agentspace-devbox:latest --init --additional-packages "git just" --volume "{{justfile_directory()}}:/workspace:rw"
 
 # Run the full repository verification suite.
 [group('check')]
