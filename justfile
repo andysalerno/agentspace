@@ -39,6 +39,7 @@ dev-start home="":
     home_volume=("{{dev_home_volume}}:/home/dev:U")
   fi
   if ! podman image exists {{dev_image}}; then
+    echo "Development image not found; building {{dev_image}}."
     just --justfile "{{justfile_directory()}}/justfile" dev-build-image
   fi
   if podman container exists {{dev_container}}; then
@@ -51,12 +52,27 @@ dev-start home="":
         --format '{{ "{{.Config.Labels.agentspace_dev_home}}" }}'
     )"
     if [[ "$container_user" != "$user" || "$container_home" != "$home_key" ]]; then
+      echo "Existing container configuration changed; recreating {{dev_container}}."
       podman rm --force {{dev_container}} >/dev/null
     fi
   fi
   if podman container exists {{dev_container}}; then
-    podman start {{dev_container}} >/dev/null
+    container_running="$(
+      podman inspect {{dev_container}} \
+        --format '{{ "{{.State.Running}}" }}'
+    )"
+    if [[ "$container_running" == true ]]; then
+      echo "Development container {{dev_container}} is already running."
+    else
+      echo "Starting existing development container {{dev_container}}."
+      podman start {{dev_container}} >/dev/null
+    fi
   else
+    if [[ -n "$home_dir" ]]; then
+      echo "Creating development container {{dev_container}} with home $home_dir."
+    else
+      echo "Creating development container {{dev_container}} with a persistent home volume."
+    fi
     podman run \
       --detach \
       --name {{dev_container}} \
@@ -77,6 +93,11 @@ dev-start home="":
       >/dev/null
   fi
 
+# List development containers created by this repository.
+[group('dev')]
+dev-list-containers:
+  @podman ps --all --filter "name={{dev_container}}"
+
 # Remove the development container and its persistent named volumes.
 [group('dev')]
 dev-clear-volumes:
@@ -91,8 +112,27 @@ dev-clear-volumes:
 
 # Enter an interactive Bash shell in the development container.
 [group('dev')]
-dev-shell home="": (dev-start home)
+dev-shell home="":
   #!/usr/bin/env bash
+  set -euo pipefail
+  home_dir={{quote(home)}}
+  if [[ -n "$home_dir" ]]; then
+    just --justfile "{{justfile_directory()}}/justfile" dev-start "$home_dir"
+  elif ! podman container exists {{dev_container}}; then
+    just --justfile "{{justfile_directory()}}/justfile" dev-start
+  else
+    container_running="$(
+      podman inspect {{dev_container}} \
+        --format '{{ "{{.State.Running}}" }}'
+    )"
+    if [[ "$container_running" == true ]]; then
+      echo "Attaching to running development container {{dev_container}}."
+    else
+      echo "Starting existing development container {{dev_container}} before attaching."
+      podman start {{dev_container}} >/dev/null
+    fi
+  fi
+  echo "Opening an interactive shell in {{dev_container}}."
   exec podman exec \
     --interactive \
     --tty \
