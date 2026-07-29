@@ -28,6 +28,20 @@ dev-start home="":
   uid="$(id -u)"
   gid="$(id -g)"
   user="$uid:$gid"
+  if [[ -n "${PODMAN_SOCKET:-}" ]]; then
+    podman_socket="$PODMAN_SOCKET"
+  else
+    podman_socket="$(
+      podman info --format '{{ "{{.Host.RemoteSocket.Path}}" }}'
+    )"
+  fi
+  podman_socket="${podman_socket#unix://}"
+  if [[ ! -S "$podman_socket" ]]; then
+    echo "Podman socket not found at $podman_socket." >&2
+    echo "Start it with: systemctl --user enable --now podman.socket" >&2
+    echo "Or set PODMAN_SOCKET to the host socket path." >&2
+    exit 1
+  fi
   home_dir={{quote(home)}}
   if [[ -n "$home_dir" ]]; then
     mkdir -p -- "$home_dir"
@@ -51,7 +65,13 @@ dev-start home="":
       podman inspect {{dev_container}} \
         --format '{{ "{{.Config.Labels.agentspace_dev_home}}" }}'
     )"
-    if [[ "$container_user" != "$user" || "$container_home" != "$home_key" ]]; then
+    container_podman_socket="$(
+      podman inspect {{dev_container}} \
+        --format '{{ "{{.Config.Labels.agentspace_dev_podman_socket}}" }}'
+    )"
+    if [[ "$container_user" != "$user" \
+      || "$container_home" != "$home_key" \
+      || "$container_podman_socket" != "$podman_socket" ]]; then
       echo "Existing container configuration changed; recreating {{dev_container}}."
       podman rm --force {{dev_container}} >/dev/null
     fi
@@ -78,14 +98,18 @@ dev-start home="":
       --name {{dev_container}} \
       --hostname agentspace-dev \
       --label agentspace_dev_home="$home_key" \
+      --label agentspace_dev_podman_socket="$podman_socket" \
       --userns keep-id \
       --user "$user" \
       --passwd-entry "dev:x:$uid:$gid:Development User:/home/dev:/bin/bash" \
+      --env CONTAINER_HOST=unix:///run/podman/podman.sock \
+      --env DOCKER_HOST=unix:///run/podman/podman.sock \
       --env HOME=/home/dev \
       --env USER=dev \
       --env LOGNAME=dev \
       --security-opt label=disable \
       --volume "${home_volume[0]}" \
+      --volume "$podman_socket:/run/podman/podman.sock:rw" \
       --volume "{{justfile_directory()}}:/workspace:rw" \
       --workdir /workspace \
       {{dev_image}} \
@@ -144,28 +168,48 @@ dev-shell home="":
 
 # Run the full repository verification suite.
 [group('check')]
-check:
+check: check-rust check-python check-js
+
+# Check the Rust workspace with fmt, tests, and Clippy.
+[group('check')]
+check-rust:
+  cargo fmt --check --all
+  cargo test --quiet --workspace
+  cargo clippy --workspace --all-targets --all-features
+
+# Check Python formatting, linting, types, and tests.
+[group('check')]
+check-python:
   uv run ruff format --check .
   uv run ruff check .
   uv run pyright
   uv run --all-packages pytest
-  just rust-check
+
+# Check JavaScript linting, tests, and the production build.
+[group('check')]
+check-js:
   cd clients/webui && pnpm run lint
   cd clients/webui && pnpm run --if-present test
   cd clients/webui && pnpm run build
 
-# Run all Python and Rust tests.
+# Run all repository tests.
 [group('check')]
-test:
-  uv run --all-packages pytest
+test: test-rust test-python test-js
+
+# Run Rust workspace tests.
+[group('check')]
+test-rust:
   cargo test --quiet --workspace
 
-# Check the Rust workspace with fmt, tests, and Clippy.
+# Run all Python package tests.
 [group('check')]
-rust-check:
-  cargo fmt --check --all
-  cargo test --quiet --workspace
-  cargo clippy --workspace --all-targets --all-features
+test-python:
+  uv run --all-packages pytest
+
+# Run JavaScript tests when configured.
+[group('check')]
+test-js:
+  cd clients/webui && pnpm run --if-present test
 
 # Check only the client-service Rust crate.
 [group('check')]

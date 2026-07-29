@@ -26,6 +26,25 @@ uv run ruff check .
 uv run pyright
 ```
 
+## Development Container
+
+The openSUSE development image includes Podman and Podman Compose. Start the
+host's rootless Podman API socket before creating the container:
+
+```sh
+systemctl --user enable --now podman.socket
+just dev-shell
+```
+
+`just dev-start` discovers the host socket and mounts it at
+`/run/podman/podman.sock`. Set `PODMAN_SOCKET` when the socket uses a
+nonstandard path.
+
+The mounted socket connects the development container to the host Podman
+daemon, so `podman images` and `podman ps` show the host user's containers and
+images. An isolated store would require running a separate nested Podman daemon
+instead of using the host socket.
+
 ## Dockerized Copilot Flow
 
 Authenticate Copilot once inside the container environment:
