@@ -39,7 +39,10 @@ podman logs --follow agentspace-dev
 
 `just dev-start` discovers the host socket and mounts it at
 `/run/podman/podman.sock`. Set `PODMAN_SOCKET` when the socket uses a
-nonstandard path.
+nonstandard path. It also exposes the host-side socket and checkout paths to
+the container, so `just stack-up-rootless-podman` works both on the host and
+from a development-container shell. Run `just dev-start` once from the host to
+recreate a development container created before this metadata was added.
 
 The container runs a VS Code tunnel named `agentspace-dev`. On the first start,
 follow the container logs to complete the device login flow. The CLI

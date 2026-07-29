@@ -79,6 +79,10 @@ dev-start home="":
       podman inspect {{dev_container}} \
         --format '{{ "{{.Config.Labels.agentspace_dev_podman_socket}}" }}'
     )"
+    container_workspace="$(
+      podman inspect {{dev_container}} \
+        --format '{{ "{{.Config.Labels.agentspace_dev_workspace}}" }}'
+    )"
     container_image_id="$(
       podman inspect {{dev_container}} \
         --format '{{ "{{.Config.Labels.agentspace_dev_image_id}}" }}'
@@ -86,6 +90,7 @@ dev-start home="":
     if [[ "$container_user" != "$user" \
       || "$container_home" != "$home_key" \
       || "$container_podman_socket" != "$podman_socket" \
+      || "$container_workspace" != "{{justfile_directory()}}" \
       || "$container_image_id" != "$image_id" ]]; then
       echo "Existing container configuration changed; recreating {{dev_container}}."
       podman rm --force {{dev_container}} >/dev/null
@@ -115,9 +120,12 @@ dev-start home="":
       --label agentspace_dev_home="$home_key" \
       --label agentspace_dev_image_id="$image_id" \
       --label agentspace_dev_podman_socket="$podman_socket" \
+      --label agentspace_dev_workspace="{{justfile_directory()}}" \
       --userns keep-id \
       --user "$user" \
       --passwd-entry "dev:x:$uid:$gid:Development User:/home/dev:/bin/bash" \
+      --env AGENTSPACE_HOST_WORKSPACE="{{justfile_directory()}}" \
+      --env AGENTSPACE_PODMAN_SOCKET_PATH="$podman_socket" \
       --env CONTAINER_HOST=unix:///run/podman/podman.sock \
       --env DOCKER_HOST=unix:///run/podman/podman.sock \
       --env HOME=/home/dev \
@@ -328,6 +336,18 @@ stack-up-rootless-podman:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  if [[ -z "${AGENTSPACE_HOST_WORKSPACE:-}" && -e /run/.containerenv ]]; then
+    echo "The container is missing its host workspace path." >&2
+    echo "Recreate it from the host with: just dev-start" >&2
+    exit 1
+  fi
+  export AGENTSPACE_HOST_WORKSPACE="${AGENTSPACE_HOST_WORKSPACE:-{{justfile_directory()}}}"
+  if [[ -z "${AGENTSPACE_PODMAN_SOCKET_PATH:-}" ]]; then
+    AGENTSPACE_PODMAN_SOCKET_PATH="$(
+      podman info --format '{{ "{{.Host.RemoteSocket.Path}}" }}'
+    )"
+  fi
+  export AGENTSPACE_PODMAN_SOCKET_PATH="${AGENTSPACE_PODMAN_SOCKET_PATH#unix://}"
   podman compose \
     --file compose.yaml \
     --file compose.podman.yaml \
@@ -340,6 +360,18 @@ stack-rebuild-rootless-podman *services:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
+  if [[ -z "${AGENTSPACE_HOST_WORKSPACE:-}" && -e /run/.containerenv ]]; then
+    echo "The container is missing its host workspace path." >&2
+    echo "Recreate it from the host with: just dev-start" >&2
+    exit 1
+  fi
+  export AGENTSPACE_HOST_WORKSPACE="${AGENTSPACE_HOST_WORKSPACE:-{{justfile_directory()}}}"
+  if [[ -z "${AGENTSPACE_PODMAN_SOCKET_PATH:-}" ]]; then
+    AGENTSPACE_PODMAN_SOCKET_PATH="$(
+      podman info --format '{{ "{{.Host.RemoteSocket.Path}}" }}'
+    )"
+  fi
+  export AGENTSPACE_PODMAN_SOCKET_PATH="${AGENTSPACE_PODMAN_SOCKET_PATH#unix://}"
   podman compose \
     --file compose.yaml \
     --file compose.podman.yaml \
