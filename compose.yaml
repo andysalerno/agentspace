@@ -92,7 +92,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - skills:/skills
-      - ./mounts/skills:/builtin-skills:ro
+      - ${AGENTSPACE_HOST_WORKSPACE:-.}/mounts/skills:/builtin-skills:ro
     networks:
       - agentspace
 
@@ -122,7 +122,7 @@ services:
     ports:
       - "8002:8002"
     volumes:
-      - ./mounts/data/client_service:/data
+      - ${AGENTSPACE_HOST_WORKSPACE:-.}/mounts/data/client_service:/data
     networks:
       - agentspace
 

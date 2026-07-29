@@ -1,11 +1,12 @@
-# Override for running the stack on rootless Podman.
+# Override for running the stack on Podman.
 #
 # Usage:
-#   podman compose -f compose.yaml -f compose.podman.yaml up -d --build
+#   just stack-up
 #
-# Replaces the Docker socket bind-mount with the user's rootless Podman socket
-# (which exposes the Docker-compatible API). Make sure the user socket is
-# running first:
+# Replaces the Docker socket bind-mount with the Podman socket, which exposes
+# the Docker-compatible API. The recipe discovers the daemon's socket path,
+# including when invoked through a devcontainer-mounted rootless socket. Make
+# sure the socket is running first (for rootless Podman):
 #   systemctl --user enable --now podman.socket
 
 services:
@@ -22,6 +23,6 @@ services:
     restart: unless-stopped
     depends_on: !reset []
     volumes:
-      - ${XDG_RUNTIME_DIR:-/run/user/1000}/podman/podman.sock:/var/run/docker.sock
+      - ${AGENTSPACE_PODMAN_SOCKET_PATH:?Run through just stack-up}:/var/run/docker.sock
       - skills:/skills
-      - ./mounts/skills:/builtin-skills:ro
+      - ${AGENTSPACE_HOST_WORKSPACE:-.}/mounts/skills:/builtin-skills:ro

@@ -79,6 +79,10 @@ dev-start home="":
       podman inspect {{dev_container}} \
         --format '{{ "{{.Config.Labels.agentspace_dev_podman_socket}}" }}'
     )"
+    container_workspace="$(
+      podman inspect {{dev_container}} \
+        --format '{{ "{{.Config.Labels.agentspace_dev_workspace}}" }}'
+    )"
     container_image_id="$(
       podman inspect {{dev_container}} \
         --format '{{ "{{.Config.Labels.agentspace_dev_image_id}}" }}'
@@ -86,6 +90,7 @@ dev-start home="":
     if [[ "$container_user" != "$user" \
       || "$container_home" != "$home_key" \
       || "$container_podman_socket" != "$podman_socket" \
+      || "$container_workspace" != "{{justfile_directory()}}" \
       || "$container_image_id" != "$image_id" ]]; then
       echo "Existing container configuration changed; recreating {{dev_container}}."
       podman rm --force {{dev_container}} >/dev/null
@@ -115,9 +120,12 @@ dev-start home="":
       --label agentspace_dev_home="$home_key" \
       --label agentspace_dev_image_id="$image_id" \
       --label agentspace_dev_podman_socket="$podman_socket" \
+      --label agentspace_dev_workspace="{{justfile_directory()}}" \
       --userns keep-id \
       --user "$user" \
       --passwd-entry "dev:x:$uid:$gid:Development User:/home/dev:/bin/bash" \
+      --env AGENTSPACE_HOST_WORKSPACE="{{justfile_directory()}}" \
+      --env AGENTSPACE_PODMAN_SOCKET_PATH="$podman_socket" \
       --env CONTAINER_HOST=unix:///run/podman/podman.sock \
       --env DOCKER_HOST=unix:///run/podman/podman.sock \
       --env HOME=/home/dev \
@@ -290,15 +298,45 @@ webui-lint:
 webui-deps-outdated:
   cd clients/webui && pnpm outdated
 
+[private]
+_stack-runtime:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [[ -n "${CONTAINER_RUNTIME:-}" ]]; then
+    echo "$CONTAINER_RUNTIME"
+  elif podman info >/dev/null 2>&1; then
+    echo podman
+  elif docker info >/dev/null 2>&1; then
+    echo docker
+  else
+    echo "Cannot connect to Podman or Docker." >&2
+    exit 1
+  fi
+
+[private]
+_stack-compose *args:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  runtime="$(just --justfile "{{justfile_directory()}}/justfile" _stack-runtime)"
+  compose_files=(--file compose.yaml)
+  args=({{args}})
+  if [[ "$runtime" == podman ]]; then
+    export AGENTSPACE_HOST_WORKSPACE="${AGENTSPACE_HOST_WORKSPACE:-{{justfile_directory()}}}"
+    socket="${AGENTSPACE_PODMAN_SOCKET_PATH:-$(
+      podman info --format '{{ "{{.Host.RemoteSocket.Path}}" }}'
+    )}"
+    export AGENTSPACE_PODMAN_SOCKET_PATH="${socket#unix://}"
+    compose_files+=(--file compose.podman.yaml)
+  fi
+  "$runtime" compose "${compose_files[@]}" "${args[@]}"
+
 # Build all stack container images with Compose.
 [group('build')]
 stack-build-images:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
-    build
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose build
 
 # Build stack container images with Compose without using cached layers.
 [group('build')]
@@ -306,68 +344,51 @@ stack-build-images-no-cache *services:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
-    build \
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose build \
     --no-cache {{services}}
 
-# Start the full Compose stack.
+# Start the full Compose stack with an available Podman or Docker runtime.
 [group('run')]
 stack-up:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
-    up \
-    --detach
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose up --detach
 
-# Start the stack with the rootless Podman override.
+# Start the stack with Podman. Prefer `stack-up`, which selects the runtime.
 [group('run')]
 stack-up-rootless-podman:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
-    --file compose.podman.yaml \
-    up \
-    --detach
+  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" stack-up
+
+[private]
+_stack-up-force-recreate *services:
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose up --detach --force-recreate {{services}}
 
 # Rebuild rootless Podman stack images without cache, then recreate containers.
 [group('run')]
 stack-rebuild-rootless-podman *services:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
-    --file compose.podman.yaml \
-    build \
-    --no-cache {{services}}
-  podman compose \
-    --file compose.yaml \
-    --file compose.podman.yaml \
-    up \
-    --detach \
-    --force-recreate {{services}}
+  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" stack-build-images-no-cache {{services}}
+  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" _stack-up-force-recreate {{services}}
 
 # Stop the Compose stack and clean spawned kernel/gateway containers.
 [group('run')]
 stack-down:
-  podman compose -f compose.yaml down --remove-orphans
-  -podman rm -f $(podman ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
-  -podman rm -f $(podman ps -q --filter "label=agentspace.role=gateway") 2>/dev/null || true
+  #!/usr/bin/env bash
+  set -euo pipefail
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose down --remove-orphans
+  runtime="$(just --justfile "{{justfile_directory()}}/justfile" _stack-runtime)"
+  "$runtime" rm -f $("$runtime" ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
+  "$runtime" rm -f $("$runtime" ps -q --filter "label=agentspace.role=gateway") 2>/dev/null || true
 
 # Tail logs for the full Compose stack.
 [group('run')]
 stack-logs:
-  podman compose -f compose.yaml logs -f
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose logs --follow
 
 # Show Compose service status.
 [group('run')]
 stack-status:
-  podman compose -f compose.yaml ps
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose ps
 
 # Run the containerized memory release smoke flow against prebuilt images.
 [group('check')]

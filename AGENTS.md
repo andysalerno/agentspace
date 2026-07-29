@@ -27,7 +27,7 @@ Use `just` for common tasks:
 - `just bootstrap`: Install all dependencies (`uv sync` and `pnpm install`).
 - `just check`: Run the full repo verification suite before finishing work.
 - `just test`: Run Python and service tests.
-- `just stack-up`: Start the full stack using Docker Compose.
+- `just stack-up`: Start the full stack using Podman or Docker Compose.
 - `just stack-down`: Stop the full stack.
 
 Run `just check` after completing any code or documentation change. It covers
