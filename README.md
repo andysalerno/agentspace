@@ -33,12 +33,37 @@ host's rootless Podman API socket before creating the container:
 
 ```sh
 systemctl --user enable --now podman.socket
-just dev-shell
+just dev-start
+podman logs --follow agentspace-dev
 ```
 
 `just dev-start` discovers the host socket and mounts it at
 `/run/podman/podman.sock`. Set `PODMAN_SOCKET` when the socket uses a
 nonstandard path.
+
+The container runs a VS Code tunnel named `agentspace-dev`. On the first start,
+follow the container logs to complete the device login flow. The CLI
+authentication metadata, VS Code server, and extensions are stored under
+`/home/dev`, which uses a persistent named volume by default, so later container
+starts reuse the login. Pressing `Ctrl+C` stops following the logs without
+stopping the container.
+
+Open a shell in the running development container with:
+
+```sh
+just dev-shell
+```
+
+Authenticate GitHub CLI once inside the container:
+
+```sh
+gh auth login
+```
+
+The image routes GitHub SSH-style Git remotes through HTTPS and uses GitHub CLI
+as the credential helper, so repositories with `git@github.com:` remotes can be
+pushed without mounting an SSH key. GitHub CLI authentication is retained in
+the persistent home directory.
 
 The mounted socket connects the development container to the host Podman
 daemon, so `podman images` and `podman ps` show the host user's containers and

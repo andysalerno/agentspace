@@ -10,9 +10,15 @@ dev_home_volume := "agentspace-dev-home"
 default:
   @just --list
 
-# Install Python and web dependencies.
-bootstrap:
+# Install all development dependencies.
+bootstrap: bootstrap-python bootstrap-node
+
+# Install Python dependencies.
+bootstrap-python:
   uv sync --all-packages --dev
+
+# Install Node.js dependencies.
+bootstrap-node:
   cd clients/webui && pnpm install
 
 # Build the openSUSE development image with Podman.
@@ -56,6 +62,10 @@ dev-start home="":
     echo "Development image not found; building {{dev_image}}."
     just --justfile "{{justfile_directory()}}/justfile" dev-build-image
   fi
+  image_id="$(
+    podman image inspect {{dev_image}} \
+      --format '{{ "{{.Id}}" }}'
+  )"
   if podman container exists {{dev_container}}; then
     container_user="$(
       podman inspect {{dev_container}} \
@@ -69,9 +79,14 @@ dev-start home="":
       podman inspect {{dev_container}} \
         --format '{{ "{{.Config.Labels.agentspace_dev_podman_socket}}" }}'
     )"
+    container_image_id="$(
+      podman inspect {{dev_container}} \
+        --format '{{ "{{.Config.Labels.agentspace_dev_image_id}}" }}'
+    )"
     if [[ "$container_user" != "$user" \
       || "$container_home" != "$home_key" \
-      || "$container_podman_socket" != "$podman_socket" ]]; then
+      || "$container_podman_socket" != "$podman_socket" \
+      || "$container_image_id" != "$image_id" ]]; then
       echo "Existing container configuration changed; recreating {{dev_container}}."
       podman rm --force {{dev_container}} >/dev/null
     fi
@@ -98,6 +113,7 @@ dev-start home="":
       --name {{dev_container}} \
       --hostname agentspace-dev \
       --label agentspace_dev_home="$home_key" \
+      --label agentspace_dev_image_id="$image_id" \
       --label agentspace_dev_podman_socket="$podman_socket" \
       --userns keep-id \
       --user "$user" \
@@ -113,8 +129,9 @@ dev-start home="":
       --volume "{{justfile_directory()}}:/workspace:rw" \
       --workdir /workspace \
       {{dev_image}} \
-      sleep infinity \
       >/dev/null
+    echo "Follow the VS Code tunnel login and status with:"
+    echo "  podman logs --follow {{dev_container}}"
   fi
 
 # List development containers created by this repository.
@@ -180,6 +197,7 @@ check-rust:
 # Check Python formatting, linting, types, and tests.
 [group('check')]
 check-python:
+  just bootstrap-python
   uv run ruff format --check .
   uv run ruff check .
   uv run pyright
@@ -188,6 +206,7 @@ check-python:
 # Check JavaScript linting, tests, and the production build.
 [group('check')]
 check-js:
+  just bootstrap-node
   cd clients/webui && pnpm run lint
   cd clients/webui && pnpm run --if-present test
   cd clients/webui && pnpm run build
