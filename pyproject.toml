@@ -6,7 +6,17 @@ requires-python = ">=3.13"
 dependencies = []
 
 [dependency-groups]
-dev = ["ruff", "pytest", "pytest-asyncio", "pyright", "httpx", "fastapi", "jinja2", "uvicorn"]
+dev = [
+    "ruff",
+    "pytest",
+    "pytest-asyncio",
+    "pyright",
+    "httpx",
+    "fastapi",
+    "jinja2",
+    "uvicorn",
+    "httpx2",
+]
 
 [tool.uv.workspace]
 members = [
@@ -73,6 +83,7 @@ ignore = [
     "D104",    # missing docstring in public package
     "D107",    # missing docstring in __init__
     "PLR2004", # magic value comparison
+    "CPY001",  # copyright notices
 ]
 
 [tool.ruff.lint.per-file-ignores]

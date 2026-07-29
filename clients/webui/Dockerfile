@@ -1,12 +1,12 @@
 # syntax=docker/dockerfile:1
 
-FROM docker.io/library/node:22-alpine AS build
+FROM docker.io/library/node:26-alpine AS build
 
 WORKDIR /app
 
-RUN corepack enable
+RUN npm install --global corepack@0.35 && corepack enable
 
-COPY package.json pnpm-lock.yaml ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY index.html ./
@@ -17,7 +17,7 @@ COPY src ./src
 
 RUN pnpm run build
 
-FROM docker.io/library/nginx:1.27-alpine
+FROM docker.io/library/nginx:1.31-alpine
 
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf.template /etc/nginx/templates/default.conf.template

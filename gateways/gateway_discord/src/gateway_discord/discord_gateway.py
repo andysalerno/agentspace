@@ -30,7 +30,7 @@ from gateway.simulated_typing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -433,7 +433,7 @@ class DiscordGateway:
     async def _typing_indicator(
         self,
         channel: _ChannelLike,
-    ) -> AsyncIterator[None]:
+    ) -> AsyncGenerator[None]:
         """Wrap channel.typing() so its own failures cannot drop the turn.
 
         discord.py's channel.typing() opens a REST call on enter; that call
@@ -774,7 +774,7 @@ class DiscordGateway:
                 session_id=session_id,
             ),
         )
-        logger.exception(
+        logger.error(
             "discord gateway send_message failed; transitioning to ERROR "
             "(restart required to recover)",
             exc_info=exc,

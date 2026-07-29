@@ -14,6 +14,8 @@ use crate::path::PagePath;
 /// The current on-disk frontmatter schema version written by this crate.
 pub const SCHEMA_VERSION: u64 = 1;
 
+const REVISION_HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// A deterministic digest of a page's exact stored bytes, returned on every
 /// read and required (optionally) on every mutation to detect stale writes.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
@@ -24,7 +26,13 @@ impl Revision {
     pub fn of(bytes: &[u8]) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        Self(format!("{:x}", hasher.finalize()))
+        let digest = hasher.finalize();
+        let mut revision = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            revision.push(char::from(REVISION_HEX[usize::from(byte >> 4)]));
+            revision.push(char::from(REVISION_HEX[usize::from(byte & 0x0f)]));
+        }
+        Self(revision)
     }
 }
 

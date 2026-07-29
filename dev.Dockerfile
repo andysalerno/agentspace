@@ -1,7 +1,7 @@
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
 ARG PODMAN_COMPOSE_VERSION=1.6.0
-ARG VSCODE_CLI_RELEASE=commit:e4c7e7b1d6d060162f4aa7f8225271b67ce1df75
+ARG VSCODE_CLI_RELEASE=commit:1b6a188127eeaf9194f945eb6eb89a657e93c54c
 
 ENV CARGO_HOME="/home/dev/.cargo" \
     LANG="C.UTF-8" \
@@ -27,15 +27,15 @@ RUN zypper --non-interactive install --no-recommends \
         pkgconf-pkg-config \
         pnpm \
         podman \
-        python313 \
-        python313-devel \
-        python313-uv \
+        python314 \
+        python314-devel \
+        python314-uv \
         rustup \
         tmux \
         vim \
     && zypper clean --all \
     && uv tool install \
-        --python /usr/bin/python3.13 \
+        --python /usr/bin/python3.14 \
         "podman-compose==${PODMAN_COMPOSE_VERSION}" \
     && install -d -m 0755 /run/podman \
     && install -d -m 1777 /run/tmux \

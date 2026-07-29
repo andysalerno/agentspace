@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from kernel_host.service import service_from_env
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     from kernel.events import KernelEvent
 
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     vscode_process = await _start_vscode_server()
     try:
         yield

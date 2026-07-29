@@ -3,7 +3,7 @@
 FROM scratch AS memory-rs
 COPY services/memory_rs /
 
-FROM docker.io/library/rust:1.96-slim-bookworm AS builder
+FROM docker.io/library/rust:1.97-slim-trixie AS builder
 
 ARG RUST_BUILD_PROFILE=release
 
@@ -23,7 +23,7 @@ RUN --mount=type=cache,id=agentspace-cargo-registry,target=/usr/local/cargo/regi
         *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 1 ;; \
     esac
 
-FROM docker.io/library/debian:bookworm-slim AS runtime
+FROM docker.io/library/debian:trixie-slim AS runtime
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates \

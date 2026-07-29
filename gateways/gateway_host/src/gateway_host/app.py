@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from gateway_host.service import service_from_env
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +17,7 @@ service = service_from_env()
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
     await service.start()
     try:
         yield

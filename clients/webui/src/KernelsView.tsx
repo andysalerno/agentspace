@@ -211,7 +211,7 @@ export default function KernelsView() {
             document.body.removeChild(link);
             URL.revokeObjectURL(url);
         } catch (err) {
-            reportError(err as Error);
+            reportError(err);
         }
     }
 
