@@ -24,6 +24,7 @@ RUN zypper --non-interactive install --no-recommends \
         tmux \
         vim \
     && zypper clean --all \
+    && install -d -m 1777 /run/tmux \
     && rustup toolchain install stable \
         --profile minimal \
         --component clippy,rustfmt \
