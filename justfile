@@ -191,6 +191,7 @@ check-rust:
 # Check Python formatting, linting, types, and tests.
 [group('check')]
 check-python:
+  just bootstrap
   uv run ruff format --check .
   uv run ruff check .
   uv run pyright
