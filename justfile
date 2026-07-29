@@ -10,9 +10,15 @@ dev_home_volume := "agentspace-dev-home"
 default:
   @just --list
 
-# Install Python and web dependencies.
-bootstrap:
+# Install all development dependencies.
+bootstrap: bootstrap-python bootstrap-node
+
+# Install Python dependencies.
+bootstrap-python:
   uv sync --all-packages --dev
+
+# Install Node.js dependencies.
+bootstrap-node:
   cd clients/webui && pnpm install
 
 # Build the openSUSE development image with Podman.
@@ -191,7 +197,7 @@ check-rust:
 # Check Python formatting, linting, types, and tests.
 [group('check')]
 check-python:
-  just bootstrap
+  just bootstrap-python
   uv run ruff format --check .
   uv run ruff check .
   uv run pyright
@@ -200,6 +206,7 @@ check-python:
 # Check JavaScript linting, tests, and the production build.
 [group('check')]
 check-js:
+  just bootstrap-node
   cd clients/webui && pnpm run lint
   cd clients/webui && pnpm run --if-present test
   cd clients/webui && pnpm run build
