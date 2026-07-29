@@ -55,7 +55,9 @@ RUN case "$(uname -m)" in \
     && tar -xzf /tmp/vscode-cli.tar.gz -C /usr/local/bin code \
     && rm /tmp/vscode-cli.tar.gz
 
-RUN printf '%s\n' 'export PATH="/home/dev/.local/bin:$PATH"' \
+RUN printf '%s\n' \
+        'export PATH="/home/dev/.local/bin:$PATH"' \
+        'eval "$(JUST_COMPLETE=bash just)"' \
     > /etc/bash.bashrc.local \
     && git config --system --add \
         url.https://github.com/.insteadOf \

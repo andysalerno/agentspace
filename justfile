@@ -23,7 +23,7 @@ bootstrap-node:
 
 # Build the openSUSE development image with Podman.
 [group('dev')]
-dev-build-image:
+build-image-dev:
   podman build --file dev.Dockerfile --tag {{dev_image}} .
 
 # Start the development container in the background.
@@ -60,7 +60,7 @@ dev-start home="":
   fi
   if ! podman image exists {{dev_image}}; then
     echo "Development image not found; building {{dev_image}}."
-    just --justfile "{{justfile_directory()}}/justfile" dev-build-image
+    just --justfile "{{justfile_directory()}}/justfile" build-image-dev
   fi
   image_id="$(
     podman image inspect {{dev_image}} \
@@ -254,7 +254,7 @@ agent-host-check:
 
 # Build the client-service container image.
 [group('build')]
-client-service-build-image:
+build-image-client-service:
   #!/usr/bin/env bash
   set -euo pipefail
   runtime="${CONTAINER_RUNTIME:-podman}"
@@ -272,7 +272,7 @@ client-service-build-image:
 
 # Build the agent-host container image.
 [group('build')]
-agent-host-build-image:
+build-image-agent-host:
   #!/usr/bin/env bash
   set -euo pipefail
   runtime="${CONTAINER_RUNTIME:-podman}"
@@ -332,7 +332,7 @@ _stack-compose *args:
 
 # Build all stack container images with Compose.
 [group('run')]
-stack-build:
+build-image-stack:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
@@ -340,7 +340,7 @@ stack-build:
 
 # Build stack container images with Compose without using cached layers.
 [group('build')]
-stack-build-images-no-cache *services:
+build-image-stack-no-cache *services:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
@@ -367,7 +367,7 @@ _stack-up-force-recreate *services:
 # Rebuild rootless Podman stack images without cache, then recreate containers.
 [group('run')]
 stack-rebuild-rootless-podman *services:
-  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" stack-build-images-no-cache {{services}}
+  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" build-image-stack-no-cache {{services}}
   CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" _stack-up-force-recreate {{services}}
 
 # Stop the Compose stack and clean spawned kernel/gateway containers.
