@@ -29,11 +29,16 @@ RUN zypper --non-interactive install --no-recommends \
         podman \
         python314 \
         python314-devel \
-        python314-uv \
         rustup \
         tmux \
         vim \
     && zypper clean --all \
+    && curl --fail --location --silent --show-error \
+        https://astral.sh/uv/install.sh \
+        --output /tmp/uv-install.sh \
+    && env UV_UNMANAGED_INSTALL=/usr/local/bin \
+        sh /tmp/uv-install.sh \
+    && rm /tmp/uv-install.sh \
     && uv tool install \
         --python /usr/bin/python3.14 \
         "podman-compose==${PODMAN_COMPOSE_VERSION}" \
