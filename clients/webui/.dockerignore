@@ -2,10 +2,22 @@ node_modules/
 dist/
 build/
 .next/
+coverage/
 *.tsbuildinfo
+
+# Generated Vite config output; the image builds from vite.config.ts.
+vite.config.js
+vite.config.d.ts
+
+# Unit tests and local development files are not used by the production build.
+src/**/*.test.ts
+src/**/*.test.tsx
 .env
 .env.*
 !.env.example
 .vscode/
 .idea/
+compose*.yaml
+compose*.yml
+run-service.*
 .DS_Store
