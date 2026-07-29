@@ -14,6 +14,7 @@ RUN zypper --non-interactive install --no-recommends \
         just \
         make \
         nodejs26 \
+        openssh-clients \
         pkgconf-pkg-config \
         pnpm \
         python313 \
