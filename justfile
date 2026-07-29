@@ -331,8 +331,8 @@ _stack-compose *args:
   "$runtime" compose "${compose_files[@]}" "${args[@]}"
 
 # Build all stack container images with Compose.
-[group('build')]
-stack-build-images:
+[group('run')]
+stack-build:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
