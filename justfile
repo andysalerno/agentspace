@@ -304,9 +304,7 @@ stack-build-images:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
-    build
+  bash scripts/stack-runtime.sh compose build
 
 # Build stack container images with Compose without using cached layers.
 [group('build')]
@@ -314,45 +312,25 @@ stack-build-images-no-cache *services:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
+  bash scripts/stack-runtime.sh compose \
     build \
     --no-cache {{services}}
 
-# Start the full Compose stack.
+# Start the full Compose stack with an available Podman or Docker runtime.
 [group('run')]
 stack-up:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  podman compose \
-    --file compose.yaml \
-    up \
-    --detach
+  bash scripts/stack-runtime.sh compose up --detach
 
-# Start the stack with the rootless Podman override.
+# Start the stack with Podman. Prefer `stack-up`, which selects the runtime.
 [group('run')]
 stack-up-rootless-podman:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  if [[ -z "${AGENTSPACE_HOST_WORKSPACE:-}" && -e /run/.containerenv ]]; then
-    echo "The container is missing its host workspace path." >&2
-    echo "Recreate it from the host with: just dev-start" >&2
-    exit 1
-  fi
-  export AGENTSPACE_HOST_WORKSPACE="${AGENTSPACE_HOST_WORKSPACE:-{{justfile_directory()}}}"
-  if [[ -z "${AGENTSPACE_PODMAN_SOCKET_PATH:-}" ]]; then
-    AGENTSPACE_PODMAN_SOCKET_PATH="$(
-      podman info --format '{{ "{{.Host.RemoteSocket.Path}}" }}'
-    )"
-  fi
-  export AGENTSPACE_PODMAN_SOCKET_PATH="${AGENTSPACE_PODMAN_SOCKET_PATH#unix://}"
-  podman compose \
-    --file compose.yaml \
-    --file compose.podman.yaml \
-    up \
-    --detach
+  CONTAINER_RUNTIME=podman bash scripts/stack-runtime.sh compose up --detach
 
 # Rebuild rootless Podman stack images without cache, then recreate containers.
 [group('run')]
@@ -360,26 +338,10 @@ stack-rebuild-rootless-podman *services:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  if [[ -z "${AGENTSPACE_HOST_WORKSPACE:-}" && -e /run/.containerenv ]]; then
-    echo "The container is missing its host workspace path." >&2
-    echo "Recreate it from the host with: just dev-start" >&2
-    exit 1
-  fi
-  export AGENTSPACE_HOST_WORKSPACE="${AGENTSPACE_HOST_WORKSPACE:-{{justfile_directory()}}}"
-  if [[ -z "${AGENTSPACE_PODMAN_SOCKET_PATH:-}" ]]; then
-    AGENTSPACE_PODMAN_SOCKET_PATH="$(
-      podman info --format '{{ "{{.Host.RemoteSocket.Path}}" }}'
-    )"
-  fi
-  export AGENTSPACE_PODMAN_SOCKET_PATH="${AGENTSPACE_PODMAN_SOCKET_PATH#unix://}"
-  podman compose \
-    --file compose.yaml \
-    --file compose.podman.yaml \
+  CONTAINER_RUNTIME=podman bash scripts/stack-runtime.sh compose \
     build \
     --no-cache {{services}}
-  podman compose \
-    --file compose.yaml \
-    --file compose.podman.yaml \
+  CONTAINER_RUNTIME=podman bash scripts/stack-runtime.sh compose \
     up \
     --detach \
     --force-recreate {{services}}
@@ -387,19 +349,18 @@ stack-rebuild-rootless-podman *services:
 # Stop the Compose stack and clean spawned kernel/gateway containers.
 [group('run')]
 stack-down:
-  podman compose -f compose.yaml down --remove-orphans
-  -podman rm -f $(podman ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
-  -podman rm -f $(podman ps -q --filter "label=agentspace.role=gateway") 2>/dev/null || true
+  bash scripts/stack-runtime.sh compose down --remove-orphans
+  -bash scripts/stack-runtime.sh cleanup
 
 # Tail logs for the full Compose stack.
 [group('run')]
 stack-logs:
-  podman compose -f compose.yaml logs -f
+  bash scripts/stack-runtime.sh compose logs --follow
 
 # Show Compose service status.
 [group('run')]
 stack-status:
-  podman compose -f compose.yaml ps
+  bash scripts/stack-runtime.sh compose ps
 
 # Run the containerized memory release smoke flow against prebuilt images.
 [group('check')]

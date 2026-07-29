@@ -231,7 +231,7 @@ sequenceDiagram
     CS-->>C: { events, assistant_message, session }
 ```
 
-## Docker Compose Stack
+## Compose Stack
 
 The `compose.yaml` defines four services:
 
@@ -253,7 +253,7 @@ Kernel containers are not defined in Compose — they are created dynamically by
 
 - Python 3.13+, [uv](https://docs.astral.sh/uv/) package manager
 - Node.js 22.13+ with pnpm (for webui)
-- Docker
+- Podman or Docker
 
 ### Workspace
 
@@ -268,10 +268,10 @@ kernels/*  services/git_agent  channels/*  clients/cli_ui
 
 ```bash
 just bootstrap       # uv sync + pnpm install
-just stack-up        # docker compose up -d --build
-just stack-down      # docker compose down + cleanup
+just stack-up        # start with an available Podman or Docker runtime
+just stack-down      # compose down + cleanup with the selected runtime
 just stack-logs      # tail logs
-just stack-status    # docker compose ps
+just stack-status    # compose ps
 ```
 
 ### Quality
