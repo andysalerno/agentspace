@@ -56,7 +56,16 @@ RUN case "$(uname -m)" in \
     && rm /tmp/vscode-cli.tar.gz
 
 RUN printf '%s\n' 'export PATH="/home/dev/.local/bin:$PATH"' \
-    > /etc/bash.bashrc.local
+    > /etc/bash.bashrc.local \
+    && git config --system --add \
+        url.https://github.com/.insteadOf \
+        git@github.com: \
+    && git config --system --add \
+        url.https://github.com/.insteadOf \
+        ssh://git@github.com/ \
+    && git config --system \
+        credential.https://github.com.helper \
+        "!/usr/bin/gh auth git-credential"
 
 WORKDIR /workspace
 

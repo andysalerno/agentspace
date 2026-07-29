@@ -54,6 +54,17 @@ Open a shell in the running development container with:
 just dev-shell
 ```
 
+Authenticate GitHub CLI once inside the container:
+
+```sh
+gh auth login
+```
+
+The image routes GitHub SSH-style Git remotes through HTTPS and uses GitHub CLI
+as the credential helper, so repositories with `git@github.com:` remotes can be
+pushed without mounting an SSH key. GitHub CLI authentication is retained in
+the persistent home directory.
+
 The mounted socket connects the development container to the host Podman
 daemon, so `podman images` and `podman ps` show the host user's containers and
 images. An isolated store would require running a separate nested Podman daemon
