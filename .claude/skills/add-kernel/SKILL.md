@@ -138,7 +138,7 @@ Check and update any tests that assert on the full list of harnesses, e.g.:
 ```bash
 uv sync
 just test  # all 164+ tests should pass
-just stack-build-images  # Docker images should build
+just build-image-stack  # Docker images should build
 ```
 
 ## Tips
