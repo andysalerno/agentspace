@@ -298,13 +298,45 @@ webui-lint:
 webui-deps-outdated:
   cd clients/webui && pnpm outdated
 
+[private]
+_stack-runtime:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if [[ -n "${CONTAINER_RUNTIME:-}" ]]; then
+    echo "$CONTAINER_RUNTIME"
+  elif podman info >/dev/null 2>&1; then
+    echo podman
+  elif docker info >/dev/null 2>&1; then
+    echo docker
+  else
+    echo "Cannot connect to Podman or Docker." >&2
+    exit 1
+  fi
+
+[private]
+_stack-compose *args:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  runtime="$(just --justfile "{{justfile_directory()}}/justfile" _stack-runtime)"
+  compose_files=(--file compose.yaml)
+  args=({{args}})
+  if [[ "$runtime" == podman ]]; then
+    export AGENTSPACE_HOST_WORKSPACE="${AGENTSPACE_HOST_WORKSPACE:-{{justfile_directory()}}}"
+    socket="${AGENTSPACE_PODMAN_SOCKET_PATH:-$(
+      podman info --format '{{ "{{.Host.RemoteSocket.Path}}" }}'
+    )}"
+    export AGENTSPACE_PODMAN_SOCKET_PATH="${socket#unix://}"
+    compose_files+=(--file compose.podman.yaml)
+  fi
+  "$runtime" compose "${compose_files[@]}" "${args[@]}"
+
 # Build all stack container images with Compose.
 [group('build')]
 stack-build-images:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  bash scripts/stack-runtime.sh compose build
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose build
 
 # Build stack container images with Compose without using cached layers.
 [group('build')]
@@ -312,8 +344,7 @@ stack-build-images-no-cache *services:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  bash scripts/stack-runtime.sh compose \
-    build \
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose build \
     --no-cache {{services}}
 
 # Start the full Compose stack with an available Podman or Docker runtime.
@@ -322,45 +353,42 @@ stack-up:
   #!/usr/bin/env bash
   set -euo pipefail
   export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  bash scripts/stack-runtime.sh compose up --detach
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose up --detach
 
 # Start the stack with Podman. Prefer `stack-up`, which selects the runtime.
 [group('run')]
 stack-up-rootless-podman:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  CONTAINER_RUNTIME=podman bash scripts/stack-runtime.sh compose up --detach
+  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" stack-up
+
+[private]
+_stack-up-force-recreate *services:
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose up --detach --force-recreate {{services}}
 
 # Rebuild rootless Podman stack images without cache, then recreate containers.
 [group('run')]
 stack-rebuild-rootless-podman *services:
-  #!/usr/bin/env bash
-  set -euo pipefail
-  export AGENTSPACE_VERSION="${AGENTSPACE_VERSION:-$(bash scripts/build-version.sh)}"
-  CONTAINER_RUNTIME=podman bash scripts/stack-runtime.sh compose \
-    build \
-    --no-cache {{services}}
-  CONTAINER_RUNTIME=podman bash scripts/stack-runtime.sh compose \
-    up \
-    --detach \
-    --force-recreate {{services}}
+  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" stack-build-images-no-cache {{services}}
+  CONTAINER_RUNTIME=podman just --justfile "{{justfile_directory()}}/justfile" _stack-up-force-recreate {{services}}
 
 # Stop the Compose stack and clean spawned kernel/gateway containers.
 [group('run')]
 stack-down:
-  bash scripts/stack-runtime.sh compose down --remove-orphans
-  -bash scripts/stack-runtime.sh cleanup
+  #!/usr/bin/env bash
+  set -euo pipefail
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose down --remove-orphans
+  runtime="$(just --justfile "{{justfile_directory()}}/justfile" _stack-runtime)"
+  "$runtime" rm -f $("$runtime" ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
+  "$runtime" rm -f $("$runtime" ps -q --filter "label=agentspace.role=gateway") 2>/dev/null || true
 
 # Tail logs for the full Compose stack.
 [group('run')]
 stack-logs:
-  bash scripts/stack-runtime.sh compose logs --follow
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose logs --follow
 
 # Show Compose service status.
 [group('run')]
 stack-status:
-  bash scripts/stack-runtime.sh compose ps
+  just --justfile "{{justfile_directory()}}/justfile" _stack-compose ps
 
 # Run the containerized memory release smoke flow against prebuilt images.
 [group('check')]
