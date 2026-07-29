@@ -197,7 +197,7 @@ function reviewerFromConfig(config: GitAgentConfig | undefined): GitAgentReviewe
     ];
     for (const candidate of candidates) {
         if (isRecord(candidate)) {
-            return candidate as GitAgentReviewerConfig;
+            return candidate;
         }
     }
     return null;
@@ -399,7 +399,7 @@ function normalizeRequests(
         field(response, "results"),
     ]) {
         if (Array.isArray(candidate)) {
-            return candidate.filter(isRecord) as GitAgentRequestSummary[];
+            return candidate.filter(isRecord);
         }
     }
     return [];
@@ -437,7 +437,7 @@ function reviewFromRequest(request: GitAgentRequestSummary): GitAgentReview | nu
         field(request, "reviewer_result"),
     ]) {
         if (isRecord(candidate)) {
-            return candidate as GitAgentReview;
+            return candidate;
         }
     }
     return null;
@@ -464,7 +464,7 @@ function commentsFromRequest(request: GitAgentRequestSummary): GitAgentReviewCom
         field(request, "reviewer_comments"),
     ]) {
         if (Array.isArray(candidate)) {
-            return candidate.filter(isRecord) as GitAgentReviewComment[];
+            return candidate.filter(isRecord);
         }
     }
     return [];

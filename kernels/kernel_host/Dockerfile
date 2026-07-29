@@ -3,7 +3,7 @@
 FROM scratch AS memory-rs
 COPY services/memory_rs /
 
-FROM docker.io/library/rust:1.96-slim-bookworm AS memory-builder
+FROM docker.io/library/rust:1.97-slim-trixie AS memory-builder
 
 ARG RUST_BUILD_PROFILE=release
 
@@ -23,7 +23,7 @@ RUN --mount=type=cache,id=agentspace-kernel-cargo-registry,target=/usr/local/car
         *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 1 ;; \
     esac
 
-FROM docker.io/library/python:3.13-slim
+FROM docker.io/library/python:3.14-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 COPY --from=ghcr.io/casey/just:latest /just /usr/local/bin/
@@ -54,11 +54,11 @@ RUN apt-get update && \
         wget \
         xz-utils \
         zip && \
-    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     curl -fsSL https://gh.io/copilot-install | bash && \
     curl -fsSL https://claude.ai/install.sh | bash && \
-    curl -fsSL https://opencode.ai/install | bash -s -- --version 1.17.20 && \
+    curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.9 && \
     npm install -g firecrawl-cli && \
     curl -fsSL https://code-server.dev/install.sh | \
         sh -s -- --method=standalone --prefix=/usr/local && \

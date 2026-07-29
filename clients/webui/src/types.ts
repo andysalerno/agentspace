@@ -1,6 +1,6 @@
 export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "git-agent" | "memory" | "skills" | "connections" | "gateways" | "info" | "config-kernels";
 
-export type Harness = string;
+type Harness = string;
 
 export type WorkspaceMountMode = "rw" | "ro";
 
@@ -53,14 +53,14 @@ export type MemoryPageSummary = {
   updated_at: string;
 };
 
-export type MemoryPageLink = {
+type MemoryPageLink = {
   text: string;
   raw_target: string;
   resolved_path: string | null;
   broken: boolean;
 };
 
-export type MemoryBacklink = {
+type MemoryBacklink = {
   from: string;
   text: string;
   raw_target: string;
@@ -92,7 +92,7 @@ export type MemoryLinksReport = {
   backlinks: MemoryBacklink[];
 };
 
-export type MemoryCheckIssue = {
+type MemoryCheckIssue = {
   path: string | null;
   message: string;
 };
@@ -108,7 +108,7 @@ export type MemoryMoveOutcome = {
   updated_referrers: string[];
 };
 
-export type MemoryErrorBody = {
+type MemoryErrorBody = {
   kind: string;
   message: string;
   path?: string;
@@ -148,7 +148,7 @@ export type SessionSummary = {
   active_turn?: ActiveTurnSummary;
 };
 
-export type ActiveTurnSummary = {
+type ActiveTurnSummary = {
   turn_id: string;
   user_message_id: string;
   assistant_message_id: string;
@@ -238,7 +238,7 @@ export type KernelEvent = {
   message?: string | null;
 };
 
-export type MessageStreamEventChunk = {
+type MessageStreamEventChunk = {
   type: "event";
   event: KernelEvent;
 };
@@ -297,7 +297,7 @@ export type ConnectionModels = {
 
 export type GatewayType = string;
 
-export type GatewayConfigFieldKind = "env" | "secret";
+type GatewayConfigFieldKind = "env" | "secret";
 
 export type GatewayConfigField = {
   key: string;
@@ -313,7 +313,7 @@ export type GatewaySchema = {
   fields: GatewayConfigField[];
 };
 
-export type GatewayStatus = "stopped" | "starting" | "running" | "error";
+type GatewayStatus = "stopped" | "starting" | "running" | "error";
 
 export type Gateway = {
   gateway_id: string;
@@ -401,7 +401,7 @@ export type GitAgentConfigUpdate = {
   reviewer_agent?: GitAgentReviewerConfig;
 };
 
-export type GitAgentRepoStatus = {
+type GitAgentRepoStatus = {
   default_branch?: string | null;
   head_sha?: string | null;
   commit_sha?: string | null;

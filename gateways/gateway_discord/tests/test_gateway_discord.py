@@ -15,7 +15,7 @@ from gateway_discord import discord_gateway as gw_mod
 from gateway_discord.discord_gateway import _chunk  # type: ignore[reportPrivateUsage]
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator, AsyncIterator
 
     import discord
     from gateway.client import ClientServiceClient
@@ -104,7 +104,7 @@ class FakeChannel:
         self.typing_calls += 1
 
         @asynccontextmanager
-        async def _cm() -> AsyncIterator[None]:
+        async def _cm() -> AsyncGenerator[None]:
             self.typing_entered += 1
             try:
                 yield
@@ -323,7 +323,7 @@ async def test_typing_enter_failure_does_not_drop_turn() -> None:
 
     # Replace channel.typing() with one that raises on __aenter__.
     @asynccontextmanager
-    async def _broken_typing() -> AsyncIterator[None]:
+    async def _broken_typing() -> AsyncGenerator[None]:
         msg = "typing not allowed"
         raise RuntimeError(msg)
         yield  # pragma: no cover - unreachable, satisfies asynccontextmanager

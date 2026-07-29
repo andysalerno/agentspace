@@ -41,7 +41,7 @@ from git_agent.reviewer import (
 from git_agent.storage import PatchRequestCreate, PatchRequestUpdate, PatchStore
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
 
@@ -80,7 +80,7 @@ def create_app(  # noqa: C901
     state = AppState(settings or Settings.from_env(), reviewer)
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         state.initialize()
         yield
 
