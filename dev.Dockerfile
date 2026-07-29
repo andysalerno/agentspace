@@ -1,6 +1,7 @@
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
 ARG PODMAN_COMPOSE_VERSION=1.6.0
+ARG VSCODE_CLI_VERSION=latest
 
 ENV CARGO_HOME="/home/dev/.cargo" \
     LANG="C.UTF-8" \
@@ -8,7 +9,9 @@ ENV CARGO_HOME="/home/dev/.cargo" \
     RUSTUP_HOME="/usr/local/lib/rustup" \
     UV_PYTHON_DOWNLOADS="never" \
     UV_TOOL_BIN_DIR="/usr/local/bin" \
-    UV_TOOL_DIR="/opt/uv-tools"
+    UV_TOOL_DIR="/opt/uv-tools" \
+    VSCODE_CLI_DATA_DIR="/home/dev/.vscode-cli" \
+    VSCODE_CLI_USE_FILE_KEYCHAIN="1"
 
 RUN zypper --non-interactive install --no-recommends \
         ca-certificates \
@@ -41,9 +44,27 @@ RUN zypper --non-interactive install --no-recommends \
         --component clippy,rustfmt \
     && rustup default stable
 
+RUN case "$(uname -m)" in \
+        x86_64) vscode_arch="x64" ;; \
+        aarch64|arm64) vscode_arch="arm64" ;; \
+        *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && curl --fail --location --silent --show-error \
+        "https://update.code.visualstudio.com/${VSCODE_CLI_VERSION}/cli-linux-${vscode_arch}/stable" \
+        --output /tmp/vscode-cli.tar.gz \
+    && tar -xzf /tmp/vscode-cli.tar.gz -C /usr/local/bin code \
+    && rm /tmp/vscode-cli.tar.gz
+
 RUN printf '%s\n' 'export PATH="/home/dev/.local/bin:$PATH"' \
     > /etc/bash.bashrc.local
 
 WORKDIR /workspace
 
-CMD ["/bin/bash"]
+STOPSIGNAL SIGINT
+
+ENTRYPOINT ["code", "tunnel", \
+    "--accept-server-license-terms", \
+    "--name", "agentspace-dev", \
+    "--cli-data-dir", "/home/dev/.vscode-cli", \
+    "--server-data-dir", "/home/dev/.vscode-server", \
+    "--extensions-dir", "/home/dev/.vscode-server/extensions"]
