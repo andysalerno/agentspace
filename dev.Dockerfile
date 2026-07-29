@@ -1,7 +1,7 @@
 FROM registry.opensuse.org/opensuse/tumbleweed:latest
 
 ARG PODMAN_COMPOSE_VERSION=1.6.0
-ARG VSCODE_CLI_VERSION=latest
+ARG VSCODE_CLI_RELEASE=commit:e4c7e7b1d6d060162f4aa7f8225271b67ce1df75
 
 ENV CARGO_HOME="/home/dev/.cargo" \
     LANG="C.UTF-8" \
@@ -50,7 +50,7 @@ RUN case "$(uname -m)" in \
         *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
     esac \
     && curl --fail --location --silent --show-error \
-        "https://update.code.visualstudio.com/${VSCODE_CLI_VERSION}/cli-linux-${vscode_arch}/stable" \
+        "https://update.code.visualstudio.com/${VSCODE_CLI_RELEASE}/cli-linux-${vscode_arch}/stable" \
         --output /tmp/vscode-cli.tar.gz \
     && tar -xzf /tmp/vscode-cli.tar.gz -C /usr/local/bin code \
     && rm /tmp/vscode-cli.tar.gz
