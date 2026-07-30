@@ -142,6 +142,46 @@ dev-start home="":
     echo "  podman logs --follow {{dev_container}}"
   fi
 
+# Stop the development container without removing it.
+[group('dev')]
+dev-stop:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if ! podman container exists {{dev_container}}; then
+    echo "Development container {{dev_container}} does not exist."
+    exit 0
+  fi
+  container_running="$(
+    podman inspect {{dev_container}} \
+      --format '{{ "{{.State.Running}}" }}'
+  )"
+  if [[ "$container_running" == true ]]; then
+    echo "Stopping development container {{dev_container}}."
+    podman stop {{dev_container}} >/dev/null
+  else
+    echo "Development container {{dev_container}} is already stopped."
+  fi
+
+# Remove the development container, keeping its persistent home volume.
+[group('dev')]
+dev-remove:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  if ! podman container exists {{dev_container}}; then
+    echo "Development container {{dev_container}} does not exist."
+    exit 0
+  fi
+  echo "Removing development container {{dev_container}}."
+  podman rm --force {{dev_container}} >/dev/null
+
+# Recreate the development container from scratch, keeping its home volume.
+[group('dev')]
+dev-restart home="":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  just --justfile "{{justfile_directory()}}/justfile" dev-remove
+  just --justfile "{{justfile_directory()}}/justfile" dev-start {{quote(home)}}
+
 # List development containers created by this repository.
 [group('dev')]
 dev-list-containers:

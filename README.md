@@ -61,6 +61,19 @@ Open a shell in the running development container with:
 just dev-shell
 ```
 
+Stop, remove, or recreate the development container with:
+
+```sh
+just dev-stop
+just dev-remove
+just dev-restart
+```
+
+`just dev-stop` leaves the container in place so `just dev-start` resumes it.
+`just dev-remove` deletes the container but keeps the persistent home volume,
+and `just dev-restart` removes and re-creates it. Use `just dev-clear-volumes`
+to also delete the persistent home volume, which discards the stored logins.
+
 Authenticate GitHub CLI once inside the container:
 
 ```sh
