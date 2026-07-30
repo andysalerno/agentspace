@@ -2,7 +2,7 @@ import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import {
     queryKeys,
     useGitAgentConfig,

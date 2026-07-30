@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { browserReachableLocalUrl } from "./browserUrls";
 import { queryKeys, useKernels } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import type { KernelStats, KernelSummary } from "./types";
 import { promptSaveWorkspace } from "./saveWorkspacePrompt";
 import {
@@ -389,9 +389,10 @@ function KernelRow({
         null,
     );
 
+    // The menu is only rendered while `isMenuOpen`, so a stale position while
+    // closed is harmless — it is recomputed before the menu is shown again.
     useEffect(() => {
         if (!isMenuOpen) {
-            setMenuPos(null);
             return;
         }
         const update = () => {

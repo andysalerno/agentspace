@@ -1,5 +1,5 @@
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type { Gateway, GatewayConfigField } from "./types";
@@ -10,10 +10,26 @@ import {
     useGatewaySchema,
     useGatewayTypes,
 } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { Button, Checkbox, Input, Select, Textarea } from "./fluent";
 
 type SecretEntry = { key: string; value: string };
+
+type SchemaOverrides = { gatewayType: string; values: Record<string, string> };
+
+type EditDraft = {
+    gatewayId: string;
+    name: string;
+    agentId: string;
+    enabled: boolean;
+    extraEnv: string;
+    schemaValues: Record<string, string>;
+    newSecrets: SecretEntry[];
+};
+
+const NO_OVERRIDES: SchemaOverrides = { gatewayType: "", values: {} };
+const EMPTY_VALUES: Record<string, string> = {};
+const EMPTY_SECRETS: SecretEntry[] = [];
 
 function secretsToRecord(entries: SecretEntry[]): Record<string, string> {
     const record: Record<string, string> = {};
@@ -148,26 +164,28 @@ export default function GatewaysView() {
     const [showForm, setShowForm] = useState(false);
     const [gatewayId, setGatewayId] = useState("");
     const [gatewayName, setGatewayName] = useState("");
-    const [gatewayType, setGatewayType] = useState("");
-    const [agentId, setAgentId] = useState("");
+    const [selectedGatewayType, setGatewayType] = useState("");
+    const [selectedAgentId, setAgentId] = useState("");
     const [enabled, setEnabled] = useState(false);
     const [envVars, setEnvVars] = useState("");
     const [newSecrets, setNewSecrets] = useState<SecretEntry[]>([]);
-    const [schemaValues, setSchemaValues] = useState<Record<string, string>>({});
+    const [schemaOverrides, setSchemaOverrides] = useState<SchemaOverrides>(NO_OVERRIDES);
     const [expandedGatewayId, setExpandedGatewayId] = useState<string | null>(null);
+
+    // Fall back to the first available option until the user picks one explicitly.
+    const gatewayType = gatewayTypes.includes(selectedGatewayType)
+        ? selectedGatewayType
+        : (gatewayTypes[0] ?? "");
+    const agentId = validAgentIds.has(selectedAgentId)
+        ? selectedAgentId
+        : (agents[0]?.agent_id ?? "");
 
     // --- Edit-form state (mirrors the create-form state above, but
     // scoped to a single gateway being edited inline). ---
     const [editingGatewayId, setEditingGatewayId] = useState<string | null>(null);
-    const [editName, setEditName] = useState("");
-    const [editAgentId, setEditAgentId] = useState("");
-    const [editEnabled, setEditEnabled] = useState(false);
-    const [editExtraEnv, setEditExtraEnv] = useState("");
-    const [editSchemaValues, setEditSchemaValues] = useState<Record<string, string>>({});
-    const [editNewSecrets, setEditNewSecrets] = useState<SecretEntry[]>([]);
-    // Snapshot of the ID we last hydrated form state for, so we don't
-    // overwrite in-flight user edits on every render.
-    const [editHydratedFor, setEditHydratedFor] = useState<string | null>(null);
+    // Only populated once the user actually edits something; until then the
+    // form values are derived from the gateway being edited.
+    const [editDraft, setEditDraft] = useState<EditDraft | null>(null);
 
     const editingGateway = editingGatewayId
         ? (gateways.find((g) => g.gateway_id === editingGatewayId) ?? null)
@@ -180,6 +198,54 @@ export default function GatewaysView() {
     const editSchemaQuery = useGatewaySchema(editingGateway?.gateway_type ?? null);
     const editSchema = editSchemaQuery.data ?? null;
     const editSchemaLoading = editSchemaQuery.isFetching;
+
+    // Schema field values default to the schema's own defaults; user edits are
+    // tracked as overrides so switching gateway type resets back to defaults.
+    const schemaValues = useMemo(() => {
+        if (!schema) return {};
+        const overrides =
+            schemaOverrides.gatewayType === gatewayType ? schemaOverrides.values : {};
+        const values: Record<string, string> = {};
+        for (const field of schema.fields) {
+            values[field.key] = overrides[field.key] ?? field.default ?? "";
+        }
+        return values;
+    }, [schema, schemaOverrides, gatewayType]);
+
+    // Derive the edit form from the gateway until the user changes something.
+    // The schema may still be loading when the user clicks Edit, so this can't
+    // be snapshotted eagerly.
+    const editValues = useMemo<EditDraft | null>(() => {
+        if (!editingGateway || !editSchema) return null;
+        if (editDraft && editDraft.gatewayId === editingGateway.gateway_id) {
+            return editDraft;
+        }
+        const { schemaValues: sv, extraEnv } = splitEnvForEdit(
+            editingGateway.env_vars,
+            editSchema.fields,
+        );
+        return {
+            gatewayId: editingGateway.gateway_id,
+            name: editingGateway.name,
+            agentId: editingGateway.agent_id,
+            enabled: editingGateway.enabled,
+            extraEnv,
+            schemaValues: sv,
+            newSecrets: [],
+        };
+    }, [editingGateway, editSchema, editDraft]);
+
+    const editName = editValues?.name ?? "";
+    const editAgentId = editValues?.agentId ?? "";
+    const editEnabled = editValues?.enabled ?? false;
+    const editExtraEnv = editValues?.extraEnv ?? "";
+    const editSchemaValues = editValues?.schemaValues ?? EMPTY_VALUES;
+    const editNewSecrets = editValues?.newSecrets ?? EMPTY_SECRETS;
+
+    function patchEditDraft(patch: Partial<EditDraft>) {
+        if (!editValues) return;
+        setEditDraft({ ...editValues, ...patch });
+    }
 
     const logsQuery = useQuery({
         queryKey: expandedGatewayId
@@ -249,57 +315,6 @@ export default function GatewaysView() {
         || startMutation.isPending
         || stopMutation.isPending;
 
-    // Default the gateway type to the first available option once types load.
-    useEffect(() => {
-        if (gatewayTypes.length === 0) return;
-        if (!gatewayType || !gatewayTypes.includes(gatewayType)) {
-            setGatewayType(gatewayTypes[0]);
-        }
-    }, [gatewayTypes, gatewayType]);
-
-    // Default the agent to the first available agent once agents load.
-    useEffect(() => {
-        if (agents.length === 0) return;
-        if (!agentId || !agents.some((a) => a.agent_id === agentId)) {
-            setAgentId(agents[0].agent_id);
-        }
-    }, [agents, agentId]);
-
-    // Reset schema value defaults whenever the schema loads/changes.
-    useEffect(() => {
-        if (!schema) {
-            setSchemaValues({});
-            return;
-        }
-        const initial: Record<string, string> = {};
-        for (const field of schema.fields) {
-            initial[field.key] = field.default ?? "";
-        }
-        setSchemaValues(initial);
-    }, [schema]);
-
-    // Hydrate the edit form once per (gateway, schema) pair.  We can't
-    // do this synchronously when the user clicks Edit because the
-    // schema may still be loading; this effect waits for both to be
-    // ready, then snapshots the gateway's current values into the
-    // form.  `editHydratedFor` ensures we don't clobber subsequent
-    // user edits on every render.
-    useEffect(() => {
-        if (!editingGateway || !editSchema) return;
-        if (editHydratedFor === editingGateway.gateway_id) return;
-        const { schemaValues: sv, extraEnv } = splitEnvForEdit(
-            editingGateway.env_vars,
-            editSchema.fields,
-        );
-        setEditName(editingGateway.name);
-        setEditAgentId(editingGateway.agent_id);
-        setEditEnabled(editingGateway.enabled);
-        setEditSchemaValues(sv);
-        setEditExtraEnv(extraEnv);
-        setEditNewSecrets([]);
-        setEditHydratedFor(editingGateway.gateway_id);
-    }, [editingGateway, editSchema, editHydratedFor]);
-
     function updateSecret(index: number, field: "key" | "value", value: string) {
         setNewSecrets((prev) => prev.map((s, i) => (i === index ? { ...s, [field]: value } : s)));
     }
@@ -329,45 +344,49 @@ export default function GatewaysView() {
         setEnabled(false);
         setEnvVars("");
         setNewSecrets([]);
-        setSchemaValues(() => {
-            const reset: Record<string, string> = {};
-            for (const f of fields) reset[f.key] = f.default ?? "";
-            return reset;
-        });
+        setSchemaOverrides(NO_OVERRIDES);
         setShowForm(false);
     }
 
     function updateSchemaValue(key: string, value: string) {
-        setSchemaValues((prev) => ({ ...prev, [key]: value }));
+        setSchemaOverrides((prev) => ({
+            gatewayType,
+            values: {
+                ...(prev.gatewayType === gatewayType ? prev.values : {}),
+                [key]: value,
+            },
+        }));
     }
 
     // --- Edit helpers ---
     function openEdit(gateway: Gateway) {
         setEditingGatewayId(gateway.gateway_id);
-        setEditHydratedFor(null);  // force re-hydration when schema arrives
+        setEditDraft(null);
     }
 
     function cancelEdit() {
         setEditingGatewayId(null);
-        setEditHydratedFor(null);
+        setEditDraft(null);
     }
 
     function updateEditSchemaValue(key: string, value: string) {
-        setEditSchemaValues((prev) => ({ ...prev, [key]: value }));
+        patchEditDraft({ schemaValues: { ...editSchemaValues, [key]: value } });
     }
 
     function updateEditSecret(index: number, field: "key" | "value", value: string) {
-        setEditNewSecrets((prev) =>
-            prev.map((s, i) => (i === index ? { ...s, [field]: value } : s)),
-        );
+        patchEditDraft({
+            newSecrets: editNewSecrets.map((s, i) =>
+                i === index ? { ...s, [field]: value } : s,
+            ),
+        });
     }
 
     function addEditSecret() {
-        setEditNewSecrets((prev) => [...prev, { key: "", value: "" }]);
+        patchEditDraft({ newSecrets: [...editNewSecrets, { key: "", value: "" }] });
     }
 
     function removeEditSecret(index: number) {
-        setEditNewSecrets((prev) => prev.filter((_, i) => i !== index));
+        patchEditDraft({ newSecrets: editNewSecrets.filter((_, i) => i !== index) });
     }
 
     async function handleEditSubmit(event: FormEvent<HTMLFormElement>) {
@@ -644,14 +663,14 @@ export default function GatewaysView() {
                                         <Input
                                             required
                                             value={editName}
-                                            onChange={(e) => setEditName(e.target.value)}
+                                            onChange={(e) => patchEditDraft({ name: e.target.value })}
                                         />
                                     </label>
                                     <label>
                                         Agent
                                         <Select
                                             value={editAgentId}
-                                            onChange={(e) => setEditAgentId(e.target.value)}
+                                            onChange={(e) => patchEditDraft({ agentId: e.target.value })}
                                             required
                                         >
                                             <option disabled value="">
@@ -679,7 +698,7 @@ export default function GatewaysView() {
                                         checked={editEnabled}
                                         className="checkbox-label"
                                         label="Auto-start on boot"
-                                        onChange={(_, data) => setEditEnabled(data.checked === true)}
+                                        onChange={(_, data) => patchEditDraft({ enabled: data.checked === true })}
                                     />
                                     {editSchema && editSchema.fields.length > 0 && (
                                         <fieldset className="schema-fields">
@@ -725,7 +744,7 @@ export default function GatewaysView() {
                                             placeholder="EXTRA_VAR=value"
                                             rows={4}
                                             value={editExtraEnv}
-                                            onChange={(e) => setEditExtraEnv(e.target.value)}
+                                            onChange={(e) => patchEditDraft({ extraEnv: e.target.value })}
                                         />
                                     </label>
                                     <div className="skill-files-section">

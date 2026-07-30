@@ -84,6 +84,9 @@ ignore = [
     "D107",    # missing docstring in __init__
     "PLR2004", # magic value comparison
     "CPY001",  # copyright notices
+    "D203",    # incompatible with D211 (no blank line before class)
+    "D213",    # incompatible with D212 (multi-line summary on first line)
+    "COM812",  # trailing comma rule conflicts with the formatter
 ]
 
 [tool.ruff.lint.per-file-ignores]

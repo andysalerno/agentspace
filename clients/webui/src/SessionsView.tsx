@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { queryKeys, useAgents, useSessions } from "./queries";
 import { promptSaveWorkspace } from "./saveWorkspacePrompt";
 import {

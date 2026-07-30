@@ -20,7 +20,7 @@ import {
     useSkills,
     useWorkspaces,
 } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { Button, Checkbox, Combobox, Input, Option, Select } from "./fluent";
 
 type AgentsViewProps = {
@@ -224,11 +224,18 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
 
-    const [form, setForm] = useState<AgentFormState>(() => emptyAgentForm(harnesses));
+    const [formState, setForm] = useState<AgentFormState>(() => emptyAgentForm(harnesses));
     const [showForm, setShowForm] = useState(false);
     const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
     const [editForm, setEditForm] = useState<AgentFormState | null>(null);
     const [envDirty, setEnvDirty] = useState(false);
+
+    // Fall back to a valid harness while the harness list is loading or when
+    // the previously selected harness is no longer available.
+    const form: AgentFormState =
+        harnesses.length === 0 || harnesses.includes(formState.harness)
+            ? formState
+            : { ...formState, harness: getInitialHarness(harnesses) };
 
     const invalidateAgents = () =>
         queryClient.invalidateQueries({ queryKey: queryKeys.agents });
@@ -291,15 +298,6 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
         || updateMutation.isPending
         || deleteMutation.isPending
         || startSessionMutation.isPending;
-
-    useEffect(() => {
-        if (harnesses.length === 0) {
-            return;
-        }
-        if (!harnesses.includes(form.harness)) {
-            setForm((prev) => ({ ...prev, harness: getInitialHarness(harnesses) }));
-        }
-    }, [form.harness, harnesses]);
 
     useEffect(() => {
         if (!showForm) return;
