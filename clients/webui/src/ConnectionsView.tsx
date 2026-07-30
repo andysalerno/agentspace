@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Connection } from "./types";
 import { api } from "./api";
 import { queryKeys, useConnections } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { Button, Input, Select } from "./fluent";
 
 type ConnectionApiFlavor = Connection["api_flavor"];

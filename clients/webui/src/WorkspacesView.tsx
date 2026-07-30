@@ -4,7 +4,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import { browserReachableLocalUrl } from "./browserUrls";
 import { queryKeys, useAgents, useWorkspaces } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { WORKSPACE_ID_PATTERN, workspaceIdFromName } from "./saveWorkspacePrompt";
 import type { Workspace, WorkspaceVscode } from "./types";
 import { Button, Input } from "./fluent";

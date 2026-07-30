@@ -22,7 +22,7 @@ import {
     useSession,
     useSessions,
 } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { promptSaveWorkspace, promptWorkspaceSaveDetails } from "./saveWorkspacePrompt";
 import { Button, Input, Select, Textarea } from "./fluent";
 import "./chat-workspace.css";
@@ -446,10 +446,13 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     const { reportError } = useErrorContext();
 
     const [messageDraft, setMessageDraft] = useState("");
-    const [newSessionAgentId, setNewSessionAgentId] = useState("");
+    const [selectedNewSessionAgentId, setNewSessionAgentId] = useState("");
     const [newSessionChannelName, setNewSessionChannelName] = useState("");
     const [showNewSession, setShowNewSession] = useState(false);
     const [selectedToolCall, setSelectedToolCall] = useState<ToolCall | null>(null);
+
+    // Fall back to the first agent until the user picks one explicitly.
+    const newSessionAgentId = selectedNewSessionAgentId || (agents[0]?.agent_id ?? "");
 
     // Streaming local state (true client state — not server-cached).
     const [pendingUserMessage, setPendingUserMessage] = useState<ChatMessage | null>(null);
@@ -524,12 +527,6 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         },
         onError: reportError,
     });
-
-    useEffect(() => {
-        if (!newSessionAgentId && agents.length > 0) {
-            setNewSessionAgentId(agents[0].agent_id);
-        }
-    }, [agents, newSessionAgentId]);
 
     // Abort any in-flight stream when the selected session changes.
     useEffect(() => {

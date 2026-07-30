@@ -15,7 +15,7 @@ import GatewaysView from "./GatewaysView";
 import InfoView from "./InfoView";
 import ConfigKernelsView from "./ConfigKernelsView";
 import MemoryView from "./MemoryView";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { Button, FluentProvider } from "./fluent";
 import { useWebuiInfo } from "./queries";
 

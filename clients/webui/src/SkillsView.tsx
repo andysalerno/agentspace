@@ -5,7 +5,7 @@ import { api } from "./api";
 import type { Skill, SkillVersion } from "./types";
 import CodeEditor from "./CodeEditor";
 import { queryKeys, useSkills } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { Button, Input } from "./fluent";
 
 type FileEntry = { path: string; content: string };

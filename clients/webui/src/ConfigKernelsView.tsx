@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import { withRequiredEnvKeys } from "./envPrefill";
 import { queryKeys, useHarnesses, useKernelConfig } from "./queries";
-import { useErrorContext } from "./ErrorContext";
+import { useErrorContext } from "./useErrorContext";
 import { Button } from "./fluent";
 
 const CONFIGURABLE_HARNESSES = new Set(["opencode"]);
@@ -29,9 +29,10 @@ export default function ConfigKernelsView() {
     const queryClient = useQueryClient();
 
     const [selected, setSelected] = useState<string | null>(null);
-    const [envVars, setEnvVars] = useState("");
-    const [dirty, setDirty] = useState(false);
-    const [savedNotice, setSavedNotice] = useState(false);
+    // Local editor edits, scoped to the harness they were made against. `null`
+    // means "not edited" and the editor shows the server value.
+    const [draft, setDraft] = useState<{ harness: string; value: string } | null>(null);
+    const [savedNoticeFor, setSavedNoticeFor] = useState<string | null>(null);
 
     // Fall back to the first harness until the user picks one explicitly.
     const effectiveSelected: string | null = selected ?? harnesses[0] ?? null;
@@ -40,47 +41,36 @@ export default function ConfigKernelsView() {
 
     const configQuery = useKernelConfig(isConfigurable ? effectiveSelected : null);
 
-    // Track which server payload (keyed by harness + updated_at) has been
-    // copied into the editor. This prevents a stale `configQuery.data`
-    // (still in cache before the post-save refetch lands) from clobbering
-    // the freshly-saved value the mutation just wrote into local state.
-    const appliedRef = useRef<string | null>(null);
+    const serverEnvVars =
+        isConfigurable && effectiveSelected !== null && configQuery.data
+            ? withRequiredEnvKeys(configQuery.data.env_vars, effectiveSelected)
+            : "";
+    const dirty = draft !== null && draft.harness === effectiveSelected;
+    const envVars = dirty ? draft.value : serverEnvVars;
+    const savedNotice = savedNoticeFor !== null && savedNoticeFor === effectiveSelected;
 
-    // Sync server config into local editor state when it changes (and we're
-    // not mid-edit). The editor needs its own state for the dirty/saved
-    // tracking.
-    useEffect(() => {
-        if (!isConfigurable || effectiveSelected === null) {
-            setEnvVars("");
-            setDirty(false);
-            appliedRef.current = null;
-            return;
-        }
-        const data = configQuery.data;
-        if (!data || dirty) return;
-        const stamp = `${effectiveSelected}::${data.updated_at}`;
-        if (appliedRef.current === stamp) return;
-        appliedRef.current = stamp;
-        setEnvVars(withRequiredEnvKeys(data.env_vars, effectiveSelected));
-    }, [configQuery.data, isConfigurable, effectiveSelected, dirty]);
+    function selectHarness(harness: string) {
+        setSelected(harness);
+        setDraft(null);
+        setSavedNoticeFor(null);
+    }
 
-    // When the selected harness changes, clear dirty/saved state.
-    useEffect(() => {
-        setDirty(false);
-        setSavedNotice(false);
-    }, [effectiveSelected]);
+    function handleEditorChange(value: string) {
+        if (effectiveSelected === null) return;
+        setDraft({ harness: effectiveSelected, value });
+        setSavedNoticeFor(null);
+    }
 
     const saveMutation = useMutation({
         mutationFn: ({ harness, value }: { harness: string; value: string }) =>
             api.updateKernelConfig(harness, value),
         onSuccess: (config, variables) => {
-            setEnvVars(withRequiredEnvKeys(config.env_vars, variables.harness));
-            setDirty(false);
-            setSavedNotice(true);
-            // Mark this payload as already applied so the sync effect won't
-            // re-copy the (still-stale) cached value back into the editor
-            // before the invalidation refetch completes.
-            appliedRef.current = `${variables.harness}::${config.updated_at}`;
+            // Write the server's response straight into the cache so the editor
+            // never falls back to the stale pre-save value while the
+            // invalidation refetch is in flight.
+            queryClient.setQueryData(queryKeys.kernelConfig(variables.harness), config);
+            setDraft(null);
+            setSavedNoticeFor(variables.harness);
             void queryClient.invalidateQueries({
                 queryKey: queryKeys.kernelConfig(variables.harness),
             });
@@ -90,7 +80,7 @@ export default function ConfigKernelsView() {
 
     function handleSave() {
         if (effectiveSelected === null) return;
-        setSavedNotice(false);
+        setSavedNoticeFor(null);
         saveMutation.mutate({ harness: effectiveSelected, value: envVars });
     }
 
@@ -121,7 +111,7 @@ export default function ConfigKernelsView() {
                             <li key={harness}>
                                 <Button
                                     className={`list-item ${effectiveSelected === harness ? "active" : ""}`}
-                                    onClick={() => setSelected(harness)}
+                                    onClick={() => selectHarness(harness)}
                                     type="button"
                                 >
                                     <span>{formatHarnessLabel(harness)}</span>
@@ -164,7 +154,7 @@ export default function ConfigKernelsView() {
                             <label>Environment Variables</label>
                             <CodeEditor
                                 value={envVars}
-                                onChange={(v) => { setEnvVars(v); setDirty(true); setSavedNotice(false); }}
+                                onChange={handleEditorChange}
                                 language="ini"
                                 height="200px"
                             />
