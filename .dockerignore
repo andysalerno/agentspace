@@ -21,12 +21,24 @@
 *.pyo
 **/*.egg-info/
 
+# Tests are not used by any stack image build.
+**/tests/
+
 # Node / web build artifacts
 **/node_modules/
 **/dist/
 **/build/
 **/.next/
+**/coverage/
 **/*.tsbuildinfo
+
+# The web UI has its own build context.
+clients/webui/
+
+# uv requires these workspace members to exist, but stack images do not use
+# their implementation source.
+channels/*/src/
+clients/cli_ui/src/
 
 # Rust build artifacts
 **/target/
@@ -37,13 +49,16 @@
 **/.env
 !**/.env.example
 
-# Runtime data mounts — not needed at image build time
+# Runtime data mounts
 mounts/
 
-# Docs and project notes
+# Documentation and local development files
 docs/
-TODO.md
-README.md
+**/*.md
+**/.gitignore
+**/compose*.yaml
+**/compose*.yml
+**/run-service.*
 
 # OS junk
 .DS_Store
