@@ -47,14 +47,34 @@ afterEach(() => {
 });
 
 describe("ConfigurationView", () => {
+  it("loads the active canonical config into the editor", async () => {
+    vi.spyOn(api, "getCanonicalConfig").mockResolvedValue(
+      "kind: AgentSpaceConfig\nspec:\n  agents: []\n",
+    );
+    render(<ConfigurationView />, { wrapper: wrapper() });
+
+    const editor = await screen.findByLabelText<HTMLTextAreaElement>(
+      "YAML configuration",
+    );
+    await waitFor(() => {
+      expect(editor.value).toBe("kind: AgentSpaceConfig\nspec:\n  agents: []\n");
+    });
+  });
+
   it("validates and applies the exact editor source", async () => {
+    vi.spyOn(api, "getCanonicalConfig").mockResolvedValue("kind: Active\n");
     const validate = vi.spyOn(api, "validateConfig").mockResolvedValue({ valid: true });
     vi.spyOn(api, "planConfig").mockResolvedValue({ active_generation: 7 });
     const apply = vi.spyOn(api, "applyConfig").mockResolvedValue({ generation: 2 });
     const user = userEvent.setup();
     render(<ConfigurationView />, { wrapper: wrapper() });
 
-    const editor = screen.getByLabelText<HTMLTextAreaElement>("YAML configuration");
+    const editor = await screen.findByLabelText<HTMLTextAreaElement>(
+      "YAML configuration",
+    );
+    await waitFor(() => {
+      expect(editor.value).toBe("kind: Active\n");
+    });
     fireEvent.change(editor, { target: { value: "kind: AgentSpaceConfig\n" } });
     await user.click(screen.getByRole("button", { name: "Validate" }));
     await waitFor(() => {

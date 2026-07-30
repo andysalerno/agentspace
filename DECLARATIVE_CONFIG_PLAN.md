@@ -1046,9 +1046,11 @@ references and structured environments that their legacy payload cannot represen
 ### Import/plan WebUI
 
 The WebUI provides source/canonical downloads, YAML/ZIP selection, validate, preview, and
-generation-guarded replacement apply. The preview result is currently displayed as the server's
-structured JSON rather than the richer grouped create/update/delete/no-op diff UI proposed in the
-plan.
+generation-guarded replacement apply. The editor is seeded with the canonical YAML of the currently
+active configuration (`GET /config/export?mode=canonical`) so the page always opens on live state;
+local edits or a loaded file replace that text until they are discarded or applied. The preview
+result is currently displayed as the server's structured JSON rather than the richer grouped
+create/update/delete/no-op diff UI proposed in the plan.
 
 Per-item Export YAML controls were added for agents, skills, connections, gateways, Git Agent
 config, kernel config, and secret declarations. Workspaces intentionally have no config export.

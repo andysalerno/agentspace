@@ -3,32 +3,27 @@ import type { ChangeEvent } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
+import { useCanonicalConfig } from "./queries";
 import { useErrorContext } from "./useErrorContext";
 import { Button } from "./fluent";
 
-const EMPTY_CONFIG = `apiVersion: agentspace.dev/v1alpha1
-kind: AgentSpaceConfig
-metadata:
-  name: local
-spec:
-  secrets: []
-  kernelConfigs: []
-  connections: []
-  skills: []
-  agents: []
-  gateways: []
-`;
+const LOADING_CONFIG = "# Loading current configuration…\n";
 
 type ConfigAction = "validate" | "plan" | "apply";
 type ConfigInput = string | Blob;
 
 export default function ConfigurationView() {
-  const [source, setSource] = useState(EMPTY_CONFIG);
+  const [draft, setDraft] = useState<string | null>(null);
   const [bundle, setBundle] = useState<File | null>(null);
   const [result, setResult] = useState<object | null>(null);
   const [expectedGeneration, setExpectedGeneration] = useState<number | null>(null);
   const queryClient = useQueryClient();
   const { reportError } = useErrorContext();
+  const canonicalQuery = useCanonicalConfig();
+
+  // The editor shows the live canonical configuration until the user edits it
+  // or loads a file; from then on the local draft wins until it is reverted.
+  const source = draft ?? canonicalQuery.data ?? LOADING_CONFIG;
 
   const mutation = useMutation({
     mutationFn: ({
@@ -54,6 +49,8 @@ export default function ConfigurationView() {
       }
       if (variables.action === "apply") {
         setExpectedGeneration(null);
+        setDraft(null);
+        setBundle(null);
         void queryClient.invalidateQueries();
       }
     },
@@ -66,16 +63,26 @@ export default function ConfigurationView() {
     if (file.name.toLowerCase().endsWith(".zip")) {
       setBundle(file);
     } else {
-      setSource(await file.text());
+      setDraft(await file.text());
       setBundle(null);
     }
     setResult(null);
     setExpectedGeneration(null);
   }
 
+  function revert() {
+    setDraft(null);
+    setBundle(null);
+    setResult(null);
+    setExpectedGeneration(null);
+    void canonicalQuery.refetch();
+  }
+
   function download(mode: "source" | "canonical") {
     void api.downloadConfig(mode).catch(reportError);
   }
+
+  const busy = mutation.isPending || canonicalQuery.isPending;
 
   return (
     <div className="view-content management-view">
@@ -106,8 +113,10 @@ export default function ConfigurationView() {
 
       <div className="card management-card">
         <p className="muted">
-          Applying this document atomically replaces all in-scope configuration.
-          Workspaces, sessions, and secret values are not changed.
+          The editor is loaded with the canonical YAML for the configuration that
+          is active right now. Applying this document atomically replaces all
+          in-scope configuration. Workspaces, sessions, and secret values are not
+          changed.
         </p>
         <label>
           Load YAML
@@ -122,11 +131,23 @@ export default function ConfigurationView() {
             Loaded config-set bundle: <code>{bundle.name}</code>
           </p>
         )}
+        {(draft !== null || bundle !== null) && (
+          <p className="muted">
+            Showing local edits instead of the active configuration.{" "}
+            <Button
+              className="secondary-button"
+              onClick={revert}
+              type="button"
+            >
+              Discard And Reload
+            </Button>
+          </p>
+        )}
         <CodeEditor
           height="480px"
           language="yaml"
           onChange={(value) => {
-            setSource(value);
+            setDraft(value);
             setBundle(null);
             setResult(null);
             setExpectedGeneration(null);
@@ -136,7 +157,7 @@ export default function ConfigurationView() {
         <div className="form-actions" style={{ marginTop: 12 }}>
           <Button
             className="secondary-button"
-            disabled={mutation.isPending}
+            disabled={busy}
             onClick={() => mutation.mutate({ action: "validate", input: bundle ?? source })}
             type="button"
           >
@@ -144,14 +165,14 @@ export default function ConfigurationView() {
           </Button>
           <Button
             className="secondary-button"
-            disabled={mutation.isPending}
+            disabled={busy}
             onClick={() => mutation.mutate({ action: "plan", input: bundle ?? source })}
             type="button"
           >
             Preview Replacement
           </Button>
           <Button
-            disabled={mutation.isPending}
+            disabled={busy}
             onClick={() => mutation.mutate({
               action: "apply",
               input: bundle ?? source,

@@ -106,6 +106,19 @@ async function requestDownload(path: string): Promise<void> {
   }
 }
 
+async function requestText(path: string): Promise<string> {
+  const response = await fetch(`${apiBase}${path}`);
+  const text = await response.text();
+  if (!response.ok) {
+    throw new ApiError(
+      text || `${response.status} ${response.statusText}`,
+      response.status,
+      text,
+    );
+  }
+  return text;
+}
+
 function configRequest(
   path: string,
   source: ConfigSource,
@@ -206,6 +219,7 @@ export const api = {
     configRequest("/config/apply", source, expectedGeneration),
   downloadConfig: (mode: "source" | "canonical") =>
     requestDownload(`/config/export?mode=${mode}`),
+  getCanonicalConfig: () => requestText("/config/export?mode=canonical"),
   downloadConfigResource: (kind: string, name: string) =>
     requestDownload(
       `/config/export/${encodeURIComponent(kind)}/${encodeURIComponent(name)}`,

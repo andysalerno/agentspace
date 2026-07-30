@@ -22,6 +22,7 @@ export const queryKeys = {
   gatewaySchema: (gatewayType: string) =>
     ["gateway-types", gatewayType, "schema"] as const,
   gatewayLogs: (gatewayId: string) => ["gateways", gatewayId, "logs"] as const,
+  canonicalConfig: ["config", "canonical"] as const,
   kernelConfig: (harness: string) => ["kernel-configs", harness] as const,
   connections: ["connections"] as const,
   secrets: ["secrets"] as const,
@@ -117,6 +118,12 @@ export const useGatewaySchema = (gatewayType: string | null) =>
     queryFn: () => api.getGatewayTypeSchema(gatewayType as string),
     enabled: gatewayType !== null,
     staleTime: 60_000,
+  });
+
+export const useCanonicalConfig = () =>
+  useQuery({
+    queryKey: queryKeys.canonicalConfig,
+    queryFn: api.getCanonicalConfig,
   });
 
 export const useKernelConfig = (harness: string | null) =>
