@@ -101,8 +101,7 @@ The WebUI can currently configure:
 - agents (`clients/webui/src/AgentsView.tsx:439-764`);
 - skills and skill rollback (`SkillsView.tsx:245-449`);
 - connections (`ConnectionsView.tsx:139-291`);
-- schema-driven gateways (`GatewaysView.tsx:418-794`);
-- Git Agent policy and reviewer configuration (`GitAgentView.tsx:633-971`); and
+- schema-driven gateways (`GatewaysView.tsx:418-794`); and
 - per-harness kernel defaults (`ConfigKernelsView.tsx:26-193`).
 
 Workspace and workspace-mount controls remain runtime-only UI and do not receive config export
@@ -168,13 +167,12 @@ spec: {}
 
 `AgentSpaceConfig` is the aggregate form and can contain the entire system configuration in one
 file. The same schema should also define standalone resource documents (`Connection`, `Skill`,
-`SecretDeclaration`, `Agent`, `Gateway`, `KernelConfig`, and `GitAgentConfig`) for per-item exports
+`SecretDeclaration`, `Agent`, `Gateway`, and `KernelConfig`) for per-item exports
 and multi-file repositories. A source loader combines all documents and expands authoring syntax
 into one typed `ConfigDocument` before any validation or mutation.
 
 All standalone documents use `metadata.name` as their identity. Aggregate-list `id` fields are a
-compact spelling of the same identity. `KernelConfig.metadata.name` is its harness name, while the
-singleton `GitAgentConfig` always uses `metadata.name: default`.
+compact spelling of the same identity. `KernelConfig.metadata.name` is its harness name.
 
 Support YAML multi-document streams and multiple `--file`/directory inputs. Do not add an
 `include` directive in v1alpha1: file discovery belongs in the client-side loader, avoids server
@@ -274,18 +272,6 @@ spec:
       secrets:
         DISCORD_BOT_TOKEN:
           secretRef: DISCORD_BOT_TOKEN
-
-  gitAgent:
-    enabled: true
-    defaultBranch: main
-    allowedRefPrefixes:
-      - refs/heads/wip/
-    allowedRefs:
-      - refs/heads/main
-    remoteUrl: http://gitagent:8004/repo.git
-    patchUrl: http://gitagent:8004/PatchRequest
-    reviewAgent: git-agent
-    validationCommand: just validate
 ```
 
 ### Skills as normal files
@@ -486,9 +472,6 @@ referenced builtins exist. Standalone export of a builtin
 may produce a read-only informational projection marked `metadata.managedBy: installation`, but
 apply must reject attempts to create/update/delete it.
 
-The default `git-agent` reviewer should stop being created by a GET side effect. Bootstrap it
-explicitly as an installation-owned default or require it in the applied graph.
-
 ## Persistence and reconciliation design
 
 ### Document-centric backing store
@@ -541,7 +524,7 @@ the document, while container status/errors remain runtime records.
 
 Drop the current configuration tables and stores rather than synchronizing them:
 
-- `agents`, `connections`, `kernel_configs`, `git_agent_config`, and desired `gateways`;
+- `agents`, `connections`, `kernel_configs`, and desired `gateways`;
 - user-skill filesystem state as an independent source of truth; and
 - config fields mixed into runtime records.
 
@@ -630,9 +613,8 @@ bundles. JSON error responses should identify document, line/column when availab
 resource ID, field path, and stable error code. Return `409` for generation/immutable/reference
 conflicts and `422` for schema/validation failures.
 
-For export addressing, kernel config names are harness names and the Git Agent singleton name is
-`default`; the WebUI therefore requests `kernelConfig/opencode` or `gitAgentConfig/default` without
-resource-specific endpoint shapes.
+For export addressing, kernel config names are harness names; the WebUI therefore requests
+`kernelConfig/opencode` without resource-specific endpoint shapes.
 
 Implementation details:
 
@@ -677,8 +659,7 @@ Add **Export YAML** beside existing card actions:
 - skill card footer (`SkillsView.tsx:464-509`);
 - connection card footer (`ConnectionsView.tsx:294-316`);
 - gateway card footer (`GatewaysView.tsx:797-861`);
-- each declaration on the new Secrets page (exports name/description/reference only);
-- Git Agent config actions (`GitAgentView.tsx:738-747,958-970`); and
+- each declaration on the new Secrets page (exports name/description/reference only); and
 - kernel config save actions (`ConfigKernelsView.tsx:172-186`).
 
 Add **Configuration -> Secrets** beside Kernels and Connections in the sidebar. It should show
@@ -1052,32 +1033,8 @@ local edits or a loaded file replace that text until they are discarded or appli
 result is currently displayed as the server's structured JSON rather than the richer grouped
 create/update/delete/no-op diff UI proposed in the plan.
 
-Per-item Export YAML controls were added for agents, skills, connections, gateways, Git Agent
-config, kernel config, and secret declarations. Workspaces intentionally have no config export.
-
-### Git Agent integration
-
-Implementation uncovered a separate control-plane boundary: Git Agent runs as its own service and
-could not safely consume resolved secret-backed policy through the public config response.
-
-The implemented design adds a token-authenticated internal endpoint:
-
-`GET /internal/git-agent/effective-config`
-
-`CLIENT_SERVICE_INTERNAL_TOKEN` and `GITAGENT_CLIENT_SERVICE_INTERNAL_TOKEN` must match. The
-endpoint resolves Git Agent secret references inside client_service and never logs or publicly
-exports the resulting values. Git Agent refreshes effective config for each patch/re-review
-operation so secret rotation, disablement, and policy changes take effect without restart.
-Unresolved secret-backed policy fails closed instead of retaining old decrypted values.
-
-Git Agent now consumes declarative `enabled`, branch/ref policy, default branch, validation
-command, remote URL, patch URL, and review agent. Exact refs and full `refs/heads/...` prefixes are
-enforced without rewriting them. Changing the default branch also updates the bare repository's
-symbolic `HEAD`. Resolved Git Agent URLs are injected into newly created agent sessions and take
-precedence over static agent-host defaults.
-
-The reserved `git-agent` reviewer is installation-owned and synthesized/reserved outside the
-authored document; reading Git Agent config does not mutate source YAML.
+Per-item Export YAML controls were added for agents, skills, connections, gateways, kernel config,
+and secret declarations. Workspaces intentionally have no config export.
 
 ### Security hardening added during implementation
 
@@ -1087,7 +1044,6 @@ of it immediately:
 - permissive CORS was replaced with a configurable browser-origin allowlist
   (`CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`);
 - requests without an `Origin` header remain available to CLI and service-to-service callers;
-- the internal effective-config endpoint requires a shared token;
 - `/info` redacts secret-, token-, key-, and password-like environment variables; and
 - config ZIP request/decompression limits are enforced.
 
@@ -1105,11 +1061,7 @@ machine-readable schema version, and unknown fields are rejected by the Serde mo
 
 Deployments now have additional environment requirements and controls:
 
-- `CLIENT_SERVICE_SECRET_KEY`: persistent secret encryption master key;
-- `CLIENT_SERVICE_INTERNAL_TOKEN`: token protecting the resolved Git Agent endpoint;
-- `GITAGENT_CLIENT_SERVICE_INTERNAL_TOKEN`: matching Git Agent token;
-- `CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`: allowed browser origins; and
-- the existing client-service/Git Agent base URLs used for effective-config refresh.
+- `CLIENT_SERVICE_SECRET_KEY`: persistent secret encryption master key; and
+- `CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`: allowed browser origins.
 
-The root `.env.example` and `compose.yaml` document and wire these values. Without an internal
-token, Git Agent uses immutable environment defaults rather than resolved declarative policy.
+The root `.env.example` and `compose.yaml` document and wire these values.

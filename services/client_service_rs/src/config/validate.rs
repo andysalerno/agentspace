@@ -6,10 +6,7 @@ use crate::{
         error::{ConfigError, ValidationIssue},
         value::{ConfigValue, SecretName},
     },
-    models::{
-        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, validate_agent_id, validate_connection_id,
-        validate_gateway_id, validate_skill_id,
-    },
+    models::{validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id},
 };
 
 /// A single secret reference discovered in the document, with its stable field
@@ -67,34 +64,6 @@ pub fn secret_references(document: &ConfigDocument) -> Vec<SecretReference> {
             collect_value(
                 &mut references,
                 &format!("gateways/{}/secrets/{key}", gateway.id),
-                value,
-            );
-        }
-    }
-    if let Some(git_agent) = &document.spec.git_agent {
-        collect_value(
-            &mut references,
-            "gitAgent/defaultBranch",
-            &git_agent.default_branch,
-        );
-        collect_value(&mut references, "gitAgent/remoteUrl", &git_agent.remote_url);
-        collect_value(&mut references, "gitAgent/patchUrl", &git_agent.patch_url);
-        collect_value(
-            &mut references,
-            "gitAgent/validationCommand",
-            &git_agent.validation_command,
-        );
-        for (index, value) in git_agent.allowed_refs.iter().enumerate() {
-            collect_value(
-                &mut references,
-                &format!("gitAgent/allowedRefs/{index}"),
-                value,
-            );
-        }
-        for (index, value) in git_agent.allowed_ref_prefixes.iter().enumerate() {
-            collect_value(
-                &mut references,
-                &format!("gitAgent/allowedRefPrefixes/{index}"),
                 value,
             );
         }
@@ -198,7 +167,6 @@ fn validate_inner(
     );
     validate_kernels(&mut issues, document);
     validate_gateways(&mut issues, document, &agent_ids);
-    validate_git_agent(&mut issues, document, &agent_ids);
     validate_secret_refs(&mut issues, document, &declared_secrets);
 
     if issues.is_empty() {
@@ -397,26 +365,6 @@ fn validate_gateways(
                     );
                 }
             }
-        }
-    }
-}
-
-fn validate_git_agent(
-    issues: &mut Vec<ValidationIssue>,
-    document: &ConfigDocument,
-    agent_ids: &BTreeSet<&str>,
-) {
-    if let Some(git_agent) = &document.spec.git_agent {
-        let reviewer = &git_agent.review_agent;
-        if !agent_ids.contains(reviewer.as_str()) && reviewer != DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
-            issues.push(
-                ValidationIssue::new(
-                    "unresolved_agent_reference",
-                    format!("gitAgent references unknown review agent {reviewer:?}"),
-                )
-                .with_resource("gitAgentConfig/default")
-                .with_field("gitAgent/reviewAgent"),
-            );
         }
     }
 }

@@ -318,12 +318,6 @@ fn json_post(path: &str, body: &Value) -> Result<Request<Body>, Box<dyn Error + 
         .body(Body::from(serde_json::to_vec(body)?))?)
 }
 
-fn json_put(path: &str, body: &Value) -> Result<Request<Body>, Box<dyn Error + Send + Sync>> {
-    Ok(Request::put(path)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(serde_json::to_vec(body)?))?)
-}
-
 fn agent_only_doc(prompt: &str) -> String {
     format!(
         "apiVersion: agentspace.dev/v1alpha1
@@ -662,81 +656,6 @@ async fn skills_are_read_from_document_not_stale_upstream()
     assert!(
         !ids.contains(&"phantom".to_owned()),
         "stale upstream user skill leaked into the listing: {ids:?}"
-    );
-    Ok(())
-}
-
-// ----- Item I: Git Agent secret-reference preservation -----
-
-#[tokio::test]
-async fn git_agent_secret_ref_survives_unrelated_update() -> Result<(), Box<dyn Error + Send + Sync>>
-{
-    let server = TestServer::start().await?;
-    let app = server.app()?;
-
-    // Declare and set the secret that the Git Agent remote URL references.
-    let (status, _value) = send(
-        &app,
-        json_post("/secrets", &json!({ "name": "GIT_REMOTE" }))?,
-    )
-    .await?;
-    assert!(status.is_success(), "declaring secret failed: {status}");
-    let (status, _value) = send(
-        &app,
-        json_put(
-            "/secrets/GIT_REMOTE/value",
-            &json!({ "value": "https://git.example/repo.git" }),
-        )?,
-    )
-    .await?;
-    assert!(status.is_success(), "setting secret value failed");
-
-    let source = r"apiVersion: agentspace.dev/v1alpha1
-kind: AgentSpaceConfig
-metadata:
-  name: local
-spec:
-  secrets:
-    - name: GIT_REMOTE
-  agents:
-    - id: reviewer
-      name: Reviewer
-      harness: acp
-      systemPrompt: review carefully
-  gitAgent:
-    enabled: true
-    defaultBranch: main
-    remoteUrl:
-      secretRef: GIT_REMOTE
-    patchUrl: https://git.example/patch
-    reviewAgent: reviewer
-";
-    let (status, value) = send(&app, yaml_post("/config/apply", source)?).await?;
-    assert_eq!(status, StatusCode::OK, "git agent apply failed: {value}");
-
-    // An unrelated PATCH that only changes the default branch must preserve the
-    // secretRef-backed remote URL.
-    let (status, value) = send(
-        &app,
-        json_put("/git-agent/config", &json!({ "default_branch": "trunk" }))?,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::OK, "git agent patch failed: {value}");
-
-    let (status, body) = send_bytes(
-        &app,
-        Request::get("/config/export?mode=canonical").body(Body::empty())?,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::OK);
-    let text = String::from_utf8(body)?;
-    assert!(
-        text.contains("secretRef: GIT_REMOTE"),
-        "remoteUrl secretRef was lost by an unrelated update: {text}"
-    );
-    assert!(
-        text.contains("defaultBranch: trunk"),
-        "unrelated update was not applied: {text}"
     );
     Ok(())
 }

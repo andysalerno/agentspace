@@ -124,11 +124,6 @@ services:
       # without an Origin header (CLI / service-to-service) are always allowed.
       # Unset falls back to the default local WebUI origins.
       - CLIENT_SERVICE_CORS_ALLOWED_ORIGINS=${CLIENT_SERVICE_CORS_ALLOWED_ORIGINS:-}
-      # Shared token authenticating internal service-to-service endpoints (e.g.
-      # GET /internal/git-agent/effective-config). When unset those endpoints are
-      # disabled so resolved secret values are never exposed unauthenticated.
-      # Must match GITAGENT_CLIENT_SERVICE_INTERNAL_TOKEN below.
-      - CLIENT_SERVICE_INTERNAL_TOKEN=${CLIENT_SERVICE_INTERNAL_TOKEN:-}
     ports:
       - "8002:8002"
     volumes:

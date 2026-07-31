@@ -13,9 +13,6 @@ pub const API_VERSION: &str = "agentspace.dev/v1alpha1";
 pub const KIND_AGGREGATE: &str = "AgentSpaceConfig";
 /// Default aggregate metadata name used when the UI regenerates the source.
 pub const DEFAULT_METADATA_NAME: &str = "local";
-/// Fixed `metadata.name` for the singleton Git Agent configuration.
-pub const GIT_AGENT_METADATA_NAME: &str = "default";
-
 /// Metadata block shared by every manifest form.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -102,28 +99,6 @@ pub struct Gateway {
     pub secrets: BTreeMap<String, ConfigValue<String>>,
 }
 
-/// The singleton Git Agent configuration.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct GitAgentConfig {
-    pub enabled: bool,
-    pub default_branch: ConfigValue<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_ref_prefixes: Vec<ConfigValue<String>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_refs: Vec<ConfigValue<String>>,
-    pub remote_url: ConfigValue<String>,
-    pub patch_url: ConfigValue<String>,
-    pub review_agent: String,
-    #[serde(default = "default_config_value_string")]
-    pub validation_command: ConfigValue<String>,
-}
-
-/// Default literal for optional `ConfigValue<String>` leaves (empty string).
-const fn default_config_value_string() -> ConfigValue<String> {
-    ConfigValue::Literal(String::new())
-}
-
 /// The desired-state configuration payload.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -140,8 +115,6 @@ pub struct ConfigSpec {
     pub agents: Vec<Agent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gateways: Vec<Gateway>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub git_agent: Option<GitAgentConfig>,
 }
 
 /// The aggregate manifest form (`kind: AgentSpaceConfig`).

@@ -28,8 +28,8 @@ use crate::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord,
         DEFAULT_AGENT_SYSTEM_PROMPT, GatewayRecord, GatewayType, HarnessName, MessageRecord,
         MessageRole, SessionRecord, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord,
-        WorkspaceStatus, parse_env_vars, utc_now, validate_agent_id, validate_connection_id,
-        validate_gateway_id, validate_skill_id, validate_workspace_id,
+        WorkspaceStatus, utc_now, validate_agent_id, validate_connection_id, validate_gateway_id,
+        validate_skill_id, validate_workspace_id,
     },
 };
 
@@ -616,7 +616,6 @@ async fn create_agent(
     Json(payload): Json<CreateAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_agent_id(&payload.agent_id)?;
-    reject_reserved_agent_id(&payload.agent_id)?;
     validate_agent_skill_refs(&state, &payload.skills).await?;
     if let Some(connection_id) = payload.connection_id.as_deref() {
         require_connection(&state, connection_id)?;
@@ -684,7 +683,6 @@ async fn update_agent(
     Path(agent_id): Path<String>,
     Json(payload): Json<UpdateAgentRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    reject_reserved_agent_id(&agent_id)?;
     let mut agent = require_agent(&state, &agent_id)?;
     if let Some(name) = payload.name {
         agent.name = name;
@@ -735,7 +733,6 @@ async fn delete_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    reject_reserved_agent_id(&agent_id)?;
     if !state.agents.delete(&agent_id)? {
         return Err(ApiError::not_found(format!("agent {agent_id:?} not found")));
     }
@@ -765,47 +762,6 @@ async fn delete_agent(
         "api handler completed"
     );
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Authorize an internal service-to-service request against the shared internal
-/// token. Returns 503 when no token is configured (the endpoint is disabled so
-/// resolved secrets are never exposed unauthenticated) and 401 for a
-/// missing/incorrect token. The token is compared in constant time.
-fn authorize_internal(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
-    let Some(expected) = state.config.internal_token() else {
-        return Err(ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            detail: "internal endpoints are disabled; set CLIENT_SERVICE_INTERNAL_TOKEN to enable"
-                .to_owned(),
-            extra: None,
-        });
-    };
-    let presented = headers
-        .get("x-internal-token")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    if constant_time_eq(presented.as_bytes(), expected.as_bytes()) {
-        Ok(())
-    } else {
-        Err(ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            detail: "missing or invalid internal token".to_owned(),
-            extra: None,
-        })
-    }
-}
-
-/// Compare two byte slices in constant time to avoid leaking token length or
-/// content through timing.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 async fn list_workspaces(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
@@ -2540,29 +2496,6 @@ fn session_env(
         env.insert("KERNEL_SYSTEM_PROMPT".to_owned(), system_prompt);
     }
 
-    // Inject the resolved Git Agent discovery URLs so runtime agents reach the
-    // authored (and possibly secret-backed) endpoints. These take precedence
-    // over the static AGENT_HOST_GITAGENT_* process vars in agent_host, and
-    // because they are resolved at session-create time a secret rotation or
-    // config apply takes effect on the next session. When no Git Agent is
-    // authored, nothing is injected and agent_host falls back to its defaults.
-    match config::resolver::resolve_git_agent(&state.config_state) {
-        Ok(Some(git_agent)) => {
-            if let Some(remote_url) = git_agent.remote_url {
-                env.insert("GITAGENT_REMOTE_URL".to_owned(), remote_url);
-            }
-            if let Some(patch_url) = git_agent.patch_url {
-                env.insert("GITAGENT_PATCH_URL".to_owned(), patch_url);
-            }
-            if let Some(default_branch) = git_agent.default_branch {
-                env.insert("GITAGENT_DEFAULT_BRANCH".to_owned(), default_branch);
-            }
-        }
-        Ok(None) => {}
-        Err(ResolveError::Missing(mut git_missing)) => missing.append(&mut git_missing),
-        Err(err) => return Err(resolve_error_to_api(err)),
-    }
-
     if !missing.is_empty() {
         return Err(resolve_error_to_api(ResolveError::Missing(missing)));
     }
@@ -3449,18 +3382,6 @@ fn require_agent(state: &AppState, agent_id: &str) -> Result<AgentRecord, ApiErr
         .ok_or_else(|| ApiError::not_found(format!("agent {agent_id:?} not found")))
 }
 
-/// Reject mutations targeting the reserved, installation-owned Git Agent
-/// reviewer id, which is synthesized on demand and never authored by users.
-fn reject_reserved_agent_id(agent_id: &str) -> Result<(), ApiError> {
-    if agent_id == DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
-        return Err(ApiError::conflict(format!(
-            "agent id {agent_id:?} is reserved for the installation-owned Git Agent reviewer and \
-             cannot be created, modified, or deleted"
-        )));
-    }
-    Ok(())
-}
-
 fn require_connection(state: &AppState, connection_id: &str) -> Result<ConnectionRecord, ApiError> {
     state
         .connections
@@ -3876,13 +3797,6 @@ async fn export_config_resource(
         "gateway" => {
             let item = document.gateway(&name).ok_or_else(missing)?;
             ("Gateway", spec_without(item, "id")?)
-        }
-        "git-agent-config" => {
-            let item = document.spec.git_agent.as_ref().ok_or_else(missing)?;
-            let spec = serde_yaml_ng::to_value(item).map_err(|error| {
-                ApiError::internal(format!("failed to serialize resource: {error}"))
-            })?;
-            ("GitAgentConfig", spec)
         }
         other => {
             return Err(ApiError::not_found(format!(
@@ -5130,7 +5044,6 @@ mod tests {
     #[tokio::test]
     async fn info_redacts_secret_env_values() -> Result<(), Box<dyn Error + Send + Sync>> {
         let secret_key_value = "super-secret-master-key-value";
-        let internal_token_value = "internal-service-token-value";
         let api_key_value = "sk-openai-connection-api-key";
 
         let mut env = BTreeMap::new();
@@ -5138,10 +5051,6 @@ mod tests {
         env.insert(
             "CLIENT_SERVICE_SECRET_KEY".to_owned(),
             secret_key_value.to_owned(),
-        );
-        env.insert(
-            "CLIENT_SERVICE_INTERNAL_TOKEN".to_owned(),
-            internal_token_value.to_owned(),
         );
         env.insert(
             "CLIENT_SERVICE_OPENAI_API_KEY".to_owned(),
@@ -5157,13 +5066,11 @@ mod tests {
         let env = &value["client_service"]["env"];
         assert_eq!(env["CLIENT_SERVICE_TEST"], "enabled");
         assert_eq!(env["CLIENT_SERVICE_SECRET_KEY"], "***redacted***");
-        assert_eq!(env["CLIENT_SERVICE_INTERNAL_TOKEN"], "***redacted***");
         assert_eq!(env["CLIENT_SERVICE_OPENAI_API_KEY"], "***redacted***");
 
         // The exact secret material must never appear anywhere in the response.
         let serialized = serde_json::to_string(&value)?;
         assert!(!serialized.contains(secret_key_value));
-        assert!(!serialized.contains(internal_token_value));
         assert!(!serialized.contains(api_key_value));
 
         Ok(())

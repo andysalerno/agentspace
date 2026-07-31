@@ -5,9 +5,8 @@ use serde::Deserialize;
 use crate::{
     config::{
         document::{
-            API_VERSION, Agent, AggregateManifest, ConfigDocument, ConfigSpec, Connection,
-            GIT_AGENT_METADATA_NAME, Gateway, GitAgentConfig, KIND_AGGREGATE, KernelConfig,
-            Metadata, SecretDeclaration, Skill,
+            API_VERSION, Agent, AggregateManifest, ConfigDocument, ConfigSpec, Connection, Gateway,
+            KIND_AGGREGATE, KernelConfig, Metadata, SecretDeclaration, Skill,
         },
         error::ConfigError,
         value::{ConfigValue, SecretName},
@@ -121,7 +120,7 @@ fn merge_document(
         KIND_AGGREGATE => {
             let manifest: AggregateManifest = from_value(value)?;
             *metadata_name = Some(manifest.metadata.name);
-            merge_spec(spec, manifest.spec)?;
+            merge_spec(spec, manifest.spec);
         }
         "SecretDeclaration" => {
             let manifest: Standalone<SecretDeclarationSpec> = from_value(value)?;
@@ -188,10 +187,6 @@ fn merge_document(
                 secrets: manifest.spec.secrets,
             });
         }
-        "GitAgentConfig" => {
-            let manifest: Standalone<GitAgentConfig> = from_value(value)?;
-            merge_git_agent(spec, manifest)?;
-        }
         other => {
             return Err(ConfigError::UnsupportedKind {
                 value: other.to_owned(),
@@ -231,42 +226,13 @@ fn parse_skill(
     })
 }
 
-fn merge_git_agent(
-    spec: &mut ConfigSpec,
-    manifest: Standalone<GitAgentConfig>,
-) -> Result<(), ConfigError> {
-    if manifest.metadata.name != GIT_AGENT_METADATA_NAME {
-        return Err(ConfigError::Parse {
-            detail: format!("GitAgentConfig metadata.name must be {GIT_AGENT_METADATA_NAME:?}"),
-        });
-    }
-    if spec.git_agent.is_some() {
-        return Err(ConfigError::DuplicateResource {
-            kind: "gitAgentConfig".to_owned(),
-            id: GIT_AGENT_METADATA_NAME.to_owned(),
-        });
-    }
-    spec.git_agent = Some(manifest.spec);
-    Ok(())
-}
-
-fn merge_spec(target: &mut ConfigSpec, source: ConfigSpec) -> Result<(), ConfigError> {
+fn merge_spec(target: &mut ConfigSpec, source: ConfigSpec) {
     target.secrets.extend(source.secrets);
     target.kernel_configs.extend(source.kernel_configs);
     target.connections.extend(source.connections);
     target.skills.extend(source.skills);
     target.agents.extend(source.agents);
     target.gateways.extend(source.gateways);
-    if let Some(git_agent) = source.git_agent {
-        if target.git_agent.is_some() {
-            return Err(ConfigError::DuplicateResource {
-                kind: "gitAgentConfig".to_owned(),
-                id: GIT_AGENT_METADATA_NAME.to_owned(),
-            });
-        }
-        target.git_agent = Some(git_agent);
-    }
-    Ok(())
 }
 
 fn check_duplicate_ids(document: &ConfigDocument) -> Result<(), ConfigError> {
@@ -325,7 +291,6 @@ const fn spec_is_empty(spec: &ConfigSpec) -> bool {
         && spec.skills.is_empty()
         && spec.agents.is_empty()
         && spec.gateways.is_empty()
-        && spec.git_agent.is_none()
 }
 
 fn read_str_field(value: &serde_yaml_ng::Value, field: &str) -> Result<String, ConfigError> {

@@ -242,13 +242,6 @@ spec:
       name: Helper
       harness: acp
       systemPrompt: be helpful
-  gitAgent:
-    enabled: true
-    defaultBranch: main
-    remoteUrl: https://example.test/repo.git
-    patchUrl: https://example.test/patch
-    reviewAgent: helper
-    validationCommand: just verify
 ";
     let (status, _headers, _body) = send(&app, apply_request(source)?).await?;
     assert_eq!(status, StatusCode::OK);
@@ -271,23 +264,6 @@ spec:
         Some("attachment; filename=\"kernel-config-acp.yaml\"")
     );
 
-    let (status, headers, body) = send(
-        &app,
-        Request::get("/config/export/git-agent-config/default").body(Body::empty())?,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::OK);
-    let text = String::from_utf8(body)?;
-    assert!(
-        text.contains("kind: GitAgentConfig"),
-        "unexpected manifest: {text}"
-    );
-    assert_eq!(
-        headers
-            .get(header::CONTENT_DISPOSITION.as_str())
-            .map(String::as_str),
-        Some("attachment; filename=\"git-agent-config-default.yaml\"")
-    );
     Ok(())
 }
 
@@ -619,73 +595,6 @@ async fn crud_patches_preserve_secret_refs_and_structured_env()
     assert!(text.contains("name: OpenAI Renamed"), "rename lost: {text}");
     assert!(text.contains("name: Echo Renamed"), "rename lost: {text}");
     assert!(text.contains("name: Helper Renamed"), "rename lost: {text}");
-    Ok(())
-}
-
-#[tokio::test]
-async fn get_git_agent_config_does_not_author_git_agent_record()
--> Result<(), Box<dyn Error + Send + Sync>> {
-    let app = router()?;
-    send(&app, apply_request(SAMPLE_SOURCE)?).await?;
-
-    // Capture the exact source before any Git Agent read.
-    let (status, _headers, source_before) =
-        send(&app, Request::get("/config/export").body(Body::empty())?).await?;
-    assert_eq!(status, StatusCode::OK);
-
-    // Reading the Git Agent config must never author anything into the desired
-    // document: neither a gitAgent config block nor the reserved review agent.
-    let (status, _headers, _body) =
-        send(&app, Request::get("/git-agent/config").body(Body::empty())?).await?;
-    assert_eq!(status, StatusCode::OK);
-
-    // The exact source bytes must be byte-identical after the read.
-    let (status, _headers, source_after) =
-        send(&app, Request::get("/config/export").body(Body::empty())?).await?;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        source_before, source_after,
-        "reading the Git Agent config changed the exact source bytes"
-    );
-
-    let (status, _headers, after) = send(
-        &app,
-        Request::get("/config/export?mode=canonical").body(Body::empty())?,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::OK);
-    let text = String::from_utf8(after)?;
-    assert!(
-        !text.contains("gitAgent"),
-        "authored config gained an unauthored gitAgent config block: {text}"
-    );
-    // The reserved reviewer is synthesized, never authored into the document.
-    assert!(
-        !text.contains("id: git-agent"),
-        "reading the Git Agent config authored the reserved reviewer: {text}"
-    );
-
-    // The reserved reviewer is still resolvable via GET (synthesized on demand).
-    let (status, _headers, agent) =
-        send(&app, Request::get("/agents/git-agent").body(Body::empty())?).await?;
-    assert_eq!(status, StatusCode::OK);
-    let agent: Value = serde_json::from_slice(&agent)?;
-    assert_eq!(agent["agent_id"], "git-agent");
-
-    // A second read is stable: still no authored Git Agent config record.
-    let (status, _headers, _body) =
-        send(&app, Request::get("/git-agent/config").body(Body::empty())?).await?;
-    assert_eq!(status, StatusCode::OK);
-    let (status, _headers, again) = send(
-        &app,
-        Request::get("/config/export?mode=canonical").body(Body::empty())?,
-    )
-    .await?;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        !String::from_utf8(again)?.contains("gitAgent"),
-        "repeated reads authored a gitAgent config block"
-    );
     Ok(())
 }
 

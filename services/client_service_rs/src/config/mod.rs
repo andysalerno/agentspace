@@ -25,8 +25,8 @@ pub mod validate;
 pub mod value;
 
 pub use document::{
-    Agent, AggregateManifest, ConfigDocument, ConfigSpec, Connection, Gateway, GitAgentConfig,
-    KernelConfig, SecretDeclaration, Skill,
+    Agent, AggregateManifest, ConfigDocument, ConfigSpec, Connection, Gateway, KernelConfig,
+    SecretDeclaration, Skill,
 };
 pub use error::{ConfigError, ValidationIssue};
 pub use value::{ConfigValue, SecretName};

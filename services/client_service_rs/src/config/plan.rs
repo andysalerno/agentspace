@@ -133,13 +133,6 @@ pub fn plan(current: &ConfigDocument, next: &ConfigDocument) -> Plan {
         }),
         &map_of(&next.spec.gateways, |item| (item.id.clone(), json_of(item))),
     );
-    diff_singleton(
-        &mut entries,
-        "gitAgentConfig",
-        current.spec.git_agent.as_ref().map(json_of),
-        next.spec.git_agent.as_ref().map(json_of),
-    );
-
     Plan { entries }
 }
 
@@ -181,24 +174,4 @@ fn diff_collection(
             action,
         });
     }
-}
-
-fn diff_singleton(
-    entries: &mut Vec<PlanEntry>,
-    kind: &str,
-    current: Option<Value>,
-    next: Option<Value>,
-) {
-    let action = match (current, next) {
-        (None, Some(_)) => PlanAction::Create,
-        (Some(_), None) => PlanAction::Delete,
-        (Some(before), Some(after)) if before == after => PlanAction::NoOp,
-        (Some(_), Some(_)) => PlanAction::Update,
-        (None, None) => return,
-    };
-    entries.push(PlanEntry {
-        kind: kind.to_owned(),
-        id: "default".to_owned(),
-        action,
-    });
 }

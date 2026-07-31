@@ -199,18 +199,6 @@ impl AppConfig {
         self
     }
 
-    /// The shared token required for internal service-to-service endpoints (for
-    /// example the Git Agent effective-config endpoint). When unset, those
-    /// endpoints are disabled so resolved secrets are never exposed without
-    /// authentication.
-    #[must_use]
-    pub fn internal_token(&self) -> Option<&str> {
-        self.client_service_env
-            .get("CLIENT_SERVICE_INTERNAL_TOKEN")
-            .map(String::as_str)
-            .filter(|value| !value.is_empty())
-    }
-
     #[must_use]
     pub fn db_path(&self) -> Option<&str> {
         self.client_service_env
@@ -223,9 +211,8 @@ impl AppConfig {
     /// values of sensitive variables replaced by a redaction placeholder.
     ///
     /// This is what `/info` and any diagnostic surface must expose: secret
-    /// material (the master encryption key, internal service token, and any
-    /// variable whose name matches a sensitive heuristic) must never leave the
-    /// process. Non-sensitive keys keep their real values so `/info` remains
+    /// material (the master encryption key and any variable whose name matches
+    /// a sensitive heuristic) must never leave the process. Non-sensitive keys keep their real values so `/info` remains
     /// useful for debugging deployment wiring.
     #[must_use]
     pub fn redacted_env(&self) -> BTreeMap<String, String> {
@@ -248,7 +235,7 @@ pub(crate) const REDACTED_ENV_PLACEHOLDER: &str = "***redacted***";
 
 /// Environment variable names whose values are always sensitive and must be
 /// redacted regardless of the heuristic below.
-const SENSITIVE_ENV_KEYS: &[&str] = &["CLIENT_SERVICE_SECRET_KEY", "CLIENT_SERVICE_INTERNAL_TOKEN"];
+const SENSITIVE_ENV_KEYS: &[&str] = &["CLIENT_SERVICE_SECRET_KEY"];
 
 /// Substrings that mark an environment variable name as sensitive. Matched
 /// case-insensitively so, e.g., `CLIENT_SERVICE_OPENAI_API_KEY` is redacted.

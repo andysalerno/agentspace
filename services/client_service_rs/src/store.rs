@@ -10,8 +10,8 @@ use crate::{
     config::{adapter, state::ConfigState},
     errors::StoreError,
     models::{
-        AgentRecord, ConnectionRecord, GatewayRecord, GitAgentConfigRecord, HarnessName,
-        KernelConfigRecord, MessageRecord, SessionRecord, WorkspaceRecord,
+        AgentRecord, ConnectionRecord, GatewayRecord, HarnessName, KernelConfigRecord,
+        MessageRecord, SessionRecord, WorkspaceRecord,
     },
 };
 
@@ -192,7 +192,6 @@ impl InMemorySessionStore {
 pub struct StoreSet {
     pub(crate) config: ConfigState,
     pub(crate) agents: AgentStore,
-    pub(crate) git_agent_config: GitAgentConfigStore,
     pub(crate) kernel_configs: KernelConfigStore,
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
@@ -209,7 +208,6 @@ impl StoreSet {
         let config = ConfigState::in_memory()?;
         Ok(Self {
             agents: AgentStore::new(config.clone()),
-            git_agent_config: GitAgentConfigStore::new(config.clone()),
             kernel_configs: KernelConfigStore::new(config.clone()),
             connections: ConnectionStore::new(config.clone()),
             gateways: GatewayStore::new(config.clone()),
@@ -243,7 +241,6 @@ impl StoreSet {
         tracing::info!(in_memory, "created sqlite-backed store set");
         Ok(Self {
             agents: AgentStore::new(config.clone()),
-            git_agent_config: GitAgentConfigStore::new(config.clone()),
             kernel_configs: KernelConfigStore::new(config.clone()),
             connections: ConnectionStore::new(config.clone()),
             gateways: GatewayStore::new(config.clone()),
@@ -292,30 +289,6 @@ impl AgentStore {
 
     pub fn delete(&self, agent_id: &str) -> Result<bool, StoreError> {
         adapter::delete_agent(&self.config, agent_id)
-    }
-}
-
-/// Git Agent configuration store backed by the authoritative document.
-#[derive(Clone, Debug)]
-pub struct GitAgentConfigStore {
-    config: ConfigState,
-}
-
-impl GitAgentConfigStore {
-    #[must_use]
-    pub const fn new(config: ConfigState) -> Self {
-        Self { config }
-    }
-
-    pub fn get(&self) -> Result<Option<GitAgentConfigRecord>, StoreError> {
-        adapter::get_git_agent_config(&self.config)
-    }
-
-    pub fn upsert(
-        &self,
-        config: &GitAgentConfigRecord,
-    ) -> Result<GitAgentConfigRecord, StoreError> {
-        adapter::upsert_git_agent_config(&self.config, config)
     }
 }
 
@@ -623,14 +596,13 @@ mod tests {
         errors::StoreError,
         models::{
             AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord,
-            GatewayType, GitAgentConfigRecord, HarnessName, MessageRecord, MessageRole,
-            SessionRecord, ToolCallRecord,
+            GatewayType, HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
         },
     };
 
     use super::{
-        AgentStore, ConnectionStore, GatewayStore, GitAgentConfigStore, InMemorySessionStore,
-        KernelConfigStore, StoreSet,
+        AgentStore, ConnectionStore, GatewayStore, InMemorySessionStore, KernelConfigStore,
+        StoreSet,
     };
     use crate::config::state::ConfigState;
 
@@ -811,35 +783,6 @@ mod tests {
     }
 
     #[test]
-    fn git_agent_config_store_upserts_singleton() -> Result<(), Box<dyn Error + Send + Sync>> {
-        let config = ConfigState::in_memory()?;
-        AgentStore::new(config.clone()).insert(&agent("reviewer", "2024-01-01"))?;
-        let store = GitAgentConfigStore::new(config);
-        assert!(store.get()?.is_none());
-
-        let mut config = GitAgentConfigRecord::new_default();
-        config.enabled = false;
-        config.remote_url = "http://gitagent.example/repo.git".to_owned();
-        store.upsert(&config)?;
-
-        let mut replacement = GitAgentConfigRecord::new_default();
-        replacement.default_branch = "trunk".to_owned();
-        replacement.allowed_refs = vec!["refs/heads/trunk".to_owned()];
-        replacement.review_agent_id = "reviewer".to_owned();
-        store.upsert(&replacement)?;
-
-        assert!(matches!(
-            store.get()?,
-            Some(record)
-                if record.enabled
-                    && record.default_branch == "trunk"
-                    && record.allowed_refs == vec!["refs/heads/trunk".to_owned()]
-                    && record.review_agent_id == "reviewer"
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn session_store_persists_updates_and_clears_messages()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         let store = InMemorySessionStore::new();
@@ -901,49 +844,6 @@ mod tests {
         ));
         assert!(store.delete("session")?);
         assert!(!store.delete("session")?);
-        Ok(())
-    }
-
-    #[test]
-    fn sqlite_git_agent_config_persists_across_reopen() -> Result<(), Box<dyn Error + Send + Sync>>
-    {
-        let path = sqlite_test_path()?;
-        {
-            let stores = StoreSet::sqlite(&path)?;
-            stores.agents.insert(&agent("reviewer", "2024-01-01"))?;
-            let mut config = GitAgentConfigRecord::new_default();
-            config.enabled = false;
-            config.default_branch = "trunk".to_owned();
-            config.allowed_ref_prefixes = vec!["refs/heads/dev/".to_owned()];
-            config.allowed_refs = vec!["refs/heads/trunk".to_owned()];
-            config.remote_url = "http://gitagent.example/repo.git".to_owned();
-            config.patch_url = "http://gitagent.example/PatchRequest".to_owned();
-            config.review_agent_id = "reviewer".to_owned();
-            config.validation_command = "just verify".to_owned();
-            stores.git_agent_config.upsert(&config)?;
-        }
-
-        {
-            let stores = StoreSet::sqlite(&path)?;
-            let config = stores
-                .git_agent_config
-                .get()?
-                .ok_or_else(|| StoreError::Persistence {
-                    store: "git_agent_config",
-                    detail: "missing git agent config".to_owned(),
-                })?;
-            assert!(!config.enabled);
-            assert_eq!(config.default_branch, "trunk");
-            assert_eq!(
-                config.allowed_ref_prefixes,
-                vec!["refs/heads/dev/".to_owned()]
-            );
-            assert_eq!(config.allowed_refs, vec!["refs/heads/trunk".to_owned()]);
-            assert_eq!(config.review_agent_id, "reviewer");
-            assert_eq!(config.validation_command, "just verify");
-        }
-
-        cleanup_sqlite_path(&path);
         Ok(())
     }
 

@@ -8,15 +8,12 @@
 
 use crate::{
     config::{
-        document::{Agent, Connection, Gateway, GitAgentConfig, KernelConfig, Skill, env_to_text},
+        document::{Agent, Connection, Gateway, KernelConfig, Skill, env_to_text},
         state::{ConfigState, GatewayRuntime},
         value::ConfigValue,
     },
     errors::StoreError,
-    models::{
-        AgentRecord, ConnectionRecord, GatewayRecord, GitAgentConfigRecord, HarnessName,
-        KernelConfigRecord,
-    },
+    models::{AgentRecord, ConnectionRecord, GatewayRecord, HarnessName, KernelConfigRecord},
 };
 
 fn literal_or_empty(value: &ConfigValue<String>) -> String {
@@ -127,8 +124,6 @@ fn kernel_key(harness: HarnessName) -> String {
     format!("kernelConfig/{}", harness.as_str())
 }
 
-const GIT_AGENT_KEY: &str = "gitAgent";
-
 // ----- agents -----
 
 fn record_to_agent(record: &AgentRecord) -> Agent {
@@ -181,12 +176,6 @@ pub fn get_agent(config: &ConfigState, agent_id: &str) -> Result<Option<AgentRec
         .find(|agent| agent.id == agent_id)
     {
         return Ok(Some(agent_to_record(config, agent)));
-    }
-    // Synthesize the reserved Git Agent reviewer on demand so sessions and Git
-    // Agent flows can resolve it without it ever being authored into the
-    // desired document.
-    if agent_id == crate::models::DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
-        return Ok(Some(AgentRecord::git_agent_reviewer()));
     }
     Ok(None)
 }
@@ -766,123 +755,6 @@ pub fn delete_kernel_config(
         config.remove_meta(&kernel_key(harness));
     }
     Ok(removed)
-}
-
-// ----- git agent config -----
-
-fn git_agent_to_record(config: &ConfigState, git_agent: &GitAgentConfig) -> GitAgentConfigRecord {
-    let (created_at, updated_at) = config.timestamps(GIT_AGENT_KEY);
-    GitAgentConfigRecord {
-        enabled: git_agent.enabled,
-        default_branch: literal_or_empty(&git_agent.default_branch),
-        allowed_ref_prefixes: git_agent
-            .allowed_ref_prefixes
-            .iter()
-            .map(literal_or_empty)
-            .collect(),
-        allowed_refs: git_agent
-            .allowed_refs
-            .iter()
-            .map(literal_or_empty)
-            .collect(),
-        remote_url: literal_or_empty(&git_agent.remote_url),
-        patch_url: literal_or_empty(&git_agent.patch_url),
-        review_agent_id: git_agent.review_agent.clone(),
-        validation_command: literal_or_empty(&git_agent.validation_command),
-        created_at,
-        updated_at,
-    }
-}
-
-/// Merge a legacy flat Git Agent record onto the existing document Git Agent
-/// config, preserving any `secretRef` leaves the flat record cannot represent
-/// when the projected literal is unchanged.
-fn merge_git_agent(
-    existing: Option<&GitAgentConfig>,
-    record: &GitAgentConfigRecord,
-) -> GitAgentConfig {
-    GitAgentConfig {
-        enabled: record.enabled,
-        default_branch: merge_required_value(
-            existing.map_or(&ConfigValue::Literal(String::new()), |git| {
-                &git.default_branch
-            }),
-            &record.default_branch,
-        ),
-        allowed_ref_prefixes: merge_value_list(
-            existing.map_or(&[], |git| git.allowed_ref_prefixes.as_slice()),
-            &record.allowed_ref_prefixes,
-        ),
-        allowed_refs: merge_value_list(
-            existing.map_or(&[], |git| git.allowed_refs.as_slice()),
-            &record.allowed_refs,
-        ),
-        remote_url: merge_required_value(
-            existing.map_or(&ConfigValue::Literal(String::new()), |git| &git.remote_url),
-            &record.remote_url,
-        ),
-        patch_url: merge_required_value(
-            existing.map_or(&ConfigValue::Literal(String::new()), |git| &git.patch_url),
-            &record.patch_url,
-        ),
-        review_agent: record.review_agent_id.clone(),
-        validation_command: merge_required_value(
-            existing.map_or(&ConfigValue::Literal(String::new()), |git| {
-                &git.validation_command
-            }),
-            &record.validation_command,
-        ),
-    }
-}
-
-/// Merge a legacy flat list onto an existing `ConfigValue` list, preserving
-/// `secretRef` elements when the projected literal list is unchanged.
-fn merge_value_list(
-    existing: &[ConfigValue<String>],
-    incoming: &[String],
-) -> Vec<ConfigValue<String>> {
-    let projected: Vec<String> = existing.iter().map(literal_or_empty).collect();
-    if projected == incoming {
-        existing.to_vec()
-    } else {
-        incoming
-            .iter()
-            .map(|value| ConfigValue::Literal(value.clone()))
-            .collect()
-    }
-}
-
-pub fn get_git_agent_config(
-    config: &ConfigState,
-) -> Result<Option<GitAgentConfigRecord>, StoreError> {
-    Ok(config
-        .active()
-        .spec
-        .git_agent
-        .as_ref()
-        .map(|git_agent| git_agent_to_record(config, git_agent)))
-}
-
-pub fn upsert_git_agent_config(
-    config: &ConfigState,
-    record: &GitAgentConfigRecord,
-) -> Result<GitAgentConfigRecord, StoreError> {
-    let existed = config.active().spec.git_agent.is_some();
-    let record = record.clone();
-    config.mutate(move |document| {
-        let merged = merge_git_agent(document.spec.git_agent.as_ref(), &record);
-        document.spec.git_agent = Some(merged);
-        Ok(())
-    })?;
-    if existed {
-        config.mark_updated(GIT_AGENT_KEY);
-    } else {
-        config.mark_created(GIT_AGENT_KEY);
-    }
-    get_git_agent_config(config)?.ok_or_else(|| StoreError::Persistence {
-        store: "git_agent_config",
-        detail: "git agent config vanished after upsert".to_owned(),
-    })
 }
 
 // ----- user skills -----
