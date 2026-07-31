@@ -870,11 +870,12 @@ async fn clone_workspace(
     );
     let target_workspace_id = target_workspace.workspace_id.clone();
     let target_volume_name = target_workspace.volume_name();
+    let source_volume_name = source_workspace.volume_name();
     state.workspaces.insert(target_workspace.clone())?;
     let clone_result = state
         .agent_host
         .clone_workspace(
-            &source_workspace.volume_name(),
+            &source_volume_name,
             &target_workspace_id,
             &target_volume_name,
         )
@@ -904,9 +905,10 @@ async fn open_workspace_vscode(
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let workspace = require_ready_workspace(&state, &workspace_id)?;
+    let volume_name = workspace.volume_name();
     let upstream = state
         .agent_host
-        .open_workspace_vscode(&workspace.workspace_id, &workspace.volume_name())
+        .open_workspace_vscode(&workspace.workspace_id, &volume_name)
         .await?;
     tracing::info!(
         route = "/workspaces/:workspace_id/vscode",
