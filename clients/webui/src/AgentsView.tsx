@@ -768,6 +768,18 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                             </span>
                             <div className="card-footer-actions">
                                 <Button
+                                    className="secondary-button small"
+                                    onClick={() => {
+                                        void api.downloadConfigResource(
+                                            "agent",
+                                            agent.agent_id,
+                                        ).catch(reportError);
+                                    }}
+                                    type="button"
+                                >
+                                    Export YAML
+                                </Button>
+                                <Button
                                     className="small"
                                     disabled={busy}
                                     onClick={() => startSessionMutation.mutate(agent.agent_id)}

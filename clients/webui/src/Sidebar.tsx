@@ -12,6 +12,7 @@ import {
     Database20Regular,
     Folder20Regular,
     Info20Regular,
+    Key20Regular,
     PanelLeftContract20Regular,
     PanelLeftExpand20Regular,
     PlugConnected20Regular,
@@ -54,6 +55,16 @@ const navGroups: NavGroup[] = [
         label: "Configuration",
         icon: <Settings20Regular />,
         items: [
+            {
+                id: "config",
+                label: "Declarative",
+                icon: <Code20Regular />,
+            },
+            {
+                id: "config-secrets",
+                label: "Secrets",
+                icon: <Key20Regular />,
+            },
             {
                 id: "config-kernels",
                 label: "Kernels",

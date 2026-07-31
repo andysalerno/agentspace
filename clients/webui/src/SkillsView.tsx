@@ -462,6 +462,18 @@ export default function SkillsView() {
                                 {expandedSkillId === skill.skill_id ? "Collapse" : "View Files"}
                             </Button>
                             <div className="card-footer-actions">
+                                <Button
+                                    className="secondary-button small"
+                                    onClick={() => {
+                                        void api.downloadConfigResource(
+                                            "skill",
+                                            skill.skill_id,
+                                        ).catch(reportError);
+                                    }}
+                                    type="button"
+                                >
+                                    Export YAML
+                                </Button>
                                 {skill.source !== "builtin" && (
                                     <Button
                                         className="secondary-button small"

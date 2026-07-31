@@ -17,12 +17,17 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
-use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    classify::ServerErrorsFailureClass,
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
 use tracing::Span;
 use uuid::Uuid;
 
 use crate::{
     agent_host::AgentHostClient,
+    config::state::ConfigState,
     memory::MemoryProxyClient,
     store::{
         AgentStore, ConnectionStore, GatewayStore, KernelConfigStore, SessionStore, StoreSet,
@@ -32,6 +37,7 @@ use crate::{
 
 pub mod agent_host;
 pub mod api;
+pub mod config;
 pub mod errors;
 pub mod memory;
 pub mod models;
@@ -48,6 +54,15 @@ const DEFAULT_MEMORY_CONTAINER_BASE_URL: &str = "http://memory:8005";
 const DEFAULT_MEMORY_LOCAL_BASE_URL: &str = "http://127.0.0.1:8005";
 const DEFAULT_MEMORY_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_CONNECTION_MODELS_TIMEOUT_SECONDS: u64 = 15;
+/// Browser origins allowed for cross-origin (CORS) requests by default. These
+/// are the local `WebUI` dev/prod origins; production deployments override the
+/// list via `CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`.
+const DEFAULT_CORS_ALLOWED_ORIGINS: &[&str] = &[
+    "http://localhost:8003",
+    "http://127.0.0.1:8003",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppConfig {
@@ -57,6 +72,7 @@ pub struct AppConfig {
     memory_base_url: String,
     memory_timeout: Duration,
     connection_models_timeout: Duration,
+    cors_allowed_origins: Vec<String>,
     pub(crate) client_service_env: BTreeMap<String, String>,
 }
 
@@ -81,6 +97,12 @@ impl AppConfig {
             .filter(|(key, _value)| key.starts_with(ENV_PREFIX))
             .collect();
 
+        let cors_allowed_origins = parse_cors_allowed_origins(
+            env::var("CLIENT_SERVICE_CORS_ALLOWED_ORIGINS")
+                .ok()
+                .as_deref(),
+        );
+
         Ok(Self {
             bind_host,
             bind_port,
@@ -88,6 +110,7 @@ impl AppConfig {
             memory_base_url,
             memory_timeout,
             connection_models_timeout,
+            cors_allowed_origins,
             client_service_env,
         })
     }
@@ -108,6 +131,7 @@ impl AppConfig {
             connection_models_timeout: Duration::from_secs(
                 DEFAULT_CONNECTION_MODELS_TIMEOUT_SECONDS,
             ),
+            cors_allowed_origins: parse_cors_allowed_origins(None),
             client_service_env,
         }
     }
@@ -161,12 +185,72 @@ impl AppConfig {
     }
 
     #[must_use]
+    pub fn cors_allowed_origins(&self) -> &[String] {
+        &self.cors_allowed_origins
+    }
+
+    #[must_use]
+    pub fn with_cors_allowed_origins<I, S>(mut self, origins: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.cors_allowed_origins = origins.into_iter().map(Into::into).collect();
+        self
+    }
+
+    #[must_use]
     pub fn db_path(&self) -> Option<&str> {
         self.client_service_env
             .get("CLIENT_SERVICE_DB_PATH")
             .map(String::as_str)
             .filter(|value| !value.is_empty())
     }
+
+    /// Return the collected `CLIENT_SERVICE_`-prefixed environment with the
+    /// values of sensitive variables replaced by a redaction placeholder.
+    ///
+    /// This is what `/info` and any diagnostic surface must expose: secret
+    /// material (the master encryption key and any variable whose name matches
+    /// a sensitive heuristic) must never leave the process. Non-sensitive keys keep their real values so `/info` remains
+    /// useful for debugging deployment wiring.
+    #[must_use]
+    pub fn redacted_env(&self) -> BTreeMap<String, String> {
+        self.client_service_env
+            .iter()
+            .map(|(key, value)| {
+                let value = if is_sensitive_env_key(key) {
+                    REDACTED_ENV_PLACEHOLDER.to_owned()
+                } else {
+                    value.clone()
+                };
+                (key.clone(), value)
+            })
+            .collect()
+    }
+}
+
+/// Placeholder substituted for the value of any sensitive environment variable.
+pub(crate) const REDACTED_ENV_PLACEHOLDER: &str = "***redacted***";
+
+/// Environment variable names whose values are always sensitive and must be
+/// redacted regardless of the heuristic below.
+const SENSITIVE_ENV_KEYS: &[&str] = &["CLIENT_SERVICE_SECRET_KEY"];
+
+/// Substrings that mark an environment variable name as sensitive. Matched
+/// case-insensitively so, e.g., `CLIENT_SERVICE_OPENAI_API_KEY` is redacted.
+const SENSITIVE_ENV_SUBSTRINGS: &[&str] = &["SECRET", "TOKEN", "PASSWORD", "KEY"];
+
+/// Whether the value of the environment variable named `key` must be redacted.
+#[must_use]
+pub(crate) fn is_sensitive_env_key(key: &str) -> bool {
+    if SENSITIVE_ENV_KEYS.contains(&key) {
+        return true;
+    }
+    let upper = key.to_ascii_uppercase();
+    SENSITIVE_ENV_SUBSTRINGS
+        .iter()
+        .any(|needle| upper.contains(needle))
 }
 
 #[derive(Debug)]
@@ -212,6 +296,7 @@ pub struct AppState {
     pub(crate) http_client: reqwest::Client,
     pub(crate) agent_host: AgentHostClient,
     pub(crate) memory: MemoryProxyClient,
+    pub(crate) config_state: ConfigState,
     pub(crate) agents: AgentStore,
     pub(crate) kernel_configs: KernelConfigStore,
     pub(crate) connections: ConnectionStore,
@@ -219,6 +304,9 @@ pub struct AppState {
     pub(crate) workspaces: WorkspaceStore,
     pub(crate) sessions: SessionStore,
     pub(crate) active_turns: Arc<Mutex<BTreeMap<String, ActiveTurnRecord>>>,
+    /// Serializes `/config/apply` end to end (validate → stage skills → commit
+    /// → reconcile gateways) so two applies cannot interleave reconciliation.
+    pub(crate) apply_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) instance_id: Uuid,
     pub(crate) started_at: DateTime<Utc>,
 }
@@ -244,13 +332,23 @@ impl AppState {
         )?;
         let stores = config
             .db_path()
-            .map_or_else(|| Ok(StoreSet::in_memory()), StoreSet::sqlite)?;
+            .map_or_else(StoreSet::in_memory, StoreSet::sqlite)?;
         Ok(Self::with_clients_and_stores(config, agent_host, stores))
     }
 
-    #[must_use]
-    pub fn with_agent_host(config: AppConfig, agent_host: AgentHostClient) -> Self {
-        Self::with_clients_and_stores(config, agent_host, StoreSet::in_memory())
+    /// Build an app state with a custom agent-host client and in-memory stores.
+    ///
+    /// # Errors
+    /// Returns an error if the in-memory stores cannot be initialized.
+    pub fn with_agent_host(
+        config: AppConfig,
+        agent_host: AgentHostClient,
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+        Ok(Self::with_clients_and_stores(
+            config,
+            agent_host,
+            StoreSet::in_memory()?,
+        ))
     }
 
     #[must_use]
@@ -264,6 +362,7 @@ impl AppState {
             config,
             http_client: reqwest::Client::new(),
             agent_host,
+            config_state: stores.config.clone(),
             agents: stores.agents,
             kernel_configs: stores.kernel_configs,
             connections: stores.connections,
@@ -271,6 +370,7 @@ impl AppState {
             workspaces: stores.workspaces,
             sessions: stores.sessions,
             active_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            apply_lock: Arc::new(tokio::sync::Mutex::new(())),
             instance_id: Uuid::now_v7(),
             started_at: Utc::now(),
         }
@@ -285,57 +385,109 @@ fn default_memory_base_url() -> String {
     }
 }
 
+/// Parse a comma-separated list of allowed CORS origins, falling back to the
+/// default local `WebUI` origins when unset or empty. Blank entries are ignored.
+fn parse_cors_allowed_origins(raw: Option<&str>) -> Vec<String> {
+    let parsed: Vec<String> = raw
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if parsed.is_empty() {
+        DEFAULT_CORS_ALLOWED_ORIGINS
+            .iter()
+            .map(|origin| (*origin).to_owned())
+            .collect()
+    } else {
+        parsed
+    }
+}
+
+/// Build a CORS layer that allows only the configured browser origins with an
+/// explicit method and header allowlist. Requests without an `Origin` header
+/// (CLI and service-to-service callers) are unaffected because CORS only
+/// governs browser cross-origin access.
+fn build_cors_layer(config: &AppConfig) -> CorsLayer {
+    use axum::http::{HeaderName, Method, header};
+
+    let origins: Vec<axum::http::HeaderValue> = config
+        .cors_allowed_origins()
+        .iter()
+        .filter_map(|origin| origin.parse().ok())
+        .collect();
+
+    let methods = [
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::PATCH,
+        Method::OPTIONS,
+    ];
+    let headers: [HeaderName; 4] = [
+        header::CONTENT_TYPE,
+        header::IF_MATCH,
+        header::AUTHORIZATION,
+        header::ACCEPT,
+    ];
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(methods)
+        .allow_headers(headers)
+}
+
 pub fn build_router(state: AppState) -> Router {
-    api::router()
-        .with_state(state)
-        .layer(CorsLayer::permissive())
-        .layer(
-            TraceLayer::new_for_http()
-                .make_span_with(|request: &Request<Body>| {
-                    let route = matched_route(request);
-                    tracing::info_span!(
-                        "http_request",
-                        method = %request.method(),
-                        route = %route,
-                        path = %request.uri().path(),
-                        status = tracing::field::Empty,
-                        latency_ms = tracing::field::Empty,
-                    )
-                })
-                .on_request(|request: &Request<Body>, span: &Span| {
+    let cors = build_cors_layer(&state.config);
+    api::router().with_state(state).layer(cors).layer(
+        TraceLayer::new_for_http()
+            .make_span_with(|request: &Request<Body>| {
+                let route = matched_route(request);
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    route = %route,
+                    path = %request.uri().path(),
+                    status = tracing::field::Empty,
+                    latency_ms = tracing::field::Empty,
+                )
+            })
+            .on_request(|request: &Request<Body>, span: &Span| {
+                tracing::info!(
+                    parent: span,
+                    method = %request.method(),
+                    route = %matched_route(request),
+                    path = %request.uri().path(),
+                    "http request started"
+                );
+            })
+            .on_response(
+                |response: &Response<Body>, latency: Duration, span: &Span| {
+                    let latency_ms = duration_millis(latency);
+                    span.record("status", response.status().as_u16());
+                    span.record("latency_ms", latency_ms);
                     tracing::info!(
                         parent: span,
-                        method = %request.method(),
-                        route = %matched_route(request),
-                        path = %request.uri().path(),
-                        "http request started"
+                        status = response.status().as_u16(),
+                        latency_ms,
+                        "http request completed"
                     );
-                })
-                .on_response(
-                    |response: &Response<Body>, latency: Duration, span: &Span| {
-                        let latency_ms = duration_millis(latency);
-                        span.record("status", response.status().as_u16());
-                        span.record("latency_ms", latency_ms);
-                        tracing::info!(
-                            parent: span,
-                            status = response.status().as_u16(),
-                            latency_ms,
-                            "http request completed"
-                        );
-                    },
-                )
-                .on_failure(
-                    |failure_class: ServerErrorsFailureClass, latency: Duration, span: &Span| {
-                        let latency_ms = duration_millis(latency);
-                        tracing::warn!(
-                            parent: span,
-                            error_kind = ?failure_class,
-                            latency_ms,
-                            "http request failed"
-                        );
-                    },
-                ),
-        )
+                },
+            )
+            .on_failure(
+                |failure_class: ServerErrorsFailureClass, latency: Duration, span: &Span| {
+                    let latency_ms = duration_millis(latency);
+                    tracing::warn!(
+                        parent: span,
+                        error_kind = ?failure_class,
+                        latency_ms,
+                        "http request failed"
+                    );
+                },
+            ),
+    )
 }
 
 fn matched_route<B>(request: &Request<B>) -> &str {
@@ -374,7 +526,7 @@ fn parse_port() -> Result<u16, ConfigError> {
 mod tests {
     use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
 
-    use crate::store::AgentStore;
+    use crate::models::{AgentRecord, HarnessName};
 
     use super::{AppConfig, AppState};
 
@@ -392,10 +544,21 @@ mod tests {
             path.to_string_lossy().into_owned(),
         );
 
-        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env);
-        let state = AppState::new(config)?;
-        assert!(matches!(state.agents, AgentStore::Sqlite(_)));
-        drop(state);
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env.clone());
+        {
+            let state = AppState::new(config)?;
+            state.agents.insert(&AgentRecord::new(
+                "persisted",
+                "Persisted",
+                HarnessName::Acp,
+                "prompt",
+            ))?;
+        }
+
+        let reopened_config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", env);
+        let reopened = AppState::new(reopened_config)?;
+        assert!(reopened.agents.get("persisted")?.is_some());
+        drop(reopened);
 
         let raw = path.to_string_lossy();
         for candidate in [

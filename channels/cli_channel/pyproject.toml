@@ -5,6 +5,9 @@ description = "CLI session client for AgentSpace"
 requires-python = ">=3.13"
 dependencies = ["httpx"]
 
+[project.scripts]
+agentspace = "cli_channel.__main__:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

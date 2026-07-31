@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from email.message import Message
 from typing import cast
 
 import httpx
@@ -23,9 +24,25 @@ class SessionReply:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfigDownload:
+    content: bytes
+    filename: str
+    content_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class SecretStatus:
+    name: str
+    description: str | None
+    is_set: bool
+    references: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ClientServiceSessionClient:
     base_url: str
     timeout: float = 60.0
+    transport: httpx.AsyncBaseTransport | None = None
 
     async def create_session(
         self,
@@ -66,6 +83,68 @@ class ClientServiceSessionClient:
         response = await self._request_json("POST", f"/sessions/{session_id}/reset")
         return self._parse_session_registration(response)
 
+    async def validate_config(
+        self,
+        source: bytes,
+        content_type: str = "application/yaml",
+    ) -> object:
+        return await self._request_json(
+            "POST",
+            "/config/validate",
+            content=source,
+            content_type=content_type,
+        )
+
+    async def plan_config(
+        self,
+        source: bytes,
+        content_type: str = "application/yaml",
+    ) -> object:
+        return await self._request_json(
+            "POST",
+            "/config/plan",
+            content=source,
+            content_type=content_type,
+        )
+
+    async def apply_config(
+        self,
+        source: bytes,
+        content_type: str = "application/yaml",
+        expected_generation: int | None = None,
+    ) -> object:
+        headers = {"content-type": content_type}
+        if expected_generation is not None:
+            headers["if-match"] = str(expected_generation)
+        response = await self._request(
+            "POST",
+            "/config/apply",
+            content=source,
+            headers=headers,
+        )
+        return response.json()
+
+    async def export_config(self, mode: str) -> ConfigDownload:
+        return await self._download(f"/config/export?mode={mode}")
+
+    async def export_resource(self, kind: str, name: str) -> ConfigDownload:
+        return await self._download(f"/config/export/{kind}/{name}")
+
+    async def list_secrets(self) -> list[SecretStatus]:
+        response = await self._request_json("GET", "/secrets")
+        values = cast("list[dict[str, object]]", response)
+        return [_parse_secret_status(value) for value in values]
+
+    async def set_secret_value(self, name: str, value: str) -> None:
+        await self._request(
+            "PUT",
+            f"/secrets/{name}/value",
+            json={"value": value},
+        )
+
+    async def clear_secret_value(self, name: str) -> None:
+        await self._request("DELETE", f"/secrets/{name}/value")
+
     def _parse_session_registration(self, response: object) -> SessionRegistration:
         data = cast("dict[str, object]", response)
         channel_name = data.get("channel_name")
@@ -81,12 +160,82 @@ class ClientServiceSessionClient:
         path: str,
         *,
         json: dict[str, object] | None = None,
+        content: bytes | None = None,
+        content_type: str | None = None,
     ) -> object:
+        response = await self._request(
+            method,
+            path,
+            json=json,
+            content=content,
+            headers=(None if content_type is None else {"content-type": content_type}),
+        )
+        return response.json()
+
+    async def _download(
+        self,
+        path: str,
+    ) -> ConfigDownload:
+        response = await self._request("GET", path)
+        return ConfigDownload(
+            content=response.content,
+            filename=_response_filename(response),
+            content_type=response.headers.get(
+                "content-type",
+                "application/octet-stream",
+            ),
+        )
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, object] | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         logger.info("cli_channel -> client_service %s %s", method, path)
         async with httpx.AsyncClient(
             base_url=self.base_url,
             timeout=self.timeout,
+            transport=self.transport,
         ) as client:
-            response = await client.request(method, path, json=json)
+            response = await client.request(
+                method,
+                path,
+                json=json,
+                content=content,
+                headers=headers,
+            )
         response.raise_for_status()
-        return response.json()
+        return response
+
+
+def _response_filename(response: httpx.Response) -> str:
+    disposition = response.headers.get("content-disposition")
+    if disposition is None:
+        return "agentspace-config.yaml"
+    message = Message()
+    message["content-disposition"] = disposition
+    filename = message.get_filename()
+    return filename or "agentspace-config.yaml"
+
+
+def _parse_secret_status(value: dict[str, object]) -> SecretStatus:
+    raw_references = value.get("references")
+    references = (
+        cast("list[object]", raw_references) if isinstance(raw_references, list) else []
+    )
+    raw_is_set = value["is_set"]
+    if not isinstance(raw_is_set, bool):
+        msg = "secret is_set must be a boolean"
+        raise TypeError(msg)
+    return SecretStatus(
+        name=str(value["name"]),
+        description=(
+            None if value.get("description") is None else str(value["description"])
+        ),
+        is_set=raw_is_set,
+        references=tuple(str(item) for item in references),
+    )

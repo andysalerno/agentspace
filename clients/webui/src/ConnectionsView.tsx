@@ -296,6 +296,18 @@ export default function ConnectionsView() {
                                 Created {new Date(conn.created_at).toLocaleDateString()}
                             </span>
                             <div className="card-footer-actions">
+                                <Button
+                                    className="secondary-button small"
+                                    onClick={() => {
+                                        void api.downloadConfigResource(
+                                            "connection",
+                                            conn.connection_id,
+                                        ).catch(reportError);
+                                    }}
+                                    type="button"
+                                >
+                                    Export YAML
+                                </Button>
                                 {editingId !== conn.connection_id && (
                                     <Button
                                         className="secondary-button small"
