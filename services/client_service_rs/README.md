@@ -16,8 +16,6 @@ The script runs `cargo run` with the default client-service bind address:
 - `CLIENT_SERVICE_PORT` defaults to `8002`
 - `CLIENT_SERVICE_AGENT_HOST_BASE_URL` defaults to `http://127.0.0.1:8001`
 - `CLIENT_SERVICE_CONNECTION_MODELS_TIMEOUT` defaults to `15` seconds
-- `CLIENT_SERVICE_GIT_AGENT_BASE_URL` defaults to `http://127.0.0.1:8004`
-  locally and `http://git-agent:8004` when running in a container
 - `CLIENT_SERVICE_MEMORY_BASE_URL` defaults to `http://127.0.0.1:8005`
   locally and `http://memory:8005` when running in a container
 - `CLIENT_SERVICE_MEMORY_TIMEOUT` defaults to `60` seconds for JSON requests;
@@ -46,7 +44,6 @@ The container defaults match `run-service.sh`:
 - `CLIENT_SERVICE_PORT=8002`
 - `CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://127.0.0.1:8001`
 - `CLIENT_SERVICE_CONNECTION_MODELS_TIMEOUT=15`
-- `CLIENT_SERVICE_GIT_AGENT_BASE_URL=http://git-agent:8004`
 - `CLIENT_SERVICE_MEMORY_BASE_URL=http://memory:8005`
 - `CLIENT_SERVICE_MEMORY_TIMEOUT=60`
 

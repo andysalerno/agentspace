@@ -8,7 +8,6 @@ import AgentsView from "./AgentsView";
 import WorkspacesView from "./WorkspacesView";
 import SessionsView from "./SessionsView";
 import KernelsView from "./KernelsView";
-import GitAgentView from "./GitAgentView";
 import SkillsView from "./SkillsView";
 import ConnectionsView from "./ConnectionsView";
 import GatewaysView from "./GatewaysView";
@@ -71,8 +70,6 @@ export default function App() {
         return <SessionsView onNavigateToChat={handleNavigateToChat} />;
       case "kernels":
         return <KernelsView />;
-      case "git-agent":
-        return <GitAgentView />;
       case "memory":
         return <MemoryView />;
       case "skills":

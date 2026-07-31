@@ -23,19 +23,16 @@ use uuid::Uuid;
 
 use crate::{
     agent_host::AgentHostClient,
-    git_agent::GitAgentClient,
     memory::MemoryProxyClient,
-    models::DEFAULT_GIT_AGENT_DATA_VOLUME,
     store::{
-        AgentStore, ConnectionStore, GatewayStore, GitAgentConfigStore, KernelConfigStore,
-        SessionStore, StoreSet, WorkspaceStore,
+        AgentStore, ConnectionStore, GatewayStore, KernelConfigStore, SessionStore, StoreSet,
+        WorkspaceStore,
     },
 };
 
 pub mod agent_host;
 pub mod api;
 pub mod errors;
-pub mod git_agent;
 pub mod memory;
 pub mod models;
 pub mod store;
@@ -47,9 +44,6 @@ const DEFAULT_BIND_HOST: &str = "0.0.0.0";
 const DEFAULT_BIND_PORT: u16 = 8002;
 const DEFAULT_AGENT_HOST_BASE_URL: &str = "http://127.0.0.1:8001";
 const DEFAULT_AGENT_HOST_TIMEOUT_SECONDS: u64 = 60;
-const DEFAULT_GIT_AGENT_CONTAINER_BASE_URL: &str = "http://git-agent:8004";
-const DEFAULT_GIT_AGENT_LOCAL_BASE_URL: &str = "http://127.0.0.1:8004";
-const DEFAULT_GIT_AGENT_TIMEOUT_SECONDS: u64 = 60;
 const DEFAULT_MEMORY_CONTAINER_BASE_URL: &str = "http://memory:8005";
 const DEFAULT_MEMORY_LOCAL_BASE_URL: &str = "http://127.0.0.1:8005";
 const DEFAULT_MEMORY_TIMEOUT_SECONDS: u64 = 60;
@@ -60,8 +54,6 @@ pub struct AppConfig {
     bind_host: String,
     bind_port: u16,
     agent_host_base_url: String,
-    git_agent_base_url: String,
-    git_agent_data_volume_name: String,
     memory_base_url: String,
     memory_timeout: Duration,
     connection_models_timeout: Duration,
@@ -75,10 +67,6 @@ impl AppConfig {
         let bind_port = parse_port()?;
         let agent_host_base_url = env::var("CLIENT_SERVICE_AGENT_HOST_BASE_URL")
             .unwrap_or_else(|_| DEFAULT_AGENT_HOST_BASE_URL.to_owned());
-        let git_agent_base_url = env::var("CLIENT_SERVICE_GIT_AGENT_BASE_URL")
-            .unwrap_or_else(|_| default_git_agent_base_url());
-        let git_agent_data_volume_name = env::var("CLIENT_SERVICE_GIT_AGENT_DATA_VOLUME")
-            .unwrap_or_else(|_| DEFAULT_GIT_AGENT_DATA_VOLUME.to_owned());
         let memory_base_url = env::var("CLIENT_SERVICE_MEMORY_BASE_URL")
             .unwrap_or_else(|_| default_memory_base_url());
         let memory_timeout = parse_duration_seconds_env(
@@ -97,8 +85,6 @@ impl AppConfig {
             bind_host,
             bind_port,
             agent_host_base_url,
-            git_agent_base_url,
-            git_agent_data_volume_name,
             memory_base_url,
             memory_timeout,
             connection_models_timeout,
@@ -117,8 +103,6 @@ impl AppConfig {
             bind_host: bind_host.into(),
             bind_port,
             agent_host_base_url: agent_host_base_url.into(),
-            git_agent_base_url: default_git_agent_base_url(),
-            git_agent_data_volume_name: DEFAULT_GIT_AGENT_DATA_VOLUME.to_owned(),
             memory_base_url: default_memory_base_url(),
             memory_timeout: Duration::from_secs(DEFAULT_MEMORY_TIMEOUT_SECONDS),
             connection_models_timeout: Duration::from_secs(
@@ -126,21 +110,6 @@ impl AppConfig {
             ),
             client_service_env,
         }
-    }
-
-    #[must_use]
-    pub fn with_git_agent_base_url(mut self, git_agent_base_url: impl Into<String>) -> Self {
-        self.git_agent_base_url = git_agent_base_url.into();
-        self
-    }
-
-    #[must_use]
-    pub fn with_git_agent_data_volume_name(
-        mut self,
-        git_agent_data_volume_name: impl Into<String>,
-    ) -> Self {
-        self.git_agent_data_volume_name = git_agent_data_volume_name.into();
-        self
     }
 
     #[must_use]
@@ -174,16 +143,6 @@ impl AppConfig {
     #[must_use]
     pub fn agent_host_base_url(&self) -> &str {
         &self.agent_host_base_url
-    }
-
-    #[must_use]
-    pub fn git_agent_base_url(&self) -> &str {
-        &self.git_agent_base_url
-    }
-
-    #[must_use]
-    pub fn git_agent_data_volume_name(&self) -> &str {
-        &self.git_agent_data_volume_name
     }
 
     #[must_use]
@@ -252,10 +211,8 @@ pub struct AppState {
     pub(crate) config: AppConfig,
     pub(crate) http_client: reqwest::Client,
     pub(crate) agent_host: AgentHostClient,
-    pub(crate) git_agent: GitAgentClient,
     pub(crate) memory: MemoryProxyClient,
     pub(crate) agents: AgentStore,
-    pub(crate) git_agent_config: GitAgentConfigStore,
     pub(crate) kernel_configs: KernelConfigStore,
     pub(crate) connections: ConnectionStore,
     pub(crate) gateways: GatewayStore,
@@ -285,32 +242,21 @@ impl AppState {
             config.agent_host_base_url(),
             Duration::from_secs(DEFAULT_AGENT_HOST_TIMEOUT_SECONDS),
         )?;
-        let git_agent = GitAgentClient::new(
-            config.git_agent_base_url(),
-            Duration::from_secs(DEFAULT_GIT_AGENT_TIMEOUT_SECONDS),
-        );
         let stores = config
             .db_path()
             .map_or_else(|| Ok(StoreSet::in_memory()), StoreSet::sqlite)?;
-        Ok(Self::with_clients_and_stores(
-            config, agent_host, git_agent, stores,
-        ))
+        Ok(Self::with_clients_and_stores(config, agent_host, stores))
     }
 
     #[must_use]
     pub fn with_agent_host(config: AppConfig, agent_host: AgentHostClient) -> Self {
-        let git_agent = GitAgentClient::new(
-            config.git_agent_base_url(),
-            Duration::from_secs(DEFAULT_GIT_AGENT_TIMEOUT_SECONDS),
-        );
-        Self::with_clients_and_stores(config, agent_host, git_agent, StoreSet::in_memory())
+        Self::with_clients_and_stores(config, agent_host, StoreSet::in_memory())
     }
 
     #[must_use]
     pub fn with_clients_and_stores(
         config: AppConfig,
         agent_host: AgentHostClient,
-        git_agent: GitAgentClient,
         stores: StoreSet,
     ) -> Self {
         Self {
@@ -318,9 +264,7 @@ impl AppState {
             config,
             http_client: reqwest::Client::new(),
             agent_host,
-            git_agent,
             agents: stores.agents,
-            git_agent_config: stores.git_agent_config,
             kernel_configs: stores.kernel_configs,
             connections: stores.connections,
             gateways: stores.gateways,
@@ -330,14 +274,6 @@ impl AppState {
             instance_id: Uuid::now_v7(),
             started_at: Utc::now(),
         }
-    }
-}
-
-fn default_git_agent_base_url() -> String {
-    if std::path::Path::new("/.dockerenv").exists() {
-        DEFAULT_GIT_AGENT_CONTAINER_BASE_URL.to_owned()
-    } else {
-        DEFAULT_GIT_AGENT_LOCAL_BASE_URL.to_owned()
     }
 }
 

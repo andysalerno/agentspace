@@ -83,9 +83,6 @@ services:
       - AGENT_HOST_KERNEL_VSCODE_URL_TEMPLATE=http://127.0.0.1:{host_port}
       - AGENT_HOST_GATEWAY_IMAGE=agentspace-gateway-gateway:latest
       - AGENT_HOST_GATEWAY_CLIENT_SERVICE_URL=http://client-service:8002
-      - AGENT_HOST_GITAGENT_REMOTE_URL=${AGENT_HOST_GITAGENT_REMOTE_URL:-http://gitagent:8004/repo.git}
-      - AGENT_HOST_GITAGENT_PATCH_URL=${AGENT_HOST_GITAGENT_PATCH_URL:-http://gitagent:8004/PatchRequest}
-      - AGENT_HOST_GITAGENT_DEFAULT_BRANCH=${AGENT_HOST_GITAGENT_DEFAULT_BRANCH:-main}
       - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     ports:
       - "8001:8001"
@@ -114,8 +111,6 @@ services:
       - CLIENT_SERVICE_AGENT_HOST_BASE_URL=http://agent-host:8001
       - CLIENT_SERVICE_AGENT_HOST_TIMEOUT=60
       - CLIENT_SERVICE_CONNECTION_MODELS_TIMEOUT=15
-      - CLIENT_SERVICE_GIT_AGENT_BASE_URL=http://git-agent:8004
-      - CLIENT_SERVICE_GIT_AGENT_DATA_VOLUME=${GITAGENT_DATA_VOLUME:-agentspace-git-agent-data}
       - CLIENT_SERVICE_MEMORY_BASE_URL=http://memory:8005
       - CLIENT_SERVICE_MEMORY_TIMEOUT=${CLIENT_SERVICE_MEMORY_TIMEOUT:-60}
       - CLIENT_SERVICE_DB_PATH=/data/client_service.sqlite
@@ -125,36 +120,6 @@ services:
       - ${AGENTSPACE_HOST_WORKSPACE:-.}/mounts/data/client_service:/data
     networks:
       - agentspace
-
-  git-agent:
-    image: agentspace-git-agent:latest
-    build:
-      context: .
-      dockerfile: services/git_agent/Dockerfile
-      args:
-        AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
-    depends_on:
-      client-service:
-        condition: service_started
-    restart: unless-stopped
-    environment:
-      - LOG_LEVEL=INFO
-      - GITAGENT_REPO_PATH=${GITAGENT_REPO_PATH:-/data/repos/repo.git}
-      - GITAGENT_DB_PATH=/data/gitagent.sqlite
-      - GITAGENT_WORKDIR=/data/worktrees
-      - GITAGENT_SCRATCH_PATH=/data/worktrees
-      - GITAGENT_CLIENT_SERVICE_BASE_URL=http://client-service:8002
-      - GITAGENT_CLIENT_SERVICE_URL=http://client-service:8002
-      - GITAGENT_REVIEW_AGENT_ID=git-agent
-      - GITAGENT_DEFAULT_BRANCH=${GITAGENT_DEFAULT_BRANCH:-main}
-    ports:
-      - "8004:8004"
-    volumes:
-      - git-agent-data:/data
-    networks:
-      agentspace:
-        aliases:
-          - gitagent
 
   webui:
     image: agentspace-webui-webui:latest
@@ -193,7 +158,3 @@ volumes:
     name: agentspace-skills
   memory-data:
     name: ${AGENTSPACE_MEMORY_VOLUME:-agentspace-memory-data}
-  git-agent-data:
-    # Stable named volume so GitAgent's repository and request database survive
-    # service/container teardown. Override for deployment-specific isolation.
-    name: ${GITAGENT_DATA_VOLUME:-agentspace-git-agent-data}

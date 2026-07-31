@@ -153,7 +153,6 @@ impl DockerKernelRuntime {
             "KERNEL_FREE_PORT".to_owned(),
             self.config.free_port_container_port.to_string(),
         );
-        environment.extend(self.config.gitagent_env.clone());
         environment
     }
 
@@ -670,7 +669,6 @@ pub struct DockerRuntimeConfig {
     pub skills_volume: String,
     pub skills_dir: String,
     pub skill_volume_overrides: BTreeMap<String, String>,
-    pub gitagent_env: BTreeMap<String, String>,
 }
 
 impl Default for DockerRuntimeConfig {
@@ -690,7 +688,6 @@ impl Default for DockerRuntimeConfig {
             skills_volume: "agentspace-skills".to_owned(),
             skills_dir: "/skills".to_owned(),
             skill_volume_overrides: BTreeMap::new(),
-            gitagent_env: BTreeMap::new(),
         }
     }
 }
@@ -732,7 +729,6 @@ impl DockerRuntimeConfig {
         config.skills_volume = env_or("AGENT_HOST_SKILLS_VOLUME", &config.skills_volume);
         config.skills_dir = env_or("AGENT_HOST_SKILLS_DIR", &config.skills_dir);
         config.skill_volume_overrides = Self::skill_volume_overrides_from_process();
-        config.gitagent_env = gitagent_env_from_process();
         config
     }
 
@@ -1321,24 +1317,6 @@ fn env_f64(name: &str, default: f64) -> f64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
-}
-
-fn gitagent_env_from_process() -> BTreeMap<String, String> {
-    [
-        ("AGENT_HOST_GITAGENT_REMOTE_URL", "GITAGENT_REMOTE_URL"),
-        ("AGENT_HOST_GITAGENT_PATCH_URL", "GITAGENT_PATCH_URL"),
-        (
-            "AGENT_HOST_GITAGENT_DEFAULT_BRANCH",
-            "GITAGENT_DEFAULT_BRANCH",
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(host_name, container_name)| {
-        std::env::var(host_name)
-            .ok()
-            .map(|value| (container_name.to_owned(), value))
-    })
-    .collect()
 }
 
 const fn path_separator() -> &'static str {

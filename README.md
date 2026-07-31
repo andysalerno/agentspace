@@ -11,7 +11,6 @@ The repo is currently centered on the kernel milestone:
 - `agent_host`: session manager that spawns and supervises `kernel_host` containers
 - `client_service` (`services/client_service_rs`): client-facing API over `agent_host`
 - `memory` (`services/memory_rs`): local CLI and private HTTP memory service
-- `git_agent`: internal GitAgent service for repo access and patch submission
 - `webui`: TypeScript dashboard over `client_service`
 - `cli_channel`: proof-of-concept CLI session client over `client_service`
 
@@ -276,30 +275,6 @@ Session metadata notes:
 - clients can set optional `channel_name` and `client_type` when creating a session
 - persistence is keyed only by `session_id`
 - external adapters are responsible for remembering that `session_id`
-
-## GitAgent
-
-`git_agent` is the internal service that owns the shared Git repository and
-patch submission workflow. In compose it is reachable to kernels as
-`http://gitagent:8004`.
-
-Default endpoint: `http://127.0.0.1:8004`
-Default in-network git remote: `http://gitagent:8004/repo.git`
-
-GitAgent stores its repository and request database in the stable named Docker
-volume `${GITAGENT_DATA_VOLUME:-agentspace-git-agent-data}`. This volume
-persists across `just stack-down` and `just stack-up`; remove it only when you
-intentionally want to erase GitAgent state.
-
-On first run, agents may not be able to clone until the first patch has been
-accepted. Use the `gitagent-helper` skill's `clone` command; it falls back to an
-empty local repo with `origin` set to GitAgent, so agents can create a new
-project, commit locally, and submit the initial patch with the all-zero base SHA.
-
-The same volume is exposed through `client_service` as the built-in `git-agent`
-workspace. It always appears on the Workspaces page and can be opened in VS Code
-like a normal workspace, but it cannot be edited, cloned, deleted, or replaced by
-a user-created workspace.
 
 ## Web UI
 
