@@ -5,11 +5,6 @@ import type {
   Gateway,
   GatewaySchema,
   GatewayType,
-  GitAgentConfig,
-  GitAgentConfigUpdate,
-  GitAgentRequestDetail,
-  GitAgentRequestsResponse,
-  GitAgentStatus,
   KernelConfig,
   KernelEvent,
   KernelSummary,
@@ -322,19 +317,6 @@ export const api = {
     requestJson<void>(`/skills/${skillId}`, { method: "DELETE" }),
 
   getInfo: () => requestJson<SystemInfo>("/info"),
-
-  // Git Agent
-  getGitAgentConfig: () => requestJson<GitAgentConfig>("/git-agent/config"),
-  updateGitAgentConfig: (payload: GitAgentConfigUpdate) =>
-    requestJson<GitAgentConfig>("/git-agent/config", {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    }),
-  getGitAgentStatus: () => requestJson<GitAgentStatus>("/git-agent/status"),
-  listGitAgentRequests: () =>
-    requestJson<GitAgentRequestsResponse>("/git-agent/requests"),
-  getGitAgentRequest: (requestId: string) =>
-    requestJson<GitAgentRequestDetail>(`/git-agent/requests/${requestId}`),
 
   getKernelConfig: (harness: string) =>
     requestJson<KernelConfig>(`/kernel-configs/${harness}`),

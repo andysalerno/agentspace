@@ -261,7 +261,7 @@ The repo is a `uv` workspace for Python packages, plus a Cargo workspace for
 service crates under `services/client_service_rs` and `services/agent_host_rs`.
 
 ```
-kernels/*  services/git_agent  channels/*  clients/cli_ui
+kernels/*  channels/*  clients/cli_ui
 ```
 
 ### Commands

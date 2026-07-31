@@ -23,16 +23,13 @@ use crate::{
     ActiveTurnRecord, ActiveTurnStreamState, AppState, ENV_PREFIX, StreamItem,
     agent_host::{AgentHostError, JsonObject, KernelEvent},
     errors::{StoreError, ValidationError},
-    git_agent::GitAgentError,
     memory::{MEMORY_JSON_CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE, MemoryProxyError},
     models::{
-        AgentRecord, BUILTIN_GIT_AGENT_WORKSPACE_ID, BUILTIN_GIT_AGENT_WORKSPACE_NAME, ClientType,
-        ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
-        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID, GatewayRecord, GatewayType, GitAgentConfigRecord,
-        HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, parse_env_vars, utc_now,
-        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
-        validate_workspace_id,
+        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord,
+        DEFAULT_AGENT_SYSTEM_PROMPT, GatewayRecord, GatewayType, HarnessName, MessageRecord,
+        MessageRole, SessionRecord, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord,
+        WorkspaceStatus, parse_env_vars, utc_now, validate_agent_id, validate_connection_id,
+        validate_gateway_id, validate_skill_id, validate_workspace_id,
     },
 };
 
@@ -73,7 +70,6 @@ pub fn router() -> Router<AppState> {
             get(get_agent).patch(update_agent).delete(delete_agent),
         )
         .merge(memory_router())
-        .merge(git_agent_router())
         .route("/workspaces", get(list_workspaces).post(create_workspace))
         .route(
             "/workspaces/{workspace_id}",
@@ -156,24 +152,6 @@ fn memory_router() -> Router<AppState> {
         .route("/memory/v1/links", get(proxy_memory))
         .route("/memory/v1/check", get(proxy_memory))
         .route("/memory/v1/run", post(proxy_memory))
-}
-
-fn git_agent_router() -> Router<AppState> {
-    Router::new()
-        .route(
-            "/git-agent/config",
-            get(get_git_agent_config).put(update_git_agent_config),
-        )
-        .route("/git-agent/status", get(git_agent_status))
-        .route("/git-agent/requests", get(list_git_agent_requests))
-        .route(
-            "/git-agent/requests/{request_id}",
-            get(get_git_agent_request),
-        )
-        .route(
-            "/git-agent/requests/{request_id}/rerun-review",
-            post(rerun_git_agent_review),
-        )
 }
 
 async fn proxy_memory(
@@ -730,103 +708,13 @@ async fn delete_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn get_git_agent_config(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let config = get_or_init_git_agent_config(&state)?;
-    ensure_git_agent_review_agent(&state, &config.review_agent_id)?;
-    tracing::info!(
-        route = "/git-agent/config",
-        action = "get_git_agent_config",
-        enabled = config.enabled,
-        default_branch = %config.default_branch,
-        review_agent_id = %config.review_agent_id,
-        "api handler completed"
-    );
-    Ok(Json(config.summary()))
-}
-
-async fn update_git_agent_config(
-    State(state): State<AppState>,
-    Json(payload): Json<UpdateGitAgentConfigRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let mut config = get_or_init_git_agent_config(&state)?;
-    apply_git_agent_config_update(&state, &mut config, payload)?;
-    config.updated_at = utc_now();
-    let config = state.git_agent_config.upsert(config)?;
-    ensure_git_agent_review_agent(&state, &config.review_agent_id)?;
-    tracing::info!(
-        route = "/git-agent/config",
-        action = "update_git_agent_config",
-        enabled = config.enabled,
-        default_branch = %config.default_branch,
-        review_agent_id = %config.review_agent_id,
-        allowed_ref_prefix_count = config.allowed_ref_prefixes.len(),
-        allowed_ref_count = config.allowed_refs.len(),
-        "api handler completed"
-    );
-    Ok(Json(config.summary()))
-}
-
-async fn git_agent_status(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let status = state.git_agent.status().await?;
-    tracing::info!(
-        route = "/git-agent/status",
-        action = "git_agent_status",
-        "api handler completed"
-    );
-    Ok(Json(Value::Object(status)))
-}
-
-async fn list_git_agent_requests(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let requests = state.git_agent.list_requests().await?;
-    let request_count = requests.as_array().map_or(0, Vec::len);
-    tracing::info!(
-        route = "/git-agent/requests",
-        action = "list_git_agent_requests",
-        request_count,
-        "api handler completed"
-    );
-    Ok(Json(requests))
-}
-
-async fn get_git_agent_request(
-    State(state): State<AppState>,
-    Path(request_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let request = state.git_agent.get_request(&request_id).await?;
-    tracing::info!(
-        route = "/git-agent/requests/:request_id",
-        action = "get_git_agent_request",
-        request_id = %request_id,
-        has_raw_patch = request.get("raw_patch").is_some(),
-        "api handler completed"
-    );
-    Ok(Json(Value::Object(request)))
-}
-
-async fn rerun_git_agent_review(
-    State(state): State<AppState>,
-    Path(request_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
-    let request = state.git_agent.rerun_review(&request_id).await?;
-    tracing::info!(
-        route = "/git-agent/requests/:request_id/rerun-review",
-        action = "rerun_git_agent_review",
-        request_id = %request_id,
-        "api handler completed"
-    );
-    Ok(Json(Value::Object(request)))
-}
-
 async fn list_workspaces(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
-    let mut workspaces = vec![builtin_git_agent_workspace_summary(&state)];
-    workspaces.extend(
-        state
-            .workspaces
-            .list()?
-            .into_iter()
-            .filter(|workspace| !is_builtin_workspace_id(&workspace.workspace_id))
-            .map(|workspace| workspace.summary()),
-    );
+    let workspaces: Vec<Value> = state
+        .workspaces
+        .list()?
+        .into_iter()
+        .map(|workspace| workspace.summary())
+        .collect();
     tracing::info!(
         route = "/workspaces",
         action = "list_workspaces",
@@ -841,7 +729,6 @@ async fn create_workspace(
     Json(payload): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_workspace_id(&payload.workspace_id)?;
-    reject_builtin_workspace_mutation(&payload.workspace_id)?;
     let workspace = WorkspaceRecord::new(payload.workspace_id, payload.name);
     let value = workspace.summary();
     state.workspaces.insert(workspace)?;
@@ -858,16 +745,6 @@ async fn get_workspace(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    if is_builtin_workspace_id(&workspace_id) {
-        tracing::info!(
-            route = "/workspaces/:workspace_id",
-            action = "get_workspace",
-            workspace_id = %workspace_id,
-            builtin = true,
-            "api handler completed"
-        );
-        return Ok(Json(builtin_git_agent_workspace_summary(&state)));
-    }
     let workspace = require_workspace(&state, &workspace_id)?;
     tracing::info!(
         route = "/workspaces/:workspace_id",
@@ -883,7 +760,6 @@ async fn update_workspace(
     Path(workspace_id): Path<String>,
     Json(payload): Json<UpdateWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    reject_builtin_workspace_mutation(&workspace_id)?;
     let mut workspace = require_workspace(&state, &workspace_id)?;
     if let Some(name) = payload.name {
         workspace.name = name;
@@ -904,7 +780,6 @@ async fn delete_workspace(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    reject_builtin_workspace_mutation(&workspace_id)?;
     if workspace_in_use(&state, &workspace_id)? {
         return Err(ApiError::conflict(format!(
             "workspace {workspace_id:?} is mounted by one or more agents"
@@ -930,9 +805,7 @@ async fn clone_workspace(
     Path(source_workspace_id): Path<String>,
     Json(payload): Json<CloneWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    reject_builtin_workspace_mutation(&source_workspace_id)?;
     validate_workspace_id(&payload.workspace_id)?;
-    reject_builtin_workspace_mutation(&payload.workspace_id)?;
     let source_workspace = require_ready_workspace(&state, &source_workspace_id)?;
     let mut target_workspace = WorkspaceRecord::new_with_status(
         payload.workspace_id,
@@ -974,18 +847,10 @@ async fn open_workspace_vscode(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let (workspace_id_for_editor, volume_name) = if is_builtin_workspace_id(&workspace_id) {
-        (
-            BUILTIN_GIT_AGENT_WORKSPACE_ID.to_owned(),
-            state.config.git_agent_data_volume_name().to_owned(),
-        )
-    } else {
-        let workspace = require_ready_workspace(&state, &workspace_id)?;
-        (workspace.workspace_id.clone(), workspace.volume_name())
-    };
+    let workspace = require_ready_workspace(&state, &workspace_id)?;
     let upstream = state
         .agent_host
-        .open_workspace_vscode(&workspace_id_for_editor, &volume_name)
+        .open_workspace_vscode(&workspace.workspace_id, &workspace.volume_name())
         .await?;
     tracing::info!(
         route = "/workspaces/:workspace_id/vscode",
@@ -1016,7 +881,7 @@ async fn create_session(
         has_connection = agent.connection_id.is_some(),
         "creating upstream session"
     );
-    let workspace_mounts = agent_host_workspace_mounts(&state, &session_mounts);
+    let workspace_mounts = session_mounts.clone();
     let upstream = state
         .agent_host
         .create_session(
@@ -3002,49 +2867,6 @@ fn active_turn_summary(state: &AppState, session_id: &str) -> Result<Option<Valu
     }))
 }
 
-fn builtin_git_agent_workspace_summary(state: &AppState) -> Value {
-    json!({
-        "workspace_id": BUILTIN_GIT_AGENT_WORKSPACE_ID,
-        "name": BUILTIN_GIT_AGENT_WORKSPACE_NAME,
-        "status": WorkspaceStatus::Ready.as_str(),
-        "mount_path": format!("/workspace/{BUILTIN_GIT_AGENT_WORKSPACE_ID}"),
-        "volume_name": state.config.git_agent_data_volume_name(),
-        "builtin": true,
-        "created_at": "1970-01-01T00:00:00Z",
-        "updated_at": "1970-01-01T00:00:00Z",
-    })
-}
-
-fn is_builtin_workspace_id(workspace_id: &str) -> bool {
-    workspace_id == BUILTIN_GIT_AGENT_WORKSPACE_ID
-}
-
-fn reject_builtin_workspace_mutation(workspace_id: &str) -> Result<(), ApiError> {
-    if is_builtin_workspace_id(workspace_id) {
-        return Err(ApiError::conflict(
-            "git-agent is a built-in workspace and cannot be modified".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn agent_host_workspace_mounts(
-    state: &AppState,
-    mounts: &[WorkspaceMountRecord],
-) -> Vec<WorkspaceMountRecord> {
-    mounts
-        .iter()
-        .map(|mount| {
-            if !is_builtin_workspace_id(&mount.workspace_id) {
-                return mount.clone();
-            }
-            let mut mount = mount.clone();
-            mount.volume_name = Some(state.config.git_agent_data_volume_name().to_owned());
-            mount
-        })
-        .collect()
-}
-
 fn session_workspace_mounts(
     agent_mounts: &[WorkspaceMountRecord],
     request_mounts: &[WorkspaceMountRecord],
@@ -3061,135 +2883,6 @@ fn session_workspace_mounts(
         }
     }
     mounts
-}
-
-fn get_or_init_git_agent_config(state: &AppState) -> Result<GitAgentConfigRecord, ApiError> {
-    if let Some(config) = state.git_agent_config.get()? {
-        return Ok(config);
-    }
-    let config = GitAgentConfigRecord::new_default();
-    state.git_agent_config.upsert(config).map_err(Into::into)
-}
-
-fn apply_git_agent_config_update(
-    state: &AppState,
-    config: &mut GitAgentConfigRecord,
-    payload: UpdateGitAgentConfigRequest,
-) -> Result<(), ApiError> {
-    if let Some(enabled) = payload.enabled {
-        config.enabled = enabled;
-    }
-    if let Some(default_branch) = payload.default_branch {
-        validate_git_branch(&default_branch)?;
-        config.default_branch = default_branch;
-    }
-    if let Some(allowed_ref_prefixes) = payload.allowed_ref_prefixes {
-        for prefix in &allowed_ref_prefixes {
-            validate_git_ref_prefix(prefix)?;
-        }
-        config.allowed_ref_prefixes = allowed_ref_prefixes;
-    }
-    if let Some(allowed_refs) = payload.allowed_refs {
-        for git_ref in &allowed_refs {
-            validate_git_ref(git_ref)?;
-        }
-        config.allowed_refs = allowed_refs;
-    }
-    if let Some(remote_url) = payload.remote_url {
-        validate_non_empty_field("remote_url", &remote_url)?;
-        config.remote_url = remote_url;
-    }
-    if let Some(patch_url) = payload.patch_url {
-        validate_non_empty_field("patch_url", &patch_url)?;
-        config.patch_url = patch_url;
-    }
-    if let Some(review_agent_id) = payload.review_agent_id {
-        validate_agent_id(&review_agent_id)?;
-        if review_agent_id == DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
-            ensure_git_agent_review_agent(state, &review_agent_id)?;
-        } else {
-            require_agent(state, &review_agent_id)?;
-        }
-        config.review_agent_id = review_agent_id;
-    } else if config.review_agent_id == DEFAULT_GIT_AGENT_REVIEW_AGENT_ID {
-        ensure_git_agent_review_agent(state, &config.review_agent_id)?;
-    } else {
-        require_agent(state, &config.review_agent_id)?;
-    }
-    if let Some(validation_command) = payload.validation_command {
-        config.validation_command = validation_command;
-    }
-    Ok(())
-}
-
-fn ensure_git_agent_review_agent(state: &AppState, agent_id: &str) -> Result<(), ApiError> {
-    if agent_id != DEFAULT_GIT_AGENT_REVIEW_AGENT_ID || state.agents.get(agent_id)?.is_some() {
-        return Ok(());
-    }
-    state.agents.insert(default_git_agent_review_agent())?;
-    tracing::info!(
-        action = "ensure_git_agent_review_agent",
-        agent_id,
-        "created default git agent reviewer"
-    );
-    Ok(())
-}
-
-fn default_git_agent_review_agent() -> AgentRecord {
-    AgentRecord::new(
-        DEFAULT_GIT_AGENT_REVIEW_AGENT_ID,
-        "Git Agent Reviewer",
-        HarnessName::Acp,
-        "Review submitted patches for correctness, safety, and repository policy before GitAgent commits them.",
-    )
-}
-
-fn validate_git_branch(value: &str) -> Result<(), ApiError> {
-    validate_non_empty_field("default_branch", value)?;
-    validate_git_name_component("default_branch", value)
-}
-
-fn validate_git_ref(value: &str) -> Result<(), ApiError> {
-    validate_non_empty_field("allowed_refs", value)?;
-    if !value.starts_with("refs/") {
-        return Err(ApiError::unprocessable(format!(
-            "allowed_refs entries must start with refs/, got {value:?}"
-        )));
-    }
-    validate_git_name_component("allowed_refs", value)
-}
-
-fn validate_git_ref_prefix(value: &str) -> Result<(), ApiError> {
-    validate_non_empty_field("allowed_ref_prefixes", value)?;
-    if !value.starts_with("refs/") {
-        return Err(ApiError::unprocessable(format!(
-            "allowed_ref_prefixes entries must start with refs/, got {value:?}"
-        )));
-    }
-    if !value.ends_with('/') {
-        return Err(ApiError::unprocessable(format!(
-            "allowed_ref_prefixes entries must end with '/', got {value:?}"
-        )));
-    }
-    validate_git_name_component("allowed_ref_prefixes", value)
-}
-
-fn validate_git_name_component(field: &'static str, value: &str) -> Result<(), ApiError> {
-    if value.contains(char::is_whitespace) || value.contains("..") {
-        return Err(ApiError::unprocessable(format!(
-            "{field} contains an invalid git ref component: {value:?}"
-        )));
-    }
-    Ok(())
-}
-
-fn validate_non_empty_field(field: &'static str, value: &str) -> Result<(), ApiError> {
-    if value.trim().is_empty() {
-        return Err(ApiError::unprocessable(format!(
-            "{field} must not be empty"
-        )));
-    }
-    Ok(())
 }
 
 fn require_agent(state: &AppState, agent_id: &str) -> Result<AgentRecord, ApiError> {
@@ -3253,9 +2946,7 @@ fn validate_workspace_mounts(
                 mount.workspace_id
             )));
         }
-        if !is_builtin_workspace_id(&mount.workspace_id) {
-            require_ready_workspace(state, &mount.workspace_id)?;
-        }
+        require_ready_workspace(state, &mount.workspace_id)?;
     }
     Ok(())
 }
@@ -3346,18 +3037,6 @@ struct UpdateAgentRequest {
     #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
     connection_id: NullableStringField,
     workspace_mounts: Option<Vec<WorkspaceMountRecord>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateGitAgentConfigRequest {
-    enabled: Option<bool>,
-    default_branch: Option<String>,
-    allowed_ref_prefixes: Option<Vec<String>>,
-    allowed_refs: Option<Vec<String>>,
-    remote_url: Option<String>,
-    patch_url: Option<String>,
-    review_agent_id: Option<String>,
-    validation_command: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3594,22 +3273,6 @@ impl From<AgentHostError> for ApiError {
             AgentHostError::HttpStatus { status, .. } if status.is_client_error() => Self {
                 status,
                 detail: format!("agent_host returned HTTP {status}"),
-            },
-            other => Self::bad_gateway(other.to_string()),
-        }
-    }
-}
-
-impl From<GitAgentError> for ApiError {
-    fn from(error: GitAgentError) -> Self {
-        match error {
-            GitAgentError::HttpStatus { status, .. } if status == StatusCode::NOT_FOUND => {
-                Self::not_found(format!("git_agent returned HTTP {status}"))
-            }
-
-            GitAgentError::HttpStatus { status, .. } if status.is_client_error() => Self {
-                status,
-                detail: format!("git_agent returned HTTP {status}"),
             },
             other => Self::bad_gateway(other.to_string()),
         }

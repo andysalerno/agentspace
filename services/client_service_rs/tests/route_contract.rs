@@ -538,9 +538,7 @@ async fn workspace_routes_and_agent_mounts_match_contract()
 
     let (status, value) = get_json(app.clone(), "/workspaces").await?;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(value[0]["workspace_id"], "git-agent");
-    assert_eq!(value[0]["builtin"], true);
-    assert_eq!(value[0]["volume_name"], "agentspace-git-agent-data");
+    assert!(value.as_array().is_some_and(Vec::is_empty));
 
     let (status, workspace) = request_json(
         app.clone(),
