@@ -1,336 +1,237 @@
 # AgentSpace
 
-Agents: see `AGENTS.md`.
+[![CI](https://github.com/andysalerno/agentspace/actions/workflows/ci.yml/badge.svg)](https://github.com/andysalerno/agentspace/actions/workflows/ci.yml)
 
-The repo is currently centered on the kernel milestone:
+AgentSpace is a local control plane for defining, running, and observing AI
+agents. It wraps external agent CLIs behind a shared kernel protocol, runs
+sessions in isolated containers, and exposes them through a web application,
+an HTTP API, terminal clients, and gateway integrations.
 
-- `kernel`: shared protocol and JSONL event schema
-- `kernel_echo`: reference in-process kernel
-- `kernel_copilot`: `copilot-cli` kernel adapter
-- `kernel_host`: runner plus one-session HTTP service mode for kernel containers
-- `agent_host`: session manager that spawns and supervises `kernel_host` containers
-- `client_service` (`services/client_service_rs`): client-facing API over `agent_host`
-- `memory` (`services/memory_rs`): local CLI and private HTTP memory service
-- `webui`: TypeScript dashboard over `client_service`
-- `cli_channel`: proof-of-concept CLI session client over `client_service`
+> [!IMPORTANT]
+> AgentSpace is a personal, experimental project built for my own use. It is
+> under active development, has no stability or compatibility guarantees, and
+> is not currently intended to be installed, operated, or depended on by other
+> people. This repository is public for visibility and reference, not because
+> AgentSpace is ready for general use.
 
-For now, keep `copilot-cli` as the only real kernel path.
+> [!CAUTION]
+> The stack is designed for a trusted, single-user environment. It has no
+> general-purpose user authentication, and `agent_host` controls the local
+> container engine through its socket. Do not expose its services directly to
+> an untrusted network.
 
-## Validate
+## What it does
 
-```powershell
-$env:UV_CACHE_DIR='C:\Users\andys\AppData\Local\Temp\uv-cache'
-uv run pytest
-uv run ruff check .
-uv run pyright
+AgentSpace provides a common layer around otherwise independent agent
+harnesses:
+
+- define agents with a harness, system prompt, skills, and environment;
+- run each agent session in its own `kernel_host` container;
+- chat through a React web UI or a small CLI client;
+- inspect sessions, messages, tool calls, logs, and running kernels;
+- attach persistent workspaces and open container-hosted VS Code sessions;
+- manage reusable skills, model connections, and write-only secret values;
+- connect agents to gateway processes such as Discord;
+- give selected agents access to a shared, durable Markdown memory corpus; and
+- export, validate, plan, and apply declarative YAML configuration.
+
+Harness adapters currently represented in the system include ACP, GitHub
+Copilot CLI, Claude Code, Codex, OpenCode, and an in-process echo harness.
+Their maturity and required external authentication vary. The echo harness is
+the easiest way to exercise the stack without credentials.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Web["Web UI<br/>:8003"]
+    CLI["CLI clients"]
+    Gateway["Gateway containers"]
+    Client["client_service<br/>:8002"]
+    Host["agent_host<br/>:8001"]
+    Kernel["kernel_host containers<br/>one per session"]
+    Harness["Agent CLI / ACP server"]
+    Memory["memory service"]
+
+    Web --> Client
+    CLI --> Client
+    Gateway --> Client
+    Client --> Host
+    Client --> Memory
+    Host --> Kernel
+    Host -. manages .-> Gateway
+    Kernel --> Harness
 ```
 
-## Development Container
+`client_service` is the client-facing API and persistence layer. Clients
+should not call `agent_host` directly. `agent_host` manages session,
+workspace, gateway, and container lifecycles. Each kernel container translates
+between a harness-specific protocol and AgentSpace's common event model.
 
-The openSUSE development image includes Podman and Podman Compose. Start the
-host's rootless Podman API socket before creating the container:
+## Quick start
+
+### Requirements
+
+- Linux with [Podman](https://podman.io/) or Docker and Compose
+- [`just`](https://just.systems/)
+- enough local resources to build the Rust, Python, and web container images
+
+For rootless Podman, start its Docker-compatible API socket:
+
+```sh
+systemctl --user enable --now podman.socket
+```
+
+Create the local configuration:
+
+```sh
+cp .env.example .env
+```
+
+Edit `.env` and set `KERNEL_WORKDIR` to a dedicated absolute working directory
+for agent sessions. Do not point it at directories containing credentials or
+other data that agents should not access.
+
+Start the stack:
+
+```sh
+just stack-up
+```
+
+Then open <http://127.0.0.1:8003>. Create an agent using the `echo` harness for
+a credential-free smoke test.
+
+Useful stack commands:
+
+| Command | Purpose |
+| --- | --- |
+| `just stack-up` | Build and start the full stack |
+| `just stack-status` | Show service status |
+| `just stack-logs` | Follow stack logs |
+| `just stack-down` | Stop the stack and clean up spawned containers |
+| `just build-image-stack` | Build all stack images without starting them |
+
+`just stack-up` selects a reachable Podman daemon when available and otherwise
+uses Docker. Set `CONTAINER_RUNTIME=podman` or `CONTAINER_RUNTIME=docker` to
+choose explicitly.
+
+### Using Copilot CLI
+
+The Docker helper can populate the named Copilot configuration volume used by
+spawned kernel containers:
+
+```sh
+cp kernels/kernel_host/.env.example kernels/kernel_host/.env
+# Set KERNEL_WORKDIR in that file.
+./kernels/kernel_host/spawn-kernel.sh setup
+```
+
+Run `/login` in the interactive Copilot session. This helper currently uses
+Docker Compose directly. Other harnesses have their own authentication and
+configuration requirements.
+
+## Services and data
+
+| Component | Location | Default endpoint |
+| --- | --- | --- |
+| Web UI | `clients/webui` | <http://127.0.0.1:8003> |
+| Client API | `services/client_service_rs` | <http://127.0.0.1:8002> |
+| Agent host | `services/agent_host_rs` | <http://127.0.0.1:8001> |
+| Memory service | `services/memory_rs` | Internal Compose network only |
+
+Local state includes:
+
+- client-service SQLite data under `mounts/data/client_service`;
+- the shared memory corpus in the `agentspace-memory-data` named volume;
+- managed skills in the `agentspace-skills` named volume, with built-in skills
+  sourced from `mounts/skills`; and
+- harness authentication state in harness-specific named volumes.
+
+`CLIENT_SERVICE_SECRET_KEY` encrypts write-only configuration secrets stored in
+SQLite. Generate it with `openssl rand -base64 32` before storing secrets, keep
+it stable for the lifetime of the database, and never commit `.env` files.
+
+## Development
+
+AgentSpace is a monorepo with:
+
+- Rust services in a Cargo workspace;
+- Python packages in a `uv` workspace;
+- a React/TypeScript application managed with pnpm; and
+- container images and Compose files for integration testing and local use.
+
+The current toolchain is Python 3.14, Rust stable, Node.js 26, and pnpm 11.
+Version constraints and lockfiles in the repository are authoritative.
+
+Install dependencies and run the full verification suite:
+
+```sh
+just bootstrap
+just check
+```
+
+Common development commands:
+
+| Command | Purpose |
+| --- | --- |
+| `just bootstrap` | Install Python and web dependencies |
+| `just test` | Run Rust, Python, and web tests |
+| `just check` | Run formatting, linting, type checks, tests, and the web build |
+| `just client-service-check` | Check only `client_service` |
+| `just agent-host-check` | Check only `agent_host` |
+| `just webui-lint` | Run web lint and dead-code checks |
+
+### Development container
+
+The optional openSUSE development container includes the repository toolchain,
+Podman tooling, GitHub CLI, and a persistent VS Code tunnel environment:
 
 ```sh
 systemctl --user enable --now podman.socket
 just dev-start
 podman logs --follow agentspace-dev
-```
-
-`just dev-start` discovers the host socket and mounts it at
-`/run/podman/podman.sock`. Set `PODMAN_SOCKET` when the socket uses a
-nonstandard path. It also exposes the host-side socket and checkout paths to
-the container, so `just stack-up` works both on the host and from a
-development-container shell. Run `just dev-start` once from the host to
-recreate a development container created before this metadata was added.
-
-`just stack-up` uses a reachable Podman daemon when available, otherwise
-Docker. Podman automatically receives its Compose override. Set
-`CONTAINER_RUNTIME=podman` or `CONTAINER_RUNTIME=docker` to select explicitly.
-
-The container runs a VS Code tunnel named `agentspace-dev`. On the first start,
-follow the container logs to complete the device login flow. The CLI
-authentication metadata, VS Code server, and extensions are stored under
-`/home/dev`, which uses a persistent named volume by default, so later container
-starts reuse the login. Pressing `Ctrl+C` stops following the logs without
-stopping the container.
-
-Open a shell in the running development container with:
-
-```sh
 just dev-shell
 ```
 
-Stop, remove, or recreate the development container with:
-
-```sh
-just dev-stop
-just dev-remove
-just dev-restart
-```
-
-`just dev-stop` leaves the container in place so `just dev-start` resumes it.
-`just dev-remove` deletes the container but keeps the persistent home volume,
-and `just dev-restart` removes and re-creates it. Use `just dev-clear-volumes`
-to also delete the persistent home volume, which discards the stored logins.
-
-Authenticate GitHub CLI once inside the container:
-
-```sh
-gh auth login
-```
-
-The image routes GitHub SSH-style Git remotes through HTTPS and uses GitHub CLI
-as the credential helper, so repositories with `git@github.com:` remotes can be
-pushed without mounting an SSH key. GitHub CLI authentication is retained in
-the persistent home directory.
-
-The mounted socket connects the development container to the host Podman
-daemon, so `podman images` and `podman ps` show the host user's containers and
-images. An isolated store would require running a separate nested Podman daemon
-instead of using the host socket.
-
-## Dockerized Copilot Flow
-
-Authenticate Copilot once inside the container environment:
-
-```powershell
-.\kernels\kernel_host\spawn-kernel.ps1 setup
-```
-
-Then run a prompt through the kernel host:
-
-```powershell
-.\kernels\kernel_host\spawn-kernel.ps1 "Summarize this repository"
-```
-
-The launcher now:
-
-- brings down previous compose resources before every run
-- persists Copilot config and session state in the `copilot-config` volume
-
-Before using the Docker flow, set `KERNEL_WORKDIR` in [kernels/kernel_host/.env.example](/C:/repos/agentspace/kernels/kernel_host/.env.example) or your local `.env`. It is intentionally not defaulted by compose.
-
-To resume a previous Copilot session, set `COPILOT_SESSION_ID` in [kernels/kernel_host/.env.example](/C:/repos/agentspace/kernels/kernel_host/.env.example).
-
-## Agent Host
-
-The Dockerized `agent_host` service uses `services/agent_host_rs/Dockerfile` with the repository root as its build context and manages sessions by spawning one `kernel_host` container per session.
-
-Start it with:
-
-```powershell
-.\services\agent_host_rs\run-service.ps1 start
-```
-
-Stop it with:
-
-```powershell
-.\services\agent_host_rs\run-service.ps1 stop
-```
-
-Default endpoint: `http://127.0.0.1:8001`
-
-Architecture note:
-
-- `agent_host` does not mount Copilot login state directly
-- spawned `kernel_host` containers mount the shared Copilot config volume instead
-- `agent_host` talks to those kernel containers over an internal HTTP API
-
-Currently implemented endpoints:
-
-- `GET /healthz`
-- `POST /sessions`
-- `GET /sessions`
-- `GET /sessions/{session_id}`
-- `POST /sessions/{session_id}/messages`
-- `GET /sessions/{session_id}/history`
-- `POST /sessions/{session_id}/reset`
-- `DELETE /sessions/{session_id}`
-
-## Agent Memory
-
-The built-in `memory` skill provides opt-in, durable memory to hosted agents.
-Enable **memory** on an agent in the Agents page, then start a new session or
-reset an existing one. The kernel image includes the `memory` CLI; enabled
-sessions receive its instructions and share an installation-scoped persistent
-volume.
-
-The memory corpus is shared by every agent that enables the skill. Never store
-credentials, tokens, secrets, or sensitive personal information in it. Agents
-without the skill do not receive the memory volume or memory instructions.
-
-The volume name defaults to `agentspace-memory-data` and can be overridden with
-`AGENTSPACE_MEMORY_VOLUME`. It survives normal session deletion, reset,
-`just stack-down`, and `just stack-up`. Removing that named volume permanently
-deletes the corpus.
-
-The default stack also runs a private `memory` HTTP service on the internal
-network. It uses the same `memory` binary and named volume as local
-memory-enabled kernels. Clients must use the `client_service` proxy under
-`/memory`; the memory service does not publish a host port.
-
-The CLI supports three deployment modes:
-
-```sh
-# Explicit local store
-memory --root /path/to/memory pages ls
-
-# In-stack or otherwise reachable service
-AGENTSPACE_MEMORY_URI=http://memory:8005 memory pages ls
-
-# Externally hosted service
-memory --uri https://memory.example.internal pages ls
-```
-
-`--uri` or `AGENTSPACE_MEMORY_URI` selects HTTP mode and never falls back to
-local storage after an error. `--root` or `AGENTSPACE_MEMORY_DIR` selects local
-mode. Run a standalone service with
-`memory --serve --root /path/to/memory --host 127.0.0.1 --port 8005`.
-
-Configure the public proxy with `CLIENT_SERVICE_MEMORY_BASE_URL` and its
-bounded upstream timeout with `CLIENT_SERVICE_MEMORY_TIMEOUT`. It exposes the
-memory service routes at `/memory/healthz` and `/memory/v1/...`.
-
-The Web UI's **Memory** page uses that proxy to browse the page tree, search,
-filter by tags, edit and preview Markdown, inspect links and backlinks, move or
-delete pages, and view integrity findings. Browser writes always include the
-revision that was loaded. If an agent or another browser changes the page
-first, the stale edit is retained as a draft but cannot overwrite the newer
-content; reload the latest revision before saving again. The page explicitly
-distinguishes a healthy empty corpus from an unavailable memory service.
-
-### Back up and restore memory
-
-Stop the stack before taking a consistent filesystem backup:
-
-```sh
-just stack-down
-podman run --rm \
-  -v agentspace-memory-data:/source:ro \
-  -v "$PWD":/backup \
-  docker.io/library/alpine \
-  tar czf /backup/agentspace-memory-backup.tgz -C /source .
-```
-
-To restore into an empty volume:
-
-```sh
-just stack-down
-podman volume create agentspace-memory-data
-podman run --rm \
-  -v agentspace-memory-data:/target \
-  -v "$PWD":/backup:ro \
-  docker.io/library/alpine \
-  tar xzf /backup/agentspace-memory-backup.tgz -C /target
-just stack-up
-```
-
-Replace `agentspace-memory-data` in both commands when
-`AGENTSPACE_MEMORY_VOLUME` selects another volume. Backups contain the shared
-Markdown corpus and should be protected accordingly.
-
-To intentionally erase all memory, stop the stack and remove the configured
-named volume:
-
-```sh
-just stack-down
-podman volume rm agentspace-memory-data
-```
-
-Disabling the skill, deleting agents or sessions, and normal stack recreation
-never remove this volume.
-
-## Client Service
-
-`client_service` is the intended public backend API. Clients should talk to it, not to `agent_host` directly. The implementation lives in `services/client_service_rs`.
-
-Start it with:
-
-```sh
-./services/client_service_rs/run-service.sh
-```
-
-Default endpoint: `http://127.0.0.1:8002`
-
-Current endpoints:
-
-- `GET /healthz`
-- `POST /agents`
-- `GET /agents`
-- `GET /agents/{agent_id}`
-- `PATCH /agents/{agent_id}`
-- `DELETE /agents/{agent_id}`
-- `POST /sessions`
-- `GET /sessions`
-- `GET /sessions/{session_id}`
-- `GET /sessions/{session_id}/messages`
-- `POST /sessions/{session_id}/messages`
-- `POST /sessions/{session_id}/reset`
-- `DELETE /sessions/{session_id}`
-- `GET /kernels`
-- `/memory/healthz` and `/memory/v1/...` proxy routes
-
-Session metadata notes:
-
-- clients can set optional `channel_name` and `client_type` when creating a session
-- persistence is keyed only by `session_id`
-- external adapters are responsible for remembering that `session_id`
-
-## Web UI
-
-`webui` is a deliberately simple TypeScript dashboard over `client_service`.
-
-Start it with:
-
-```powershell
-.\clients\webui\run-service.ps1 start
-```
-
-Stop it with:
-
-```powershell
-.\clients\webui\run-service.ps1 stop
-```
-
-Default endpoint: `http://127.0.0.1:8003`
-
-It currently supports:
-
-- viewing, creating, and deleting agents
-- starting sessions and chatting with them
-- viewing existing sessions, including sessions created by other clients
-- viewing the session source metadata attached at creation time
-- viewing active kernel sessions exposed through `client_service`
-- browsing and revision-safe editing of shared agent memory
-
-Kernel VS Code links are opened against the web UI's current browser host when
-the kernel reports a loopback or wildcard host. For remote deployments, make sure
-`AGENT_HOST_KERNEL_VSCODE_HOST_IP` is `0.0.0.0` or another externally reachable
-interface, and allow the dynamically published kernel VS Code ports through the
-host firewall.
-
-Spawned kernel containers also publish container port `8081` to a dynamic host
-port by default. The host URL is exposed as `free_port_url`, and the container
-receives `KERNEL_FREE_PORT=8081` so agents can bind ad hoc services there.
-
-## CliChannel
-
-`cli_channel` is the first proof-of-concept CLI session client. It is separate from the future native CLI client and exists only to validate the client-service session contract.
-
-Start a new session:
-
-```powershell
-uv run --package cli-channel -m cli_channel --agent-id <agent_id> --name terminal-1
-```
-
-Resume an existing session:
-
-```powershell
-uv run --package cli-channel -m cli_channel --session-id <session_id>
-```
-
-Supported commands:
-
-- normal input sends a session message
-- `/reset` resets the backing kernel session while preserving the client-facing `session_id`
-- `/exit` exits the client
+The container uses the host's rootless Podman socket, so it can build and run
+the same stack. Its default home directory is a persistent named volume.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `kernels/` | Kernel protocol, harness adapters, and `kernel_host` |
+| `gateways/` | Gateway protocol and integrations |
+| `services/agent_host_rs/` | Session, workspace, gateway, and container lifecycle |
+| `services/client_service_rs/` | Client API, persistence, and configuration control plane |
+| `services/memory_rs/` | Durable Markdown memory CLI and private HTTP service |
+| `clients/webui/` | React dashboard |
+| `clients/cli_ui/` | Terminal UI experiments |
+| `channels/cli_channel/` | Minimal command-line session client |
+| `mounts/skills/` | Built-in skills mounted into the stack |
+| `docs/` | Architecture notes, feature designs, and historical plans |
+| `compose.yaml` | Full local stack |
+| `justfile` | Primary development and operations commands |
+
+Files under `docs/` include working notes and plans and may lag behind the
+implementation. The code, Compose configuration, and `justfile` are the source
+of truth for current behavior.
+
+## Project status
+
+This project changes quickly. APIs, database schemas, configuration formats,
+container layouts, and user-facing workflows may change without migration
+paths or release notes. There is currently:
+
+- no supported release or installation process;
+- no multi-user or internet-facing security model;
+- no compatibility promise for APIs or persisted state;
+- no expectation of support for third-party deployments; and
+- no commitment that experimental harnesses or features will keep working.
+
+In short: this is the source tree for my personal AgentSpace installation, not
+a finished product.
+
+## License
+
+No license has been selected yet.
