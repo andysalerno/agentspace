@@ -672,6 +672,19 @@ async fn connection_api_key_secret_is_selectable_by_name()
         "expected connection apiKey and gateway secret to reference GW_TOKEN, got: {text}"
     );
 
+    // A name that violates the secret-name grammar is rejected outright; it can
+    // never reach the record, where the field is typed as a validated name.
+    let (status, _headers, _body) = send(
+        &app,
+        Request::patch("/connections/openai")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "api_key_secret": "lower_case" }),
+            )?))?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
     // An undeclared name is rejected rather than written to the document.
     let (status, _headers, _body) = send(
         &app,

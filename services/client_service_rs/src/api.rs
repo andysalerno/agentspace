@@ -559,7 +559,7 @@ async fn create_connection(
         connection_id = %value["connection_id"].as_str().unwrap_or_default(),
         api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
         has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
-        api_key_secret = connection.api_key_secret.as_deref().unwrap_or(""),
+        api_key_secret = connection.api_key_secret.as_ref().map_or("", SecretName::as_str),
         "api handler completed"
     );
     Ok(Json(value))
@@ -597,7 +597,7 @@ fn apply_connection_api_key(
             )));
         }
         connection.api_key = String::new();
-        connection.api_key_secret = Some(name.into_string());
+        connection.api_key_secret = Some(name);
         return Ok(());
     }
     if let Some(literal) = literal {
@@ -637,7 +637,7 @@ async fn update_connection(
         connection_id = %connection_id,
         api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
         has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
-        api_key_secret = connection.api_key_secret.as_deref().unwrap_or(""),
+        api_key_secret = connection.api_key_secret.as_ref().map_or("", SecretName::as_str),
         "api handler completed"
     );
     Ok(Json(value))

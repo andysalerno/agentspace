@@ -8,7 +8,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::errors::ValidationError;
+use crate::{config::value::SecretName, errors::ValidationError};
 
 pub const DEFAULT_CONNECTION_API_FLAVOR: ConnectionApiFlavor = ConnectionApiFlavor::ChatCompletions;
 pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = "You are a helpful assistant. Despite living inside a coding agent harness, you are not strictly a coding assistant. Instead, you help the user with any and all tasks they give you (possibly including coding!) using the tools and skills at your disposal. Pro tip: always prefer your skills and tools over generic CLI tools (though you can use those, too!)";
@@ -639,10 +639,11 @@ pub struct ConnectionRecord {
     /// [`ConnectionRecord::api_key_secret`].
     #[serde(default)]
     pub api_key: String,
-    /// Name of the declared secret backing the API key, when the configured
-    /// value is a `secretRef` rather than a literal.
+    /// Declared secret backing the API key, when the configured value is a
+    /// `secretRef` rather than a literal. Typed as a [`SecretName`] so an
+    /// invalid name cannot be represented and silently dropped on projection.
     #[serde(default)]
-    pub api_key_secret: Option<String>,
+    pub api_key_secret: Option<SecretName>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -881,7 +882,7 @@ mod tests {
 
     use super::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
-        HarnessName, KernelConfigRecord, MessageRecord, MessageRole, ToolCallRecord,
+        HarnessName, KernelConfigRecord, MessageRecord, MessageRole, SecretName, ToolCallRecord,
         parse_env_vars, validate_agent_id, validate_connection_id, validate_gateway_id,
         validate_skill_id, validate_workspace_id,
     };
@@ -1037,11 +1038,12 @@ mod tests {
     }
 
     #[test]
-    fn connection_summary_reports_secret_backed_api_key() {
+    fn connection_summary_reports_secret_backed_api_key() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
         let mut connection = ConnectionRecord::new("conn", "Connection", "http://example.test");
         connection.created_at = "c".to_owned();
         connection.updated_at = "u".to_owned();
-        connection.api_key_secret = Some("OPENAI_API_KEY".to_owned());
+        connection.api_key_secret = Some(SecretName::new("OPENAI_API_KEY")?);
 
         assert!(connection.has_api_key());
         assert_eq!(
@@ -1058,6 +1060,7 @@ mod tests {
                 "api_key": "",
             })
         );
+        Ok(())
     }
 
     #[test]

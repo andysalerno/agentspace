@@ -302,12 +302,11 @@ fn record_to_connection(record: &ConnectionRecord) -> Connection {
 
 /// Project a record's mutually exclusive literal/`secretRef` API key fields onto
 /// the document value. A secret name always wins over a literal, so a record
-/// that carries both cannot silently downgrade a reference to a literal.
+/// that carries both cannot silently downgrade a reference to a literal. The
+/// name is already validated by its type, so this projection is infallible.
 fn connection_api_key_value(record: &ConnectionRecord) -> Option<ConfigValue<String>> {
     if let Some(name) = &record.api_key_secret {
-        return crate::config::value::SecretName::new(name)
-            .ok()
-            .map(ConfigValue::Secret);
+        return Some(ConfigValue::Secret(name.clone()));
     }
     if record.api_key.is_empty() {
         None
@@ -332,7 +331,7 @@ fn connection_to_record(config: &ConfigState, connection: &Connection) -> Connec
             .api_key
             .as_ref()
             .and_then(ConfigValue::secret_name)
-            .map(|name| name.as_str().to_owned()),
+            .cloned(),
         created_at,
         updated_at,
     }
