@@ -622,3 +622,105 @@ async fn lazy_resolution_reports_missing_secret() -> Result<(), Box<dyn Error + 
     );
     Ok(())
 }
+
+/// The web UI (and any other client) selects a connection API key by declared
+/// secret name. Literal keys stay YAML-only, so the request forms are mutually
+/// exclusive and an unknown name is rejected before it can reach the document.
+#[tokio::test]
+async fn connection_api_key_secret_is_selectable_by_name()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let app = router()?;
+    let (status, _headers, _body) = send(&app, apply_request(SECRET_RICH_SOURCE)?).await?;
+    assert_eq!(status, StatusCode::OK);
+
+    // The configured reference is reported by name, never by value.
+    let (status, _headers, body) = send(
+        &app,
+        Request::get("/connections/openai").body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body)?;
+    assert_eq!(value["api_key_secret"], json!("OPENAI_KEY"));
+    assert_eq!(value["has_api_key"], json!(true));
+    assert!(value.get("api_key").is_none());
+
+    // Point the connection at a different declared secret.
+    let (status, _headers, body) = send(
+        &app,
+        Request::patch("/connections/openai")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "api_key_secret": "GW_TOKEN" }),
+            )?))?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body)?;
+    assert_eq!(value["api_key_secret"], json!("GW_TOKEN"));
+
+    let (status, _headers, body) = send(
+        &app,
+        Request::get("/config/export?mode=canonical").body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body)?;
+    assert_eq!(
+        text.matches("secretRef: GW_TOKEN").count(),
+        2,
+        "expected connection apiKey and gateway secret to reference GW_TOKEN, got: {text}"
+    );
+
+    // An undeclared name is rejected rather than written to the document.
+    let (status, _headers, _body) = send(
+        &app,
+        Request::patch("/connections/openai")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "api_key_secret": "NOT_DECLARED" }),
+            )?))?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // A literal and a reference in one request is ambiguous.
+    let (status, _headers, _body) = send(
+        &app,
+        Request::patch("/connections/openai")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "api_key": "sk-literal", "api_key_secret": "OPENAI_KEY" }),
+            )?))?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // An empty selection clears the reference entirely.
+    let (status, _headers, body) = send(
+        &app,
+        Request::patch("/connections/openai")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(
+                &json!({ "api_key_secret": "" }),
+            )?))?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body)?;
+    assert_eq!(value["has_api_key"], json!(false));
+    assert_eq!(value["api_key_secret"], Value::Null);
+
+    let (status, _headers, body) = send(
+        &app,
+        Request::get("/config/export?mode=canonical").body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let text = String::from_utf8(body)?;
+    assert!(
+        !text.contains("apiKey:"),
+        "expected the connection apiKey to be removed, got: {text}"
+    );
+    Ok(())
+}

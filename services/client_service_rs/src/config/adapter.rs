@@ -54,22 +54,6 @@ fn merge_env(
     }
 }
 
-/// Merge a legacy literal into an optional secret-backed value. An empty literal
-/// preserves an existing `secretRef`; otherwise it is treated as a literal set
-/// or clear.
-fn merge_optional_value(
-    existing: Option<&ConfigValue<String>>,
-    incoming_literal: &str,
-) -> Option<ConfigValue<String>> {
-    match existing {
-        Some(ConfigValue::Secret(name)) if incoming_literal.is_empty() => {
-            Some(ConfigValue::Secret(name.clone()))
-        }
-        _ if incoming_literal.is_empty() => None,
-        _ => Some(ConfigValue::Literal(incoming_literal.to_owned())),
-    }
-}
-
 /// Merge a legacy literal into a required secret-backed value. An empty literal
 /// preserves an existing `secretRef`.
 fn merge_required_value(existing: &ConfigValue<String>, incoming: &str) -> ConfigValue<String> {
@@ -312,11 +296,23 @@ fn record_to_connection(record: &ConnectionRecord) -> Connection {
         name: record.name.clone(),
         url: ConfigValue::Literal(record.url.clone()),
         api_flavor: record.api_flavor,
-        api_key: if record.api_key.is_empty() {
-            None
-        } else {
-            Some(ConfigValue::Literal(record.api_key.clone()))
-        },
+        api_key: connection_api_key_value(record),
+    }
+}
+
+/// Project a record's mutually exclusive literal/`secretRef` API key fields onto
+/// the document value. A secret name always wins over a literal, so a record
+/// that carries both cannot silently downgrade a reference to a literal.
+fn connection_api_key_value(record: &ConnectionRecord) -> Option<ConfigValue<String>> {
+    if let Some(name) = &record.api_key_secret {
+        return crate::config::value::SecretName::new(name)
+            .ok()
+            .map(ConfigValue::Secret);
+    }
+    if record.api_key.is_empty() {
+        None
+    } else {
+        Some(ConfigValue::Literal(record.api_key.clone()))
     }
 }
 
@@ -332,6 +328,11 @@ fn connection_to_record(config: &ConfigState, connection: &Connection) -> Connec
             .as_ref()
             .map(literal_or_empty)
             .unwrap_or_default(),
+        api_key_secret: connection
+            .api_key
+            .as_ref()
+            .and_then(ConfigValue::secret_name)
+            .map(|name| name.as_str().to_owned()),
         created_at,
         updated_at,
     }
@@ -444,13 +445,14 @@ pub fn upsert_connection(
     Ok(())
 }
 
-/// Patch the representable scalar fields of a connection from a legacy record,
-/// preserving a secret-backed URL or API key that the record cannot express.
+/// Patch the representable scalar fields of a connection from a record,
+/// preserving a secret-backed URL the record cannot express. The API key is
+/// fully representable (literal or `secretRef`), so it is replaced outright.
 fn patch_connection(slot: &mut Connection, record: &ConnectionRecord) {
     slot.name.clone_from(&record.name);
     slot.api_flavor = record.api_flavor;
     slot.url = merge_required_value(&slot.url, &record.url);
-    slot.api_key = merge_optional_value(slot.api_key.as_ref(), &record.api_key);
+    slot.api_key = connection_api_key_value(record);
 }
 
 pub fn delete_connection(config: &ConfigState, connection_id: &str) -> Result<bool, StoreError> {

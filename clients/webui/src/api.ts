@@ -500,7 +500,9 @@ export const api = {
     name: string;
     url: string;
     api_flavor?: "chat_completions" | "responses";
-    api_key?: string;
+    /// Name of a declared secret, or "" for no API key. Literal keys are
+    /// intentionally not settable from clients; author them in YAML instead.
+    api_key_secret?: string;
   }) =>
     requestJson<Connection>("/connections", {
       method: "POST",
@@ -512,7 +514,7 @@ export const api = {
       name?: string;
       url?: string;
       api_flavor?: "chat_completions" | "responses";
-      api_key?: string;
+      api_key_secret?: string;
     },
   ) =>
     requestJson<Connection>(`/connections/${connectionId}`, {

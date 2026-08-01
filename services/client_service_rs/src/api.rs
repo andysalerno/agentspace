@@ -445,7 +445,7 @@ async fn get_connection(
         action = "get_connection",
         connection_id = %connection_id,
         api_flavor = connection.api_flavor.as_str(),
-        has_api_key = !connection.api_key.is_empty(),
+        has_api_key = connection.has_api_key(),
         "api handler completed"
     );
     Ok(Json(connection.summary(false)))
@@ -545,7 +545,12 @@ async fn create_connection(
     validate_connection_id(&payload.connection_id)?;
     let mut connection = ConnectionRecord::new(payload.connection_id, payload.name, payload.url);
     connection.api_flavor = payload.api_flavor;
-    connection.api_key = payload.api_key;
+    apply_connection_api_key(
+        &state,
+        &mut connection,
+        Some(payload.api_key),
+        payload.api_key_secret.as_deref(),
+    )?;
     let value = connection.summary(true);
     state.connections.insert(&connection)?;
     tracing::info!(
@@ -554,9 +559,50 @@ async fn create_connection(
         connection_id = %value["connection_id"].as_str().unwrap_or_default(),
         api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
         has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
+        api_key_secret = connection.api_key_secret.as_deref().unwrap_or(""),
         "api handler completed"
     );
     Ok(Json(value))
+}
+
+/// Apply the requested API key selection to a connection record.
+///
+/// `api_key_secret` names a declared secret and is the only form clients such as
+/// the web UI offer; literal keys remain authorable through YAML. The two forms
+/// are mutually exclusive, and an empty value for either clears the key.
+fn apply_connection_api_key(
+    state: &AppState,
+    connection: &mut ConnectionRecord,
+    literal: Option<String>,
+    secret: Option<&str>,
+) -> Result<(), ApiError> {
+    let literal_requested = literal.as_ref().is_some_and(|value| !value.is_empty());
+    let secret_name = secret.map(str::trim).unwrap_or_default();
+    if literal_requested && !secret_name.is_empty() {
+        return Err(ApiError::unprocessable(
+            "api_key and api_key_secret are mutually exclusive; provide only one".to_owned(),
+        ));
+    }
+    if !secret_name.is_empty() {
+        let name = SecretName::new(secret_name)
+            .map_err(|error| ApiError::unprocessable(error.to_string()))?;
+        if !state.config_state.active().secret_declared(name.as_str()) {
+            return Err(ApiError::unprocessable(format!(
+                "secret {name} must be declared before it can be referenced"
+            )));
+        }
+        connection.api_key = String::new();
+        connection.api_key_secret = Some(name.into_string());
+        return Ok(());
+    }
+    if let Some(literal) = literal {
+        connection.api_key = literal;
+        connection.api_key_secret = None;
+    } else if secret.is_some() {
+        connection.api_key = String::new();
+        connection.api_key_secret = None;
+    }
+    Ok(())
 }
 
 async fn update_connection(
@@ -574,9 +620,12 @@ async fn update_connection(
     if let Some(api_flavor) = payload.api_flavor {
         connection.api_flavor = api_flavor;
     }
-    if let Some(api_key) = payload.api_key {
-        connection.api_key = api_key;
-    }
+    apply_connection_api_key(
+        &state,
+        &mut connection,
+        payload.api_key,
+        payload.api_key_secret.as_deref(),
+    )?;
     connection.updated_at = utc_now();
     let value = connection.summary(true);
     state.connections.update(&connection)?;
@@ -586,6 +635,7 @@ async fn update_connection(
         connection_id = %connection_id,
         api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
         has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
+        api_key_secret = connection.api_key_secret.as_deref().unwrap_or(""),
         "api handler completed"
     );
     Ok(Json(value))
@@ -3492,6 +3542,8 @@ struct CreateConnectionRequest {
     api_flavor: ConnectionApiFlavor,
     #[serde(default)]
     api_key: String,
+    #[serde(default)]
+    api_key_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3500,6 +3552,7 @@ struct UpdateConnectionRequest {
     url: Option<String>,
     api_flavor: Option<ConnectionApiFlavor>,
     api_key: Option<String>,
+    api_key_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
