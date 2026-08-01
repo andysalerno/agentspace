@@ -732,6 +732,16 @@ async fn connection_api_key_secret_is_selectable_by_name()
     let value: Value = serde_json::from_slice(&body)?;
     assert_eq!(value["api_key_secret"], json!("GW_TOKEN"));
 
+    // The reference is immediately visible to declaration removal, which is the
+    // observable half of serializing the write against secret operations: a
+    // referenced declaration cannot be removed out from under the connection.
+    let (status, _headers, _body) = send(
+        &app,
+        Request::delete("/secrets/GW_TOKEN").body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+
     // An empty selection clears the reference entirely.
     let (status, _headers, body) = send(
         &app,

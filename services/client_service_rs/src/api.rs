@@ -546,13 +546,14 @@ async fn create_connection(
     let mut connection = ConnectionRecord::new(payload.connection_id, payload.name, payload.url);
     connection.api_flavor = payload.api_flavor;
     apply_connection_api_key(
-        &state,
         &mut connection,
         payload.api_key,
         payload.api_key_secret.as_deref(),
     )?;
     let value = connection.summary(true);
-    state.connections.insert(&connection)?;
+    write_connection(&state, &connection, |record| {
+        state.connections.insert(record)
+    })?;
     tracing::info!(
         route = "/connections",
         action = "create_connection",
@@ -565,14 +566,48 @@ async fn create_connection(
     Ok(Json(value))
 }
 
+/// Persist a connection, serializing the write against secret declaration and
+/// removal operations.
+///
+/// The referenced declaration must still exist at the moment the document is
+/// mutated. Checking it separately would leave a window in which a concurrent
+/// removal turns the write into a document validation failure (a 500) rather
+/// than a clean rejection.
+fn write_connection<F>(
+    state: &AppState,
+    connection: &ConnectionRecord,
+    write: F,
+) -> Result<(), ApiError>
+where
+    F: FnOnce(&ConnectionRecord) -> Result<(), StoreError>,
+{
+    let required = connection
+        .api_key_secret
+        .as_ref()
+        .map(SecretName::as_str)
+        .map(ToOwned::to_owned);
+    let written = state
+        .config_state
+        .with_declared_secret(required.as_deref(), || write(connection))?;
+    if written.is_none() {
+        return Err(ApiError::unprocessable(format!(
+            "secret {} must be declared before it can be referenced",
+            required.unwrap_or_default()
+        )));
+    }
+    Ok(())
+}
+
 /// Apply the requested API key selection to a connection record.
 ///
 /// `api_key_secret` names a declared secret and is the only form clients such as
 /// the web UI offer; literal keys remain authorable through YAML. Supplying both
 /// fields is rejected regardless of their values, an empty value for either
 /// clears the key, and omitting both leaves the record untouched.
+///
+/// The name is only validated for grammar here; that it is actually declared is
+/// enforced atomically with the write by [`write_connection`].
 fn apply_connection_api_key(
-    state: &AppState,
     connection: &mut ConnectionRecord,
     literal: Option<String>,
     secret: Option<&str>,
@@ -591,11 +626,6 @@ fn apply_connection_api_key(
         }
         let name = SecretName::new(secret_name)
             .map_err(|error| ApiError::unprocessable(error.to_string()))?;
-        if !state.config_state.active().secret_declared(name.as_str()) {
-            return Err(ApiError::unprocessable(format!(
-                "secret {name} must be declared before it can be referenced"
-            )));
-        }
         connection.api_key = String::new();
         connection.api_key_secret = Some(name);
         return Ok(());
@@ -623,14 +653,15 @@ async fn update_connection(
         connection.api_flavor = api_flavor;
     }
     apply_connection_api_key(
-        &state,
         &mut connection,
         payload.api_key,
         payload.api_key_secret.as_deref(),
     )?;
     connection.updated_at = utc_now();
     let value = connection.summary(true);
-    state.connections.update(&connection)?;
+    write_connection(&state, &connection, |record| {
+        state.connections.update(record)
+    })?;
     tracing::info!(
         route = "/connections/:connection_id",
         action = "update_connection",
