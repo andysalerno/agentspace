@@ -548,7 +548,7 @@ async fn create_connection(
     apply_connection_api_key(
         &state,
         &mut connection,
-        Some(payload.api_key),
+        payload.api_key,
         payload.api_key_secret.as_deref(),
     )?;
     let value = connection.summary(true);
@@ -568,22 +568,27 @@ async fn create_connection(
 /// Apply the requested API key selection to a connection record.
 ///
 /// `api_key_secret` names a declared secret and is the only form clients such as
-/// the web UI offer; literal keys remain authorable through YAML. The two forms
-/// are mutually exclusive, and an empty value for either clears the key.
+/// the web UI offer; literal keys remain authorable through YAML. Supplying both
+/// fields is rejected regardless of their values, an empty value for either
+/// clears the key, and omitting both leaves the record untouched.
 fn apply_connection_api_key(
     state: &AppState,
     connection: &mut ConnectionRecord,
     literal: Option<String>,
     secret: Option<&str>,
 ) -> Result<(), ApiError> {
-    let literal_requested = literal.as_ref().is_some_and(|value| !value.is_empty());
-    let secret_name = secret.map(str::trim).unwrap_or_default();
-    if literal_requested && !secret_name.is_empty() {
+    if literal.is_some() && secret.is_some() {
         return Err(ApiError::unprocessable(
             "api_key and api_key_secret are mutually exclusive; provide only one".to_owned(),
         ));
     }
-    if !secret_name.is_empty() {
+    if let Some(secret) = secret {
+        let secret_name = secret.trim();
+        if secret_name.is_empty() {
+            connection.api_key = String::new();
+            connection.api_key_secret = None;
+            return Ok(());
+        }
         let name = SecretName::new(secret_name)
             .map_err(|error| ApiError::unprocessable(error.to_string()))?;
         if !state.config_state.active().secret_declared(name.as_str()) {
@@ -597,9 +602,6 @@ fn apply_connection_api_key(
     }
     if let Some(literal) = literal {
         connection.api_key = literal;
-        connection.api_key_secret = None;
-    } else if secret.is_some() {
-        connection.api_key = String::new();
         connection.api_key_secret = None;
     }
     Ok(())
@@ -3541,7 +3543,7 @@ struct CreateConnectionRequest {
     #[serde(default)]
     api_flavor: ConnectionApiFlavor,
     #[serde(default)]
-    api_key: String,
+    api_key: Option<String>,
     #[serde(default)]
     api_key_secret: Option<String>,
 }

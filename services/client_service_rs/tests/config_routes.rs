@@ -684,17 +684,40 @@ async fn connection_api_key_secret_is_selectable_by_name()
     .await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
 
-    // A literal and a reference in one request is ambiguous.
-    let (status, _headers, _body) = send(
+    // A literal and a reference in one request is ambiguous. Presence decides,
+    // not emptiness, so no combination of values slips through.
+    for payload in [
+        json!({ "api_key": "sk-literal", "api_key_secret": "OPENAI_KEY" }),
+        json!({ "api_key": "", "api_key_secret": "OPENAI_KEY" }),
+        json!({ "api_key": "sk-literal", "api_key_secret": "" }),
+    ] {
+        let (status, _headers, _body) = send(
+            &app,
+            Request::patch("/connections/openai")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&payload)?))?,
+        )
+        .await?;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "expected {payload} to be rejected"
+        );
+    }
+
+    // Omitting both fields leaves the configured reference untouched.
+    let (status, _headers, body) = send(
         &app,
         Request::patch("/connections/openai")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_vec(
-                &json!({ "api_key": "sk-literal", "api_key_secret": "OPENAI_KEY" }),
+                &json!({ "name": "Renamed" }),
             )?))?,
     )
     .await?;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body)?;
+    assert_eq!(value["api_key_secret"], json!("GW_TOKEN"));
 
     // An empty selection clears the reference entirely.
     let (status, _headers, body) = send(

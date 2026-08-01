@@ -6,7 +6,7 @@ import { api } from "./api";
 import { queryKeys, useConnections } from "./queries";
 import { useErrorContext } from "./useErrorContext";
 import { Button, Input, Select } from "./fluent";
-import SecretRefSelect from "./SecretRefSelect";
+import SecretRefSelect, { LITERAL_VALUE } from "./SecretRefSelect";
 
 type ConnectionApiFlavor = Connection["api_flavor"];
 
@@ -91,7 +91,11 @@ export default function ConnectionsView() {
         setEditName(conn.name);
         setEditUrl(conn.url);
         setEditApiFlavor(conn.api_flavor);
-        setEditApiKeySecret(conn.api_key_secret ?? "");
+        // A literal key is only authorable in YAML, so it is represented by a
+        // sentinel the picker preserves rather than silently clearing.
+        setEditApiKeySecret(
+            conn.api_key_secret ?? (conn.has_api_key ? LITERAL_VALUE : ""),
+        );
     }
 
     function cancelEdit() {
@@ -111,7 +115,11 @@ export default function ConnectionsView() {
                 name: editName,
                 url: editUrl,
                 api_flavor: editApiFlavor,
-                api_key_secret: editApiKeySecret,
+                // Omitted while the YAML literal is still selected, so editing
+                // an unrelated field cannot clear an authored key.
+                ...(editApiKeySecret === LITERAL_VALUE
+                    ? {}
+                    : { api_key_secret: editApiKeySecret }),
             },
         });
         cancelEdit();
@@ -248,6 +256,7 @@ export default function ConnectionsView() {
                                     <label>
                                         API Key Secret
                                         <SecretRefSelect
+                                            literalLabel="Literal value authored in YAML (keep)"
                                             noneLabel="No API key"
                                             value={editApiKeySecret}
                                             onChange={setEditApiKeySecret}

@@ -87,6 +87,61 @@ describe("ConnectionsView", () => {
     });
   });
 
+  it("keeps a YAML-authored literal key when an unrelated field is edited", async () => {
+    const literalBacked: Connection = {
+      ...CONNECTION,
+      has_api_key: true,
+      api_key_secret: null,
+    };
+    vi.spyOn(api, "listConnections").mockResolvedValue([literalBacked]);
+    vi.spyOn(api, "listSecrets").mockResolvedValue(SECRETS);
+    const update = vi.spyOn(api, "updateConnection").mockResolvedValue(literalBacked);
+    const user = userEvent.setup();
+    render(<ConnectionsView />, { wrapper: wrapper() });
+
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    const name = screen.getByLabelText(/Display Name/);
+    await user.clear(name);
+    await user.type(name, "Renamed");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    // The literal is not representable in the picker, so the field is omitted
+    // rather than sent as a clear.
+    await waitFor(() => {
+      expect(update).toHaveBeenCalledWith("openai", {
+        name: "Renamed",
+        url: "https://api.openai.com/v1",
+        api_flavor: "chat_completions",
+      });
+    });
+  });
+
+  it("clears a YAML-authored literal only when explicitly deselected", async () => {
+    const literalBacked: Connection = {
+      ...CONNECTION,
+      has_api_key: true,
+      api_key_secret: null,
+    };
+    vi.spyOn(api, "listConnections").mockResolvedValue([literalBacked]);
+    vi.spyOn(api, "listSecrets").mockResolvedValue(SECRETS);
+    const update = vi.spyOn(api, "updateConnection").mockResolvedValue(literalBacked);
+    const user = userEvent.setup();
+    render(<ConnectionsView />, { wrapper: wrapper() });
+
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+    await user.selectOptions(await screen.findByLabelText(/API Key Secret/), "");
+    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+
+    await waitFor(() => {
+      expect(update).toHaveBeenCalledWith("openai", {
+        name: "OpenAI",
+        url: "https://api.openai.com/v1",
+        api_flavor: "chat_completions",
+        api_key_secret: "",
+      });
+    });
+  });
+
   it("clears the reference when no secret is selected", async () => {
     vi.spyOn(api, "listConnections").mockResolvedValue([CONNECTION]);
     vi.spyOn(api, "listSecrets").mockResolvedValue(SECRETS);
