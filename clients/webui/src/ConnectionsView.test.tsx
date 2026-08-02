@@ -4,6 +4,9 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
+import { IN_DIALOG } from "./dialogTestQuery";
+import { FluentProvider } from "./fluent";
+import { lightTheme } from "./theme";
 import ConnectionsView from "./ConnectionsView";
 import { ErrorProvider } from "./ErrorContext";
 import type { Connection, SecretStatus } from "./types";
@@ -17,9 +20,12 @@ function wrapper() {
   });
   function TestWrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={client}>
-        <ErrorProvider>{children}</ErrorProvider>
-      </QueryClientProvider>
+      // Mirrors the app shell so dialogs portal the way they do in the app.
+      <FluentProvider theme={lightTheme}>
+        <QueryClientProvider client={client}>
+          <ErrorProvider>{children}</ErrorProvider>
+        </QueryClientProvider>
+      </FluentProvider>
     );
   }
   return TestWrapper;
@@ -80,10 +86,15 @@ describe("ConnectionsView", () => {
     // query, which resolves after the picker itself renders.
     const picker = await screen.findByLabelText(/API key secret/);
     expect(
-      await screen.findByRole("option", { name: "UNSET_KEY (value not set)" }),
+      await screen.findByRole("option", {
+        name: "UNSET_KEY (value not set)",
+        ...IN_DIALOG,
+      }),
     ).toBeTruthy();
     fireEvent.change(picker, { target: { value: "OPENAI_API_KEY" } });
-    await user.click(await screen.findByRole("button", { name: "Create connection" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Create connection", ...IN_DIALOG }),
+    );
 
     await waitFor(() => {
       expect(create).toHaveBeenCalledWith({
@@ -111,7 +122,9 @@ describe("ConnectionsView", () => {
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     const name = screen.getByLabelText(/Display name/);
     fireEvent.change(name, { target: { value: "Renamed" } });
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Save changes", ...IN_DIALOG }),
+    );
 
     // The literal is not representable in the picker, so the field is omitted
     // rather than sent as a clear.
@@ -138,7 +151,9 @@ describe("ConnectionsView", () => {
 
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     await user.selectOptions(await screen.findByLabelText(/API key secret/), "");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Save changes", ...IN_DIALOG }),
+    );
 
     await waitFor(() => {
       expect(update).toHaveBeenCalledWith("openai", {
@@ -159,7 +174,9 @@ describe("ConnectionsView", () => {
 
     await user.click(await screen.findByRole("button", { name: "Edit" }));
     await user.selectOptions(await screen.findByLabelText(/API key secret/), "");
-    await user.click(screen.getByRole("button", { name: "Save changes" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Save changes", ...IN_DIALOG }),
+    );
 
     await waitFor(() => {
       expect(update).toHaveBeenCalledWith("openai", {
