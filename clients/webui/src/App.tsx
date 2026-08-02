@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { webDarkTheme, webLightTheme } from "@fluentui/react-components";
+import { Dismiss20Regular } from "@fluentui/react-icons";
 import type { ViewId } from "./types";
 import Sidebar from "./Sidebar";
 import ChatView from "./ChatView";
@@ -17,7 +18,13 @@ import MemoryView from "./MemoryView";
 import ConfigurationView from "./ConfigurationView";
 import SecretsView from "./SecretsView";
 import { useErrorContext } from "./useErrorContext";
-import { Button, FluentProvider } from "./fluent";
+import {
+    Button,
+    FluentProvider,
+    MessageBar,
+    MessageBarActions,
+    MessageBarBody,
+} from "./fluent";
 import { useWebuiInfo } from "./queries";
 
 export default function App() {
@@ -109,16 +116,19 @@ export default function App() {
       />
       <div className="main-area">
         {error && (
-          <div className="error-banner">
-            <span>{error}</span>
-            <Button
-              className="dismiss-button"
-              onClick={clearError}
-              type="button"
-            >
-              ×
-            </Button>
-          </div>
+          <MessageBar className="app-message-bar" intent="error">
+            <MessageBarBody>{error}</MessageBarBody>
+            <MessageBarActions
+              containerAction={
+                <Button
+                  appearance="transparent"
+                  aria-label="Dismiss"
+                  icon={<Dismiss20Regular />}
+                  onClick={clearError}
+                />
+              }
+            />
+          </MessageBar>
         )}
         {renderView()}
       </div>

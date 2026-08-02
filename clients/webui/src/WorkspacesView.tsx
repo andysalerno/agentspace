@@ -1,13 +1,22 @@
-import type { FormEvent } from "react";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+    Add20Regular,
+    Copy20Regular,
+    Delete20Regular,
+    Edit20Regular,
+    Folder24Regular,
+    Open20Regular,
+} from "@fluentui/react-icons";
 import { api } from "./api";
 import { browserReachableLocalUrl } from "./browserUrls";
 import { queryKeys, useAgents, useWorkspaces } from "./queries";
 import { useErrorContext } from "./useErrorContext";
 import { WORKSPACE_ID_PATTERN, workspaceIdFromName } from "./saveWorkspacePrompt";
 import type { Workspace, WorkspaceVscode } from "./types";
-import { Button, Input } from "./fluent";
+import { Button, Field, Input } from "./fluent";
+import { EmptyState, FormDialog, RowActions, StatusBadge, ViewHeader } from "./ui";
+import { statusTone } from "./status";
 
 export default function WorkspacesView() {
     const { data: workspaces = [] } = useWorkspaces();
@@ -18,7 +27,7 @@ export default function WorkspacesView() {
     const [showForm, setShowForm] = useState(false);
     const [workspaceId, setWorkspaceId] = useState("");
     const [name, setName] = useState("");
-    const [editingWorkspaceId, setEditingWorkspaceId] = useState<string | null>(null);
+    const [editing, setEditing] = useState<Workspace | null>(null);
     const [editName, setEditName] = useState("");
 
     const invalidateWorkspaces = () =>
@@ -45,9 +54,12 @@ export default function WorkspacesView() {
     });
     const cloneMutation = useMutation({
         mutationFn: (
-            { id, workspace_id, name }: { id: string; workspace_id: string; name: string },
-        ) =>
-            api.cloneWorkspace(id, { workspace_id, name }),
+            { id, workspace_id, name: cloneName }: {
+                id: string;
+                workspace_id: string;
+                name: string;
+            },
+        ) => api.cloneWorkspace(id, { workspace_id, name: cloneName }),
         onSuccess: () => invalidateWorkspaces(),
         onError: reportError,
     });
@@ -56,8 +68,7 @@ export default function WorkspacesView() {
         onError: reportError,
     });
 
-    const busy =
-        createMutation.isPending
+    const busy = createMutation.isPending
         || updateMutation.isPending
         || deleteMutation.isPending
         || cloneMutation.isPending
@@ -65,39 +76,25 @@ export default function WorkspacesView() {
 
     function mountedAgentCount(targetWorkspaceId: string): number {
         return agents.filter((agent) =>
-            agent.workspace_mounts.some(
-                (mount) => mount.workspace_id === targetWorkspaceId,
-            ),
+            agent.workspace_mounts.some((mount) => mount.workspace_id === targetWorkspaceId)
         ).length;
     }
 
-    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
-        await createMutation.mutateAsync({
-            workspace_id: workspaceId,
-            name,
-        });
+    async function handleCreate() {
+        await createMutation.mutateAsync({ workspace_id: workspaceId, name });
         setWorkspaceId("");
         setName("");
         setShowForm(false);
     }
 
-    function startEditing(id: string, currentName: string) {
-        setEditingWorkspaceId(id);
-        setEditName(currentName);
-    }
-
-    async function saveEdit(id: string) {
-        await updateMutation.mutateAsync({ id, nextName: editName });
-        setEditingWorkspaceId(null);
-        setEditName("");
+    async function handleSaveEdit() {
+        if (editing === null) return;
+        await updateMutation.mutateAsync({ id: editing.workspace_id, nextName: editName });
+        setEditing(null);
     }
 
     async function handleClone(workspace: Workspace) {
-        const cloneName = window.prompt(
-            "Clone workspace name",
-            `${workspace.name} Copy`,
-        );
+        const cloneName = window.prompt("Clone workspace name", `${workspace.name} Copy`);
         if (cloneName === null) return;
         const trimmedName = cloneName.trim();
         if (!trimmedName) {
@@ -144,171 +141,201 @@ export default function WorkspacesView() {
     }
 
     return (
-        <div className="view-content management-view workspaces-management-view">
-            <div className="view-header">
-                <div>
-                    <h2>Workspaces</h2>
-                    <span className="muted">
-                        {workspaces.length} configured · Docker volumes mounted into agent kernels
-                    </span>
-                </div>
-                <div className="view-header-actions">
-                    <Button onClick={() => setShowForm(!showForm)} type="button">
-                        {showForm ? "Cancel" : "New Workspace"}
+        <div className="view-content">
+            <ViewHeader
+                actions={
+                    <Button
+                        appearance="primary"
+                        icon={<Add20Regular />}
+                        onClick={() => setShowForm(true)}
+                        type="button"
+                    >
+                        New workspace
                     </Button>
-                </div>
+                }
+                description="Docker volumes mounted into agent kernels."
+                title="Workspaces"
+            />
+            <div className="view-body">
+                {workspaces.length === 0
+                    ? (
+                        <EmptyState
+                            action={
+                                <Button appearance="primary" onClick={() => setShowForm(true)}>
+                                    New workspace
+                                </Button>
+                            }
+                            description="Workspaces give agents persistent storage that survives kernel restarts."
+                            icon={<Folder24Regular />}
+                            title="No workspaces yet"
+                        />
+                    )
+                    : (
+                        <div className="table-container">
+                            <div className="table-scroll">
+                                <table className="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Workspace</th>
+                                            <th>Status</th>
+                                            <th>Mount path</th>
+                                            <th>Volume</th>
+                                            <th className="num">Agents</th>
+                                            <th aria-label="Actions" />
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {workspaces.map((workspace) => {
+                                            const mountedCount = mountedAgentCount(
+                                                workspace.workspace_id,
+                                            );
+                                            const isBuiltin = workspace.builtin === true;
+                                            const ready = workspace.status === "ready";
+                                            return (
+                                                <tr key={workspace.workspace_id}>
+                                                    <td>
+                                                        <div className="cell-identity">
+                                                            <span className="cell-identity-name">
+                                                                {workspace.name}
+                                                                {isBuiltin && (
+                                                                    <span className="tag" style={{ marginLeft: 8 }}>
+                                                                        Built-in
+                                                                    </span>
+                                                                )}
+                                                            </span>
+                                                            <span className="cell-identity-id">
+                                                                {workspace.workspace_id}
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td>
+                                                        <StatusBadge
+                                                            label={workspace.status}
+                                                            tone={statusTone(workspace.status)}
+                                                        />
+                                                    </td>
+                                                    <td className="mono-sm">{workspace.mount_path}</td>
+                                                    <td
+                                                        className="mono-sm muted"
+                                                        title={workspace.volume_name}
+                                                    >
+                                                        <span className="truncate">
+                                                            {workspace.volume_name}
+                                                        </span>
+                                                    </td>
+                                                    <td className="num">{mountedCount}</td>
+                                                    <td className="actions-cell">
+                                                        <RowActions
+                                                            items={isBuiltin ? [] : [
+                                                                {
+                                                                    key: "rename",
+                                                                    label: "Rename",
+                                                                    icon: <Edit20Regular />,
+                                                                    disabled: busy,
+                                                                    onClick: () => {
+                                                                        setEditing(workspace);
+                                                                        setEditName(workspace.name);
+                                                                    },
+                                                                },
+                                                                {
+                                                                    key: "clone",
+                                                                    label: "Clone",
+                                                                    icon: <Copy20Regular />,
+                                                                    disabled: busy || !ready,
+                                                                    onClick: () => {
+                                                                        void handleClone(workspace);
+                                                                    },
+                                                                },
+                                                                {
+                                                                    key: "delete",
+                                                                    label: mountedCount > 0
+                                                                        ? "Delete (in use)"
+                                                                        : "Delete",
+                                                                    icon: <Delete20Regular />,
+                                                                    destructive: true,
+                                                                    disabled: busy || mountedCount > 0,
+                                                                    onClick: () =>
+                                                                        deleteMutation.mutate(
+                                                                            workspace.workspace_id,
+                                                                        ),
+                                                                },
+                                                            ]}
+                                                            primary={{
+                                                                key: "vscode",
+                                                                label: "Open in VS Code",
+                                                                icon: <Open20Regular />,
+                                                                disabled: busy || !ready,
+                                                                onClick: () => {
+                                                                    void handleOpenVscode(workspace);
+                                                                },
+                                                            }}
+                                                        />
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
             </div>
 
-            {showForm && (
-                <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
-                    <label>
-                        Workspace ID
+            <FormDialog
+                busy={busy}
+                onOpenChange={setShowForm}
+                onSubmit={() => {
+                    void handleCreate();
+                }}
+                open={showForm}
+                submitLabel="Create workspace"
+                title="New workspace"
+            >
+                <div className="form-grid">
+                    <Field
+                        hint="Used in the mount path: /workspace/<id>"
+                        label="Workspace ID"
+                        required
+                    >
                         <Input
+                            onChange={(e) => setWorkspaceId(e.target.value)}
                             pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
                             placeholder="todo-list-code"
                             required
                             value={workspaceId}
-                            onChange={(e) => setWorkspaceId(e.target.value)}
                         />
-                        <span className="muted">Used in the mount path: /workspace/&lt;id&gt;</span>
-                    </label>
-                    <label>
-                        Display Name
+                    </Field>
+                    <Field label="Display name" required>
                         <Input
-                            placeholder="TodoListCode"
+                            onChange={(e) => setName(e.target.value)}
+                            placeholder="Todo list code"
                             required
                             value={name}
-                            onChange={(e) => setName(e.target.value)}
                         />
-                    </label>
-                    <Button disabled={busy} type="submit">
-                        Create Workspace
-                    </Button>
-                </form>
-            )}
+                    </Field>
+                </div>
+            </FormDialog>
 
-            <div className="card-grid management-card-grid">
-                {workspaces.map((workspace) => {
-                    const mountedCount = mountedAgentCount(workspace.workspace_id);
-                    const editing = editingWorkspaceId === workspace.workspace_id;
-                    const isBuiltin = workspace.builtin === true;
-                    return (
-                        <div className="card management-card" key={workspace.workspace_id}>
-                            <div className="card-body">
-                                <div className="management-card-heading">
-                                    <div className="management-title-block">
-                                        <h3>{workspace.name}</h3>
-                                        <code className="management-id">{workspace.workspace_id}</code>
-                                    </div>
-                                    <div className="tag-row">
-                                        {isBuiltin && <span className="tag">Built-in</span>}
-                                        <span className="tag">{mountedCount} agent{mountedCount === 1 ? "" : "s"}</span>
-                                    </div>
-                                </div>
-                                <div className="card-meta management-meta">
-                                    <div>
-                                        <strong>Status</strong>
-                                        <span className={`status-badge ${workspace.status}`}>{workspace.status}</span>
-                                    </div>
-                                    <div>
-                                        <strong>Mount Path</strong>
-                                        <span className="mono">{workspace.mount_path}</span>
-                                    </div>
-                                    <div>
-                                        <strong>Volume</strong>
-                                        <span className="mono truncate-value">{workspace.volume_name}</span>
-                                    </div>
-                                </div>
-                                {editing && (
-                                    <form
-                                        className="create-form"
-                                        onSubmit={(e) => {
-                                            e.preventDefault();
-                                            void saveEdit(workspace.workspace_id);
-                                        }}
-                                    >
-                                        <label>
-                                            Display Name
-                                            <Input
-                                                required
-                                                value={editName}
-                                                onChange={(e) => setEditName(e.target.value)}
-                                            />
-                                        </label>
-                                        <div className="skills-edit-actions">
-                                            <Button className="small" disabled={busy} type="submit">
-                                                Save
-                                            </Button>
-                                            <Button
-                                                className="secondary-button small"
-                                                onClick={() => setEditingWorkspaceId(null)}
-                                                type="button"
-                                            >
-                                                Cancel
-                                            </Button>
-                                        </div>
-                                    </form>
-                                )}
-                            </div>
-                            <div className="card-footer">
-                                <span className="muted">
-                                    {isBuiltin
-                                        ? "Built-in workspace"
-                                        : `Created ${new Date(workspace.created_at).toLocaleDateString()}`}
-                                </span>
-                                <div className="card-footer-actions">
-                                    {!editing && (
-                                        <>
-                                            <Button
-                                                className="secondary-button small"
-                                                disabled={busy || workspace.status !== "ready"}
-                                                onClick={() => void handleOpenVscode(workspace)}
-                                                type="button"
-                                            >
-                                                Open in VS Code
-                                            </Button>
-                                            {!isBuiltin && (
-                                                <>
-                                                    <Button
-                                                        className="secondary-button small"
-                                                        disabled={busy || workspace.status !== "ready"}
-                                                        onClick={() => void handleClone(workspace)}
-                                                        type="button"
-                                                    >
-                                                        Clone
-                                                    </Button>
-                                                    <Button
-                                                        className="secondary-button small"
-                                                        disabled={busy}
-                                                        onClick={() => startEditing(workspace.workspace_id, workspace.name)}
-                                                        type="button"
-                                                    >
-                                                        Edit
-                                                    </Button>
-                                                </>
-                                            )}
-                                        </>
-                                    )}
-                                    {!isBuiltin && (
-                                        <Button
-                                            className="danger-button small"
-                                            disabled={busy || mountedCount > 0}
-                                            onClick={() => deleteMutation.mutate(workspace.workspace_id)}
-                                            title={mountedCount > 0 ? "Remove this workspace from agents before deleting it." : undefined}
-                                            type="button"
-                                        >
-                                            Delete
-                                        </Button>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    );
-                })}
-                {workspaces.length === 0 && (
-                    <div className="empty-state">No workspaces yet. Create one to give agents persistent shared storage.</div>
-                )}
-            </div>
+            <FormDialog
+                busy={busy}
+                onOpenChange={(open) => {
+                    if (!open) setEditing(null);
+                }}
+                onSubmit={() => {
+                    void handleSaveEdit();
+                }}
+                open={editing !== null}
+                submitLabel="Save"
+                title={`Rename ${editing?.name ?? "workspace"}`}
+            >
+                <Field label="Display name" required>
+                    <Input
+                        onChange={(e) => setEditName(e.target.value)}
+                        required
+                        value={editName}
+                    />
+                </Field>
+            </FormDialog>
         </div>
     );
 }

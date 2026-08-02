@@ -1,27 +1,28 @@
 import { useState } from "react";
 import type { ReactElement } from "react";
 import {
-    Apps20Regular,
     ArrowClockwise20Regular,
-    BookOpen20Regular,
     Bot20Regular,
     Chat20Regular,
     ChatMultiple20Regular,
     ChevronRight12Regular,
     Code20Regular,
     Database20Regular,
+    DocumentBulletList20Regular,
     Folder20Regular,
     Info20Regular,
     Key20Regular,
+    Library20Regular,
     PanelLeftContract20Regular,
     PanelLeftExpand20Regular,
     PlugConnected20Regular,
+    PlugDisconnected20Regular,
     Settings20Regular,
     WeatherMoon20Regular,
     WeatherSunny20Regular,
 } from "@fluentui/react-icons";
 import type { ViewId } from "./types";
-import { Button } from "./fluent";
+import { Button, Tooltip } from "./fluent";
 
 type SidebarProps = {
     activeView: ViewId;
@@ -42,11 +43,11 @@ const navItems: NavItem[] = [
     { id: "agents", label: "Agents", icon: <Bot20Regular /> },
     { id: "workspaces", label: "Workspaces", icon: <Folder20Regular /> },
     { id: "sessions", label: "Sessions", icon: <ChatMultiple20Regular /> },
-    { id: "kernels", label: "Running Kernels", icon: <Code20Regular /> },
-    { id: "memory", label: "Memory", icon: <Database20Regular /> },
-    { id: "gateways", label: "Gateways", icon: <Apps20Regular /> },
-    { id: "skills", label: "Skills", icon: <BookOpen20Regular /> },
-    { id: "info", label: "Info", icon: <Info20Regular /> },
+    { id: "kernels", label: "Running kernels", icon: <Code20Regular /> },
+    { id: "memory", label: "Memory", icon: <Library20Regular /> },
+    { id: "gateways", label: "Gateways", icon: <PlugDisconnected20Regular /> },
+    { id: "skills", label: "Skills", icon: <DocumentBulletList20Regular /> },
+    { id: "info", label: "System info", icon: <Info20Regular /> },
 ];
 
 const navGroups: NavGroup[] = [
@@ -55,42 +56,27 @@ const navGroups: NavGroup[] = [
         label: "Configuration",
         icon: <Settings20Regular />,
         items: [
-            {
-                id: "config",
-                label: "Declarative",
-                icon: <Code20Regular />,
-            },
-            {
-                id: "config-secrets",
-                label: "Secrets",
-                icon: <Key20Regular />,
-            },
-            {
-                id: "config-kernels",
-                label: "Kernels",
-                icon: <Database20Regular />,
-            },
-            {
-                id: "connections",
-                label: "Connections",
-                icon: <PlugConnected20Regular />,
-            },
+            { id: "config", label: "Declarative", icon: <Code20Regular /> },
+            { id: "config-secrets", label: "Secrets", icon: <Key20Regular /> },
+            { id: "config-kernels", label: "Kernels", icon: <Database20Regular /> },
+            { id: "connections", label: "Connections", icon: <PlugConnected20Regular /> },
         ],
     },
 ];
 
-export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, onToggleCollapse, darkMode, onToggleDarkMode, version }: SidebarProps) {
+export default function Sidebar(
+    {
+        activeView,
+        onNavigate,
+        onRefresh,
+        collapsed,
+        onToggleCollapse,
+        darkMode,
+        onToggleDarkMode,
+        version,
+    }: SidebarProps,
+) {
     const [expandedGroups, setExpandedGroups] = useState<Partial<Record<string, ViewId>>>({});
-
-    function collapseGroups() {
-        setExpandedGroups({});
-        localStorage.removeItem("sidebar-expanded-groups");
-    }
-
-    function navigateToTopLevel(view: ViewId) {
-        collapseGroups();
-        onNavigate(view);
-    }
 
     function toggleGroup(groupId: string) {
         if (collapsed) {
@@ -107,25 +93,49 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
         });
     }
 
+    function navButton(item: NavItem, onClick: () => void, extraClass = "") {
+        const classes = [
+            "sidebar-nav-item",
+            extraClass,
+            activeView === item.id ? "active" : "",
+        ].filter(Boolean).join(" ");
+        const button = (
+            <Button
+                appearance="subtle"
+                aria-current={activeView === item.id ? "page" : undefined}
+                className={classes}
+                icon={item.icon}
+                onClick={onClick}
+                type="button"
+            >
+                <span className="sidebar-nav-label">{item.label}</span>
+            </Button>
+        );
+        if (!collapsed) {
+            return button;
+        }
+        return (
+            <Tooltip content={item.label} positioning="after" relationship="label">
+                {button}
+            </Tooltip>
+        );
+    }
+
     return (
-        <nav className={`sidebar ${collapsed ? "collapsed" : ""}`}>
+        <nav aria-label="Primary" className={`sidebar ${collapsed ? "collapsed" : ""}`}>
             <div className="sidebar-header">
-                <span className="sidebar-logo">◇</span>
+                <span className="sidebar-logo">
+                    <AgentSpaceMark />
+                </span>
                 <span className="sidebar-title">AgentSpace</span>
             </div>
             <ul className="sidebar-nav">
-                <li className="sidebar-nav-section-label">Workspace</li>
                 {navItems.map((item) => (
                     <li key={item.id}>
-                        <Button
-                            className={`sidebar-nav-item ${activeView === item.id ? "active" : ""}`}
-                            icon={item.icon}
-                            onClick={() => navigateToTopLevel(item.id)}
-                            type="button"
-                            title={item.label}
-                        >
-                            <span className="sidebar-nav-label">{item.label}</span>
-                        </Button>
+                        {navButton(item, () => {
+                            setExpandedGroups({});
+                            onNavigate(item.id);
+                        })}
                     </li>
                 ))}
                 {navGroups.map((group) => {
@@ -134,11 +144,12 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                     return (
                         <li key={group.id}>
                             <Button
+                                appearance="subtle"
+                                aria-expanded={isExpanded}
                                 className={`sidebar-nav-item ${groupActive ? "active" : ""}`}
                                 icon={group.icon}
                                 onClick={() => toggleGroup(group.id)}
                                 type="button"
-                                title={group.label}
                             >
                                 <span className="sidebar-nav-label">{group.label}</span>
                                 <ChevronRight12Regular
@@ -150,15 +161,11 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                                 <ul className="sidebar-nav-sub">
                                     {group.items.map((item) => (
                                         <li key={item.id}>
-                                            <Button
-                                                className={`sidebar-nav-item sidebar-nav-subitem ${activeView === item.id ? "active" : ""}`}
-                                                icon={item.icon}
-                                                onClick={() => onNavigate(item.id)}
-                                                type="button"
-                                                title={item.label}
-                                            >
-                                                <span className="sidebar-nav-label">{item.label}</span>
-                                            </Button>
+                                            {navButton(
+                                                item,
+                                                () => onNavigate(item.id),
+                                                "sidebar-nav-subitem",
+                                            )}
                                         </li>
                                     ))}
                                 </ul>
@@ -168,39 +175,56 @@ export default function Sidebar({ activeView, onNavigate, onRefresh, collapsed, 
                 })}
             </ul>
             <div className="sidebar-footer">
-                <div className="sidebar-nav-section-label">Controls</div>
-                <Button
-                    className="sidebar-nav-item"
-                    icon={darkMode ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />}
-                    onClick={onToggleDarkMode}
-                    type="button"
-                    title={darkMode ? "Light mode" : "Dark mode"}
+                <Tooltip content="Refresh all data" relationship="label">
+                    <Button
+                        appearance="subtle"
+                        icon={<ArrowClockwise20Regular />}
+                        onClick={onRefresh}
+                        type="button"
+                    />
+                </Tooltip>
+                <Tooltip
+                    content={darkMode ? "Switch to light theme" : "Switch to dark theme"}
+                    relationship="label"
                 >
-                    <span className="sidebar-nav-label">{darkMode ? "Light" : "Dark"}</span>
-                </Button>
-                <Button
-                    className="sidebar-nav-item"
-                    icon={<ArrowClockwise20Regular />}
-                    onClick={onRefresh}
-                    type="button"
-                    title="Refresh"
+                    <Button
+                        appearance="subtle"
+                        icon={darkMode ? <WeatherSunny20Regular /> : <WeatherMoon20Regular />}
+                        onClick={onToggleDarkMode}
+                        type="button"
+                    />
+                </Tooltip>
+                <Tooltip
+                    content={collapsed ? "Expand navigation" : "Collapse navigation"}
+                    relationship="label"
                 >
-                    <span className="sidebar-nav-label">Refresh</span>
-                </Button>
-                <Button
-                    className="sidebar-collapse-btn"
-                    icon={collapsed ? <PanelLeftExpand20Regular /> : <PanelLeftContract20Regular />}
-                    onClick={onToggleCollapse}
-                    type="button"
-                    title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-                >
-                    <span className="sidebar-nav-label">Collapse</span>
-                </Button>
-                <div className="sidebar-version" title={`WebUI version ${version}`}>
-                    <span className="sidebar-version-label">webui</span>
-                    <code>{version}</code>
-                </div>
+                    <Button
+                        appearance="subtle"
+                        icon={collapsed
+                            ? <PanelLeftExpand20Regular />
+                            : <PanelLeftContract20Regular />}
+                        onClick={onToggleCollapse}
+                        type="button"
+                    />
+                </Tooltip>
+                <span className="sidebar-version" title={`Web UI version ${version}`}>
+                    {version}
+                </span>
             </div>
         </nav>
+    );
+}
+
+function AgentSpaceMark() {
+    return (
+        <svg aria-hidden="true" fill="none" height="20" viewBox="0 0 20 20" width="20">
+            <path
+                d="M10 1.75 17.5 6v8L10 18.25 2.5 14V6L10 1.75Z"
+                stroke="currentColor"
+                strokeLinejoin="round"
+                strokeWidth="1.4"
+            />
+            <circle cx="10" cy="10" fill="currentColor" r="2.6" />
+        </svg>
     );
 }

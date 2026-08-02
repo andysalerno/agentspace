@@ -1,17 +1,11 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ChatMultiple24Regular, Delete20Regular, Open20Regular } from "@fluentui/react-icons";
 import { api } from "./api";
 import { useErrorContext } from "./useErrorContext";
 import { queryKeys, useAgents, useSessions } from "./queries";
 import { promptSaveWorkspace } from "./saveWorkspacePrompt";
-import {
-    Button,
-    Table,
-    TableBody,
-    TableCell,
-    TableHeader,
-    TableHeaderCell,
-    TableRow,
-} from "./fluent";
+import { EmptyState, RowActions, StatusBadge, ViewHeader } from "./ui";
+import { sessionTone } from "./status";
 
 type SessionsViewProps = {
     onNavigateToChat: (sessionId: string) => void;
@@ -33,13 +27,19 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
         onError: reportError,
     });
     const saveWorkspaceMutation = useMutation({
-        mutationFn: ({ sessionId, workspace_id, name }: { sessionId: string; workspace_id: string; name: string }) =>
-            api.saveSessionWorkspace(sessionId, { workspace_id, name }),
+        mutationFn: (
+            { sessionId, workspace_id, name }: {
+                sessionId: string;
+                workspace_id: string;
+                name: string;
+            },
+        ) => api.saveSessionWorkspace(sessionId, { workspace_id, name }),
         onSuccess: () => {
             void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces });
         },
         onError: reportError,
     });
+    const busy = deleteMutation.isPending || saveWorkspaceMutation.isPending;
 
     async function handleDeleteSession(sessionId: string) {
         const decision = promptSaveWorkspace();
@@ -56,76 +56,91 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
         deleteMutation.mutate(sessionId);
     }
 
-    return (
-        <div className="view-content management-view sessions-management-view">
-            <div className="view-header">
-                <div>
-                    <h2>Sessions</h2>
-                    <span className="muted">
-                        {sessions.length} total · {sessions.filter((s) => s.status === "active").length} active
-                    </span>
-                </div>
-            </div>
+    const activeCount = sessions.filter((s) => s.status === "active").length;
 
-            {sessions.length > 0 ? (
-                <div className="table-container management-table-container">
-                    <Table className="data-table management-table">
-                        <TableHeader>
-                            <TableRow>
-                                <TableHeaderCell>Agent</TableHeaderCell>
-                                <TableHeaderCell>Session ID</TableHeaderCell>
-                                <TableHeaderCell>Status</TableHeaderCell>
-                                <TableHeaderCell>Messages</TableHeaderCell>
-                                <TableHeaderCell>Channel</TableHeaderCell>
-                                <TableHeaderCell>Created</TableHeaderCell>
-                                <TableHeaderCell aria-label="Actions"></TableHeaderCell>
-                            </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                            {sessions.map((s) => (
-                                <TableRow key={s.session_id}>
-                                    <TableCell>
-                                        <strong className="truncate-value">{agentMap[s.agent_id]?.name ?? s.agent_id}</strong>
-                                        <div className="muted mono truncate-value">{s.agent_id}</div>
-                                    </TableCell>
-                                    <TableCell className="mono" title={s.session_id}>
-                                        <span className="truncate-value">{s.session_id.slice(0, 12)}…</span>
-                                    </TableCell>
-                                    <TableCell>
-                                        <span className={`status-badge ${s.status}`}>{s.status}</span>
-                                    </TableCell>
-                                    <TableCell>{s.message_count}</TableCell>
-                                    <TableCell>
-                                        <span className="truncate-value">{s.channel_name ?? "—"}</span>
-                                    </TableCell>
-                                    <TableCell className="nowrap">{new Date(s.created_at).toLocaleString()}</TableCell>
-                                    <TableCell className="actions-cell">
-                                        <div className="card-footer-actions">
-                                            <Button
-                                                className="secondary-button small"
-                                                onClick={() => onNavigateToChat(s.session_id)}
-                                                type="button"
-                                            >
-                                                Open Chat
-                                            </Button>
-                                            <Button
-                                                className="danger-button small"
-                                                disabled={deleteMutation.isPending || saveWorkspaceMutation.isPending}
-                                                onClick={() => void handleDeleteSession(s.session_id)}
-                                                type="button"
-                                            >
-                                                Delete
-                                            </Button>
-                                        </div>
-                                    </TableCell>
-                                </TableRow>
-                            ))}
-                        </TableBody>
-                    </Table>
-                </div>
-            ) : (
-                <div className="empty-state">No sessions yet.</div>
-            )}
+    return (
+        <div className="view-content">
+            <ViewHeader
+                description={`${sessions.length} total, ${activeCount} active`}
+                title="Sessions"
+            />
+            <div className="view-body">
+                {sessions.length === 0
+                    ? (
+                        <EmptyState
+                            description="Sessions appear here once an agent starts a conversation."
+                            icon={<ChatMultiple24Regular />}
+                            title="No sessions yet"
+                        />
+                    )
+                    : (
+                        <div className="table-container">
+                            <div className="table-scroll">
+                                <table className="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Agent</th>
+                                            <th>Session</th>
+                                            <th>Status</th>
+                                            <th className="num">Messages</th>
+                                            <th>Channel</th>
+                                            <th>Created</th>
+                                            <th aria-label="Actions" />
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {sessions.map((s) => (
+                                            <tr key={s.session_id}>
+                                                <td>
+                                                    <div className="cell-identity">
+                                                        <span className="cell-identity-name">
+                                                            {agentMap[s.agent_id]?.name ?? s.agent_id}
+                                                        </span>
+                                                        <span className="cell-identity-id">{s.agent_id}</span>
+                                                    </div>
+                                                </td>
+                                                <td className="mono-sm" title={s.session_id}>
+                                                    {s.session_id.slice(0, 12)}…
+                                                </td>
+                                                <td>
+                                                    <StatusBadge
+                                                        label={s.status}
+                                                        tone={sessionTone(s.status)}
+                                                    />
+                                                </td>
+                                                <td className="num">{s.message_count}</td>
+                                                <td>{s.channel_name ?? "—"}</td>
+                                                <td className="nowrap muted">
+                                                    {new Date(s.created_at).toLocaleDateString()}
+                                                </td>
+                                                <td className="actions-cell">
+                                                    <RowActions
+                                                        items={[{
+                                                            key: "delete",
+                                                            label: "Delete session",
+                                                            icon: <Delete20Regular />,
+                                                            destructive: true,
+                                                            disabled: busy,
+                                                            onClick: () => {
+                                                                void handleDeleteSession(s.session_id);
+                                                            },
+                                                        }]}
+                                                        primary={{
+                                                            key: "open",
+                                                            label: "Open",
+                                                            icon: <Open20Regular />,
+                                                            onClick: () => onNavigateToChat(s.session_id),
+                                                        }}
+                                                    />
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
+            </div>
         </div>
     );
 }
