@@ -181,12 +181,15 @@ export default function SecretsView() {
                                                                 : []),
                                                             {
                                                                 key: "delete",
-                                                                label: secret.references.length > 0
+                                                                label: secret.is_set
+                                                                    ? "Delete (clear the value first)"
+                                                                    : secret.references.length > 0
                                                                     ? "Delete (still referenced)"
                                                                     : "Delete declaration",
                                                                 icon: <Delete20Regular />,
                                                                 destructive: true,
                                                                 disabled: busy
+                                                                    || secret.is_set
                                                                     || secret.references.length > 0,
                                                                 confirm:
                                                                     `Delete the declaration "${secret.name}"? This cannot be undone.`,
