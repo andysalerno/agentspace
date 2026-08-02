@@ -21,9 +21,15 @@ The harness works and has been verified end to end: 13 views x 2 themes = 26
 screenshots, no page errors, with Monaco and markdown rendering correctly.
 
 `dev.Dockerfile` was updated to install the Chromium runtime libraries and
-fonts. **That change only takes effect once the dev image is rebuilt.** If you
-are in a container built before it, run the smoke test below; if it fails, use
-either the rebuild or the fallback described further down.
+fonts. **That change only takes effect once the dev image is rebuilt.**
+
+At the time of writing, the container this was developed in had *not* been
+rebuilt — `rpm -q mozilla-nss libgbm1 dejavu-fonts` reported all three missing,
+and runs succeeded only because of the fallback sysroot in
+`tools/webui-screenshots/.sysroot` and hand-installed fonts in `~/.fonts`, both
+of which persist in the dev home volume. So if screenshots work for you, that
+does not by itself prove the image is correct. See "A caveat about false
+passes" below.
 
 This harness was built to support a visual overhaul of the web UI. If you are
 picking that work up, generate a baseline first — screenshots are written to a
@@ -262,6 +268,13 @@ the capture output, for example `TypeError: schema.fields is not iterable`.
 | `Failed to connect to the bus` / `drmGetDevices2()` | No D-Bus or GPU in the container. | Ignore; the harness passes `--disable-gpu`. |
 | Blank or partial page | `dist/` is stale or missing. | Re-run `pnpm run build` in `clients/webui`. |
 | Shell/tooling stops spawning processes | Likely container resource exhaustion. | Restart the session. See Memory above. |
+| `zypper se` reports every package missing | Non-root cannot write the repo cache, so no repo data loads. | Use a writable cache dir: `zypper --cache-dir /tmp/zc se -x -t package libgbm1`. Use `rpm -q` to check what is *installed*. |
+
+Note the second-to-last row: as a non-root user, `zypper se` fails with
+`No permission to write repository cache` and then reports *every* package as
+not found. It is easy to misread that as proof that the names in
+`dev.Dockerfile` are wrong. They are not — all 26 resolve on Tumbleweed when
+the cache is writable.
 
 To see what Chromium is actually doing, re-run with browser logging:
 
