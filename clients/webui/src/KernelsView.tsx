@@ -357,6 +357,7 @@ export default function KernelsView() {
                         <DialogContent>
                             <div className="log-toolbar">
                                 <Select
+                                    aria-label="Log source"
                                     onChange={(e) => setLogSource(e.target.value as LogSource)}
                                     value={logsState?.source ?? "harness"}
                                 >

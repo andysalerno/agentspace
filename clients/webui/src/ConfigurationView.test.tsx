@@ -85,7 +85,7 @@ describe("ConfigurationView", () => {
     await user.click(screen.getByRole("button", { name: "Preview replacement" }));
     expect(await screen.findByText("Applying against generation 7")).toBeTruthy();
     await user.click(
-      await screen.findByRole("button", { name: "Apply replacement", ...IN_DIALOG }),
+      await screen.findByRole("button", { name: "Apply replacement" }),
     );
     await waitFor(() => {
       expect(apply).toHaveBeenCalledWith("kind: AgentSpaceConfig\n", 7);

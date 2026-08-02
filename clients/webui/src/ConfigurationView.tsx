@@ -200,13 +200,17 @@ export default function ConfigurationView() {
                             </Button>
                         </div>
                     </div>
+                    {/* Opened by the "Load file" toolbar button; kept out of the
+                        tab order so it is not an invisible extra stop. */}
                     <input
                         accept=".yaml,.yml,.zip,text/yaml,application/zip"
+                        aria-hidden="true"
                         className="visually-hidden"
                         onChange={(event) => {
                             void loadFile(event);
                         }}
                         ref={fileInput}
+                        tabIndex={-1}
                         type="file"
                     />
                     <CodeEditor
