@@ -65,7 +65,7 @@ describe("ConnectionsView", () => {
     await user.click(screen.getAllByRole("button", { name: "New connection" })[0]);
     // Typed input is used sparingly here: tabster's modal focus trap blurs the
     // active element under jsdom, which drops keystrokes.
-    fireEvent.change(screen.getByLabelText(/Connection ID/), {
+    fireEvent.change(await screen.findByLabelText(/Connection ID/), {
       target: { value: "openai" },
     });
     fireEvent.change(screen.getByLabelText(/Display name/), {
@@ -76,13 +76,14 @@ describe("ConnectionsView", () => {
     });
 
     // Unset declarations remain selectable so a connection can be wired up
-    // before its value is installed.
+    // before its value is installed. The options arrive with the secrets
+    // query, which resolves after the picker itself renders.
     const picker = await screen.findByLabelText(/API key secret/);
     expect(
-      screen.getByRole("option", { name: "UNSET_KEY (value not set)" }),
+      await screen.findByRole("option", { name: "UNSET_KEY (value not set)" }),
     ).toBeTruthy();
-    await user.selectOptions(picker, "OPENAI_API_KEY");
-    await user.click(screen.getByRole("button", { name: "Create connection" }));
+    fireEvent.change(picker, { target: { value: "OPENAI_API_KEY" } });
+    await user.click(await screen.findByRole("button", { name: "Create connection" }));
 
     await waitFor(() => {
       expect(create).toHaveBeenCalledWith({
