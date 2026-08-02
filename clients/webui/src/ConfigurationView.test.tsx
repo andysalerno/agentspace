@@ -81,9 +81,9 @@ describe("ConfigurationView", () => {
       expect(validate).toHaveBeenCalledWith("kind: AgentSpaceConfig\n");
     });
 
-    await user.click(screen.getByRole("button", { name: "Preview Replacement" }));
+    await user.click(screen.getByRole("button", { name: "Preview replacement" }));
     expect(await screen.findByText("Applying against generation 7")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Apply Replacement" }));
+    await user.click(screen.getByRole("button", { name: "Apply replacement" }));
     await waitFor(() => {
       expect(apply).toHaveBeenCalledWith("kind: AgentSpaceConfig\n", 7);
     });
@@ -105,9 +105,10 @@ describe("SecretsView", () => {
     const user = userEvent.setup();
     render(<SecretsView />, { wrapper: wrapper() });
 
+    await user.click(await screen.findByRole("button", { name: "Set value" }));
     const input = await screen.findByPlaceholderText("Value is never displayed");
-    await user.type(input, "hidden-value");
-    await user.click(screen.getByRole("button", { name: "Set Value" }));
+    fireEvent.change(input, { target: { value: "hidden-value" } });
+    await user.click(screen.getByRole("button", { name: "Save value" }));
 
     await waitFor(() => {
       expect(setValue).toHaveBeenCalledWith("TOKEN", "hidden-value");

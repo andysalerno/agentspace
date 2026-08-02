@@ -2,26 +2,22 @@ import Editor from "@monaco-editor/react";
 
 type CodeEditorProps = {
     value: string;
-    onChange: (value: string) => void;
+    onChange?: (value: string) => void;
     language?: string;
     height?: string;
-    placeholder?: string;
+    readOnly?: boolean;
 };
 
-export default function CodeEditor({
-    value,
-    onChange,
-    language = "markdown",
-    height = "200px",
-}: CodeEditorProps) {
+export default function CodeEditor(
+    { value, onChange, language = "markdown", height = "200px", readOnly = false }:
+        CodeEditorProps,
+) {
     return (
-        <div style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)", overflow: "hidden" }}>
+        <div className="editor-frame">
             <Editor
                 height={height}
                 language={language}
-                value={value}
-                onChange={(v) => onChange(v ?? "")}
-                theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
+                onChange={(v) => onChange?.(v ?? "")}
                 options={{
                     minimap: { enabled: false },
                     lineNumbers: "on",
@@ -31,7 +27,15 @@ export default function CodeEditor({
                     tabSize: 2,
                     automaticLayout: true,
                     fixedOverflowWidgets: true,
+                    renderLineHighlight: "none",
+                    padding: { top: 8, bottom: 8 },
+                    readOnly,
+                    domReadOnly: readOnly,
                 }}
+                theme={document.documentElement.getAttribute("data-theme") === "dark"
+                    ? "vs-dark"
+                    : "light"}
+                value={value}
             />
         </div>
     );
