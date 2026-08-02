@@ -254,6 +254,8 @@ export default function WorkspacesView() {
                                                                     icon: <Delete20Regular />,
                                                                     destructive: true,
                                                                     disabled: busy || mountedCount > 0,
+                                                                    confirm:
+                                                                        `Delete "${workspace.name}"? Its volume and contents are destroyed.`,
                                                                     onClick: () =>
                                                                         deleteMutation.mutate(
                                                                             workspace.workspace_id,

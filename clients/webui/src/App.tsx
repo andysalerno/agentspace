@@ -28,12 +28,18 @@ import {
 import { darkTheme, lightTheme } from "./theme";
 import { useWebuiInfo } from "./queries";
 
+const narrowViewport = "(max-width: 900px)";
+
+function storedSidebarPreference(): boolean {
+  return localStorage.getItem("sidebar-collapsed") === "true";
+}
+
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    return localStorage.getItem("sidebar-collapsed") === "true";
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    window.matchMedia(narrowViewport).matches || storedSidebarPreference()
+  );
   const [darkMode, setDarkMode] = useState(() => {
     const stored = localStorage.getItem("theme");
     if (stored) return stored === "dark";
@@ -50,9 +56,28 @@ export default function App() {
     localStorage.setItem("theme", darkMode ? "dark" : "light");
   }, [darkMode]);
 
+  /*
+   * There is no room for the navigation labels on a narrow viewport, so the
+   * sidebar collapses itself. Doing this in state rather than CSS keeps the
+   * component honest: it swaps the hidden labels for tooltips and routes the
+   * configuration submenu through an expand, so those views stay reachable.
+   */
   useEffect(() => {
-    localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed));
-  }, [sidebarCollapsed]);
+    const query = window.matchMedia(narrowViewport);
+    const handleChange = (event: MediaQueryListEvent) => {
+      setSidebarCollapsed(event.matches || storedSidebarPreference());
+    };
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }, []);
+
+  /** Only explicit toggles are remembered; an automatic collapse is not. */
+  function handleToggleSidebar() {
+    setSidebarCollapsed((previous) => {
+      localStorage.setItem("sidebar-collapsed", String(!previous));
+      return !previous;
+    });
+  }
 
   function handleNavigateToChat(sessionId: string) {
     setSelectedSessionId(sessionId);
@@ -111,7 +136,7 @@ export default function App() {
         onNavigate={setViewId}
         onRefresh={handleRefresh}
         collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+        onToggleCollapse={handleToggleSidebar}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((prev) => !prev)}
         version={webuiVersion}

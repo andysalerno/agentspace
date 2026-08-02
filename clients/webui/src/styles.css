@@ -522,6 +522,7 @@ pre,
 
 .data-table {
   width: 100%;
+  min-width: 640px;
   border-collapse: collapse;
   font-size: var(--text-md);
   table-layout: auto;
@@ -1130,34 +1131,13 @@ pre,
   }
 }
 
+/*
+ * The narrow-viewport sidebar collapse lives in App.tsx, not here. Hiding the
+ * labels and the configuration submenu from CSS alone leaves the component
+ * thinking it is expanded, which drops the tooltips that replace the labels
+ * and makes the configuration views unreachable.
+ */
 @media (max-width: 900px) {
-  .sidebar {
-    width: var(--sidebar-collapsed-width);
-    min-width: var(--sidebar-collapsed-width);
-  }
-
-  .sidebar .sidebar-title,
-  .sidebar .sidebar-nav-label,
-  .sidebar .sidebar-group-chevron,
-  .sidebar .sidebar-nav-sub,
-  .sidebar .sidebar-version {
-    display: none;
-  }
-
-  .sidebar .sidebar-header {
-    justify-content: center;
-    padding: 0;
-  }
-
-  .sidebar .sidebar-nav-item {
-    justify-content: center;
-    padding: 0;
-  }
-
-  .sidebar .sidebar-footer {
-    flex-direction: column;
-  }
-
   .view-header,
   .view-body {
     padding-inline: var(--space-4);

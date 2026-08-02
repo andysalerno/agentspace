@@ -659,6 +659,8 @@ export default function GatewaysView() {
                                                                     icon: <Delete20Regular />,
                                                                     destructive: true,
                                                                     disabled: busy,
+                                                                    confirm:
+                                                                        `Delete the gateway "${gateway.name}"? This cannot be undone.`,
                                                                     onClick: () =>
                                                                         deleteMutation.mutate(gateway.gateway_id),
                                                                 },

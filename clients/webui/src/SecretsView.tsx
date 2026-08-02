@@ -170,6 +170,8 @@ export default function SecretsView() {
                                                                     icon: <EraserRegular />,
                                                                     destructive: true,
                                                                     disabled: busy,
+                                                                    confirm:
+                                                                        `Clear the value of "${secret.name}"? Everything referencing it stops working until a new value is set.`,
                                                                     onClick: () => {
                                                                         clearMutation.mutate(
                                                                             secret.name,
@@ -186,6 +188,8 @@ export default function SecretsView() {
                                                                 destructive: true,
                                                                 disabled: busy
                                                                     || secret.references.length > 0,
+                                                                confirm:
+                                                                    `Delete the declaration "${secret.name}"? This cannot be undone.`,
                                                                 onClick: () =>
                                                                     deleteMutation.mutate(
                                                                         secret.name,

@@ -39,7 +39,7 @@ present, and the web build.
 
 `just webui-screenshots` builds `clients/webui`, serves it against fixture data,
 and screenshots every view in light and dark themes. No backend required. Read
-`PLAYWRIGHT.md` before touching the harness; headless Chromium has non-obvious
+`docs/PLAYWRIGHT.md` before touching the harness; headless Chromium has non-obvious
 environment requirements in this container.
 
 ### Python Standards

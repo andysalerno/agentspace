@@ -356,6 +356,8 @@ export default function SkillsView() {
                                                                     icon: <Delete20Regular />,
                                                                     destructive: true,
                                                                     disabled: busy,
+                                                                    confirm:
+                                                                        `Delete the skill "${skill.skill_id}"? This cannot be undone.`,
                                                                     onClick: () =>
                                                                         deleteMutation.mutate(
                                                                             skill.skill_id,

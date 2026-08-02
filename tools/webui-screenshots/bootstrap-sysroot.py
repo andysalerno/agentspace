@@ -22,7 +22,7 @@ import sys
 import urllib.request
 from pathlib import Path
 
-MIRROR = "http://deb.debian.org/debian"
+MIRROR = "https://deb.debian.org/debian"
 DIST = "bookworm"
 HERE = Path(__file__).resolve().parent
 ROOT = HERE / ".sysroot"

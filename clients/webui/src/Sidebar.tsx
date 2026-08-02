@@ -93,6 +93,18 @@ export default function Sidebar(
         });
     }
 
+    /** Collapsed labels are hidden, so the tooltip carries the accessible name. */
+    function withTooltip(label: string, button: ReactElement) {
+        if (!collapsed) {
+            return button;
+        }
+        return (
+            <Tooltip content={label} positioning="after" relationship="label">
+                {button}
+            </Tooltip>
+        );
+    }
+
     function navButton(item: NavItem, onClick: () => void, extraClass = "") {
         const classes = [
             "sidebar-nav-item",
@@ -111,14 +123,7 @@ export default function Sidebar(
                 <span className="sidebar-nav-label">{item.label}</span>
             </Button>
         );
-        if (!collapsed) {
-            return button;
-        }
-        return (
-            <Tooltip content={item.label} positioning="after" relationship="label">
-                {button}
-            </Tooltip>
-        );
+        return withTooltip(item.label, button);
     }
 
     return (
@@ -143,20 +148,23 @@ export default function Sidebar(
                     const isExpanded = groupActive || expandedGroups[group.id] === activeView;
                     return (
                         <li key={group.id}>
-                            <Button
-                                appearance="subtle"
-                                aria-expanded={isExpanded}
-                                className={`sidebar-nav-item ${groupActive ? "active" : ""}`}
-                                icon={group.icon}
-                                onClick={() => toggleGroup(group.id)}
-                                type="button"
-                            >
-                                <span className="sidebar-nav-label">{group.label}</span>
-                                <ChevronRight12Regular
-                                    className="sidebar-group-chevron"
-                                    style={{ transform: isExpanded ? "rotate(90deg)" : "none" }}
-                                />
-                            </Button>
+                            {withTooltip(
+                                group.label,
+                                <Button
+                                    appearance="subtle"
+                                    aria-expanded={isExpanded}
+                                    className={`sidebar-nav-item ${groupActive ? "active" : ""}`}
+                                    icon={group.icon}
+                                    onClick={() => toggleGroup(group.id)}
+                                    type="button"
+                                >
+                                    <span className="sidebar-nav-label">{group.label}</span>
+                                    <ChevronRight12Regular
+                                        className="sidebar-group-chevron"
+                                        style={{ transform: isExpanded ? "rotate(90deg)" : "none" }}
+                                    />
+                                </Button>,
+                            )}
                             {isExpanded && (
                                 <ul className="sidebar-nav-sub">
                                     {group.items.map((item) => (

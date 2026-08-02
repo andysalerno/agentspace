@@ -9,7 +9,7 @@
 //   ONLY       comma separated view ids, default all
 //   WIDTH/HEIGHT  viewport, default 1440x900
 //
-// See PLAYWRIGHT.md at the repository root for environment setup.
+// See docs/PLAYWRIGHT.md for environment setup.
 import { chromium } from "playwright";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -63,7 +63,7 @@ if (existsSync(sysroot)) {
 
 if (!existsSync(nodePath.join(homedir(), ".fonts")) && !existsSync("/usr/share/fonts/truetype")) {
   console.warn("warning: no fonts found. Chromium aborts with SIGTRAP when Skia cannot");
-  console.warn("         resolve a font. See PLAYWRIGHT.md.");
+  console.warn("         resolve a font. See docs/PLAYWRIGHT.md.");
 }
 
 mkdirSync(outDir, { recursive: true });
@@ -77,7 +77,13 @@ for (const theme of themes) {
     const browser = await chromium.launch({ args: ["--disable-gpu"], env: browserEnv });
     const ctx = await browser.newContext({ viewport });
     const page = await ctx.newPage();
-    page.on("pageerror", (e) => console.log(`  [pageerror ${id}]`, String(e).slice(0, 200)));
+    // A view that throws still paints something, so treat runtime errors as
+    // failures rather than letting a broken view screenshot its way to green.
+    const pageErrors = [];
+    page.on("pageerror", (e) => {
+      pageErrors.push(String(e).slice(0, 200));
+      console.log(`  [pageerror ${id}]`, String(e).slice(0, 200));
+    });
     await page.addInitScript((t) => {
       localStorage.setItem("theme", t);
       localStorage.setItem("sidebar-collapsed", "false");
@@ -94,6 +100,9 @@ for (const theme of themes) {
       }
       await page.waitForTimeout(1400);
       await page.screenshot({ path: nodePath.join(outDir, `${theme}-${id}.png`) });
+      if (pageErrors.length > 0) {
+        throw new Error(`${pageErrors.length} page error(s): ${pageErrors[0]}`);
+      }
       console.log("ok  ", theme, id);
     } catch (err) {
       failures += 1;

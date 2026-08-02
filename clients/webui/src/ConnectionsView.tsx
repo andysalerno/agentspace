@@ -223,6 +223,8 @@ export default function ConnectionsView() {
                                                                 icon: <Delete20Regular />,
                                                                 destructive: true,
                                                                 disabled: busy,
+                                                                confirm:
+                                                                    `Delete the connection "${conn.name}"? Agents using it stop working.`,
                                                                 onClick: () =>
                                                                     deleteMutation.mutate(
                                                                         conn.connection_id,

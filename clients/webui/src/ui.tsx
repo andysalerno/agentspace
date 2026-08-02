@@ -52,9 +52,19 @@ export type RowAction = {
     onClick: () => void;
     disabled?: boolean;
     destructive?: boolean;
+    /**
+     * Prompt shown before `onClick` runs. Menu items are a single click, so
+     * anything irreversible needs one.
+     */
+    confirm?: string;
     /** Renders above the following item with a separator. */
     separatorBefore?: boolean;
 };
+
+function runAction(action: RowAction) {
+    if (action.confirm !== undefined && !window.confirm(action.confirm)) return;
+    action.onClick();
+}
 
 /**
  * One inline button plus an overflow menu. Row action sets grow over time, so
@@ -70,7 +80,7 @@ export function RowActions(
                 <Button
                     disabled={primary.disabled}
                     icon={primary.icon}
-                    onClick={primary.onClick}
+                    onClick={() => runAction(primary)}
                     size="small"
                 >
                     {primary.label}
@@ -104,7 +114,7 @@ export function RowActions(
                                     disabled={item.disabled}
                                     icon={item.icon}
                                     key={item.key}
-                                    onClick={item.onClick}
+                                    onClick={() => runAction(item)}
                                     style={item.destructive
                                         ? { color: "var(--danger)" }
                                         : undefined}

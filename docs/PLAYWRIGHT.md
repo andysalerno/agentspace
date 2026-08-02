@@ -17,7 +17,7 @@ tool. Screenshots are captured for every view in both light and dark themes.
 
 ## Status
 
-The harness works and has been verified end to end: 13 views x 2 themes = 26
+The harness works and has been verified end to end: 14 views x 2 themes = 28
 screenshots, no page errors, with Monaco and markdown rendering correctly.
 
 `dev.Dockerfile` was updated to install the Chromium runtime libraries and
@@ -218,9 +218,12 @@ node capture.mjs ./out
 | `WIDTH` / `HEIGHT` | `1440` / `900` | Viewport size. |
 | `PW_SYSROOT` | `./.sysroot` | Override the fallback sysroot location. |
 
-View ids: `chat`, `agents`, `workspaces`, `sessions`, `kernels`, `memory`,
-`gateways`, `skills`, `info`, `config`, `config-secrets`, `config-kernels`,
-`connections`.
+View ids: `chat`, `chat-session`, `agents`, `workspaces`, `sessions`,
+`kernels`, `memory`, `gateways`, `skills`, `info`, `config`,
+`config-secrets`, `config-kernels`, `connections`.
+
+`chat-session` opens the first session so the transcript is captured; `chat`
+leaves the empty state visible.
 
 Output files are named `<theme>-<view>.png`.
 
@@ -232,7 +235,7 @@ that reason. A single long-lived browser walking the whole matrix gets killed
 around the sixth or seventh view. If you rewrite the harness, keep that
 property.
 
-The container is not generously provisioned, and a full run launches 26
+The container is not generously provisioned, and a full run launches 28
 browsers. During the session that built this harness, the surrounding tool
 process eventually failed to spawn any new shell at all (`No such file or
 directory (os error 2)`), with the filesystem intact. The cause was never

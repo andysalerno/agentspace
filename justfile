@@ -345,7 +345,7 @@ webui-screenshots-setup:
   cd tools/webui-screenshots && pnpm install
   cd tools/webui-screenshots && ./node_modules/.bin/playwright install chromium
 
-# Screenshot every webui view against the mock API. See PLAYWRIGHT.md.
+# Screenshot every webui view against the mock API. See docs/PLAYWRIGHT.md.
 [group('dev')]
 webui-screenshots out="tools/webui-screenshots/out":
   #!/usr/bin/env bash
