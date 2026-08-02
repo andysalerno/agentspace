@@ -355,7 +355,14 @@ webui-screenshots out="tools/webui-screenshots/out":
   node mock-api.mjs &
   server=$!
   trap 'kill "$server" 2>/dev/null || true' EXIT
-  sleep 1
+  for _ in $(seq 1 20); do
+    if ! kill -0 "$server" 2>/dev/null; then
+      echo "mock-api exited before serving; is port 8010 already in use?" >&2
+      exit 1
+    fi
+    if curl -sf http://127.0.0.1:8010/info.json >/dev/null; then break; fi
+    sleep 0.5
+  done
   node capture.mjs "{{justfile_directory()}}/{{out}}"
 
 [private]

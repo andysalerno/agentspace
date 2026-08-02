@@ -142,7 +142,14 @@ const routes = {
     client_service: { service: "client_service", version: "0.4.2", env_prefix: "CLIENT_SERVICE_", env: { CLIENT_SERVICE_PORT: "8002", CLIENT_SERVICE_AGENT_HOST_URL: "http://agent_host:8001", CLIENT_SERVICE_LOG_LEVEL: "info" } },
     agent_host: { service: "agent_host", version: "0.4.2", env_prefix: "AGENT_HOST_", env: { AGENT_HOST_PORT: "8001", AGENT_HOST_KERNEL_IMAGE: "ghcr.io/andysalerno/kernel_host:latest", KERNEL_WORKDIR: "/workspace" } },
   },
-  "GET /api/info.json": { version: "0.4.2" },
+};
+
+// Served by the webui's own nginx in production, not by client_service.
+const webuiInfo = {
+  service: "webui",
+  version: "0.4.2",
+  env_prefix: "WEBUI_CLIENT_",
+  env: { WEBUI_CLIENT_API_BASE: "/api", WEBUI_CLIENT_TITLE: "AgentSpace" },
 };
 
 const server = http.createServer(async (req, res) => {
@@ -155,6 +162,14 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(body));
   };
 
+  const sendText = (body, type = "text/plain") => {
+    res.writeHead(200, { "content-type": type, "access-control-allow-origin": "*" });
+    res.end(body);
+  };
+
+  // Must precede the /api/ guard: the webui reads this as a static file.
+  if (path === "/info.json") return send(webuiInfo);
+
   if (path.startsWith("/api/")) {
     if (routes[key]) return send(routes[key]);
     if (path === "/api/memory/v1/pages") return send(memoryPages);
@@ -164,8 +179,8 @@ const server = http.createServer(async (req, res) => {
       return send({ ...meta, schema_version: 1, created_at: then, created_by: "code-reviewer", updated_by: "docs-writer", extra: {}, revision: "rev-4412", body: `# ${meta.title}\n\nThe kernel protocol is a line-delimited JSON stream over stdio.\n\n- Requests carry a \`method\` and \`params\`.\n- Responses carry \`result\` or \`error\`.\n\nSee [[architecture/services.md]] for how this fits together.\n`, outgoing_links: [{ text: "architecture/services.md", raw_target: "architecture/services.md", resolved_path: "architecture/services.md", broken: false }] });
     }
     if (path === "/api/memory/v1/links") return send({ path: url.searchParams.get("path") ?? "index.md", outgoing: [{ text: "services", raw_target: "architecture/services.md", resolved_path: "architecture/services.md", broken: false }], backlinks: [{ from: "index.md", text: "kernels", raw_target: "architecture/kernels.md" }] });
-    if (path === "/api/config/export") return send(canonicalConfig);
-    if (path.startsWith("/api/config/export/")) return send(canonicalConfig);
+    if (path === "/api/config/export") return sendText(canonicalConfig, "text/yaml");
+    if (path.startsWith("/api/config/export/")) return sendText(canonicalConfig, "text/yaml");
     if (path === "/api/config/validate" || path === "/api/config/plan") return send({ valid: true, generation: 12, active_generation: 11, source_sha256: "a1b2c3d4e5f6a7b8", semantic_sha256: "f0e1d2c3b4a59687", creates: ["agent/docs-writer"], updates: ["connection/openai-prod"], deletes: [], unchanged: ["workspace/agentspace", "workspace/scratch"] });
     const sessionMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);
     if (sessionMatch) {
@@ -173,9 +188,9 @@ const server = http.createServer(async (req, res) => {
       return send({ ...s, messages: messages.map((m) => ({ ...m, session_id: s.session_id })) });
     }
     if (/^\/api\/kernels\/[^/]+\/(logs|container-logs)$/.test(path)) {
-      return send({ logs: "2026-07-28T14:31:02Z INFO  kernel_host: started\n2026-07-28T14:31:03Z INFO  kernel_copilot: acp handshake ok\n2026-07-28T14:32:10Z INFO  kernel_copilot: turn 6 complete" });
+      return send({ lines: ["2026-07-28T14:31:02Z INFO  kernel_host: started", "2026-07-28T14:31:03Z INFO  kernel_copilot: acp handshake ok", "2026-07-28T14:32:10Z INFO  kernel_copilot: turn 6 complete"] });
     }
-    if (/^\/api\/gateways\/[^/]+\/logs$/.test(path)) return send({ logs: "2026-07-28T14:20:00Z INFO gateway started\n2026-07-28T14:22:11Z WARN webhook 401" });
+    if (/^\/api\/gateways\/[^/]+\/logs$/.test(path)) return send({ lines: ["2026-07-28T14:20:00Z INFO gateway started", "2026-07-28T14:22:11Z WARN webhook 401"] });
     if (/^\/api\/skills\/[^/]+\/versions$/.test(path)) return send([{ skill_id: "memory", version: 2, created_at: now, files: { "SKILL.md": "v2" } }, { skill_id: "memory", version: 1, created_at: then, files: { "SKILL.md": "v1" } }]);
     if (/^\/api\/skills\/[^/]+$/.test(path)) {
       const id = decodeURIComponent(path.split("/").pop());
