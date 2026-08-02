@@ -150,7 +150,10 @@ export default function Sidebar(
                 ))}
                 {navGroups.map((group) => {
                     const groupActive = group.items.some((item) => item.id === activeView);
-                    const isExpanded = groupActive || expandedGroups[group.id] === activeView;
+                    // A collapsed rail has no room for the submenu, so it stays
+                    // closed rather than being rendered and hidden.
+                    const isExpanded = !collapsed &&
+                        (groupActive || expandedGroups[group.id] === activeView);
                     return (
                         <li key={group.id}>
                             {withTooltip(

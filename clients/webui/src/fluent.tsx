@@ -20,6 +20,7 @@ export {
     FluentProvider,
     Input,
     Menu,
+    MenuDivider,
     MenuItem,
     MenuList,
     MenuPopover,

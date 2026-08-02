@@ -393,7 +393,6 @@ pre,
 .sidebar.collapsed .sidebar-title,
 .sidebar.collapsed .sidebar-nav-label,
 .sidebar.collapsed .sidebar-group-chevron,
-.sidebar.collapsed .sidebar-nav-sub,
 .sidebar.collapsed .sidebar-version {
   display: none;
 }

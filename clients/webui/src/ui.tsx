@@ -5,7 +5,7 @@
  * classes in styles.css rather than introducing a second styling system.
  */
 import type { FormEvent, ReactElement, ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { Fragment, useEffect, useRef } from "react";
 import { ArrowClockwise20Regular, MoreHorizontal20Regular } from "@fluentui/react-icons";
 import {
     Button,
@@ -16,6 +16,7 @@ import {
     DialogSurface,
     DialogTitle,
     Menu,
+    MenuDivider,
     MenuItem,
     MenuList,
     MenuPopover,
@@ -57,8 +58,6 @@ export type RowAction = {
      * anything irreversible needs one.
      */
     confirm?: string;
-    /** Renders above the following item with a separator. */
-    separatorBefore?: boolean;
 };
 
 function runAction(action: RowAction) {
@@ -74,6 +73,10 @@ function runAction(action: RowAction) {
 export function RowActions(
     { primary, items }: { primary?: RowAction; items: RowAction[] },
 ) {
+    // Destructive actions are grouped below a divider so a mis-click on the
+    // last safe item cannot land on one.
+    const firstDestructive = items.findIndex((item) => item.destructive === true);
+    const dividerIndex = firstDestructive > 0 ? firstDestructive : -1;
     return (
         <div className="row-actions">
             {primary !== undefined && (
@@ -109,18 +112,20 @@ export function RowActions(
                     </MenuTrigger>
                     <MenuPopover>
                         <MenuList>
-                            {items.map((item) => (
-                                <MenuItem
-                                    disabled={item.disabled}
-                                    icon={item.icon}
-                                    key={item.key}
-                                    onClick={() => runAction(item)}
-                                    style={item.destructive
-                                        ? { color: "var(--danger)" }
-                                        : undefined}
-                                >
-                                    {item.label}
-                                </MenuItem>
+                            {items.map((item, index) => (
+                                <Fragment key={item.key}>
+                                    {index === dividerIndex && <MenuDivider />}
+                                    <MenuItem
+                                        disabled={item.disabled}
+                                        icon={item.icon}
+                                        onClick={() => runAction(item)}
+                                        style={item.destructive
+                                            ? { color: "var(--danger)" }
+                                            : undefined}
+                                    >
+                                        {item.label}
+                                    </MenuItem>
+                                </Fragment>
                             ))}
                         </MenuList>
                     </MenuPopover>
