@@ -954,6 +954,8 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     <span className="truncate">{session.agent_id}</span>
                                 </span>
                                 <span className="session-row-meta">
+                                    <span className="truncate">{session.status}</span>
+                                    <span aria-hidden="true">·</span>
                                     <span className="truncate">
                                         {sessionChannelLabel(session.channel_name)}
                                     </span>

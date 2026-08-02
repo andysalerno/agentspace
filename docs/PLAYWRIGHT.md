@@ -183,6 +183,10 @@ and copies the bundled fonts into `~/.fonts`. `capture.mjs` detects `.sysroot/`
 automatically and sets `LD_LIBRARY_PATH`, `FONTCONFIG_FILE`, and `XDG_DATA_DIRS`
 for the browser process.
 
+Packages are selected for the host architecture (`amd64` or `arm64`), and the
+multiarch triplet is recorded in `.sysroot/.multiarch` so `capture.mjs` uses
+the matching library directories. Any other architecture fails early.
+
 Deliberately excluded from the sysroot: `libc6`, `libgcc-s1`, `libstdc++6`, and
 friends. Mixing a Debian libc with the host loader breaks every binary in the
 container, including `node`. Use the host's copies of those.

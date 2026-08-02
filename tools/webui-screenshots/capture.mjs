@@ -11,7 +11,7 @@
 //
 // See docs/PLAYWRIGHT.md for environment setup.
 import { chromium } from "playwright";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,10 +51,20 @@ const views = [
 // bootstrap-sysroot.py). When the sysroot is absent we rely on system packages.
 const sysroot = process.env.PW_SYSROOT ?? nodePath.join(HERE, ".sysroot");
 const browserEnv = { ...process.env };
+const MULTIARCH_BY_ARCH = { x64: "x86_64-linux-gnu", arm64: "aarch64-linux-gnu" };
 if (existsSync(sysroot)) {
+  // bootstrap-sysroot.py records the triplet it built for; fall back to this
+  // host's for a sysroot produced before that marker existed.
+  const marker = nodePath.join(sysroot, ".multiarch");
+  const multiarch = existsSync(marker)
+    ? readFileSync(marker, "utf8").trim()
+    : MULTIARCH_BY_ARCH[process.arch];
+  if (!multiarch) {
+    throw new Error(`unsupported architecture ${process.arch} for the Chromium sysroot`);
+  }
   browserEnv.LD_LIBRARY_PATH = [
-    nodePath.join(sysroot, "usr/lib/x86_64-linux-gnu"),
-    nodePath.join(sysroot, "lib/x86_64-linux-gnu"),
+    nodePath.join(sysroot, "usr/lib", multiarch),
+    nodePath.join(sysroot, "lib", multiarch),
     process.env.LD_LIBRARY_PATH,
   ].filter(Boolean).join(":");
   browserEnv.FONTCONFIG_FILE = nodePath.join(sysroot, "etc/fonts/fonts.conf");

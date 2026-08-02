@@ -29,7 +29,10 @@ type SidebarProps = {
     onNavigate: (view: ViewId) => void;
     onRefresh: () => void;
     collapsed: boolean;
+    /** The collapse control. Remembers the choice. */
     onToggleCollapse: () => void;
+    /** Reveals the submenu of a group clicked while collapsed. Not remembered. */
+    onExpandForGroup: () => void;
     darkMode: boolean;
     onToggleDarkMode: () => void;
     version: string;
@@ -71,6 +74,7 @@ export default function Sidebar(
         onRefresh,
         collapsed,
         onToggleCollapse,
+        onExpandForGroup,
         darkMode,
         onToggleDarkMode,
         version,
@@ -80,7 +84,8 @@ export default function Sidebar(
 
     function toggleGroup(groupId: string) {
         if (collapsed) {
-            onToggleCollapse();
+            // Revealing a submenu is navigation, not a preference change.
+            onExpandForGroup();
         }
         setExpandedGroups((prev) => {
             const next = { ...prev };

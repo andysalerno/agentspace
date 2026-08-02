@@ -71,12 +71,21 @@ export default function App() {
     return () => query.removeEventListener("change", handleChange);
   }, []);
 
-  /** Only explicit toggles are remembered; an automatic collapse is not. */
+  /** The collapse control. Only this remembers the choice. */
   function handleToggleSidebar() {
     setSidebarCollapsed((previous) => {
       localStorage.setItem("sidebar-collapsed", String(!previous));
       return !previous;
     });
+  }
+
+  /*
+   * Clicking a navigation group while collapsed has to reveal its submenu, but
+   * that is navigation rather than a preference, so it is not persisted and a
+   * later viewport change can still collapse the sidebar again.
+   */
+  function handleExpandForGroup() {
+    setSidebarCollapsed(false);
   }
 
   function handleNavigateToChat(sessionId: string) {
@@ -136,6 +145,7 @@ export default function App() {
         onNavigate={setViewId}
         onRefresh={handleRefresh}
         collapsed={sidebarCollapsed}
+        onExpandForGroup={handleExpandForGroup}
         onToggleCollapse={handleToggleSidebar}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((prev) => !prev)}

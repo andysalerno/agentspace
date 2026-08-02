@@ -16,6 +16,7 @@ Usage:  python3 bootstrap-sysroot.py
 from __future__ import annotations
 
 import gzip
+import platform
 import shutil
 import subprocess
 import sys
@@ -24,6 +25,20 @@ from pathlib import Path
 
 MIRROR = "https://deb.debian.org/debian"
 DIST = "bookworm"
+
+# Debian architecture name and multiarch triplet for the host. The dev image
+# builds for both x86_64 and arm64, and a sysroot of foreign-architecture
+# libraries would leave Chromium unable to start.
+ARCHITECTURES = {
+    "x86_64": ("amd64", "x86_64-linux-gnu"),
+    "aarch64": ("arm64", "aarch64-linux-gnu"),
+    "arm64": ("arm64", "aarch64-linux-gnu"),
+}
+_machine = platform.machine()
+if _machine not in ARCHITECTURES:
+    _supported = ", ".join(sorted(ARCHITECTURES))
+    sys.exit(f"unsupported architecture {_machine!r}; expected one of {_supported}")
+DEB_ARCH, MULTIARCH = ARCHITECTURES[_machine]
 HERE = Path(__file__).resolve().parent
 ROOT = HERE / ".sysroot"
 CACHE = HERE / ".debcache"
@@ -130,7 +145,7 @@ def load_index() -> dict[str, dict[str, str]]:
     """Download and parse the Debian binary package index."""
     log("fetching Debian package index ...")
     path = fetch(
-        f"{MIRROR}/dists/{DIST}/main/binary-amd64/Packages.gz",
+        f"{MIRROR}/dists/{DIST}/main/binary-{DEB_ARCH}/Packages.gz",
         CACHE / "Packages.gz",
     )
     packages: dict[str, dict[str, str]] = {}
@@ -212,6 +227,9 @@ def main() -> int:
             log(f"  {index}/{len(order)}")
 
     install_fonts()
+    # Single source of truth for the library paths capture.mjs adds to
+    # LD_LIBRARY_PATH, so the two never disagree about the host architecture.
+    (ROOT / ".multiarch").write_text(f"{MULTIARCH}\n", encoding="utf-8")
     shutil.rmtree(CACHE, ignore_errors=True)
     log(f"sysroot ready at {ROOT}")
     log("capture.mjs picks it up automatically.")
