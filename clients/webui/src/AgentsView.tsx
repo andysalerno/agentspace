@@ -293,6 +293,7 @@ function AgentFormFields(
 
             <Field label="System prompt">
                 <CodeEditor
+                    ariaLabel="System prompt"
                     height="140px"
                     language="markdown"
                     onChange={(v) => onChange({ ...form, system_prompt: v })}
@@ -353,6 +354,7 @@ function AgentFormFields(
 
             <Field hint="One KEY=VALUE per line, using .env syntax." label="Environment variables">
                 <CodeEditor
+                    ariaLabel="Environment variables"
                     height="140px"
                     language="ini"
                     onChange={(v) => onChange({ ...form, env_vars: v })}

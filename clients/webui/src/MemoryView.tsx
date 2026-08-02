@@ -603,6 +603,7 @@ export default function MemoryView() {
                     {tab === "edit"
                       ? (
                         <CodeEditor
+                          ariaLabel="Page body"
                           height="min(42vh, 420px)"
                           onChange={(body) => setDraft({ ...draft, body })}
                           value={draft.body}

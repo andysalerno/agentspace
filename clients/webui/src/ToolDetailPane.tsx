@@ -33,6 +33,7 @@ export default function ToolDetailPane({ toolCall, onClose }: ToolDetailPaneProp
                     <DialogContent className="dialog-scroll">
                         <Field label="Input">
                             <CodeEditor
+                                ariaLabel="Tool call input"
                                 height="220px"
                                 language="json"
                                 readOnly
@@ -41,6 +42,7 @@ export default function ToolDetailPane({ toolCall, onClose }: ToolDetailPaneProp
                         </Field>
                         <Field label="Output">
                             <CodeEditor
+                                ariaLabel="Tool call output"
                                 height="260px"
                                 language="plaintext"
                                 readOnly

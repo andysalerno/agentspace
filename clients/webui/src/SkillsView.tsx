@@ -97,6 +97,7 @@ function FileList(
                         )}
                     </div>
                     <CodeEditor
+                        ariaLabel={`Contents of ${file.path || "new file"}`}
                         height="220px"
                         language={languageFor(file.path)}
                         onChange={(v) => patch(index, "content", v)}

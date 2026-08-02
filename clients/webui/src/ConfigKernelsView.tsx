@@ -179,6 +179,7 @@ export default function ConfigKernelsView() {
                                         label="Environment variables"
                                     >
                                         <CodeEditor
+                                            ariaLabel="Environment variables"
                                             height="240px"
                                             language="ini"
                                             onChange={handleEditorChange}

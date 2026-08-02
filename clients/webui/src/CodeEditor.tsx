@@ -2,6 +2,12 @@ import Editor from "@monaco-editor/react";
 
 type CodeEditorProps = {
     value: string;
+    /*
+     * Monaco renders its own textarea, which does not consume Fluent's field
+     * context, so a surrounding `Field` label never reaches it. Every call site
+     * passes the label it is presented under.
+     */
+    ariaLabel: string;
     onChange?: (value: string) => void;
     language?: string;
     height?: string;
@@ -9,7 +15,7 @@ type CodeEditorProps = {
 };
 
 export default function CodeEditor(
-    { value, onChange, language = "markdown", height = "200px", readOnly = false }:
+    { value, ariaLabel, onChange, language = "markdown", height = "200px", readOnly = false }:
         CodeEditorProps,
 ) {
     return (
@@ -19,6 +25,7 @@ export default function CodeEditor(
                 language={language}
                 onChange={(v) => onChange?.(v ?? "")}
                 options={{
+                    ariaLabel,
                     minimap: { enabled: false },
                     lineNumbers: "on",
                     scrollBeyondLastLine: false,
