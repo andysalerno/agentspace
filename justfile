@@ -338,6 +338,26 @@ webui-lint:
 webui-deps-outdated:
   cd clients/webui && pnpm outdated
 
+# Install the screenshot harness dependencies and the Playwright browser.
+[group('dev')]
+webui-screenshots-setup:
+  cd clients/webui && pnpm install
+  cd tools/webui-screenshots && pnpm install
+  cd tools/webui-screenshots && ./node_modules/.bin/playwright install chromium
+
+# Screenshot every webui view against the mock API. See PLAYWRIGHT.md.
+[group('dev')]
+webui-screenshots out="tools/webui-screenshots/out":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd clients/webui && pnpm run build
+  cd "{{justfile_directory()}}/tools/webui-screenshots"
+  node mock-api.mjs &
+  server=$!
+  trap 'kill "$server" 2>/dev/null || true' EXIT
+  sleep 1
+  node capture.mjs "{{justfile_directory()}}/{{out}}"
+
 [private]
 _stack-runtime:
   #!/usr/bin/env bash

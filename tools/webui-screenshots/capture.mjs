@@ -1,0 +1,102 @@
+// Screenshots every AgentSpace web UI view against the mock API server.
+//
+// Usage:
+//   node capture.mjs [outDir]
+//
+// Env:
+//   BASE_URL   default http://127.0.0.1:8010
+//   THEMES     comma separated, default "light,dark"
+//   ONLY       comma separated view ids, default all
+//   WIDTH/HEIGHT  viewport, default 1440x900
+//
+// See PLAYWRIGHT.md at the repository root for environment setup.
+import { chromium } from "playwright";
+import { existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import nodePath from "node:path";
+import { fileURLToPath } from "node:url";
+
+const HERE = fileURLToPath(new URL(".", import.meta.url));
+const outDir = nodePath.resolve(process.argv[2] ?? nodePath.join(HERE, "out"));
+const baseUrl = process.env.BASE_URL ?? "http://127.0.0.1:8010";
+const themes = (process.env.THEMES ?? "light,dark").split(",");
+const only = process.env.ONLY ? process.env.ONLY.split(",") : null;
+const viewport = {
+  width: Number(process.env.WIDTH ?? 1440),
+  height: Number(process.env.HEIGHT ?? 900),
+};
+
+// [view id, sidebar buttons to click in order from a fresh page load]
+const views = [
+  ["chat", ["Chat"]],
+  ["agents", ["Agents"]],
+  ["workspaces", ["Workspaces"]],
+  ["sessions", ["Sessions"]],
+  ["kernels", ["Running Kernels"]],
+  ["memory", ["Memory"]],
+  ["gateways", ["Gateways"]],
+  ["skills", ["Skills"]],
+  ["info", ["Info"]],
+  ["config", ["Configuration", "Declarative"]],
+  ["config-secrets", ["Configuration", "Secrets"]],
+  ["config-kernels", ["Configuration", "Kernels"]],
+  ["connections", ["Configuration", "Connections"]],
+];
+
+// Fallback for hosts without the Chromium shared libraries installed (see
+// bootstrap-sysroot.py). When the sysroot is absent we rely on system packages.
+const sysroot = process.env.PW_SYSROOT ?? nodePath.join(HERE, ".sysroot");
+const browserEnv = { ...process.env };
+if (existsSync(sysroot)) {
+  browserEnv.LD_LIBRARY_PATH = [
+    nodePath.join(sysroot, "usr/lib/x86_64-linux-gnu"),
+    nodePath.join(sysroot, "lib/x86_64-linux-gnu"),
+    process.env.LD_LIBRARY_PATH,
+  ].filter(Boolean).join(":");
+  browserEnv.FONTCONFIG_FILE = nodePath.join(sysroot, "etc/fonts/fonts.conf");
+  browserEnv.XDG_DATA_DIRS = nodePath.join(sysroot, "usr/share");
+}
+
+if (!existsSync(nodePath.join(homedir(), ".fonts")) && !existsSync("/usr/share/fonts/truetype")) {
+  console.warn("warning: no fonts found. Chromium aborts with SIGTRAP when Skia cannot");
+  console.warn("         resolve a font. See PLAYWRIGHT.md.");
+}
+
+mkdirSync(outDir, { recursive: true });
+
+let failures = 0;
+for (const theme of themes) {
+  for (const [id, path] of views) {
+    if (only && !only.includes(id)) continue;
+    // One browser per view: a single long-lived browser accumulates enough
+    // renderer memory to get OOM-killed part way through the matrix.
+    const browser = await chromium.launch({ args: ["--disable-gpu"], env: browserEnv });
+    const ctx = await browser.newContext({ viewport });
+    const page = await ctx.newPage();
+    page.on("pageerror", (e) => console.log(`  [pageerror ${id}]`, String(e).slice(0, 200)));
+    await page.addInitScript((t) => {
+      localStorage.setItem("theme", t);
+      localStorage.setItem("sidebar-collapsed", "false");
+    }, theme);
+    try {
+      await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(1500);
+      for (const label of path) {
+        await page.getByRole("button", { name: label, exact: true }).first()
+          .click({ timeout: 5000 });
+        await page.waitForTimeout(600);
+      }
+      await page.waitForTimeout(1400);
+      await page.screenshot({ path: nodePath.join(outDir, `${theme}-${id}.png`) });
+      console.log("ok  ", theme, id);
+    } catch (err) {
+      failures += 1;
+      console.log("FAIL", theme, id, String(err).split("\n")[0]);
+    }
+    await ctx.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
+console.log(`done -> ${outDir}${failures ? ` (${failures} failed)` : ""}`);
+process.exitCode = failures ? 1 : 0;

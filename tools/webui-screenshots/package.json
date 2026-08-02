@@ -1,0 +1,14 @@
+{
+  "name": "agentspace-webui-screenshots",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Offline screenshot harness for the AgentSpace web UI.",
+  "scripts": {
+    "serve": "node mock-api.mjs",
+    "capture": "node capture.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

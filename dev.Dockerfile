@@ -32,6 +32,33 @@ RUN zypper --non-interactive install --no-recommends \
         rustup \
         tmux \
         vim \
+    && zypper --non-interactive install --no-recommends \
+        dejavu-fonts \
+        fontconfig \
+        google-noto-fonts \
+        libX11-6 \
+        libXcomposite1 \
+        libXdamage1 \
+        libXext6 \
+        libXfixes3 \
+        libXi6 \
+        libXrandr2 \
+        libXrender1 \
+        libXtst6 \
+        libasound2 \
+        libatk-1_0-0 \
+        libatk-bridge-2_0-0 \
+        libatspi0 \
+        libcairo2 \
+        libcups2 \
+        libdrm2 \
+        libgbm1 \
+        libpango-1_0-0 \
+        libxcb1 \
+        libxkbcommon0 \
+        libxshmfence1 \
+        mozilla-nspr \
+        mozilla-nss \
     && zypper clean --all \
     && curl --fail --location --silent --show-error \
         https://astral.sh/uv/install.sh \
