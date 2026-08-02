@@ -15,6 +15,70 @@ just webui-screenshots         # writes PNGs to tools/webui-screenshots/out/
 Then open the PNGs, or view them from an agent session with an image-capable
 tool. Screenshots are captured for every view in both light and dark themes.
 
+## Status
+
+The harness works and has been verified end to end: 13 views x 2 themes = 26
+screenshots, no page errors, with Monaco and markdown rendering correctly.
+
+`dev.Dockerfile` was updated to install the Chromium runtime libraries and
+fonts. **That change only takes effect once the dev image is rebuilt.** If you
+are in a container built before it, run the smoke test below; if it fails, use
+either the rebuild or the fallback described further down.
+
+This harness was built to support a visual overhaul of the web UI. If you are
+picking that work up, generate a baseline first — screenshots are written to a
+gitignored directory and are not committed, so there is no stale baseline to
+mistrust:
+
+```bash
+git stash            # or check out the pre-change commit
+just webui-screenshots tools/webui-screenshots/baseline
+git stash pop
+just webui-screenshots tools/webui-screenshots/after
+```
+
+## Verifying your container
+
+Run a single view. This exercises the real code path, including the sysroot
+fallback detection, so it tells you whether a full run will work:
+
+```bash
+just webui-screenshots-setup
+ONLY=chat THEMES=light just webui-screenshots
+```
+
+`ok   light chat` means you are set. Anything else, consult Troubleshooting
+below — the two likely causes are missing shared libraries and missing fonts.
+
+### Getting the libraries
+
+Rebuild the dev image so the `zypper` packages in `dev.Dockerfile` are applied:
+
+```bash
+just build-image-dev
+```
+
+Then restart the dev container. If you cannot rebuild, use the sysroot fallback.
+
+### A caveat about false passes
+
+`~/.fonts` and `~/.cache/ms-playwright` live in the dev home volume, so they
+survive container restarts. If a previous session installed fonts there by hand
+(the fallback script does exactly this), the check above can pass even on an
+image that lacks the packages. That is fine for getting work done, but do not
+read it as confirmation that the image is correct. To confirm that, check for
+the packages themselves:
+
+```bash
+rpm -q mozilla-nss libgbm1 dejavu-fonts
+```
+
+Once you are on a rebuilt image, the fallback artifacts are redundant:
+
+```bash
+rm -rf ~/.fonts tools/webui-screenshots/.sysroot
+```
+
 ## What the harness is
 
 `tools/webui-screenshots/` contains three pieces:
@@ -59,8 +123,11 @@ Failed to install browsers
 Error: spawn sudo ENOENT
 ```
 
-The dev container therefore installs the libraries natively via `zypper`. They
-are already listed in `dev.Dockerfile`; the openSUSE package names are:
+The dev container installs these libraries natively via `zypper`; they are
+listed in `dev.Dockerfile`. That file was updated after this container image
+was first published, so **an older image will not have them** — rebuild with
+`just build-image-dev`, or use the sysroot fallback. The openSUSE package names
+are:
 
 ```
 libX11-6 libXcomposite1 libXdamage1 libXext6 libXfixes3 libXi6 libXrandr2
@@ -93,12 +160,12 @@ FATAL:third_party/skia/src/ports/SkFontMgr_FontConfigInterface.cpp:163] Not impl
 ```
 
 The dev container installs `dejavu-fonts`, `google-noto-fonts`, and
-`fontconfig`. If you hit this on another host, installing any TrueType font
-into `~/.fonts` is enough.
+`fontconfig`. On any other host, or on a dev image predating that change,
+installing any TrueType font into `~/.fonts` is enough.
 
 ## Fallback: no root and no packages
 
-If you are on a host where you cannot install system packages, run:
+Use this if you cannot rebuild the dev image or install system packages:
 
 ```bash
 cd tools/webui-screenshots
@@ -117,6 +184,15 @@ container, including `node`. Use the host's copies of those.
 Requires `ar` (binutils) and `tar`, both present in the dev container.
 
 ## Running it manually
+
+`just webui-screenshots` takes an optional output directory, relative to the
+repository root:
+
+```bash
+just webui-screenshots tools/webui-screenshots/after
+```
+
+To drive the pieces yourself:
 
 ```bash
 cd clients/webui && pnpm run build
@@ -150,6 +226,13 @@ that reason. A single long-lived browser walking the whole matrix gets killed
 around the sixth or seventh view. If you rewrite the harness, keep that
 property.
 
+The container is not generously provisioned, and a full run launches 26
+browsers. During the session that built this harness, the surrounding tool
+process eventually failed to spawn any new shell at all (`No such file or
+directory (os error 2)`), with the filesystem intact. The cause was never
+confirmed, but resource exhaustion is the likely candidate. If that happens,
+restart the session; committed work is unaffected. Commit before long runs.
+
 ## Extending the mock data
 
 `mock-api.mjs` holds plain object fixtures near the top of the file (agents,
@@ -178,6 +261,7 @@ the capture output, for example `TypeError: schema.fields is not iterable`.
 | `no version information available (required by libselinux.so.1)` | Harmless sysroot symbol-versioning warning. | Ignore. |
 | `Failed to connect to the bus` / `drmGetDevices2()` | No D-Bus or GPU in the container. | Ignore; the harness passes `--disable-gpu`. |
 | Blank or partial page | `dist/` is stale or missing. | Re-run `pnpm run build` in `clients/webui`. |
+| Shell/tooling stops spawning processes | Likely container resource exhaustion. | Restart the session. See Memory above. |
 
 To see what Chromium is actually doing, re-run with browser logging:
 
