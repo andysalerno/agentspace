@@ -386,10 +386,12 @@ to structured `env` plus `secretRef`. Heuristic key warnings may supplement this
 presented as complete secret detection.
 
 Literal values remain allowed everywhere a `ConfigValue<T>` is accepted, including fields that
-are conventionally sensitive. A literal is persisted and exported as written. The WebUI should
-default sensitive fields such as connection API keys and gateway secret fields to named secret
-references, and require an explicit warning/advanced action to store them as literals. This keeps
-exact round-tripping without pretending a literal can be both exportable and secret.
+are conventionally sensitive. A literal is persisted and exported as written. Clients do not offer
+literals for sensitive fields at all: the WebUI connection API key is a picker over declared secret
+names, and `POST`/`PATCH /connections` accept `api_key_secret` (a declared name) as the client-facing
+form. `api_key` remains accepted for compatibility, is mutually exclusive with `api_key_secret`, and
+authoring a literal is a deliberate YAML-only act. This keeps exact round-tripping without pretending
+a literal can be both exportable and secret.
 
 For gateways, retain separate `env` and `secrets` mappings because the gateway type schema uses
 that distinction to choose UI controls and handling defaults. Both mappings accept
@@ -998,6 +1000,11 @@ goal was narrowed to scalar fields that currently have a concrete runtime consum
 Structural identifiers/references/discriminators remain literals, as planned. Boolean and numeric
 configuration fields are also currently literals; the implementation does not yet provide a
 generic `ConfigValue<bool>`/`ConfigValue<number>` surface.
+
+Client-side selection of a `secretRef` is implemented for connection API keys (`api_key_secret` on
+the connection routes, backed by the shared `SecretRefSelect` picker in the WebUI). The remaining
+secret-capable fields — gateway `secrets`, structured env, and agent system prompts — are still
+literal-only from clients and must be authored in YAML until the same picker is extended to them.
 
 `envText` remains an opaque literal blob and cannot contain secret references. Structured `env`
 must be used for individually secret-backed environment values.

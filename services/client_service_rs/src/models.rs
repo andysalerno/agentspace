@@ -8,7 +8,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-use crate::errors::ValidationError;
+use crate::{config::value::SecretName, errors::ValidationError};
 
 pub const DEFAULT_CONNECTION_API_FLAVOR: ConnectionApiFlavor = ConnectionApiFlavor::ChatCompletions;
 pub const DEFAULT_AGENT_SYSTEM_PROMPT: &str = "You are a helpful assistant. Despite living inside a coding agent harness, you are not strictly a coding assistant. Instead, you help the user with any and all tasks they give you (possibly including coding!) using the tools and skills at your disposal. Pro tip: always prefer your skills and tools over generic CLI tools (though you can use those, too!)";
@@ -635,8 +635,15 @@ pub struct ConnectionRecord {
     pub url: String,
     #[serde(default)]
     pub api_flavor: ConnectionApiFlavor,
+    /// Literal API key. Only authorable through YAML; mutually exclusive with
+    /// [`ConnectionRecord::api_key_secret`].
     #[serde(default)]
     pub api_key: String,
+    /// Declared secret backing the API key, when the configured value is a
+    /// `secretRef` rather than a literal. Typed as a [`SecretName`] so an
+    /// invalid name cannot be represented and silently dropped on projection.
+    #[serde(default)]
+    pub api_key_secret: Option<SecretName>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -655,9 +662,18 @@ impl ConnectionRecord {
             url: url.into(),
             api_flavor: DEFAULT_CONNECTION_API_FLAVOR,
             api_key: String::new(),
+            api_key_secret: None,
             created_at: now.clone(),
             updated_at: now,
         }
+    }
+
+    /// Whether an API key is configured, either as a literal or as a
+    /// `secretRef`. This says nothing about whether a referenced secret has a
+    /// value set.
+    #[must_use]
+    pub const fn has_api_key(&self) -> bool {
+        !self.api_key.is_empty() || self.api_key_secret.is_some()
     }
 
     #[must_use]
@@ -667,7 +683,8 @@ impl ConnectionRecord {
         data.insert("name".to_owned(), json!(self.name));
         data.insert("url".to_owned(), json!(self.url));
         data.insert("api_flavor".to_owned(), json!(self.api_flavor.as_str()));
-        data.insert("has_api_key".to_owned(), json!(!self.api_key.is_empty()));
+        data.insert("has_api_key".to_owned(), json!(self.has_api_key()));
+        data.insert("api_key_secret".to_owned(), json!(self.api_key_secret));
         data.insert("created_at".to_owned(), json!(self.created_at));
         data.insert("updated_at".to_owned(), json!(self.updated_at));
         if include_api_key {
@@ -865,7 +882,7 @@ mod tests {
 
     use super::{
         AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
-        HarnessName, KernelConfigRecord, MessageRecord, MessageRole, ToolCallRecord,
+        HarnessName, KernelConfigRecord, MessageRecord, MessageRole, SecretName, ToolCallRecord,
         parse_env_vars, validate_agent_id, validate_connection_id, validate_gateway_id,
         validate_skill_id, validate_workspace_id,
     };
@@ -999,6 +1016,7 @@ mod tests {
                 "url": "http://example.test",
                 "api_flavor": "chat_completions",
                 "has_api_key": true,
+                "api_key_secret": null,
                 "created_at": "c",
                 "updated_at": "u",
             })
@@ -1011,11 +1029,38 @@ mod tests {
                 "url": "http://example.test",
                 "api_flavor": "chat_completions",
                 "has_api_key": true,
+                "api_key_secret": null,
                 "created_at": "c",
                 "updated_at": "u",
                 "api_key": "secret",
             })
         );
+    }
+
+    #[test]
+    fn connection_summary_reports_secret_backed_api_key() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let mut connection = ConnectionRecord::new("conn", "Connection", "http://example.test");
+        connection.created_at = "c".to_owned();
+        connection.updated_at = "u".to_owned();
+        connection.api_key_secret = Some(SecretName::new("OPENAI_API_KEY")?);
+
+        assert!(connection.has_api_key());
+        assert_eq!(
+            connection.summary(true),
+            json!({
+                "connection_id": "conn",
+                "name": "Connection",
+                "url": "http://example.test",
+                "api_flavor": "chat_completions",
+                "has_api_key": true,
+                "api_key_secret": "OPENAI_API_KEY",
+                "created_at": "c",
+                "updated_at": "u",
+                "api_key": "",
+            })
+        );
+        Ok(())
     }
 
     #[test]

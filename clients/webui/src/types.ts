@@ -280,7 +280,8 @@ export type Connection = {
   url: string;
   api_flavor: "chat_completions" | "responses";
   has_api_key: boolean;
-  api_key?: string;
+  /// Name of the declared secret backing the API key, when one is referenced.
+  api_key_secret?: string | null;
   created_at: string;
   updated_at: string;
 };

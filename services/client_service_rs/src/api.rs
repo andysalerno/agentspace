@@ -445,7 +445,7 @@ async fn get_connection(
         action = "get_connection",
         connection_id = %connection_id,
         api_flavor = connection.api_flavor.as_str(),
-        has_api_key = !connection.api_key.is_empty(),
+        has_api_key = connection.has_api_key(),
         "api handler completed"
     );
     Ok(Json(connection.summary(false)))
@@ -545,18 +545,96 @@ async fn create_connection(
     validate_connection_id(&payload.connection_id)?;
     let mut connection = ConnectionRecord::new(payload.connection_id, payload.name, payload.url);
     connection.api_flavor = payload.api_flavor;
-    connection.api_key = payload.api_key;
+    apply_connection_api_key(
+        &mut connection,
+        payload.api_key,
+        payload.api_key_secret.as_deref(),
+    )?;
     let value = connection.summary(true);
-    state.connections.insert(&connection)?;
+    write_connection(&state, &connection, |record| {
+        state.connections.insert(record)
+    })?;
     tracing::info!(
         route = "/connections",
         action = "create_connection",
         connection_id = %value["connection_id"].as_str().unwrap_or_default(),
         api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
         has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
+        api_key_secret = connection.api_key_secret.as_ref().map_or("", SecretName::as_str),
         "api handler completed"
     );
     Ok(Json(value))
+}
+
+/// Persist a connection, serializing the write against secret declaration and
+/// removal operations.
+///
+/// The referenced declaration must still exist at the moment the document is
+/// mutated. Checking it separately would leave a window in which a concurrent
+/// removal turns the write into a document validation failure (a 500) rather
+/// than a clean rejection.
+fn write_connection<F>(
+    state: &AppState,
+    connection: &ConnectionRecord,
+    write: F,
+) -> Result<(), ApiError>
+where
+    F: FnOnce(&ConnectionRecord) -> Result<(), StoreError>,
+{
+    let required = connection
+        .api_key_secret
+        .as_ref()
+        .map(SecretName::as_str)
+        .map(ToOwned::to_owned);
+    let written = state
+        .config_state
+        .with_declared_secret(required.as_deref(), || write(connection))?;
+    if written.is_none() {
+        return Err(ApiError::unprocessable(format!(
+            "secret {} must be declared before it can be referenced",
+            required.unwrap_or_default()
+        )));
+    }
+    Ok(())
+}
+
+/// Apply the requested API key selection to a connection record.
+///
+/// `api_key_secret` names a declared secret and is the only form clients such as
+/// the web UI offer; literal keys remain authorable through YAML. Supplying both
+/// fields is rejected regardless of their values, an empty value for either
+/// clears the key, and omitting both leaves the record untouched.
+///
+/// The name is only validated for grammar here; that it is actually declared is
+/// enforced atomically with the write by [`write_connection`].
+fn apply_connection_api_key(
+    connection: &mut ConnectionRecord,
+    literal: Option<String>,
+    secret: Option<&str>,
+) -> Result<(), ApiError> {
+    if literal.is_some() && secret.is_some() {
+        return Err(ApiError::unprocessable(
+            "api_key and api_key_secret are mutually exclusive; provide only one".to_owned(),
+        ));
+    }
+    if let Some(secret) = secret {
+        let secret_name = secret.trim();
+        if secret_name.is_empty() {
+            connection.api_key = String::new();
+            connection.api_key_secret = None;
+            return Ok(());
+        }
+        let name = SecretName::new(secret_name)
+            .map_err(|error| ApiError::unprocessable(error.to_string()))?;
+        connection.api_key = String::new();
+        connection.api_key_secret = Some(name);
+        return Ok(());
+    }
+    if let Some(literal) = literal {
+        connection.api_key = literal;
+        connection.api_key_secret = None;
+    }
+    Ok(())
 }
 
 async fn update_connection(
@@ -574,18 +652,23 @@ async fn update_connection(
     if let Some(api_flavor) = payload.api_flavor {
         connection.api_flavor = api_flavor;
     }
-    if let Some(api_key) = payload.api_key {
-        connection.api_key = api_key;
-    }
+    apply_connection_api_key(
+        &mut connection,
+        payload.api_key,
+        payload.api_key_secret.as_deref(),
+    )?;
     connection.updated_at = utc_now();
     let value = connection.summary(true);
-    state.connections.update(&connection)?;
+    write_connection(&state, &connection, |record| {
+        state.connections.update(record)
+    })?;
     tracing::info!(
         route = "/connections/:connection_id",
         action = "update_connection",
         connection_id = %connection_id,
         api_flavor = %value["api_flavor"].as_str().unwrap_or_default(),
         has_api_key = value["has_api_key"].as_bool().unwrap_or(false),
+        api_key_secret = connection.api_key_secret.as_ref().map_or("", SecretName::as_str),
         "api handler completed"
     );
     Ok(Json(value))
@@ -3491,7 +3574,9 @@ struct CreateConnectionRequest {
     #[serde(default)]
     api_flavor: ConnectionApiFlavor,
     #[serde(default)]
-    api_key: String,
+    api_key: Option<String>,
+    #[serde(default)]
+    api_key_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3500,6 +3585,7 @@ struct UpdateConnectionRequest {
     url: Option<String>,
     api_flavor: Option<ConnectionApiFlavor>,
     api_key: Option<String>,
+    api_key_secret: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

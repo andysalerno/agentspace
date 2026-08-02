@@ -593,6 +593,36 @@ impl ConfigState {
             })
     }
 
+    /// Run `operation` while holding the secret-operations lock, after checking
+    /// that `required` is declared.
+    ///
+    /// Callers that write a `secretRef` into the document must use this rather
+    /// than checking the declaration themselves: the check and the mutation are
+    /// otherwise not atomic, so a concurrent removal can slip between them and
+    /// turn the write into a validation failure instead of a clean rejection.
+    ///
+    /// Returns `Ok(None)` when `required` is not declared, leaving the document
+    /// untouched.
+    ///
+    /// # Errors
+    /// Returns [`StoreError`] on lock failure or from `operation`.
+    pub fn with_declared_secret<T, F>(
+        &self,
+        required: Option<&str>,
+        operation: F,
+    ) -> Result<Option<T>, StoreError>
+    where
+        F: FnOnce() -> Result<T, StoreError>,
+    {
+        let _guard = self.lock_secret_ops()?;
+        if let Some(name) = required
+            && !self.active().secret_declared(name)
+        {
+            return Ok(None);
+        }
+        operation().map(Some)
+    }
+
     /// Declare a new secret. Serialized against applies and value operations.
     /// Returns `false` when the declaration already exists.
     ///

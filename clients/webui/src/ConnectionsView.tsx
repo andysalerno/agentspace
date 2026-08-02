@@ -6,6 +6,7 @@ import { api } from "./api";
 import { queryKeys, useConnections } from "./queries";
 import { useErrorContext } from "./useErrorContext";
 import { Button, Input, Select } from "./fluent";
+import SecretRefSelect, { LITERAL_VALUE } from "./SecretRefSelect";
 
 type ConnectionApiFlavor = Connection["api_flavor"];
 
@@ -27,13 +28,13 @@ export default function ConnectionsView() {
     const [formName, setFormName] = useState("");
     const [formUrl, setFormUrl] = useState("");
     const [formApiFlavor, setFormApiFlavor] = useState<ConnectionApiFlavor>("chat_completions");
-    const [formApiKey, setFormApiKey] = useState("");
+    const [formApiKeySecret, setFormApiKeySecret] = useState("");
 
     const [editingId, setEditingId] = useState<string | null>(null);
     const [editName, setEditName] = useState("");
     const [editUrl, setEditUrl] = useState("");
     const [editApiFlavor, setEditApiFlavor] = useState<ConnectionApiFlavor>("chat_completions");
-    const [editApiKey, setEditApiKey] = useState("");
+    const [editApiKeySecret, setEditApiKeySecret] = useState("");
 
     const invalidate = () =>
         queryClient.invalidateQueries({ queryKey: queryKeys.connections });
@@ -44,14 +45,14 @@ export default function ConnectionsView() {
             name: string;
             url: string;
             api_flavor: ConnectionApiFlavor;
-            api_key: string;
+            api_key_secret: string;
         }) => api.createConnection(payload),
         onSuccess: () => invalidate(),
         onError: reportError,
     });
 
     const updateMutation = useMutation({
-        mutationFn: ({ id, payload }: { id: string; payload: { name?: string; url?: string; api_flavor?: ConnectionApiFlavor; api_key?: string } }) =>
+        mutationFn: ({ id, payload }: { id: string; payload: { name?: string; url?: string; api_flavor?: ConnectionApiFlavor; api_key_secret?: string } }) =>
             api.updateConnection(id, payload),
         onSuccess: () => invalidate(),
         onError: reportError,
@@ -75,13 +76,13 @@ export default function ConnectionsView() {
             name: formName,
             url: formUrl,
             api_flavor: formApiFlavor,
-            api_key: formApiKey,
+            api_key_secret: formApiKeySecret,
         });
         setFormId("");
         setFormName("");
         setFormUrl("");
         setFormApiFlavor("chat_completions");
-        setFormApiKey("");
+        setFormApiKeySecret("");
         setShowForm(false);
     }
 
@@ -90,7 +91,11 @@ export default function ConnectionsView() {
         setEditName(conn.name);
         setEditUrl(conn.url);
         setEditApiFlavor(conn.api_flavor);
-        setEditApiKey("");
+        // A literal key is only authorable in YAML, so it is represented by a
+        // sentinel the picker preserves rather than silently clearing.
+        setEditApiKeySecret(
+            conn.api_key_secret ?? (conn.has_api_key ? LITERAL_VALUE : ""),
+        );
     }
 
     function cancelEdit() {
@@ -98,7 +103,7 @@ export default function ConnectionsView() {
         setEditName("");
         setEditUrl("");
         setEditApiFlavor("chat_completions");
-        setEditApiKey("");
+        setEditApiKeySecret("");
     }
 
     async function handleEditSubmit(event: FormEvent<HTMLFormElement>) {
@@ -110,15 +115,15 @@ export default function ConnectionsView() {
                 name: editName,
                 url: editUrl,
                 api_flavor: editApiFlavor,
-                api_key: editApiKey || undefined,
+                // Omitted while the YAML literal is still selected, so editing
+                // an unrelated field cannot clear an authored key.
+                ...(editApiKeySecret === LITERAL_VALUE
+                    ? {}
+                    : { api_key_secret: editApiKeySecret }),
             },
         });
         cancelEdit();
     }
-
-    const editingConn = editingId
-        ? (connections.find((c) => c.connection_id === editingId) ?? null)
-        : null;
 
     return (
         <div className="view-content management-view connections-management-view">
@@ -170,15 +175,12 @@ export default function ConnectionsView() {
                         />
                     </label>
                     <label>
-                        API Key
-                        <Input
-                            autoComplete="new-password"
-                            placeholder="sk-..."
-                            type="password"
-                            value={formApiKey}
-                            onChange={(e) => setFormApiKey(e.target.value)}
+                        API Key Secret
+                        <SecretRefSelect
+                            noneLabel="No API key"
+                            value={formApiKeySecret}
+                            onChange={setFormApiKeySecret}
                         />
-                        <span className="muted">Leave blank if the endpoint does not require a key</span>
                     </label>
                     <label>
                         API Flavor
@@ -220,7 +222,9 @@ export default function ConnectionsView() {
                                 </div>
                                 <div>
                                     <strong>API Key:</strong>{" "}
-                                    {conn.has_api_key ? "set" : "not set"}
+                                    {conn.api_key_secret
+                                        ? <code>{conn.api_key_secret}</code>
+                                        : (conn.has_api_key ? "literal value set in YAML" : "not set")}
                                 </div>
                                 <div>
                                     <strong>API Flavor:</strong> {apiFlavorLabel(conn.api_flavor)}
@@ -250,13 +254,12 @@ export default function ConnectionsView() {
                                         />
                                     </label>
                                     <label>
-                                        API Key
-                                        <Input
-                                            autoComplete="new-password"
-                                            placeholder={editingConn && editingConn.has_api_key ? "(leave blank to keep current value)" : "sk-..."}
-                                            type="password"
-                                            value={editApiKey}
-                                            onChange={(e) => setEditApiKey(e.target.value)}
+                                        API Key Secret
+                                        <SecretRefSelect
+                                            literalLabel="Literal value authored in YAML (keep)"
+                                            noneLabel="No API key"
+                                            value={editApiKeySecret}
+                                            onChange={setEditApiKeySecret}
                                         />
                                     </label>
                                     <label>
