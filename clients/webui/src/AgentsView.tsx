@@ -1,6 +1,15 @@
-import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+    Add20Regular,
+    ArrowDownload20Regular,
+    Bot24Regular,
+    ChevronDown20Regular,
+    ChevronRight20Regular,
+    Delete20Regular,
+    Edit20Regular,
+    Play20Regular,
+} from "@fluentui/react-icons";
 import type { Agent, ConnectionModels, WorkspaceMountMode } from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
@@ -21,7 +30,18 @@ import {
     useWorkspaces,
 } from "./queries";
 import { useErrorContext } from "./useErrorContext";
-import { Button, Checkbox, Combobox, Input, Option, Select } from "./fluent";
+import {
+    Button,
+    Checkbox,
+    Combobox,
+    Field,
+    Input,
+    MessageBar,
+    MessageBarBody,
+    Option,
+    Select,
+} from "./fluent";
+import { EmptyState, FormDialog, RowActions, ViewHeader } from "./ui";
 
 type AgentsViewProps = {
     onSessionCreated: (sessionId: string) => void;
@@ -30,6 +50,11 @@ type AgentsViewProps = {
 const DEFAULT_HARNESS = "copilot-cli";
 const DEFAULT_AGENT_SYSTEM_PROMPT =
     "You are a helpful assistant. Despite living inside a coding agent harness, you are not strictly a coding assistant. Instead, you help the user with any and all tasks they give you (possibly including coding!) using the tools and skills at your disposal. Pro tip: always prefer your skills and tools over generic CLI tools (though you can use those, too!)";
+
+type WorkspaceMountFormState = {
+    workspace_id: string;
+    mode: WorkspaceMountMode;
+};
 
 type AgentFormState = {
     agent_id: string;
@@ -40,11 +65,6 @@ type AgentFormState = {
     env_vars: string;
     connection_id: string | null;
     workspace_mounts: WorkspaceMountFormState[];
-};
-
-type WorkspaceMountFormState = {
-    workspace_id: string;
-    mode: WorkspaceMountMode;
 };
 
 function emptyAgentForm(harnesses: string[]): AgentFormState {
@@ -77,9 +97,7 @@ function agentToForm(agent: Agent): AgentFormState {
 }
 
 function getInitialHarness(harnesses: string[]): string {
-    if (harnesses.includes(DEFAULT_HARNESS)) {
-        return DEFAULT_HARNESS;
-    }
+    if (harnesses.includes(DEFAULT_HARNESS)) return DEFAULT_HARNESS;
     return harnesses[0] ?? DEFAULT_HARNESS;
 }
 
@@ -97,23 +115,14 @@ function upsertWorkspaceMount(
 ): WorkspaceMountFormState[] {
     if (mounts.some((mount) => mount.workspace_id === workspaceId)) {
         return mounts.map((mount) =>
-            mount.workspace_id === workspaceId ? { ...mount, mode } : mount,
+            mount.workspace_id === workspaceId ? { ...mount, mode } : mount
         );
     }
     return [...mounts, { workspace_id: workspaceId, mode }];
 }
 
-type ModelNameFieldProps = {
-    connectionId: string | null;
-    envVars: string;
-    harness: string;
-    onEnvVarsChange: (envVars: string) => void;
-};
-
 function modelIdsFromResponse(response: ConnectionModels | undefined): string[] {
-    if (!response?.data) {
-        return [];
-    }
+    if (!response?.data) return [];
     return Array.from(
         new Set(
             response.data
@@ -123,17 +132,21 @@ function modelIdsFromResponse(response: ConnectionModels | undefined): string[] 
     );
 }
 
-function ModelNameField({
-    connectionId,
-    envVars,
-    harness,
-    onEnvVarsChange,
-}: ModelNameFieldProps) {
+/**
+ * Model picker backed by the selected connection's model list. Freeform, since
+ * a connection may be unreachable or expose models it does not advertise.
+ */
+function ModelNameField(
+    { connectionId, envVars, harness, onEnvVarsChange }: {
+        connectionId: string | null;
+        envVars: string;
+        harness: string;
+        onEnvVarsChange: (envVars: string) => void;
+    },
+) {
     const modelKey = modelEnvKeyForHarness(harness);
     const modelsQuery = useConnectionModels(modelKey === null ? null : connectionId);
-    if (modelKey === null) {
-        return null;
-    }
+    if (modelKey === null) return null;
 
     const modelIds = modelIdsFromResponse(modelsQuery.data);
     const value = getEnvValue(envVars, modelKey);
@@ -145,112 +158,242 @@ function ModelNameField({
     const placeholder = connectionId === null
         ? "Select a connection or type a model name"
         : modelsQuery.isError
-            ? "Model list unavailable; type a model name"
-            : "Select or type a model name";
-    const modelHelp = connectionId === null
-        ? modelKey
+        ? "Model list unavailable; type a model name"
+        : "Select or type a model name";
+    const hint = connectionId === null
+        ? `Sets ${modelKey}.`
         : modelsQuery.isLoading
-            ? `${modelKey} · loading models...`
-            : modelsQuery.isError
-                ? `${modelKey} · model list unavailable`
-                : modelIds.length > 0
-                    ? `${modelKey} · ${modelIds.length} model${modelIds.length === 1 ? "" : "s"} available`
-                    : `${modelKey} · no models returned`;
+        ? `Sets ${modelKey}. Loading models…`
+        : modelsQuery.isError
+        ? `Sets ${modelKey}. Model list unavailable.`
+        : modelIds.length > 0
+        ? `Sets ${modelKey}. ${modelIds.length} model${
+            modelIds.length === 1 ? "" : "s"
+        } available.`
+        : `Sets ${modelKey}. The connection returned no models.`;
     const setModelName = (modelName: string) =>
         onEnvVarsChange(setEnvValue(envVars, modelKey, modelName));
 
     return (
-        <label>
-            Model
+        <Field hint={hint} label="Model">
             <Combobox
                 freeform
                 inlinePopup
-                placeholder={placeholder}
-                selectedOptions={selectedOptions}
-                value={value}
                 onChange={(e) => setModelName(e.target.value)}
                 onOptionSelect={(_, data) => {
                     const selectedModel = data.optionValue ?? data.optionText;
-                    if (selectedModel) {
-                        setModelName(selectedModel);
-                    }
+                    if (selectedModel) setModelName(selectedModel);
                 }}
+                placeholder={placeholder}
+                selectedOptions={selectedOptions}
+                value={value}
             >
                 {visibleModelIds.map((modelId) => (
-                    <Option key={modelId} text={modelId} value={modelId}>
-                        {modelId}
-                    </Option>
+                    <Option key={modelId} text={modelId} value={modelId}>{modelId}</Option>
                 ))}
                 {connectionId !== null && modelsQuery.isLoading && (
-                    <Option disabled text="Loading models">
-                        Loading models...
-                    </Option>
+                    <Option disabled text="Loading models">Loading models…</Option>
                 )}
                 {connectionId !== null && modelsQuery.isError && (
-                    <Option disabled text="Model list unavailable">
-                        Model list unavailable
-                    </Option>
+                    <Option disabled text="Model list unavailable">Model list unavailable</Option>
                 )}
-                {connectionId !== null
-                    && !modelsQuery.isLoading
-                    && !modelsQuery.isError
-                    && modelIds.length > 0
-                    && visibleModelIds.length === 0 && (
-                    <Option disabled text="No matching models">
-                        No matching models
-                    </Option>
+                {connectionId !== null && !modelsQuery.isLoading && !modelsQuery.isError
+                    && modelIds.length > 0 && visibleModelIds.length === 0 && (
+                    <Option disabled text="No matching models">No matching models</Option>
                 )}
-                {connectionId !== null
-                    && !modelsQuery.isLoading
-                    && !modelsQuery.isError
+                {connectionId !== null && !modelsQuery.isLoading && !modelsQuery.isError
                     && modelIds.length === 0 && (
-                    <Option disabled text="No models returned">
-                        No models returned
-                    </Option>
+                    <Option disabled text="No models returned">No models returned</Option>
                 )}
             </Combobox>
-            <span className="muted">{modelHelp}</span>
-        </label>
+        </Field>
+    );
+}
+
+/** Body of both the create and the edit dialog. */
+function AgentFormFields(
+    { form, onChange, idEditable }: {
+        form: AgentFormState;
+        onChange: (next: AgentFormState) => void;
+        idEditable: boolean;
+    },
+) {
+    const { data: skills = [] } = useSkills();
+    const { data: harnesses = [] } = useHarnesses();
+    const { data: connections = [] } = useConnections();
+    const { data: workspaces = [] } = useWorkspaces();
+
+    function toggleSkill(skillId: string) {
+        onChange({
+            ...form,
+            skills: form.skills.includes(skillId)
+                ? form.skills.filter((s) => s !== skillId)
+                : [...form.skills, skillId],
+        });
+    }
+
+    function setWorkspaceMode(workspaceId: string, mode: WorkspaceMountMode | "") {
+        onChange({
+            ...form,
+            workspace_mounts: mode
+                ? upsertWorkspaceMount(form.workspace_mounts, workspaceId, mode)
+                : form.workspace_mounts.filter((mount) => mount.workspace_id !== workspaceId),
+        });
+    }
+
+    return (
+        <>
+            <div className="form-grid">
+                {idEditable && (
+                    <Field label="Agent ID" required>
+                        <Input
+                            onChange={(e) => onChange({ ...form, agent_id: e.target.value })}
+                            pattern="[a-z]+(?:-[a-z]+)*"
+                            placeholder="support-bot"
+                            required
+                            value={form.agent_id}
+                        />
+                    </Field>
+                )}
+                <Field label="Display name" required>
+                    <Input
+                        onChange={(e) => onChange({ ...form, name: e.target.value })}
+                        placeholder="Support Bot"
+                        required
+                        value={form.name}
+                    />
+                </Field>
+                <Field label="Kernel">
+                    <Select
+                        onChange={(e) => onChange({ ...form, harness: e.target.value })}
+                        value={form.harness}
+                    >
+                        {harnesses.map((harness) => (
+                            <option key={harness} value={harness}>
+                                {formatHarnessLabel(harness)}
+                            </option>
+                        ))}
+                    </Select>
+                </Field>
+                <Field label="Connection">
+                    <Select
+                        onChange={(e) =>
+                            onChange({ ...form, connection_id: e.target.value || null })}
+                        value={form.connection_id ?? ""}
+                    >
+                        <option value="">None</option>
+                        {connections.map((conn) => (
+                            <option key={conn.connection_id} value={conn.connection_id}>
+                                {conn.name} ({conn.connection_id})
+                            </option>
+                        ))}
+                    </Select>
+                </Field>
+                <ModelNameField
+                    connectionId={form.connection_id}
+                    envVars={form.env_vars}
+                    harness={form.harness}
+                    onEnvVarsChange={(envVars) => onChange({ ...form, env_vars: envVars })}
+                />
+            </div>
+
+            <Field label="System prompt">
+                <CodeEditor
+                    height="140px"
+                    language="markdown"
+                    onChange={(v) => onChange({ ...form, system_prompt: v })}
+                    value={form.system_prompt}
+                />
+            </Field>
+
+            {skills.length > 0 && (
+                <fieldset className="field-group">
+                    <legend>Skills</legend>
+                    <div className="checkbox-grid">
+                        {skills.map((skill) => (
+                            <Checkbox
+                                checked={form.skills.includes(skill.skill_id)}
+                                key={skill.skill_id}
+                                label={skill.skill_id}
+                                onChange={() => toggleSkill(skill.skill_id)}
+                            />
+                        ))}
+                    </div>
+                </fieldset>
+            )}
+
+            {workspaces.length > 0 && (
+                <fieldset className="field-group">
+                    <legend>Workspaces</legend>
+                    <span className="field-group-help">
+                        Mounted at /workspace/&lt;workspace-id&gt; when a session starts. Changes
+                        apply to new or restarted sessions.
+                    </span>
+                    <div className="checkbox-grid">
+                        {workspaces.map((workspace) => {
+                            const mount = form.workspace_mounts.find(
+                                (item) => item.workspace_id === workspace.workspace_id,
+                            );
+                            return (
+                                <div className="mount-row" key={workspace.workspace_id}>
+                                    <span title={workspace.workspace_id}>{workspace.name}</span>
+                                    <Select
+                                        aria-label={`Mount mode for ${workspace.name}`}
+                                        onChange={(e) =>
+                                            setWorkspaceMode(
+                                                workspace.workspace_id,
+                                                e.target.value as WorkspaceMountMode | "",
+                                            )}
+                                        value={mount?.mode ?? ""}
+                                    >
+                                        <option value="">Not mounted</option>
+                                        <option value="rw">Read/write</option>
+                                        <option value="ro">Read-only</option>
+                                    </Select>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </fieldset>
+            )}
+
+            <Field hint="One KEY=VALUE per line, using .env syntax." label="Environment variables">
+                <CodeEditor
+                    height="140px"
+                    language="ini"
+                    onChange={(v) => onChange({ ...form, env_vars: v })}
+                    value={form.env_vars}
+                />
+            </Field>
+        </>
     );
 }
 
 export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
     const { data: agents = [] } = useAgents();
-    const { data: skills = [] } = useSkills();
-    const { data: harnesses = [] } = useHarnesses();
     const { data: connections = [] } = useConnections();
-    const { data: workspaces = [] } = useWorkspaces();
+    const { data: harnesses = [] } = useHarnesses();
     const { data: sessions = [] } = useSessions();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
 
-    const [formState, setForm] = useState<AgentFormState>(() => emptyAgentForm(harnesses));
+    const [createForm, setCreateForm] = useState<AgentFormState>(() => emptyAgentForm(harnesses));
     const [showForm, setShowForm] = useState(false);
     const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
     const [editForm, setEditForm] = useState<AgentFormState | null>(null);
     const [envDirty, setEnvDirty] = useState(false);
+    const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
 
     // Fall back to a valid harness while the harness list is loading or when
     // the previously selected harness is no longer available.
-    const form: AgentFormState =
-        harnesses.length === 0 || harnesses.includes(formState.harness)
-            ? formState
-            : { ...formState, harness: getInitialHarness(harnesses) };
+    const form: AgentFormState = harnesses.length === 0 || harnesses.includes(createForm.harness)
+        ? createForm
+        : { ...createForm, harness: getInitialHarness(harnesses) };
 
-    const invalidateAgents = () =>
-        queryClient.invalidateQueries({ queryKey: queryKeys.agents });
+    const invalidateAgents = () => queryClient.invalidateQueries({ queryKey: queryKeys.agents });
 
     const createMutation = useMutation({
-        mutationFn: (payload: {
-            agent_id: string;
-            name: string;
-            harness: string;
-            system_prompt: string;
-            skills: string[];
-            env_vars: string;
-            connection_id: string | null;
-            workspace_mounts: WorkspaceMountFormState[];
-        }) => api.createAgent(payload),
+        mutationFn: (payload: AgentFormState) => api.createAgent(payload),
         onSuccess: () => invalidateAgents(),
         onError: reportError,
     });
@@ -267,8 +410,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 connection_id?: string | null;
                 workspace_mounts?: WorkspaceMountFormState[];
             };
-        }) =>
-            api.updateAgent(agentId, patch),
+        }) => api.updateAgent(agentId, patch),
         onSuccess: () => invalidateAgents(),
         onError: reportError,
     });
@@ -281,11 +423,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
 
     const startSessionMutation = useMutation({
         mutationFn: (agentId: string) =>
-            api.createSession({
-                agent_id: agentId,
-                channel_name: null,
-                client_type: "webui",
-            }),
+            api.createSession({ agent_id: agentId, channel_name: null, client_type: "webui" }),
         onSuccess: (session) => {
             void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
             onSessionCreated(session.session_id);
@@ -293,12 +431,13 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
         onError: reportError,
     });
 
-    const busy =
-        createMutation.isPending
+    const busy = createMutation.isPending
         || updateMutation.isPending
         || deleteMutation.isPending
         || startSessionMutation.isPending;
 
+    // Prefill the new agent's environment from the kernel defaults, until the
+    // user edits the field themselves.
     useEffect(() => {
         if (!showForm) return;
         if (envDirty) return;
@@ -307,16 +446,16 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
         api.getKernelConfig(form.harness)
             .then((config) => {
                 if (cancelled) return;
-                setForm((prev) => ({
+                setCreateForm((prev) => ({
                     ...prev,
                     env_vars: withRequiredEnvKeys(config.env_vars, form.harness),
                 }));
             })
             .catch(() => {
-                // non-fatal: prefill is a convenience. Still surface required
+                // Non-fatal: prefill is a convenience. Still surface required
                 // keys so the user knows what to fill in.
                 if (cancelled) return;
-                setForm((prev) => ({
+                setCreateForm((prev) => ({
                     ...prev,
                     env_vars: withRequiredEnvKeys(prev.env_vars, form.harness),
                 }));
@@ -326,85 +465,32 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
         };
     }, [showForm, form.harness, envDirty]);
 
-    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
-        await createMutation.mutateAsync(form);
-        setForm(emptyAgentForm(harnesses));
-        setEnvDirty(false);
-        setShowForm(false);
-    }
-
-    function toggleFormSkill(skillId: string) {
-        setForm((prev) => ({
-            ...prev,
-            skills: prev.skills.includes(skillId)
-                ? prev.skills.filter((s) => s !== skillId)
-                : [...prev.skills, skillId],
-        }));
-    }
-
-    function toggleEditSkill(skillId: string) {
-        setEditForm((prev) => {
-            if (prev === null) return prev;
-            return {
-                ...prev,
-                skills: prev.skills.includes(skillId)
-                    ? prev.skills.filter((s) => s !== skillId)
-                    : [...prev.skills, skillId],
-            };
-        });
-    }
-
-    function setFormWorkspaceMode(workspaceId: string, mode: WorkspaceMountMode | "") {
-        setForm((prev) => ({
-            ...prev,
-            workspace_mounts: mode
-                ? upsertWorkspaceMount(prev.workspace_mounts, workspaceId, mode)
-                : prev.workspace_mounts.filter((mount) => mount.workspace_id !== workspaceId),
-        }));
-    }
-
-    function setEditWorkspaceMode(workspaceId: string, mode: WorkspaceMountMode | "") {
-        setEditForm((prev) => {
-            if (prev === null) return prev;
-            return {
-                ...prev,
-                workspace_mounts: mode
-                    ? upsertWorkspaceMount(prev.workspace_mounts, workspaceId, mode)
-                    : prev.workspace_mounts.filter((mount) => mount.workspace_id !== workspaceId),
-            };
-        });
-    }
-
-    function startEditingAgent(agent: Agent) {
-        setShowForm(false);
-        setEnvDirty(false);
-        setEditingAgentId(agent.agent_id);
-        setEditForm(agentToForm(agent));
-    }
-
-    function stopEditingAgent() {
-        setEditingAgentId(null);
-        setEditForm(null);
-    }
-
     function activeSessionCount(agentId: string) {
         return sessions.filter((session) => session.agent_id === agentId).length;
     }
 
-    async function handleSaveAgent(agentId: string) {
-        if (editForm === null) return;
-        const activeCount = activeSessionCount(agentId);
+    async function handleCreate() {
+        await createMutation.mutateAsync(form);
+        setCreateForm(emptyAgentForm(harnesses));
+        setEnvDirty(false);
+        setShowForm(false);
+    }
+
+    async function handleSaveAgent() {
+        if (editForm === null || editingAgentId === null) return;
+        const activeCount = activeSessionCount(editingAgentId);
         if (
             activeCount > 0
             && !window.confirm(
-                `${activeCount} existing session${activeCount === 1 ? "" : "s"} use this agent. Save changes anyway? Those kernels need to be restarted before they pick up the new configuration.`,
+                `${activeCount} existing session${
+                    activeCount === 1 ? "" : "s"
+                } use this agent. Save changes anyway? Those kernels need to be restarted before they pick up the new configuration.`,
             )
         ) {
             return;
         }
         await updateMutation.mutateAsync({
-            agentId,
+            agentId: editingAgentId,
             patch: {
                 name: editForm.name,
                 harness: editForm.harness,
@@ -415,405 +501,323 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 workspace_mounts: editForm.workspace_mounts,
             },
         });
-        stopEditingAgent();
+        setEditingAgentId(null);
+        setEditForm(null);
+    }
+
+    function connectionLabel(agent: Agent) {
+        if (agent.connection_id === null) return null;
+        return connections.find((c) => c.connection_id === agent.connection_id)?.name
+            ?? agent.connection_id;
     }
 
     return (
-        <div className="view-content management-view agents-management-view">
-            <div className="view-header">
-                <div>
-                    <h2>Agents</h2>
-                    <span className="muted">
-                        {agents.length} configured · {sessions.length} sessions · {skills.length} skills · {workspaces.length} workspaces
-                    </span>
-                </div>
-                <div className="view-header-actions">
-                    <Button onClick={() => { setShowForm(!showForm); stopEditingAgent(); if (showForm) setEnvDirty(false); }} type="button">
-                        {showForm ? "Cancel" : "New Agent"}
+        <div className="view-content">
+            <ViewHeader
+                actions={
+                    <Button
+                        appearance="primary"
+                        icon={<Add20Regular />}
+                        onClick={() => setShowForm(true)}
+                        type="button"
+                    >
+                        New agent
                     </Button>
-                </div>
-            </div>
-
-            {showForm && (
-                <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
-                    <label>
-                        Agent ID
-                        <Input
-                            pattern="[a-z]+(?:-[a-z]+)*"
-                            placeholder="support-bot"
-                            required
-                            value={form.agent_id}
-                            onChange={(e) => setForm({ ...form, agent_id: e.target.value })}
+                }
+                description={`${agents.length} configured, ${sessions.length} active sessions`}
+                title="Agents"
+            />
+            <div className="view-body">
+                {agents.length === 0
+                    ? (
+                        <EmptyState
+                            action={
+                                <Button appearance="primary" onClick={() => setShowForm(true)}>
+                                    New agent
+                                </Button>
+                            }
+                            description="An agent binds a kernel, a model connection, skills, and workspaces into something you can start a session with."
+                            icon={<Bot24Regular />}
+                            title="No agents yet"
                         />
-                    </label>
-                    <label>
-                        Display Name
-                        <Input
-                            placeholder="Support Bot"
-                            required
-                            value={form.name}
-                            onChange={(e) => setForm({ ...form, name: e.target.value })}
-                        />
-                    </label>
-                    <label>
-                        Kernel
-                        <Select
-                            value={form.harness}
-                            onChange={(e) => setForm({ ...form, harness: e.target.value })}
-                        >
-                            {harnesses.map((harness) => (
-                                <option key={harness} value={harness}>
-                                    {formatHarnessLabel(harness)}
-                                </option>
-                            ))}
-                        </Select>
-                    </label>
-                    <label>
-                        Connection
-                        <Select
-                            value={form.connection_id ?? ""}
-                            onChange={(e) => setForm({ ...form, connection_id: e.target.value || null })}
-                        >
-                            <option value="">None</option>
-                            {connections.map((conn) => (
-                                <option key={conn.connection_id} value={conn.connection_id}>
-                                    {conn.name} ({conn.connection_id})
-                                </option>
-                            ))}
-                        </Select>
-                    </label>
-                    <ModelNameField
-                        connectionId={form.connection_id}
-                        envVars={form.env_vars}
-                        harness={form.harness}
-                        onEnvVarsChange={(envVars) => {
-                            setForm({ ...form, env_vars: envVars });
-                            setEnvDirty(true);
-                        }}
-                    />
-                    <div>
-                        <label>System Prompt</label>
-                        <CodeEditor
-                            value={form.system_prompt}
-                            onChange={(v) => setForm({ ...form, system_prompt: v })}
-                            language="markdown"
-                            height="120px"
-                        />
-                    </div>
-                    {skills.length > 0 && (
-                        <fieldset className="skills-fieldset">
-                            <legend>Skills</legend>
-                            <div className="checkbox-grid">
-                                {skills.map((skill) => (
-                                    <Checkbox
-                                        checked={form.skills.includes(skill.skill_id)}
-                                        className="checkbox-label"
-                                        key={skill.skill_id}
-                                        label={skill.skill_id}
-                                        onChange={() => toggleFormSkill(skill.skill_id)}
-                                    />
-                                ))}
-                            </div>
-                        </fieldset>
-                    )}
-                    {workspaces.length > 0 && (
-                        <fieldset className="skills-fieldset">
-                            <legend>Workspaces</legend>
-                            <span className="field-help">Mounted at /workspace/&lt;workspace-id&gt; when new sessions start.</span>
-                            <div className="checkbox-grid">
-                                {workspaces.map((workspace) => {
-                                    const mount = form.workspace_mounts.find(
-                                        (item) => item.workspace_id === workspace.workspace_id,
-                                    );
-                                    return (
-                                        <label className="checkbox-label" key={workspace.workspace_id}>
-                                            <span>{workspace.name} ({workspace.workspace_id})</span>
-                                            <Select
-                                                value={mount?.mode ?? ""}
-                                                onChange={(e) =>
-                                                    setFormWorkspaceMode(
-                                                        workspace.workspace_id,
-                                                        e.target.value as WorkspaceMountMode | "",
-                                                    )}
-                                            >
-                                                <option value="">Not mounted</option>
-                                                <option value="rw">Read/write</option>
-                                                <option value="ro">Read-only</option>
-                                            </Select>
-                                        </label>
-                                    );
-                                })}
-                            </div>
-                        </fieldset>
-                    )}
-                    <div>
-                        <label>Environment Variables</label>
-                        <CodeEditor
-                            value={form.env_vars}
-                            onChange={(v) => { setForm({ ...form, env_vars: v }); setEnvDirty(true); }}
-                            language="ini"
-                            height="120px"
-                        />
-                        <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
-                    </div>
-                    <Button disabled={busy} type="submit">
-                        Create Agent
-                    </Button>
-                </form>
-            )}
-
-            <div className="card-grid management-card-grid">
-                {agents.map((agent) => {
-                    const sessionCount = activeSessionCount(agent.agent_id);
-                    const connectionName = agent.connection_id
-                        ? (connections.find((c) => c.connection_id === agent.connection_id)?.name
-                            ?? agent.connection_id)
-                        : "None";
-                    return (
-                    <div className="card management-card" key={agent.agent_id}>
-                        <div className="card-body">
-                            <div className="management-card-heading">
-                                <div className="management-title-block">
-                                    <h3>{agent.name}</h3>
-                                    <code className="management-id">{agent.agent_id}</code>
-                                </div>
-                                <span className="tag">{agent.harness}</span>
-                            </div>
-                            <div className="card-meta management-meta">
-                                <div>
-                                    <strong>Connection</strong>
-                                    <span className="truncate-value">{connectionName}</span>
-                                </div>
-                                 <div>
-                                     <strong>Skills</strong>
-                                     <span>{agent.skills.length}</span>
-                                 </div>
-                                 <div>
-                                     <strong>Workspaces</strong>
-                                     <span>{agent.workspace_mounts.length}</span>
-                                 </div>
-                                 <div>
-                                     <strong>Sessions</strong>
-                                     <span>{sessionCount}</span>
-                                </div>
-                            </div>
-                            {agent.system_prompt && (
-                                <p className="system-prompt-preview">{agent.system_prompt}</p>
-                            )}
-                             {agent.skills.length > 0 && (
-                                 <div className="tag-row">
-                                     {agent.skills.map((s) => (
-                                        <span className="tag" key={s}>
-                                            {s}
-                                        </span>
-                                     ))}
-                                 </div>
-                             )}
-                             {agent.workspace_mounts.length > 0 && (
-                                 <div className="tag-row">
-                                     {agent.workspace_mounts.map((mount) => (
-                                         <span className="tag" key={mount.workspace_id}>
-                                             {mount.workspace_id}:{mount.mode}
-                                         </span>
-                                     ))}
-                                 </div>
-                             )}
-                            {editingAgentId === agent.agent_id && editForm !== null && (
-                                <form
-                                    className="create-form agent-edit-form"
-                                    onSubmit={(e) => {
-                                        e.preventDefault();
-                                        void handleSaveAgent(agent.agent_id);
-                                    }}
-                                >
-                                    {activeSessionCount(agent.agent_id) > 0 && (
-                                        <div className="warning-box">
-                                            {activeSessionCount(agent.agent_id)} existing session{activeSessionCount(agent.agent_id) === 1 ? "" : "s"} use this agent. Save changes only after planning to restart those kernels.
-                                        </div>
-                                    )}
-                                    <label>
-                                        Display Name
-                                        <Input
-                                            required
-                                            value={editForm.name}
-                                            onChange={(e) =>
-                                                setEditForm({ ...editForm, name: e.target.value })}
-                                        />
-                                    </label>
-                                    <label>
-                                        Kernel
-                                        <Select
-                                            value={editForm.harness}
-                                            onChange={(e) =>
-                                                setEditForm({ ...editForm, harness: e.target.value })}
-                                        >
-                                            {harnesses.map((harness) => (
-                                                <option key={harness} value={harness}>
-                                                    {formatHarnessLabel(harness)}
-                                                </option>
-                                            ))}
-                                        </Select>
-                                    </label>
-                                    <label>
-                                        Connection
-                                        <Select
-                                            value={editForm.connection_id ?? ""}
-                                            onChange={(e) =>
-                                                setEditForm({
-                                                    ...editForm,
-                                                    connection_id: e.target.value || null,
-                                                })}
-                                        >
-                                            <option value="">None</option>
-                                            {connections.map((conn) => (
-                                                <option key={conn.connection_id} value={conn.connection_id}>
-                                                    {conn.name} ({conn.connection_id})
-                                                </option>
-                                            ))}
-                                        </Select>
-                                    </label>
-                                    <ModelNameField
-                                        connectionId={editForm.connection_id}
-                                        envVars={editForm.env_vars}
-                                        harness={editForm.harness}
-                                        onEnvVarsChange={(envVars) =>
-                                            setEditForm({ ...editForm, env_vars: envVars })}
-                                    />
-                                    <div>
-                                        <label>System Prompt</label>
-                                        <CodeEditor
-                                            value={editForm.system_prompt}
-                                            onChange={(v) =>
-                                                setEditForm({ ...editForm, system_prompt: v })}
-                                            language="markdown"
-                                            height="120px"
-                                        />
-                                    </div>
-                                    {skills.length > 0 && (
-                                        <fieldset className="skills-fieldset">
-                                            <legend>Skills</legend>
-                                            <div className="checkbox-grid">
-                                                {skills.map((skill) => (
-                                                    <Checkbox
-                                                        checked={editForm.skills.includes(skill.skill_id)}
-                                                        className="checkbox-label"
-                                                        key={skill.skill_id}
-                                                        label={skill.skill_id}
-                                                        onChange={() => toggleEditSkill(skill.skill_id)}
-                                                    />
-                                                ))}
-                                            </div>
-                                        </fieldset>
-                                    )}
-                                    {workspaces.length > 0 && (
-                                        <fieldset className="skills-fieldset">
-                                            <legend>Workspaces</legend>
-                                            <span className="field-help">Changes apply to new or restarted sessions.</span>
-                                            <div className="checkbox-grid">
-                                                {workspaces.map((workspace) => {
-                                                    const mount = editForm.workspace_mounts.find(
-                                                        (item) => item.workspace_id === workspace.workspace_id,
-                                                    );
-                                                    return (
-                                                        <label className="checkbox-label" key={workspace.workspace_id}>
-                                                            <span>{workspace.name} ({workspace.workspace_id})</span>
-                                                            <Select
-                                                                value={mount?.mode ?? ""}
-                                                                onChange={(e) =>
-                                                                    setEditWorkspaceMode(
-                                                                        workspace.workspace_id,
-                                                                        e.target.value as WorkspaceMountMode | "",
+                    )
+                    : (
+                        <div className="table-container">
+                            <div className="table-scroll">
+                                <table className="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th aria-label="Expand" />
+                                            <th>Agent</th>
+                                            <th>Kernel</th>
+                                            <th>Connection</th>
+                                            <th className="num">Skills</th>
+                                            <th className="num">Workspaces</th>
+                                            <th className="num">Sessions</th>
+                                            <th aria-label="Actions" />
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {agents.map((agent) => {
+                                            const expanded = expandedAgentId === agent.agent_id;
+                                            const connection = connectionLabel(agent);
+                                            return (
+                                                <Fragment key={agent.agent_id}>
+                                                    <tr
+                                                        className={expanded ? "expanded" : undefined}
+                                                    >
+                                                        <td className="expand-toggle-cell">
+                                                            <Button
+                                                                appearance="subtle"
+                                                                aria-expanded={expanded}
+                                                                aria-label={expanded
+                                                                    ? `Hide details for ${agent.name}`
+                                                                    : `Show details for ${agent.name}`}
+                                                                icon={expanded
+                                                                    ? <ChevronDown20Regular />
+                                                                    : <ChevronRight20Regular />}
+                                                                onClick={() =>
+                                                                    setExpandedAgentId(
+                                                                        expanded
+                                                                            ? null
+                                                                            : agent.agent_id,
                                                                     )}
-                                                            >
-                                                                <option value="">Not mounted</option>
-                                                                <option value="rw">Read/write</option>
-                                                                <option value="ro">Read-only</option>
-                                                            </Select>
-                                                        </label>
-                                                    );
-                                                })}
-                                            </div>
-                                        </fieldset>
-                                    )}
-                                    <div>
-                                        <label>Environment Variables</label>
-                                        <CodeEditor
-                                            value={editForm.env_vars}
-                                            onChange={(v) => {
-                                                setEditForm({ ...editForm, env_vars: v });
-                                            }}
-                                            language="ini"
-                                            height="120px"
-                                        />
-                                        <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
-                                    </div>
-                                    <div className="skills-edit-actions">
-                                        <Button className="small" disabled={busy} type="submit">
-                                            Save
-                                        </Button>
-                                        <Button
-                                            className="secondary-button small"
-                                            onClick={stopEditingAgent}
-                                            type="button"
-                                        >
-                                            Cancel
-                                        </Button>
-                                    </div>
-                                </form>
-                            )}
-                        </div>
-                        <div className="card-footer">
-                            <span className="muted">
-                                Created {new Date(agent.created_at).toLocaleDateString()}
-                            </span>
-                            <div className="card-footer-actions">
-                                <Button
-                                    className="secondary-button small"
-                                    onClick={() => {
-                                        void api.downloadConfigResource(
-                                            "agent",
-                                            agent.agent_id,
-                                        ).catch(reportError);
-                                    }}
-                                    type="button"
-                                >
-                                    Export YAML
-                                </Button>
-                                <Button
-                                    className="small"
-                                    disabled={busy}
-                                    onClick={() => startSessionMutation.mutate(agent.agent_id)}
-                                    type="button"
-                                >
-                                    New Session
-                                </Button>
-                                {editingAgentId !== agent.agent_id && (
-                                    <Button
-                                        className="secondary-button small"
-                                        disabled={busy}
-                                        onClick={() => startEditingAgent(agent)}
-                                        type="button"
-                                    >
-                                        Edit
-                                    </Button>
-                                )}
-                                <Button
-                                    className="danger-button small"
-                                    disabled={busy}
-                                    onClick={() => deleteMutation.mutate(agent.agent_id)}
-                                    type="button"
-                                >
-                                    Delete
-                                </Button>
+                                                                size="small"
+                                                            />
+                                                        </td>
+                                                        <td>
+                                                            <div className="cell-identity">
+                                                                <span className="cell-identity-name">
+                                                                    {agent.name}
+                                                                </span>
+                                                                <span className="cell-identity-id">
+                                                                    {agent.agent_id}
+                                                                </span>
+                                                            </div>
+                                                        </td>
+                                                        <td className="nowrap">
+                                                            {formatHarnessLabel(agent.harness)}
+                                                        </td>
+                                                        <td>
+                                                            {connection === null
+                                                                ? <span className="muted">None</span>
+                                                                : connection}
+                                                        </td>
+                                                        <td className="num">
+                                                            {agent.skills.length}
+                                                        </td>
+                                                        <td className="num">
+                                                            {agent.workspace_mounts.length}
+                                                        </td>
+                                                        <td className="num">
+                                                            {activeSessionCount(agent.agent_id)}
+                                                        </td>
+                                                        <td className="actions-cell">
+                                                            <RowActions
+                                                                items={[
+                                                                    {
+                                                                        key: "edit",
+                                                                        label: "Edit agent",
+                                                                        icon: <Edit20Regular />,
+                                                                        disabled: busy,
+                                                                        onClick: () => {
+                                                                            setEditingAgentId(
+                                                                                agent.agent_id,
+                                                                            );
+                                                                            setEditForm(
+                                                                                agentToForm(agent),
+                                                                            );
+                                                                        },
+                                                                    },
+                                                                    {
+                                                                        key: "export",
+                                                                        label: "Export YAML",
+                                                                        icon: (
+                                                                            <ArrowDownload20Regular />
+                                                                        ),
+                                                                        onClick: () => {
+                                                                            void api
+                                                                                .downloadConfigResource(
+                                                                                    "agent",
+                                                                                    agent.agent_id,
+                                                                                ).catch(reportError);
+                                                                        },
+                                                                    },
+                                                                    {
+                                                                        key: "delete",
+                                                                        label: "Delete agent",
+                                                                        icon: <Delete20Regular />,
+                                                                        destructive: true,
+                                                                        disabled: busy,
+                                                                        onClick: () =>
+                                                                            deleteMutation.mutate(
+                                                                                agent.agent_id,
+                                                                            ),
+                                                                    },
+                                                                ]}
+                                                                primary={{
+                                                                    key: "session",
+                                                                    label: "New session",
+                                                                    icon: <Play20Regular />,
+                                                                    disabled: busy,
+                                                                    onClick: () =>
+                                                                        startSessionMutation.mutate(
+                                                                            agent.agent_id,
+                                                                        ),
+                                                                }}
+                                                            />
+                                                        </td>
+                                                    </tr>
+                                                    {expanded && (
+                                                        <tr className="detail-row">
+                                                            <td colSpan={8}>
+                                                                <div className="detail-block">
+                                                                    <dl className="detail-list stacked">
+                                                                        <dt>Skills</dt>
+                                                                        <dd>
+                                                                            {agent.skills.length
+                                                                                    === 0
+                                                                                ? (
+                                                                                    <span className="muted">
+                                                                                        None
+                                                                                    </span>
+                                                                                )
+                                                                                : (
+                                                                                    <span className="tag-row">
+                                                                                        {agent.skills
+                                                                                            .map((
+                                                                                                s,
+                                                                                            ) => (
+                                                                                                <span
+                                                                                                    className="tag"
+                                                                                                    key={s}
+                                                                                                >
+                                                                                                    {s}
+                                                                                                </span>
+                                                                                            ))}
+                                                                                    </span>
+                                                                                )}
+                                                                        </dd>
+                                                                        <dt>Workspaces</dt>
+                                                                        <dd>
+                                                                            {agent.workspace_mounts
+                                                                                    .length === 0
+                                                                                ? (
+                                                                                    <span className="muted">
+                                                                                        None
+                                                                                    </span>
+                                                                                )
+                                                                                : (
+                                                                                    <span className="tag-row">
+                                                                                        {agent
+                                                                                            .workspace_mounts
+                                                                                            .map((
+                                                                                                mount,
+                                                                                            ) => (
+                                                                                                <span
+                                                                                                    className="tag mono"
+                                                                                                    key={mount
+                                                                                                        .workspace_id}
+                                                                                                >
+                                                                                                    {mount
+                                                                                                        .workspace_id}:{mount
+                                                                                                        .mode}
+                                                                                                </span>
+                                                                                            ))}
+                                                                                    </span>
+                                                                                )}
+                                                                        </dd>
+                                                                        <dt>Created</dt>
+                                                                        <dd>
+                                                                            {new Date(
+                                                                                agent.created_at,
+                                                                            ).toLocaleString()}
+                                                                        </dd>
+                                                                    </dl>
+                                                                    {agent.system_prompt !== "" && (
+                                                                        <>
+                                                                            <span className="detail-block-label">
+                                                                                System prompt
+                                                                            </span>
+                                                                            <p className="quote-block">
+                                                                                {agent.system_prompt}
+                                                                            </p>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    )}
+                                                </Fragment>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
-                    </div>
-                    );
-                })}
-                {agents.length === 0 && (
-                    <div className="empty-state">No agents yet. Create one to get started.</div>
-                )}
+                    )}
             </div>
+
+            <FormDialog
+                busy={busy}
+                onOpenChange={(open) => {
+                    setShowForm(open);
+                    if (!open) setEnvDirty(false);
+                }}
+                onSubmit={() => {
+                    void handleCreate();
+                }}
+                open={showForm}
+                submitLabel="Create agent"
+                title="New agent"
+                wide
+            >
+                <AgentFormFields
+                    form={form}
+                    idEditable
+                    onChange={(next) => {
+                        if (next.env_vars !== form.env_vars) setEnvDirty(true);
+                        setCreateForm(next);
+                    }}
+                />
+            </FormDialog>
+
+            <FormDialog
+                busy={busy}
+                onOpenChange={(open) => {
+                    if (!open) {
+                        setEditingAgentId(null);
+                        setEditForm(null);
+                    }
+                }}
+                onSubmit={() => {
+                    void handleSaveAgent();
+                }}
+                open={editForm !== null}
+                submitLabel="Save changes"
+                title={`Edit ${editingAgentId ?? ""}`}
+                wide
+            >
+                {editForm !== null && (
+                    <>
+                        {editingAgentId !== null && activeSessionCount(editingAgentId) > 0 && (
+                            <MessageBar intent="warning">
+                                <MessageBarBody>
+                                    {activeSessionCount(editingAgentId)} existing session
+                                    {activeSessionCount(editingAgentId) === 1 ? "" : "s"}{" "}
+                                    use this agent. Their kernels must be restarted before they pick
+                                    up the new configuration.
+                                </MessageBarBody>
+                            </MessageBar>
+                        )}
+                        <AgentFormFields
+                            form={editForm}
+                            idEditable={false}
+                            onChange={setEditForm}
+                        />
+                    </>
+                )}
+            </FormDialog>
         </div>
     );
 }

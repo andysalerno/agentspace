@@ -62,7 +62,7 @@ describe("ConnectionsView", () => {
     const user = userEvent.setup();
     render(<ConnectionsView />, { wrapper: wrapper() });
 
-    await user.click(screen.getAllByRole("button", { name: "New connection" })[0]!);
+    await user.click(screen.getAllByRole("button", { name: "New connection" })[0]);
     // Typed input is used sparingly here: tabster's modal focus trap blurs the
     // active element under jsdom, which drops keystrokes.
     fireEvent.change(screen.getByLabelText(/Connection ID/), {
