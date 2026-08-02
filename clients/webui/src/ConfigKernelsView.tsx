@@ -7,6 +7,7 @@ import { withRequiredEnvKeys } from "./envPrefill";
 import { queryKeys, useHarnesses, useKernelConfig } from "./queries";
 import { useErrorContext } from "./useErrorContext";
 import { Button, Field, MessageBar, MessageBarBody } from "./fluent";
+import { formatHarnessLabel } from "./harness";
 import { ViewHeader } from "./ui";
 
 const CONFIGURABLE_HARNESSES = new Set(["opencode"]);
@@ -17,13 +18,6 @@ const OPENCODE_ENV_KEYS = [
     "OPENCODE_AGENT",
     "OPENCODE_EXTRA_ARGS",
 ];
-
-function formatHarnessLabel(harness: string): string {
-    return harness
-        .split("-")
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(" ");
-}
 
 export default function ConfigKernelsView() {
     const { data: harnesses = [] } = useHarnesses();

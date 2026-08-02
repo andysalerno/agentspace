@@ -18,9 +18,9 @@ const workspaces = [
 ];
 
 const agents = [
-  { agent_id: "ag-reviewer", name: "code-reviewer", harness: "copilot", system_prompt: "You are a meticulous code reviewer. Focus on correctness and security.", skills: ["git-operations", "pr-followup"], env_vars: "LOG_LEVEL=debug\nMAX_TURNS=40", connection_id: "cn-openai", workspace_mounts: [{ workspace_id: "ws-agentspace", mode: "rw", mount_path: "/workspace", volume_name: "agentspace_ws_agentspace" }], created_at: then, updated_at: now },
-  { agent_id: "ag-docs", name: "docs-writer", harness: "copilot", system_prompt: "Write clear technical documentation.", skills: ["memory"], env_vars: "", connection_id: null, workspace_mounts: [{ workspace_id: "ws-docs", mode: "ro", mount_path: "/docs", volume_name: null }], created_at: then, updated_at: now },
-  { agent_id: "ag-triage", name: "issue-triage", harness: "claude", system_prompt: "Triage incoming GitHub issues and label them.", skills: [], env_vars: "GH_TOKEN=${secret:gh_token}", connection_id: "cn-azure", workspace_mounts: [], created_at: then, updated_at: now },
+  { agent_id: "ag-reviewer", name: "code-reviewer", harness: "copilot-cli", system_prompt: "You are a meticulous code reviewer. Focus on correctness and security.", skills: ["git-operations", "pr-followup"], env_vars: "LOG_LEVEL=debug\nMAX_TURNS=40", connection_id: "cn-openai", workspace_mounts: [{ workspace_id: "ws-agentspace", mode: "rw", mount_path: "/workspace", volume_name: "agentspace_ws_agentspace" }], created_at: then, updated_at: now },
+  { agent_id: "ag-docs", name: "docs-writer", harness: "copilot-cli", system_prompt: "Write clear technical documentation.", skills: ["memory"], env_vars: "", connection_id: null, workspace_mounts: [{ workspace_id: "ws-docs", mode: "ro", mount_path: "/docs", volume_name: null }], created_at: then, updated_at: now },
+  { agent_id: "ag-triage", name: "issue-triage", harness: "claude-code", system_prompt: "Triage incoming GitHub issues and label them.", skills: [], env_vars: "GH_TOKEN=${secret:gh_token}", connection_id: "cn-azure", workspace_mounts: [], created_at: then, updated_at: now },
 ];
 
 const sessions = [
@@ -61,8 +61,8 @@ const messages = [
 ];
 
 const kernels = [
-  { session_id: "se-1a2b3c4d", harness: "copilot", status: "running", turns: 6, resume_token: "rt-88fa21", additional_paths: ["/workspace", "/scratch"], client_session_ids: ["se-1a2b3c4d"], channel_names: ["webui"], agent_ids: ["ag-reviewer"], container_name: "agentspace-kernel-1a2b3c4d", vscode_url: "http://127.0.0.1:8100", free_port_url: "http://127.0.0.1:8101", stats: { cpu_percent: 12.4, memory_usage_bytes: 412 * 1024 * 1024, memory_limit_bytes: 2048 * 1024 * 1024, memory_percent: 20.1 } },
-  { session_id: "se-9c0d1e2f", harness: "claude", status: "starting", turns: 0, resume_token: null, additional_paths: [], client_session_ids: ["se-9c0d1e2f"], channel_names: [], agent_ids: ["ag-triage"], container_name: "agentspace-kernel-9c0d1e2f", vscode_url: null, free_port_url: null, stats: { cpu_percent: 0.8, memory_usage_bytes: 96 * 1024 * 1024, memory_limit_bytes: 2048 * 1024 * 1024, memory_percent: 4.7 } },
+  { session_id: "se-1a2b3c4d", harness: "copilot-cli", status: "running", turns: 6, resume_token: "rt-88fa21", additional_paths: ["/workspace", "/scratch"], client_session_ids: ["se-1a2b3c4d"], channel_names: ["webui"], agent_ids: ["ag-reviewer"], container_name: "agentspace-kernel-1a2b3c4d", vscode_url: "http://127.0.0.1:8100", free_port_url: "http://127.0.0.1:8101", stats: { cpu_percent: 12.4, memory_usage_bytes: 412 * 1024 * 1024, memory_limit_bytes: 2048 * 1024 * 1024, memory_percent: 20.1 } },
+  { session_id: "se-9c0d1e2f", harness: "claude-code", status: "starting", turns: 0, resume_token: null, additional_paths: [], client_session_ids: ["se-9c0d1e2f"], channel_names: [], agent_ids: ["ag-triage"], container_name: "agentspace-kernel-9c0d1e2f", vscode_url: null, free_port_url: null, stats: { cpu_percent: 0.8, memory_usage_bytes: 96 * 1024 * 1024, memory_limit_bytes: 2048 * 1024 * 1024, memory_percent: 4.7 } },
 ];
 
 const skills = [
@@ -91,11 +91,11 @@ const secrets = [
 ];
 
 const memoryPages = [
-  { path: "architecture/kernels.md", title: "Kernel protocol", tags: ["architecture", "kernels"], updated_at: now },
-  { path: "architecture/services.md", title: "Service topology", tags: ["architecture"], updated_at: then },
-  { path: "decisions/0004-rust-rewrite.md", title: "ADR 0004: Rust rewrite of agent_host", tags: ["adr", "decision"], updated_at: then },
-  { path: "runbooks/restart-stack.md", title: "Restarting the stack", tags: ["runbook", "ops"], updated_at: now },
-  { path: "index.md", title: "Memory index", tags: [], updated_at: then },
+  { path: "architecture/kernels", title: "Kernel protocol", tags: ["architecture", "kernels"], updated_at: now },
+  { path: "architecture/services", title: "Service topology", tags: ["architecture"], updated_at: then },
+  { path: "decisions/0004-rust-rewrite", title: "ADR 0004: Rust rewrite of agent_host", tags: ["adr", "decision"], updated_at: then },
+  { path: "runbooks/restart-stack", title: "Restarting the stack", tags: ["runbook", "ops"], updated_at: now },
+  { path: "index", title: "Memory index", tags: [], updated_at: then },
 ];
 
 const canonicalConfig = `apiVersion: agentspace/v1
@@ -105,7 +105,7 @@ metadata:
 spec:
   agents:
     - name: code-reviewer
-      harness: copilot
+      harness: copilot-cli
       connection: openai-prod
       skills: [git-operations, pr-followup]
       workspaces:
@@ -130,14 +130,16 @@ const routes = {
   "GET /api/connections": connections,
   "GET /api/gateways": gateways,
   "GET /api/secrets": secrets,
-  "GET /api/harnesses": ["copilot", "claude", "codex"],
+  // `opencode` first: ConfigKernelsView falls back to the first harness, and it is
+  // the only one with an editable configuration, so the screenshot covers the editor.
+  "GET /api/harnesses": ["opencode", "claude-code", "copilot-cli", "codex", "acp", "echo"],
   "GET /api/gateway-types": ["slack", "github", "discord"],
   "GET /api/memory/healthz": { status: "ok" },
   "GET /api/memory/v1/tags": [
     { tag: "architecture", count: 2 }, { tag: "adr", count: 1 },
     { tag: "runbook", count: 1 }, { tag: "ops", count: 1 }, { tag: "kernels", count: 1 },
   ],
-  "GET /api/memory/v1/check": { issues: [{ path: "index.md", message: "broken link to 'architecture/old.md'" }] },
+  "GET /api/memory/v1/check": { issues: [{ path: "index", message: "broken link to 'architecture/old'" }] },
   "GET /api/info": {
     client_service: { service: "client_service", version: "0.4.2", env_prefix: "CLIENT_SERVICE_", env: { CLIENT_SERVICE_PORT: "8002", CLIENT_SERVICE_AGENT_HOST_URL: "http://agent_host:8001", CLIENT_SERVICE_LOG_LEVEL: "info" } },
     agent_host: { service: "agent_host", version: "0.4.2", env_prefix: "AGENT_HOST_", env: { AGENT_HOST_PORT: "8001", AGENT_HOST_KERNEL_IMAGE: "ghcr.io/andysalerno/kernel_host:latest", KERNEL_WORKDIR: "/workspace" } },
@@ -174,11 +176,11 @@ const server = http.createServer(async (req, res) => {
     if (routes[key]) return send(routes[key]);
     if (path === "/api/memory/v1/pages") return send(memoryPages);
     if (path === "/api/memory/v1/pages/content") {
-      const p = url.searchParams.get("path") ?? "index.md";
+      const p = url.searchParams.get("path") ?? "index";
       const meta = memoryPages.find((m) => m.path === p) ?? memoryPages[0];
-      return send({ ...meta, schema_version: 1, created_at: then, created_by: "code-reviewer", updated_by: "docs-writer", extra: {}, revision: "rev-4412", body: `# ${meta.title}\n\nThe kernel protocol is a line-delimited JSON stream over stdio.\n\n- Requests carry a \`method\` and \`params\`.\n- Responses carry \`result\` or \`error\`.\n\nSee [[architecture/services.md]] for how this fits together.\n`, outgoing_links: [{ text: "architecture/services.md", raw_target: "architecture/services.md", resolved_path: "architecture/services.md", broken: false }] });
+      return send({ ...meta, schema_version: 1, created_at: then, created_by: "code-reviewer", updated_by: "docs-writer", extra: {}, revision: "rev-4412", body: `# ${meta.title}\n\nThe kernel protocol is a line-delimited JSON stream over stdio.\n\n- Requests carry a \`method\` and \`params\`.\n- Responses carry \`result\` or \`error\`.\n\nSee [[architecture/services]] for how this fits together.\n`, outgoing_links: [{ text: "architecture/services", raw_target: "architecture/services", resolved_path: "architecture/services", broken: false }] });
     }
-    if (path === "/api/memory/v1/links") return send({ path: url.searchParams.get("path") ?? "index.md", outgoing: [{ text: "services", raw_target: "architecture/services.md", resolved_path: "architecture/services.md", broken: false }], backlinks: [{ from: "index.md", text: "kernels", raw_target: "architecture/kernels.md" }] });
+    if (path === "/api/memory/v1/links") return send({ path: url.searchParams.get("path") ?? "index", outgoing: [{ text: "services", raw_target: "architecture/services", resolved_path: "architecture/services", broken: false }], backlinks: [{ from: "index", text: "kernels", raw_target: "architecture/kernels" }] });
     if (path === "/api/config/export") return sendText(canonicalConfig, "text/yaml");
     if (path.startsWith("/api/config/export/")) return sendText(canonicalConfig, "text/yaml");
     if (path === "/api/config/validate" || path === "/api/config/plan") return send({ valid: true, generation: 12, active_generation: 11, source_sha256: "a1b2c3d4e5f6a7b8", semantic_sha256: "f0e1d2c3b4a59687", creates: ["agent/docs-writer"], updates: ["connection/openai-prod"], deletes: [], unchanged: ["workspace/agentspace", "workspace/scratch"] });
@@ -197,7 +199,7 @@ const server = http.createServer(async (req, res) => {
       return send(skills.find((s) => s.skill_id === id) ?? skills[0]);
     }
     if (/^\/api\/connections\/[^/]+\/models$/.test(path)) return send({ object: "list", data: [{ id: "gpt-5.2" }, { id: "gpt-5.2-mini" }, { id: "o5-preview" }] });
-    if (/^\/api\/kernel-configs?/.test(path)) return send({ harness: "copilot", env_vars: "COPILOT_MODEL=gpt-5.2\nCOPILOT_LOG=info", updated_at: now });
+    if (/^\/api\/kernel-configs?/.test(path)) return send({ harness: "opencode", env_vars: "OPENCODE_MODEL=gpt-5.2\nOPENCODE_LOG=info", updated_at: now });
     if (/^\/api\/gateway-types\/[^/]+\/schema$/.test(path)) {
       return send({ fields: [
         { key: "BOT_TOKEN", label: "Bot token", kind: "secret", required: true, description: "Token issued by the platform." },

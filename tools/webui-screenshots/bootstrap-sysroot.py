@@ -111,8 +111,16 @@ def fetch(url: str, dest: Path) -> Path:
     """Download `url` to `dest`, skipping files already present."""
     if dest.exists() and dest.stat().st_size > 0:
         return dest
-    with urllib.request.urlopen(url, timeout=180) as response, dest.open("wb") as out:  # noqa: S310
-        shutil.copyfileobj(response, out)
+    # Download beside the target and rename, so an interrupted transfer never
+    # leaves a partial file that later runs treat as a valid cache entry.
+    partial = dest.with_name(f"{dest.name}.partial")
+    try:
+        with urllib.request.urlopen(url, timeout=180) as response:  # noqa: S310
+            with partial.open("wb") as out:
+                shutil.copyfileobj(response, out)
+        partial.replace(dest)
+    finally:
+        partial.unlink(missing_ok=True)
     return dest
 
 

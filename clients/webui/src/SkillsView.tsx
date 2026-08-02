@@ -419,7 +419,13 @@ export default function SkillsView() {
                 open={detail !== null}
             >
                 <DialogSurface className="form-dialog-wide">
-                    <DialogBody>
+                    <form
+                        onSubmit={(event) => {
+                            event.preventDefault();
+                            void saveDetail();
+                        }}
+                    >
+                        <DialogBody>
                         <DialogTitle>
                             {detailEditable ? "Edit " : ""}
                             {detail?.skill_id}
@@ -436,22 +442,17 @@ export default function SkillsView() {
                                 )}
                         </DialogContent>
                         <DialogActions>
-                            <Button onClick={() => setDetail(null)}>
+                            <Button onClick={() => setDetail(null)} type="button">
                                 {detailEditable ? "Cancel" : "Close"}
                             </Button>
                             {detailEditable && (
-                                <Button
-                                    appearance="primary"
-                                    disabled={busy}
-                                    onClick={() => {
-                                        void saveDetail();
-                                    }}
-                                >
+                                <Button appearance="primary" disabled={busy} type="submit">
                                     Save changes
                                 </Button>
                             )}
                         </DialogActions>
                     </DialogBody>
+                    </form>
                 </DialogSurface>
             </Dialog>
 

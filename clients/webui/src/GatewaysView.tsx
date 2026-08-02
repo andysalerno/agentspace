@@ -696,7 +696,7 @@ export default function GatewaysView() {
             </div>
 
             <FormDialog
-                busy={busy || !agentId}
+                busy={busy || !agentId || !gatewayType || !schema}
                 onOpenChange={setShowForm}
                 onSubmit={() => {
                     void handleSubmit();

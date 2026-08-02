@@ -41,6 +41,7 @@ import {
     Option,
     Select,
 } from "./fluent";
+import { formatHarnessLabel } from "./harness";
 import { EmptyState, FormDialog, RowActions, ViewHeader } from "./ui";
 
 type AgentsViewProps = {
@@ -99,13 +100,6 @@ function agentToForm(agent: Agent): AgentFormState {
 function getInitialHarness(harnesses: string[]): string {
     if (harnesses.includes(DEFAULT_HARNESS)) return DEFAULT_HARNESS;
     return harnesses[0] ?? DEFAULT_HARNESS;
-}
-
-function formatHarnessLabel(harness: string): string {
-    return harness
-        .split("-")
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(" ");
 }
 
 function upsertWorkspaceMount(
@@ -524,7 +518,12 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                         New agent
                     </Button>
                 }
-                description={`${agents.length} configured, ${sessions.length} active sessions`}
+                description={(() => {
+                    const active = sessions.filter((s) => s.status === "active").length;
+                    return `${agents.length} configured, ${active} active ${
+                        active === 1 ? "session" : "sessions"
+                    }`;
+                })()}
                 title="Agents"
             />
             <div className="view-body">
@@ -649,6 +648,8 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                                         icon: <Delete20Regular />,
                                                                         destructive: true,
                                                                         disabled: busy,
+                                                                        confirm:
+                                                                            `Delete "${agent.agent_id}"? Every session for this agent is deleted and its kernel destroyed. This cannot be undone.`,
                                                                         onClick: () =>
                                                                             deleteMutation.mutate(
                                                                                 agent.agent_id,
