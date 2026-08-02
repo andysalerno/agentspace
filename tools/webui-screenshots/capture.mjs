@@ -26,9 +26,13 @@ const viewport = {
   height: Number(process.env.HEIGHT ?? 900),
 };
 
-// [view id, sidebar buttons to click in order from a fresh page load]
+// [view id, steps to click in order from a fresh page load]
+//
+// A step is an accessible button name, or `{ css }` for elements that have no
+// stable accessible name (list rows built from live data, for example).
 const views = [
   ["chat", ["Chat"]],
+  ["chat-session", ["Chat", { css: ".session-row-button" }]],
   ["agents", ["Agents"]],
   ["workspaces", ["Workspaces"]],
   ["sessions", ["Sessions"]],
@@ -81,9 +85,11 @@ for (const theme of themes) {
     try {
       await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(1500);
-      for (const label of path) {
-        await page.getByRole("button", { name: label, exact: true }).first()
-          .click({ timeout: 5000 });
+      for (const step of path) {
+        const target = typeof step === "string"
+          ? page.getByRole("button", { name: step, exact: true })
+          : page.locator(step.css);
+        await target.first().click({ timeout: 5000 });
         await page.waitForTimeout(600);
       }
       await page.waitForTimeout(1400);

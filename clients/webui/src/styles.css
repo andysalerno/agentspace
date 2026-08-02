@@ -773,6 +773,32 @@ pre,
   background: var(--accent);
 }
 
+/* Standalone dot, for rows too dense to carry a status label. */
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--fg-disabled);
+}
+
+.status-dot.ok {
+  background: var(--success);
+}
+
+.status-dot.warn {
+  background: var(--colorPaletteYellowForeground2, #c19c00);
+}
+
+.status-dot.error {
+  background: var(--colorPaletteRedBackground3, #c50f1f);
+}
+
+.status-dot.accent {
+  background: var(--accent);
+}
+
 .muted {
   color: var(--fg-muted);
 }
