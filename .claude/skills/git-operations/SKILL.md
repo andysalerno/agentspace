@@ -14,3 +14,5 @@ Do NOT commit directly to `main`. Instead, create a branch for your work and sub
 After doing this, link the github pull request.
 
 Important: before opening a PR, always run the checks locally with `just check`. Fix any issues BEFORE submitting the PR. Once the PR is opened, it will trigger the CI checks (the github actions workflow). Monitor the progress of the checks and fix any issues that arise.
+
+Once the PR is open, follow the `pr-followup` skill to iterate on CI results and reviewer comments until the PR is clean.
