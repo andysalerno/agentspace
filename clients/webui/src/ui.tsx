@@ -76,6 +76,16 @@ export function RowActions(
                     {primary.label}
                 </Button>
             )}
+            {items.length === 0 && (
+                <Button
+                    appearance="subtle"
+                    aria-hidden="true"
+                    className="row-actions-spacer"
+                    icon={<MoreHorizontal20Regular />}
+                    size="small"
+                    tabIndex={-1}
+                />
+            )}
             {items.length > 0 && (
                 <Menu positioning="below-end">
                     <MenuTrigger disableButtonEnhancement>

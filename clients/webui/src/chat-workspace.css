@@ -206,7 +206,7 @@
 .transcript {
   flex: 1;
   min-height: 0;
-  padding: var(--space-5) var(--space-5) var(--space-2);
+  padding: var(--space-5) var(--space-5) var(--space-6);
   overflow-y: auto;
 }
 
@@ -354,6 +354,7 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   font-weight: 400;
+  margin: 0 2px;
   vertical-align: baseline;
 }
 
@@ -394,11 +395,13 @@
 }
 
 .reasoning-block > summary::before {
-  content: "▸ ";
+  display: inline-block;
+  width: 14px;
+  content: "▸";
 }
 
 .reasoning-block[open] > summary::before {
-  content: "▾ ";
+  content: "▾";
 }
 
 .reasoning-content {

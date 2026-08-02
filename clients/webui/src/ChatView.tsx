@@ -899,7 +899,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                     <div className="session-rail-header-actions">
                         <Tooltip content="New session" relationship="label">
                             <Button
-                                appearance="primary"
+                                appearance="subtle"
                                 icon={<Add20Regular />}
                                 onClick={() => setShowNewSession(true)}
                                 size="small"
