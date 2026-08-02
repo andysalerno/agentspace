@@ -12,7 +12,7 @@ import {
 } from "./fluent";
 
 type ToolDetailPaneProps = {
-    /** `null` keeps the dialog mounted but closed, so it animates out. */
+    /** `null` keeps the dialog mounted but closed, so it can reopen instantly. */
     toolCall: ToolCall | null;
     onClose: () => void;
 };

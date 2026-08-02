@@ -215,7 +215,7 @@ export default function ConfigurationView() {
                     />
                     <CodeEditor
                         ariaLabel="Declarative configuration"
-                        height="calc(100vh - 420px)"
+                        height="max(240px, calc(100vh - 420px))"
                         language="yaml"
                         onChange={(value) => {
                             setDraft(value);

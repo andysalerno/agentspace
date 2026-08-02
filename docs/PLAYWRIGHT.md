@@ -187,6 +187,13 @@ Packages are selected for the host architecture (`amd64` or `arm64`), and the
 multiarch triplet is recorded in `.sysroot/.multiarch` so `capture.mjs` uses
 the matching library directories. Any other architecture fails early.
 
+Every archive is checked against the `SHA256` Debian publishes for it, and the
+package index itself against the digest in `InRelease`, so a corrupt download
+or a stale cache entry cannot end up loaded into Chromium as a shared library.
+The OpenPGP signature on `InRelease` is not verified, so this is an integrity
+check, not a defence against a hostile mirror; transport security comes from
+HTTPS.
+
 Deliberately excluded from the sysroot: `libc6`, `libgcc-s1`, `libstdc++6`, and
 friends. Mixing a Debian libc with the host loader breaks every binary in the
 container, including `node`. Use the host's copies of those.

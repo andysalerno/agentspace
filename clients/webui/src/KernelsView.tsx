@@ -202,6 +202,16 @@ export default function KernelsView() {
     const tailNote = logsState?.source === "container"
         ? `Last ${DEFAULT_LOG_TAIL.toLocaleString()} lines, refreshed every second`
         : "Refreshed every second";
+    // A pending first fetch must not read as a kernel that produced no output.
+    const logPlaceholder = activeQuery.isLoading
+        ? "(loading logs…)"
+        : activeQuery.isError
+        ? `(could not load logs: ${
+            activeQuery.error instanceof Error
+                ? activeQuery.error.message
+                : String(activeQuery.error)
+        })`
+        : "(no log output yet)";
 
     return (
         <div className="view-content">
@@ -402,7 +412,7 @@ export default function KernelsView() {
                                     theme={editorTheme}
                                     value={logLines.length > 0
                                         ? logLines.join("\n")
-                                        : "(no log output yet)"}
+                                        : logPlaceholder}
                                 />
                             </div>
                         </DialogContent>
