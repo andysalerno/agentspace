@@ -77,11 +77,6 @@
   background: var(--surface-selected);
 }
 
-/* The whole row is the target; only the leading edge marks selection. */
-.session-row.active {
-  box-shadow: inset 2px 0 0 var(--accent);
-}
-
 .session-row-button {
   display: flex;
   min-width: 0;
@@ -361,19 +356,6 @@
 .cursor {
   margin-left: 1px;
   color: var(--accent);
-  animation: chat-caret 1s steps(2, start) infinite;
-}
-
-@keyframes chat-caret {
-  to {
-    visibility: hidden;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cursor {
-    animation: none;
-  }
 }
 
 .reasoning-block {

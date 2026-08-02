@@ -14,6 +14,9 @@ importers:
       '@fluentui/react-icons':
         specifier: ^2.0.334
         version: 2.0.334(react@19.2.8)
+      '@fluentui/react-motion':
+        specifier: ^9.16.1
+        version: 9.16.1(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@monaco-editor/react':
         specifier: ^4.7.0
         version: 4.7.0(monaco-editor@0.56.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

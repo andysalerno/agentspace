@@ -39,3 +39,10 @@ export {
     ToolbarDivider,
     Tooltip,
 } from "@fluentui/react-components";
+
+/*
+ * Dialog, Menu and Popover animate their enter/exit with the Web Animations
+ * API rather than CSS, so the zeroed duration tokens in theme.ts do not reach
+ * them. `MotionBehaviourProvider value="skip"` does.
+ */
+export { MotionBehaviourProvider } from "@fluentui/react-motion";

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { webDarkTheme, webLightTheme } from "@fluentui/react-components";
 import { Dismiss20Regular } from "@fluentui/react-icons";
 import type { ViewId } from "./types";
 import Sidebar from "./Sidebar";
@@ -24,7 +23,9 @@ import {
     MessageBar,
     MessageBarActions,
     MessageBarBody,
+    MotionBehaviourProvider,
 } from "./fluent";
+import { darkTheme, lightTheme } from "./theme";
 import { useWebuiInfo } from "./queries";
 
 export default function App() {
@@ -101,8 +102,9 @@ export default function App() {
   return (
     <FluentProvider
       className="fluent-root"
-      theme={darkMode ? webDarkTheme : webLightTheme}
+      theme={darkMode ? darkTheme : lightTheme}
     >
+    <MotionBehaviourProvider value="skip">
     <div className="app-shell">
       <Sidebar
         activeView={viewId}
@@ -133,6 +135,7 @@ export default function App() {
         {renderView()}
       </div>
     </div>
+    </MotionBehaviourProvider>
     </FluentProvider>
   );
 }
