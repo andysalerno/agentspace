@@ -17,6 +17,7 @@
   "dependencies": {
     "@fluentui/react-components": "^9.74.4",
     "@fluentui/react-icons": "^2.0.334",
+    "@fluentui/react-motion": "^9.16.1",
     "@monaco-editor/react": "^4.7.0",
     "@tanstack/react-query": "^5.101.4",
     "react": "^19.2.8",

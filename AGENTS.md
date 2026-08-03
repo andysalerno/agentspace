@@ -29,10 +29,18 @@ Use `just` for common tasks:
 - `just test`: Run Python and service tests.
 - `just stack-up`: Start the full stack using Podman or Docker Compose.
 - `just stack-down`: Stop the full stack.
+- `just webui-screenshots`: Render every web UI view to PNG against a mock API.
 
 Run `just check` after completing any code or documentation change. It covers
 Python formatting, linting, type-checking, tests, web linting, pnpm tests when
 present, and the web build.
+
+### Inspecting the web UI visually
+
+`just webui-screenshots` builds `clients/webui`, serves it against fixture data,
+and screenshots every view in light and dark themes. No backend required. Read
+`docs/PLAYWRIGHT.md` before touching the harness; headless Chromium has non-obvious
+environment requirements in this container.
 
 ### Python Standards
 

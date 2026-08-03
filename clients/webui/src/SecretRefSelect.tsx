@@ -1,5 +1,5 @@
 import type { SecretStatus } from "./types";
-import { Select } from "./fluent";
+import { Field, Select } from "./fluent";
 import { useSecrets } from "./queries";
 
 /// Sentinel for a configured value the picker cannot express, namely a literal
@@ -8,6 +8,8 @@ import { useSecrets } from "./queries";
 export const LITERAL_VALUE = "__literal__";
 
 type SecretRefSelectProps = {
+    /// Field label. Rendered by the shared Fluent `Field` wrapper.
+    label: string;
     /// Name of the referenced secret, "" when nothing is referenced, or
     /// [`LITERAL_VALUE`] when a literal is configured in YAML.
     value: string;
@@ -30,6 +32,7 @@ function optionLabel(secret: SecretStatus) {
 /// literal would be persisted and exported in plain text, so it stays a
 /// YAML-only, explicitly authored choice.
 export default function SecretRefSelect({
+    label,
     value,
     onChange,
     noneLabel = "None",
@@ -40,14 +43,19 @@ export default function SecretRefSelect({
     const { data: secrets = [] } = useSecrets();
     const isLiteral = value === LITERAL_VALUE;
     const declared = secrets.some((secret) => secret.name === value);
+    const hint = isLiteral
+        ? "Authored as a literal in YAML. Pick a secret to replace it, or clear it here."
+        : (secrets.length === 0
+            ? "No secrets declared yet. Declare one on the Secrets page first."
+            : "Values are set on the Secrets page and are never sent to the browser.");
 
     return (
-        <>
+        <Field hint={hint} label={label} required={required}>
             <Select
                 disabled={disabled}
+                onChange={(event) => onChange(event.target.value)}
                 required={required}
                 value={value}
-                onChange={(event) => onChange(event.target.value)}
             >
                 <option value="">{noneLabel}</option>
                 {literalLabel !== undefined && (
@@ -62,13 +70,6 @@ export default function SecretRefSelect({
                     <option value={value}>{value} (not declared)</option>
                 )}
             </Select>
-            <span className="muted">
-                {isLiteral
-                    ? "This value was authored as a literal in YAML. Pick a secret to replace it, or clear it here."
-                    : (secrets.length === 0
-                        ? "No secrets declared yet. Declare one on the Secrets page first."
-                        : "References a declared secret by name. Values are set on the Secrets page and are never sent to the browser.")}
-            </span>
-        </>
+        </Field>
     );
 }

@@ -1,28 +1,33 @@
 import Editor from "@monaco-editor/react";
+import { useMonacoTheme } from "./monacoTheme";
 
 type CodeEditorProps = {
     value: string;
-    onChange: (value: string) => void;
+    /*
+     * Monaco renders its own textarea, which does not consume Fluent's field
+     * context, so a surrounding `Field` label never reaches it. Every call site
+     * passes the label it is presented under.
+     */
+    ariaLabel: string;
+    onChange?: (value: string) => void;
     language?: string;
     height?: string;
-    placeholder?: string;
+    readOnly?: boolean;
 };
 
-export default function CodeEditor({
-    value,
-    onChange,
-    language = "markdown",
-    height = "200px",
-}: CodeEditorProps) {
+export default function CodeEditor(
+    { value, ariaLabel, onChange, language = "markdown", height = "200px", readOnly = false }:
+        CodeEditorProps,
+) {
+    const theme = useMonacoTheme();
     return (
-        <div style={{ border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)", overflow: "hidden" }}>
+        <div className="editor-frame">
             <Editor
                 height={height}
                 language={language}
-                value={value}
-                onChange={(v) => onChange(v ?? "")}
-                theme={document.documentElement.getAttribute("data-theme") === "dark" ? "vs-dark" : "light"}
+                onChange={(v) => onChange?.(v ?? "")}
                 options={{
+                    ariaLabel,
                     minimap: { enabled: false },
                     lineNumbers: "on",
                     scrollBeyondLastLine: false,
@@ -31,7 +36,13 @@ export default function CodeEditor({
                     tabSize: 2,
                     automaticLayout: true,
                     fixedOverflowWidgets: true,
+                    renderLineHighlight: "none",
+                    padding: { top: 8, bottom: 8 },
+                    readOnly,
+                    domReadOnly: readOnly,
                 }}
+                theme={theme}
+                value={value}
             />
         </div>
     );

@@ -1,11 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { ArrowDownload20Regular } from "@fluentui/react-icons";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import { withRequiredEnvKeys } from "./envPrefill";
 import { queryKeys, useHarnesses, useKernelConfig } from "./queries";
 import { useErrorContext } from "./useErrorContext";
-import { Button } from "./fluent";
+import { Button, Field, MessageBar, MessageBarBody } from "./fluent";
+import { formatHarnessLabel } from "./harness";
+import { ViewHeader } from "./ui";
 
 const CONFIGURABLE_HARNESSES = new Set(["opencode"]);
 
@@ -15,13 +18,6 @@ const OPENCODE_ENV_KEYS = [
     "OPENCODE_AGENT",
     "OPENCODE_EXTRA_ARGS",
 ];
-
-function formatHarnessLabel(harness: string): string {
-    return harness
-        .split("-")
-        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(" ");
-}
 
 export default function ConfigKernelsView() {
     const { data: harnesses = [] } = useHarnesses();
@@ -36,15 +32,14 @@ export default function ConfigKernelsView() {
 
     // Fall back to the first harness until the user picks one explicitly.
     const effectiveSelected: string | null = selected ?? harnesses[0] ?? null;
-    const isConfigurable =
-        effectiveSelected !== null && CONFIGURABLE_HARNESSES.has(effectiveSelected);
+    const isConfigurable = effectiveSelected !== null
+        && CONFIGURABLE_HARNESSES.has(effectiveSelected);
 
     const configQuery = useKernelConfig(isConfigurable ? effectiveSelected : null);
 
-    const serverEnvVars =
-        isConfigurable && effectiveSelected !== null && configQuery.data
-            ? withRequiredEnvKeys(configQuery.data.env_vars, effectiveSelected)
-            : "";
+    const serverEnvVars = isConfigurable && effectiveSelected !== null && configQuery.data
+        ? withRequiredEnvKeys(configQuery.data.env_vars, effectiveSelected)
+        : "";
     const dirty = draft !== null && draft.harness === effectiveSelected;
     const envVars = dirty ? draft.value : serverEnvVars;
     const savedNotice = savedNoticeFor !== null && savedNoticeFor === effectiveSelected;
@@ -89,105 +84,120 @@ export default function ConfigKernelsView() {
     const loading = configQuery.isFetching;
 
     return (
-        <div className="view-content management-view config-kernels-management-view">
-            <div className="view-header">
-                <div>
-                    <h2>Kernel Configuration</h2>
-                    <span className="muted">
-                        {harnesses.length} kernels · {CONFIGURABLE_HARNESSES.size} configurable
-                    </span>
-                </div>
-            </div>
-            <p className="muted management-intro">
-                These values act as defaults that pre-fill the Environment Variables
-                field when creating a new agent.
-            </p>
+        <div className="view-content">
+            <ViewHeader
+                description="Defaults that pre-fill the environment variables field when creating an agent."
+                title="Kernel configuration"
+            />
+            <div className="view-body">
+                <div className="split-layout">
+                    <div className="panel">
+                        <ul className="nav-list">
+                            {harnesses.map((harness) => (
+                                <li key={harness}>
+                                    <button
+                                        aria-current={effectiveSelected === harness}
+                                        className={`list-item${
+                                            effectiveSelected === harness ? " active" : ""
+                                        }`}
+                                        onClick={() => selectHarness(harness)}
+                                        type="button"
+                                    >
+                                        <span>{formatHarnessLabel(harness)}</span>
+                                        {!CONFIGURABLE_HARNESSES.has(harness) && (
+                                            <span className="tag">Planned</span>
+                                        )}
+                                    </button>
+                                </li>
+                            ))}
+                            {harnesses.length === 0 && (
+                                <li className="muted-sm" style={{ padding: "var(--space-2)" }}>
+                                    No kernels available.
+                                </li>
+                            )}
+                        </ul>
+                    </div>
 
-            <div className="config-kernels-layout">
-                <div className="config-kernels-list card management-card">
-                    <h3>Kernels</h3>
-                    <ul className="plain-list">
-                        {harnesses.map((harness) => (
-                            <li key={harness}>
-                                <Button
-                                    className={`list-item ${effectiveSelected === harness ? "active" : ""}`}
-                                    onClick={() => selectHarness(harness)}
-                                    type="button"
-                                >
-                                    <span>{formatHarnessLabel(harness)}</span>
-                                    {CONFIGURABLE_HARNESSES.has(harness) ? null : (
-                                        <span className="tag muted-tag">WIP</span>
+                    <div className="panel">
+                        <div className="panel-header">
+                            <h3>
+                                {effectiveSelected === null
+                                    ? "No kernel selected"
+                                    : formatHarnessLabel(effectiveSelected)}
+                            </h3>
+                            {effectiveSelected !== null && isConfigurable && (
+                                <div className="view-header-actions">
+                                    {savedNotice && <span className="muted-sm">Saved</span>}
+                                    {!savedNotice && updatedAt !== null && (
+                                        <span className="muted-sm">
+                                            Last saved {new Date(updatedAt).toLocaleString()}
+                                        </span>
                                     )}
-                                </Button>
-                            </li>
-                        ))}
-                        {harnesses.length === 0 && (
-                            <li className="empty-state">No kernels available.</li>
-                        )}
-                    </ul>
-                </div>
-
-                <div className="config-kernels-detail card management-card">
-                    {effectiveSelected === null && (
-                        <div className="empty-state">Select a kernel.</div>
-                    )}
-                    {effectiveSelected !== null && !isConfigurable && (
-                        <div>
-                            <h3>{formatHarnessLabel(effectiveSelected)}</h3>
-                            <p className="muted">Configuration for this kernel is a work in progress.</p>
+                                    <Button
+                                        icon={<ArrowDownload20Regular />}
+                                        onClick={() => {
+                                            void api.downloadConfigResource(
+                                                "kernel-config",
+                                                effectiveSelected,
+                                            ).catch(reportError);
+                                        }}
+                                        size="small"
+                                    >
+                                        Export YAML
+                                    </Button>
+                                    <Button
+                                        appearance="primary"
+                                        disabled={saveMutation.isPending || loading || !dirty}
+                                        onClick={handleSave}
+                                        size="small"
+                                    >
+                                        {saveMutation.isPending ? "Saving…" : "Save"}
+                                    </Button>
+                                </div>
+                            )}
                         </div>
-                    )}
-                    {effectiveSelected !== null && isConfigurable && (
-                        <div>
-                            <h3>{formatHarnessLabel(effectiveSelected)}</h3>
-                            <p className="muted">
-                                Recognized keys: {OPENCODE_ENV_KEYS.map((k) => (
-                                    <code key={k} style={{ marginRight: 6 }}>{k}</code>
-                                ))}
-                            </p>
-                            {loadError !== null && (
-                                <p className="muted" style={{ color: "var(--danger, #c44)" }}>
-                                    Failed to load:{" "}
-                                    {loadError instanceof Error ? loadError.message : String(loadError)}
+                        <div className="panel-body">
+                            {effectiveSelected !== null && !isConfigurable && (
+                                <p className="muted">
+                                    Configuration for this kernel is not implemented yet.
                                 </p>
                             )}
-                            <label>Environment Variables</label>
-                            <CodeEditor
-                                value={envVars}
-                                onChange={handleEditorChange}
-                                language="ini"
-                                height="200px"
-                            />
-                            <span className="muted">Use .env file syntax: KEY=VALUE, one per line</span>
-                            <div className="form-actions" style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center" }}>
-                                <Button
-                                    className="secondary-button"
-                                    onClick={() => {
-                                        void api.downloadConfigResource(
-                                            "kernel-config",
-                                            effectiveSelected,
-                                        ).catch(reportError);
-                                    }}
-                                    type="button"
-                                >
-                                    Export YAML
-                                </Button>
-                                <Button
-                                    disabled={saveMutation.isPending || loading || !dirty}
-                                    onClick={handleSave}
-                                    type="button"
-                                >
-                                    {saveMutation.isPending ? "Saving…" : "Save"}
-                                </Button>
-                                {updatedAt !== null && (
-                                    <span className="muted">
-                                        Last saved {new Date(updatedAt).toLocaleString()}
-                                    </span>
-                                )}
-                                {savedNotice && <span className="muted">Saved.</span>}
-                            </div>
+                            {effectiveSelected !== null && isConfigurable && (
+                                <>
+                                    {loadError !== null && (
+                                        <MessageBar intent="error">
+                                            <MessageBarBody>
+                                                Failed to load configuration:{" "}
+                                                {loadError instanceof Error
+                                                    ? loadError.message
+                                                    : String(loadError)}
+                                            </MessageBarBody>
+                                        </MessageBar>
+                                    )}
+                                    <Field
+                                        hint="One KEY=VALUE per line, using .env syntax."
+                                        label="Environment variables"
+                                    >
+                                        <CodeEditor
+                                            ariaLabel="Environment variables"
+                                            height="240px"
+                                            language="ini"
+                                            onChange={handleEditorChange}
+                                            value={envVars}
+                                        />
+                                    </Field>
+                                    <p className="muted-sm">
+                                        Recognised keys:{" "}
+                                        <span className="tag-row">
+                                            {OPENCODE_ENV_KEYS.map((key) => (
+                                                <span className="tag mono" key={key}>{key}</span>
+                                            ))}
+                                        </span>
+                                    </p>
+                                </>
+                            )}
                         </div>
-                    )}
+                    </div>
                 </div>
             </div>
         </div>

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
+import { IN_DIALOG } from "./dialogTestQuery";
 import ConfigurationView from "./ConfigurationView";
 import { ErrorProvider } from "./ErrorContext";
 import SecretsView from "./SecretsView";
@@ -81,9 +82,11 @@ describe("ConfigurationView", () => {
       expect(validate).toHaveBeenCalledWith("kind: AgentSpaceConfig\n");
     });
 
-    await user.click(screen.getByRole("button", { name: "Preview Replacement" }));
+    await user.click(screen.getByRole("button", { name: "Preview replacement" }));
     expect(await screen.findByText("Applying against generation 7")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Apply Replacement" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Apply replacement" }),
+    );
     await waitFor(() => {
       expect(apply).toHaveBeenCalledWith("kind: AgentSpaceConfig\n", 7);
     });
@@ -105,9 +108,12 @@ describe("SecretsView", () => {
     const user = userEvent.setup();
     render(<SecretsView />, { wrapper: wrapper() });
 
+    await user.click(await screen.findByRole("button", { name: "Set value" }));
     const input = await screen.findByPlaceholderText("Value is never displayed");
-    await user.type(input, "hidden-value");
-    await user.click(screen.getByRole("button", { name: "Set Value" }));
+    fireEvent.change(input, { target: { value: "hidden-value" } });
+    await user.click(
+      await screen.findByRole("button", { name: "Save value", ...IN_DIALOG }),
+    );
 
     await waitFor(() => {
       expect(setValue).toHaveBeenCalledWith("TOKEN", "hidden-value");

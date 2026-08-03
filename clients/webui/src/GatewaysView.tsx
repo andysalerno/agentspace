@@ -1,6 +1,17 @@
-import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+    Add20Regular,
+    ArrowDownload20Regular,
+    Delete20Regular,
+    Dismiss20Regular,
+    Edit20Regular,
+    Play20Regular,
+    PlugDisconnected24Regular,
+    Power20Regular,
+    Stop20Regular,
+    TextBulletListLtr20Regular,
+} from "@fluentui/react-icons";
 import { api } from "./api";
 import type { Gateway, GatewayConfigField } from "./types";
 import {
@@ -11,7 +22,25 @@ import {
     useGatewayTypes,
 } from "./queries";
 import { useErrorContext } from "./useErrorContext";
-import { Button, Checkbox, Input, Select, Textarea } from "./fluent";
+import {
+    Button,
+    Checkbox,
+    Field,
+    Input,
+    MessageBar,
+    MessageBarBody,
+    Select,
+    Textarea,
+} from "./fluent";
+import {
+    EmptyState,
+    FormDialog,
+    LogsDialog,
+    RowActions,
+    StatusBadge,
+    ViewHeader,
+} from "./ui";
+import { statusTone } from "./status";
 
 type SecretEntry = { key: string; value: string };
 
@@ -170,7 +199,7 @@ export default function GatewaysView() {
     const [envVars, setEnvVars] = useState("");
     const [newSecrets, setNewSecrets] = useState<SecretEntry[]>([]);
     const [schemaOverrides, setSchemaOverrides] = useState<SchemaOverrides>(NO_OVERRIDES);
-    const [expandedGatewayId, setExpandedGatewayId] = useState<string | null>(null);
+    const [logsGatewayId, setLogsGatewayId] = useState<string | null>(null);
 
     // Fall back to the first available option until the user picks one explicitly.
     const gatewayType = gatewayTypes.includes(selectedGatewayType)
@@ -248,11 +277,11 @@ export default function GatewaysView() {
     }
 
     const logsQuery = useQuery({
-        queryKey: expandedGatewayId
-            ? queryKeys.gatewayLogs(expandedGatewayId)
+        queryKey: logsGatewayId
+            ? queryKeys.gatewayLogs(logsGatewayId)
             : (["gateways", "__none__", "logs"] as const),
-        queryFn: () => api.gatewayLogs(expandedGatewayId as string),
-        enabled: expandedGatewayId !== null,
+        queryFn: () => api.gatewayLogs(logsGatewayId as string),
+        enabled: logsGatewayId !== null,
     });
 
     const invalidateGateways = () =>
@@ -327,8 +356,7 @@ export default function GatewaysView() {
         setNewSecrets((prev) => prev.filter((_, i) => i !== index));
     }
 
-    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
+    async function handleSubmit() {
         const fields = schema?.fields ?? [];
         await createMutation.mutateAsync({
             gateway_id: gatewayId,
@@ -389,8 +417,7 @@ export default function GatewaysView() {
         patchEditDraft({ newSecrets: editNewSecrets.filter((_, i) => i !== index) });
     }
 
-    async function handleEditSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
+    async function handleEditSubmit() {
         if (!editingGateway || !editSchema) return;
         if (!validAgentIds.has(editAgentId)) return;
         const fields = editSchema.fields;
@@ -410,497 +437,447 @@ export default function GatewaysView() {
         cancelEdit();
     }
 
-    function handleToggleLogs(gateway: Gateway) {
-        if (expandedGatewayId === gateway.gateway_id) {
-            setExpandedGatewayId(null);
-            return;
-        }
-        setExpandedGatewayId(gateway.gateway_id);
+    const runningCount = gateways.filter((gateway) => gateway.status === "running").length;
+
+    function renderSchemaFields(
+        fields: GatewayConfigField[],
+        values: Record<string, string>,
+        onChange: (key: string, value: string) => void,
+        existingSecretKeys: string[] = [],
+    ) {
+        return fields.map((field) => {
+            const isExistingSecret = field.kind === "secret"
+                && existingSecretKeys.includes(field.key);
+            return (
+                <Field
+                    className="span-2"
+                    hint={field.description ?? undefined}
+                    key={field.key}
+                    label={field.label}
+                    required={field.required}
+                >
+                    <Input
+                        autoComplete={field.kind === "secret" ? "new-password" : undefined}
+                        onChange={(e) => onChange(field.key, e.target.value)}
+                        placeholder={isExistingSecret
+                            ? "Leave blank to keep the current value"
+                            : (field.placeholder ?? field.default ?? "")}
+                        required={field.required && !isExistingSecret}
+                        type={field.kind === "secret" ? "password" : "text"}
+                        value={values[field.key] ?? ""}
+                    />
+                </Field>
+            );
+        });
     }
 
-    return (
-        <div className="view-content management-view gateways-management-view">
-            <div className="view-header">
-                <div>
-                    <h2>Gateways</h2>
-                    <span className="muted">
-                        {gateways.length} total · {gateways.filter((gateway) => gateway.status === "running").length} running
-                    </span>
-                </div>
-                <div className="view-header-actions">
-                    <Button onClick={() => setShowForm(!showForm)} type="button">
-                        {showForm ? "Cancel" : "New Gateway"}
+    function renderSecretRows(
+        entries: SecretEntry[],
+        onUpdate: (index: number, field: "key" | "value", value: string) => void,
+        onRemove: (index: number) => void,
+        onAdd: () => void,
+    ) {
+        return (
+            <fieldset className="field-group span-2">
+                <legend>Additional secrets</legend>
+                <span className="field-group-help">
+                    Passed to the gateway container as environment variables.
+                </span>
+                {entries.map((secret, index) => (
+                    <div className="mount-row" key={index}>
+                        <Input
+                            onChange={(e) => onUpdate(index, "key", e.target.value)}
+                            placeholder="KEY"
+                            value={secret.key}
+                        />
+                        <Input
+                            autoComplete="new-password"
+                            onChange={(e) => onUpdate(index, "value", e.target.value)}
+                            placeholder="value"
+                            type="password"
+                            value={secret.value}
+                        />
+                        <Button
+                            appearance="subtle"
+                            aria-label="Remove secret"
+                            icon={<Dismiss20Regular />}
+                            onClick={() => onRemove(index)}
+                            type="button"
+                        />
+                    </div>
+                ))}
+                <div className="form-actions">
+                    <Button icon={<Add20Regular />} onClick={onAdd} size="small" type="button">
+                        Add secret
                     </Button>
                 </div>
+            </fieldset>
+        );
+    }
+
+    const logsGateway = logsGatewayId
+        ? (gateways.find((g) => g.gateway_id === logsGatewayId) ?? null)
+        : null;
+
+    return (
+        <div className="view-content">
+            <ViewHeader
+                actions={
+                    <Button
+                        appearance="primary"
+                        icon={<Add20Regular />}
+                        onClick={() => setShowForm(true)}
+                        type="button"
+                    >
+                        New gateway
+                    </Button>
+                }
+                description={`${gateways.length} configured, ${runningCount} running`}
+                title="Gateways"
+            />
+            <div className="view-body">
+                {gateways.length === 0
+                    ? (
+                        <EmptyState
+                            action={
+                                <Button appearance="primary" onClick={() => setShowForm(true)}>
+                                    New gateway
+                                </Button>
+                            }
+                            description="A gateway bridges an external system such as Slack or GitHub to one of your agents."
+                            icon={<PlugDisconnected24Regular />}
+                            title="No gateways yet"
+                        />
+                    )
+                    : (
+                        <div className="table-container">
+                            <div className="table-scroll">
+                                <table className="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Gateway</th>
+                                            <th>Type</th>
+                                            <th>Status</th>
+                                            <th>Agent</th>
+                                            <th>Auto-start</th>
+                                            <th aria-label="Actions" />
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {gateways.map((gateway) => {
+                                            const gatewayAgent = agents.find(
+                                                (agent) => agent.agent_id === gateway.agent_id,
+                                            );
+                                            const hasValidAgent = validAgentIds.has(gateway.agent_id);
+                                            const showMissingAgent = !agentsLoading && !hasValidAgent;
+                                            const running = gateway.status === "running";
+                                            return (
+                                                <tr key={gateway.gateway_id}>
+                                                    <td>
+                                                        <div className="cell-identity">
+                                                            <span className="cell-identity-name">
+                                                                {gateway.name}
+                                                            </span>
+                                                            <span className="cell-identity-id">
+                                                                {gateway.gateway_id}
+                                                            </span>
+                                                        </div>
+                                                    </td>
+                                                    <td>{gateway.gateway_type}</td>
+                                                    <td>
+                                                        <StatusBadge
+                                                            label={gateway.status}
+                                                            tone={statusTone(gateway.status)}
+                                                        />
+                                                        {gateway.last_error && (
+                                                            <div
+                                                                className="error-text truncate"
+                                                                title={gateway.last_error}
+                                                            >
+                                                                {gateway.last_error}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td>
+                                                        {showMissingAgent
+                                                            ? (
+                                                                <span className="error-text">
+                                                                    {gateway.agent_id} (missing)
+                                                                </span>
+                                                            )
+                                                            : (gatewayAgent?.name ?? gateway.agent_id)}
+                                                    </td>
+                                                    <td className="muted">
+                                                        {gateway.enabled ? "On" : "Off"}
+                                                    </td>
+                                                    <td className="actions-cell">
+                                                        <RowActions
+                                                            items={[
+                                                                {
+                                                                    key: "logs",
+                                                                    label: "View logs",
+                                                                    icon: <TextBulletListLtr20Regular />,
+                                                                    onClick: () =>
+                                                                        setLogsGatewayId(gateway.gateway_id),
+                                                                },
+                                                                {
+                                                                    key: "toggle",
+                                                                    label: gateway.enabled
+                                                                        ? "Disable auto-start"
+                                                                        : "Enable auto-start",
+                                                                    icon: <Power20Regular />,
+                                                                    disabled: busy
+                                                                        || agentsLoading
+                                                                        || (!hasValidAgent && !gateway.enabled),
+                                                                    onClick: () =>
+                                                                        updateMutation.mutate({
+                                                                            gatewayId: gateway.gateway_id,
+                                                                            payload: { enabled: !gateway.enabled },
+                                                                        }),
+                                                                },
+                                                                {
+                                                                    key: "edit",
+                                                                    label: "Edit configuration",
+                                                                    icon: <Edit20Regular />,
+                                                                    disabled: busy,
+                                                                    onClick: () => openEdit(gateway),
+                                                                },
+                                                                {
+                                                                    key: "export",
+                                                                    label: "Export YAML",
+                                                                    icon: <ArrowDownload20Regular />,
+                                                                    onClick: () => {
+                                                                        void api.downloadConfigResource(
+                                                                            "gateway",
+                                                                            gateway.gateway_id,
+                                                                        ).catch(reportError);
+                                                                    },
+                                                                },
+                                                                {
+                                                                    key: "delete",
+                                                                    label: "Delete",
+                                                                    icon: <Delete20Regular />,
+                                                                    destructive: true,
+                                                                    disabled: busy,
+                                                                    confirm:
+                                                                        `Delete the gateway "${gateway.name}"? This cannot be undone.`,
+                                                                    onClick: () =>
+                                                                        deleteMutation.mutate(gateway.gateway_id),
+                                                                },
+                                                            ]}
+                                                            primary={running
+                                                                ? {
+                                                                    key: "stop",
+                                                                    label: "Stop",
+                                                                    icon: <Stop20Regular />,
+                                                                    disabled: busy,
+                                                                    onClick: () =>
+                                                                        stopMutation.mutate(gateway.gateway_id),
+                                                                }
+                                                                : {
+                                                                    key: "start",
+                                                                    label: "Start",
+                                                                    icon: <Play20Regular />,
+                                                                    disabled: busy || agentsLoading
+                                                                        || !hasValidAgent,
+                                                                    onClick: () =>
+                                                                        startMutation.mutate(gateway.gateway_id),
+                                                                }}
+                                                        />
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
             </div>
 
-            {showForm && (
-                <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
-                    <label>
-                        Gateway ID
+            <FormDialog
+                busy={busy || !agentId || !gatewayType || !schema}
+                onOpenChange={setShowForm}
+                onSubmit={() => {
+                    void handleSubmit();
+                }}
+                open={showForm}
+                submitLabel="Create gateway"
+                title="New gateway"
+            >
+                <div className="form-grid">
+                    <Field hint="Lowercase letters and dashes." label="Gateway ID" required>
                         <Input
+                            onChange={(e) => setGatewayId(e.target.value)}
                             pattern="[a-z]+(?:-[a-z]+)*"
                             placeholder="echo-bridge"
                             required
                             value={gatewayId}
-                            onChange={(e) => setGatewayId(e.target.value)}
                         />
-                    </label>
-                    <label>
-                        Name
+                    </Field>
+                    <Field label="Name" required>
                         <Input
-                            placeholder="My Echo Gateway"
+                            onChange={(e) => setGatewayName(e.target.value)}
+                            placeholder="My echo gateway"
                             required
                             value={gatewayName}
-                            onChange={(e) => setGatewayName(e.target.value)}
                         />
-                    </label>
-                    <label>
-                        Type
+                    </Field>
+                    <Field label="Type">
                         <Select
-                            value={gatewayType}
                             onChange={(e) => setGatewayType(e.target.value)}
+                            value={gatewayType}
                         >
                             {gatewayTypes.map((type) => (
-                                <option key={type} value={type}>
-                                    {type}
-                                </option>
+                                <option key={type} value={type}>{type}</option>
                             ))}
                         </Select>
-                    </label>
-                    <label>
-                        Agent
+                    </Field>
+                    <Field label="Agent" required>
                         <Select
-                            value={agentId}
                             onChange={(e) => setAgentId(e.target.value)}
                             required
+                            value={agentId}
                         >
-                            <option disabled value="">
-                                Select an agent
-                            </option>
+                            <option disabled value="">Select an agent</option>
                             {agents.map((agent) => (
                                 <option key={agent.agent_id} value={agent.agent_id}>
                                     {agent.name} ({agent.agent_id})
                                 </option>
                             ))}
                         </Select>
-                    </label>
-                    <Checkbox
-                        checked={enabled}
-                        className="checkbox-label"
-                        label="Auto-start on boot"
-                        onChange={(_, data) => setEnabled(data.checked === true)}
-                    />
-                    {schema && schema.fields.length > 0 && (
-                        <fieldset className="schema-fields">
-                            <legend>Gateway environment variables</legend>
-                            {schema.fields.map((f) => (
-                                <label key={f.key}>
-                                    {f.label}
-                                    {f.required && <span aria-hidden="true"> *</span>}
-                                    <Input
-                                        autoComplete={f.kind === "secret" ? "new-password" : undefined}
-                                        type={f.kind === "secret" ? "password" : "text"}
-                                        required={f.required}
-                                        placeholder={f.placeholder ?? f.default ?? ""}
-                                        value={schemaValues[f.key] ?? ""}
-                                        onChange={(e) =>
-                                            updateSchemaValue(f.key, e.target.value)
-                                        }
-                                    />
-                                    {f.description && (
-                                        <small className="field-help">{f.description}</small>
-                                    )}
-                                </label>
-                            ))}
-                        </fieldset>
-                    )}
+                    </Field>
+                    <div className="span-2">
+                        <Checkbox
+                            checked={enabled}
+                            label="Start automatically when AgentSpace boots"
+                            onChange={(_, data) => setEnabled(data.checked === true)}
+                        />
+                    </div>
                     {schemaLoading && (
-                        <small className="field-help">Loading gateway schema…</small>
+                        <span className="muted-sm span-2">Loading gateway schema…</span>
                     )}
-                    <label>
-                        Other environment variables (.env format)
+                    {schema && schema.fields.length > 0
+                        && renderSchemaFields(schema.fields, schemaValues, updateSchemaValue)}
+                    <Field
+                        className="span-2"
+                        hint="One KEY=VALUE per line."
+                        label="Other environment variables"
+                    >
                         <Textarea
+                            onChange={(e) => setEnvVars(e.target.value)}
                             placeholder="EXTRA_VAR=value"
                             rows={4}
                             value={envVars}
-                            onChange={(e) => setEnvVars(e.target.value)}
                         />
-                    </label>
-                    <div className="skill-files-section">
-                        <div className="skill-files-header">
-                            <span className="skill-files-label">
-                                Other secrets (passed as env)
-                            </span>
-                            <Button
-                                className="secondary-button small"
-                                onClick={addSecret}
-                                type="button"
-                            >
-                                + Add Secret
-                            </Button>
-                        </div>
-                        {newSecrets.map((secret, index) => (
-                            <div className="skill-file-entry-header" key={index}>
-                                <Input
-                                    placeholder="KEY"
-                                    value={secret.key}
-                                    onChange={(e) => updateSecret(index, "key", e.target.value)}
-                                />
-                                <Input
-                                    autoComplete="new-password"
-                                    placeholder="value"
-                                    type="password"
-                                    value={secret.value}
-                                    onChange={(e) => updateSecret(index, "value", e.target.value)}
-                                />
-                                <Button
-                                    className="icon-button danger-button"
-                                    onClick={() => removeSecret(index)}
-                                    type="button"
-                                    title="Remove secret"
-                                >
-                                    ×
-                                </Button>
-                            </div>
-                        ))}
-                    </div>
-                    <Button disabled={busy || !agentId} type="submit">
-                        Create Gateway
-                    </Button>
-                </form>
-            )}
+                    </Field>
+                    {renderSecretRows(newSecrets, updateSecret, removeSecret, addSecret)}
+                </div>
+            </FormDialog>
 
-            <div className="card-grid management-card-grid">
-                {gateways.map((gateway) => {
-                    const gatewayAgent = agents.find(
-                        (agent) => agent.agent_id === gateway.agent_id,
-                    );
-                    const hasValidAgent = validAgentIds.has(gateway.agent_id);
-                    const showMissingAgent = !agentsLoading && !hasValidAgent;
-                    const editHasValidAgent = validAgentIds.has(editAgentId);
-                    const editShowsMissingAgent =
-                        Boolean(editAgentId) && !agentsLoading && !editHasValidAgent;
-                    return (
-                    <div className="card management-card" key={gateway.gateway_id}>
-                        <div className="card-body">
-                            <div className="management-card-heading">
-                                <div className="management-title-block">
-                                    <h3>{gateway.name}</h3>
-                                    <code className="management-id">{gateway.gateway_id}</code>
-                                </div>
-                                <div className="badge-row">
-                                    {showMissingAgent && (
-                                        <span className="status-badge invalid">invalid</span>
-                                    )}
-                                    <span className={`status-badge ${gateway.status}`}>
-                                        {gateway.status}
-                                    </span>
-                                </div>
-                            </div>
-                            <div className="card-meta management-meta">
-                                <div>
-                                    <strong>ID</strong>
-                                    <span className="truncate-value">{gateway.gateway_id}</span>
-                                </div>
-                                <div>
-                                    <strong>Type</strong>
-                                    <span>{gateway.gateway_type}</span>
-                                </div>
-                                <div className={showMissingAgent ? "error-text" : undefined}>
-                                    <strong>Agent</strong>
-                                    <span className="truncate-value">
-                                        {gatewayAgent
-                                            ? `${gatewayAgent.name} (${gatewayAgent.agent_id})`
-                                            : `${gateway.agent_id}${showMissingAgent ? " (missing)" : ""}`}
-                                    </span>
-                                </div>
-                                <div>
-                                    <strong>Enabled</strong>
-                                    <span>{gateway.enabled ? "yes" : "no"}</span>
-                                </div>
-                                {gateway.container_name && (
-                                    <div>
-                                        <strong>Container</strong>
-                                        <span className="truncate-value" title={gateway.container_name}>{gateway.container_name}</span>
-                                    </div>
-                                )}
-                                {gateway.secret_keys.length > 0 && (
-                                    <div>
-                                        <strong>Secrets</strong>
-                                        <span className="truncate-value">{gateway.secret_keys.join(", ")}</span>
-                                    </div>
-                                )}
-                                {gateway.last_error && (
-                                    <div className="error-text">
-                                        <strong>Error</strong>
-                                        <span className="truncate-value">{gateway.last_error}</span>
-                                    </div>
-                                )}
-                            </div>
-                            {showMissingAgent && (
-                                <div className="warning-box">
-                                    This gateway points to a deleted agent. Edit it and select an
-                                    existing agent before starting or enabling it.
-                                </div>
+            <FormDialog
+                busy={busy || !editAgentId || !editSchema || agentsLoading
+                    || !validAgentIds.has(editAgentId)}
+                onOpenChange={(open) => {
+                    if (!open) cancelEdit();
+                }}
+                onSubmit={() => {
+                    void handleEditSubmit();
+                }}
+                open={editingGateway !== null}
+                submitLabel="Save changes"
+                title={`Edit ${editingGateway?.name ?? "gateway"}`}
+            >
+                <div className="form-grid">
+                    {editingGateway?.status === "running" && (
+                        <MessageBar className="span-2" intent="warning">
+                            <MessageBarBody>
+                                Saving tears down the running container and respawns it with the
+                                new configuration.
+                            </MessageBarBody>
+                        </MessageBar>
+                    )}
+                    <Field label="Name" required>
+                        <Input
+                            onChange={(e) => patchEditDraft({ name: e.target.value })}
+                            required
+                            value={editName}
+                        />
+                    </Field>
+                    <Field
+                        label="Agent"
+                        required
+                        validationMessage={Boolean(editAgentId) && !agentsLoading
+                                && !validAgentIds.has(editAgentId)
+                            ? "The assigned agent no longer exists. Pick an existing agent."
+                            : undefined}
+                    >
+                        <Select
+                            onChange={(e) => patchEditDraft({ agentId: e.target.value })}
+                            required
+                            value={editAgentId}
+                        >
+                            <option disabled value="">Select an agent</option>
+                            {Boolean(editAgentId) && !agentsLoading
+                                && !validAgentIds.has(editAgentId) && (
+                                <option disabled value={editAgentId}>
+                                    Missing agent ({editAgentId})
+                                </option>
                             )}
-                            {expandedGatewayId === gateway.gateway_id && logsQuery.data && (
-                                <pre className="skill-file-content management-log-block">{logsQuery.data.lines.join("\n")}</pre>
-                            )}
-                            {editingGatewayId === gateway.gateway_id && (
-                                <form
-                                    className="create-form"
-                                    onSubmit={(e) => { void handleEditSubmit(e); }}
-                                >
-                                    {gateway.status === "running" && (
-                                        <small className="field-help">
-                                            This gateway is running. Saving will tear down its
-                                            container and respawn it with the new configuration.
-                                        </small>
-                                    )}
-                                    <label>
-                                        Name
-                                        <Input
-                                            required
-                                            value={editName}
-                                            onChange={(e) => patchEditDraft({ name: e.target.value })}
-                                        />
-                                    </label>
-                                    <label>
-                                        Agent
-                                        <Select
-                                            value={editAgentId}
-                                            onChange={(e) => patchEditDraft({ agentId: e.target.value })}
-                                            required
-                                        >
-                                            <option disabled value="">
-                                                Select an agent
-                                            </option>
-                                            {editShowsMissingAgent && (
-                                                <option disabled value={editAgentId}>
-                                                    Missing agent ({editAgentId})
-                                                </option>
-                                            )}
-                                            {agents.map((agent) => (
-                                                <option key={agent.agent_id} value={agent.agent_id}>
-                                                    {agent.name} ({agent.agent_id})
-                                                </option>
-                                            ))}
-                                        </Select>
-                                        {editShowsMissingAgent && (
-                                            <small className="field-help error-text">
-                                                The currently assigned agent no longer exists. Select
-                                                an existing agent to repair this gateway.
-                                            </small>
-                                        )}
-                                    </label>
-                                    <Checkbox
-                                        checked={editEnabled}
-                                        className="checkbox-label"
-                                        label="Auto-start on boot"
-                                        onChange={(_, data) => patchEditDraft({ enabled: data.checked === true })}
-                                    />
-                                    {editSchema && editSchema.fields.length > 0 && (
-                                        <fieldset className="schema-fields">
-                                            <legend>Gateway environment variables</legend>
-                                            {editSchema.fields.map((f) => {
-                                                const isExistingSecret =
-                                                    f.kind === "secret"
-                                                    && gateway.secret_keys.includes(f.key);
-                                                return (
-                                                    <label key={f.key}>
-                                                        {f.label}
-                                                        {f.required && <span aria-hidden="true"> *</span>}
-                                                        <Input
-                                                            autoComplete={f.kind === "secret" ? "new-password" : undefined}
-                                                            type={f.kind === "secret" ? "password" : "text"}
-                                                            // Don't enforce required on existing secrets:
-                                                            // empty means "keep current value".
-                                                            required={f.required && !isExistingSecret}
-                                                            placeholder={
-                                                                isExistingSecret
-                                                                    ? "(leave blank to keep current value)"
-                                                                    : (f.placeholder ?? f.default ?? "")
-                                                            }
-                                                            value={editSchemaValues[f.key] ?? ""}
-                                                            onChange={(e) =>
-                                                                updateEditSchemaValue(f.key, e.target.value)
-                                                            }
-                                                        />
-                                                        {f.description && (
-                                                            <small className="field-help">{f.description}</small>
-                                                        )}
-                                                    </label>
-                                                );
-                                            })}
-                                        </fieldset>
-                                    )}
-                                    {editSchemaLoading && (
-                                        <small className="field-help">Loading gateway schema…</small>
-                                    )}
-                                    <label>
-                                        Other environment variables (.env format)
-                                        <Textarea
-                                            placeholder="EXTRA_VAR=value"
-                                            rows={4}
-                                            value={editExtraEnv}
-                                            onChange={(e) => patchEditDraft({ extraEnv: e.target.value })}
-                                        />
-                                    </label>
-                                    <div className="skill-files-section">
-                                        <div className="skill-files-header">
-                                            <span className="skill-files-label">
-                                                Other secrets (passed as env)
-                                            </span>
-                                            <Button
-                                                className="secondary-button small"
-                                                onClick={addEditSecret}
-                                                type="button"
-                                            >
-                                                + Add Secret
-                                            </Button>
-                                        </div>
-                                        {editNewSecrets.map((secret, index) => (
-                                            <div className="skill-file-entry-header" key={index}>
-                                                <Input
-                                                    placeholder="KEY"
-                                                    value={secret.key}
-                                                    onChange={(e) =>
-                                                        updateEditSecret(index, "key", e.target.value)
-                                                    }
-                                                />
-                                                <Input
-                                                    autoComplete="new-password"
-                                                    placeholder="value"
-                                                    type="password"
-                                                    value={secret.value}
-                                                    onChange={(e) =>
-                                                        updateEditSecret(index, "value", e.target.value)
-                                                    }
-                                                />
-                                                <Button
-                                                    className="icon-button danger-button"
-                                                    onClick={() => removeEditSecret(index)}
-                                                    type="button"
-                                                    title="Remove secret"
-                                                >
-                                                    ×
-                                                </Button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                    <div className="card-footer-actions">
-                                        <Button
-                                            disabled={
-                                                busy
-                                                || !editAgentId
-                                                || !editSchema
-                                                || agentsLoading
-                                                || !editHasValidAgent
-                                            }
-                                            type="submit"
-                                        >
-                                            Save Changes
-                                        </Button>
-                                        <Button
-                                            className="secondary-button"
-                                            onClick={cancelEdit}
-                                            type="button"
-                                        >
-                                            Cancel
-                                        </Button>
-                                    </div>
-                                </form>
-                            )}
-                        </div>
-                        <div className="card-footer">
-                            <Button
-                                className="secondary-button small"
-                                disabled={logsQuery.isFetching && expandedGatewayId === gateway.gateway_id}
-                                onClick={() => handleToggleLogs(gateway)}
-                                type="button"
-                            >
-                                {expandedGatewayId === gateway.gateway_id
-                                    ? "Hide Logs"
-                                    : "View Logs"}
-                            </Button>
-                            <div className="card-footer-actions">
-                                <Button
-                                    className="secondary-button small"
-                                    onClick={() => {
-                                        void api.downloadConfigResource(
-                                            "gateway",
-                                            gateway.gateway_id,
-                                        ).catch(reportError);
-                                    }}
-                                    type="button"
-                                >
-                                    Export YAML
-                                </Button>
-                                {gateway.status === "running" ? (
-                                    <Button
-                                        className="secondary-button small"
-                                        disabled={busy}
-                                        onClick={() => stopMutation.mutate(gateway.gateway_id)}
-                                        type="button"
-                                    >
-                                        Stop
-                                    </Button>
-                                ) : (
-                                    <Button
-                                        className="small"
-                                        disabled={busy || agentsLoading || !hasValidAgent}
-                                        onClick={() => startMutation.mutate(gateway.gateway_id)}
-                                        type="button"
-                                    >
-                                        Start
-                                    </Button>
-                                )}
-                                <Button
-                                    className="secondary-button small"
-                                    disabled={
-                                        busy
-                                        || agentsLoading
-                                        || (!hasValidAgent && !gateway.enabled)
-                                    }
-                                    onClick={() =>
-                                        updateMutation.mutate({
-                                            gatewayId: gateway.gateway_id,
-                                            payload: { enabled: !gateway.enabled },
-                                        })
-                                    }
-                                    type="button"
-                                >
-                                    {gateway.enabled ? "Disable" : "Enable"}
-                                </Button>
-                                <Button
-                                    className="secondary-button small"
-                                    disabled={busy}
-                                    onClick={() => openEdit(gateway)}
-                                    type="button"
-                                    title="Edit gateway configuration. Running gateways will be restarted to pick up changes."
-                                >
-                                    Edit
-                                </Button>
-                                <Button
-                                    className="danger-button small"
-                                    disabled={busy}
-                                    onClick={() => deleteMutation.mutate(gateway.gateway_id)}
-                                    type="button"
-                                >
-                                    Delete
-                                </Button>
-                            </div>
-                        </div>
+                            {agents.map((agent) => (
+                                <option key={agent.agent_id} value={agent.agent_id}>
+                                    {agent.name} ({agent.agent_id})
+                                </option>
+                            ))}
+                        </Select>
+                    </Field>
+                    <div className="span-2">
+                        <Checkbox
+                            checked={editEnabled}
+                            label="Start automatically when AgentSpace boots"
+                            onChange={(_, data) => patchEditDraft({ enabled: data.checked === true })}
+                        />
                     </div>
-                    );
-                })}
-                {gateways.length === 0 && (
-                    <div className="empty-state">
-                        No gateways yet. Create one to bridge an external system to an agent.
-                    </div>
-                )}
-            </div>
+                    {editSchemaLoading && (
+                        <span className="muted-sm span-2">Loading gateway schema…</span>
+                    )}
+                    {editSchema && editSchema.fields.length > 0 && renderSchemaFields(
+                        editSchema.fields,
+                        editSchemaValues,
+                        updateEditSchemaValue,
+                        editingGateway?.secret_keys ?? [],
+                    )}
+                    <Field
+                        className="span-2"
+                        hint="One KEY=VALUE per line."
+                        label="Other environment variables"
+                    >
+                        <Textarea
+                            onChange={(e) => patchEditDraft({ extraEnv: e.target.value })}
+                            placeholder="EXTRA_VAR=value"
+                            rows={4}
+                            value={editExtraEnv}
+                        />
+                    </Field>
+                    {renderSecretRows(
+                        editNewSecrets,
+                        updateEditSecret,
+                        removeEditSecret,
+                        addEditSecret,
+                    )}
+                </div>
+            </FormDialog>
+
+            <LogsDialog
+                lines={logsQuery.data?.lines ?? []}
+                loading={logsQuery.isFetching}
+                onClose={() => setLogsGatewayId(null)}
+                onRefresh={() => {
+                    void logsQuery.refetch();
+                }}
+                open={logsGateway !== null}
+                title={logsGateway ? `${logsGateway.name} logs` : "Logs"}
+            />
         </div>
     );
 }

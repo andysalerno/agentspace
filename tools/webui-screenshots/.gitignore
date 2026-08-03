@@ -1,0 +1,10 @@
+node_modules/
+.sysroot/
+.debcache/
+
+# Screenshot output. Never committed: regenerate baselines instead of trusting
+# a checked-in one. See PLAYWRIGHT.md.
+*.png
+out/
+baseline/
+after/

@@ -1,12 +1,19 @@
-import type { FormEvent } from "react";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+    Add20Regular,
+    ArrowDownload20Regular,
+    Delete20Regular,
+    Edit20Regular,
+    PlugConnected24Regular,
+} from "@fluentui/react-icons";
 import type { Connection } from "./types";
 import { api } from "./api";
 import { queryKeys, useConnections } from "./queries";
 import { useErrorContext } from "./useErrorContext";
-import { Button, Input, Select } from "./fluent";
+import { Button, Field, Input, Select } from "./fluent";
 import SecretRefSelect, { LITERAL_VALUE } from "./SecretRefSelect";
+import { EmptyState, FormDialog, RowActions, StatusBadge, ViewHeader } from "./ui";
 
 type ConnectionApiFlavor = Connection["api_flavor"];
 
@@ -36,8 +43,7 @@ export default function ConnectionsView() {
     const [editApiFlavor, setEditApiFlavor] = useState<ConnectionApiFlavor>("chat_completions");
     const [editApiKeySecret, setEditApiKeySecret] = useState("");
 
-    const invalidate = () =>
-        queryClient.invalidateQueries({ queryKey: queryKeys.connections });
+    const invalidate = () => queryClient.invalidateQueries({ queryKey: queryKeys.connections });
 
     const createMutation = useMutation({
         mutationFn: (payload: {
@@ -52,8 +58,15 @@ export default function ConnectionsView() {
     });
 
     const updateMutation = useMutation({
-        mutationFn: ({ id, payload }: { id: string; payload: { name?: string; url?: string; api_flavor?: ConnectionApiFlavor; api_key_secret?: string } }) =>
-            api.updateConnection(id, payload),
+        mutationFn: ({ id, payload }: {
+            id: string;
+            payload: {
+                name?: string;
+                url?: string;
+                api_flavor?: ConnectionApiFlavor;
+                api_key_secret?: string;
+            };
+        }) => api.updateConnection(id, payload),
         onSuccess: () => invalidate(),
         onError: reportError,
     });
@@ -64,13 +77,9 @@ export default function ConnectionsView() {
         onError: reportError,
     });
 
-    const busy =
-        createMutation.isPending
-        || updateMutation.isPending
-        || deleteMutation.isPending;
+    const busy = createMutation.isPending || updateMutation.isPending || deleteMutation.isPending;
 
-    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
+    async function handleCreate() {
         await createMutation.mutateAsync({
             connection_id: formId,
             name: formName,
@@ -93,22 +102,11 @@ export default function ConnectionsView() {
         setEditApiFlavor(conn.api_flavor);
         // A literal key is only authorable in YAML, so it is represented by a
         // sentinel the picker preserves rather than silently clearing.
-        setEditApiKeySecret(
-            conn.api_key_secret ?? (conn.has_api_key ? LITERAL_VALUE : ""),
-        );
+        setEditApiKeySecret(conn.api_key_secret ?? (conn.has_api_key ? LITERAL_VALUE : ""));
     }
 
-    function cancelEdit() {
-        setEditingId(null);
-        setEditName("");
-        setEditUrl("");
-        setEditApiFlavor("chat_completions");
-        setEditApiKeySecret("");
-    }
-
-    async function handleEditSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
-        if (!editingId) return;
+    async function handleEditSubmit() {
+        if (editingId === null) return;
         await updateMutation.mutateAsync({
             id: editingId,
             payload: {
@@ -117,77 +115,187 @@ export default function ConnectionsView() {
                 api_flavor: editApiFlavor,
                 // Omitted while the YAML literal is still selected, so editing
                 // an unrelated field cannot clear an authored key.
-                ...(editApiKeySecret === LITERAL_VALUE
-                    ? {}
-                    : { api_key_secret: editApiKeySecret }),
+                ...(editApiKeySecret === LITERAL_VALUE ? {} : { api_key_secret: editApiKeySecret }),
             },
         });
-        cancelEdit();
+        setEditingId(null);
     }
 
+    const keyedCount = connections.filter((conn) => conn.has_api_key).length;
+
     return (
-        <div className="view-content management-view connections-management-view">
-            <div className="view-header">
-                <div>
-                    <h2>Connections</h2>
-                    <span className="muted">
-                        {connections.length} endpoints · {connections.filter((conn) => conn.has_api_key).length} keyed
-                    </span>
-                </div>
-                <div className="view-header-actions">
-                    <Button onClick={() => setShowForm(!showForm)} type="button">
-                        {showForm ? "Cancel" : "New Connection"}
+        <div className="view-content">
+            <ViewHeader
+                actions={
+                    <Button
+                        appearance="primary"
+                        icon={<Add20Regular />}
+                        onClick={() => setShowForm(true)}
+                        type="button"
+                    >
+                        New connection
                     </Button>
-                </div>
+                }
+                description={`${connections.length} endpoints, ${keyedCount} with a key`}
+                title="Connections"
+            />
+            <div className="view-body">
+                {connections.length === 0
+                    ? (
+                        <EmptyState
+                            action={
+                                <Button appearance="primary" onClick={() => setShowForm(true)}>
+                                    New connection
+                                </Button>
+                            }
+                            description="A connection points agents at a model endpoint and the secret that authenticates it."
+                            icon={<PlugConnected24Regular />}
+                            title="No connections yet"
+                        />
+                    )
+                    : (
+                        <div className="table-container">
+                            <div className="table-scroll">
+                                <table className="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Connection</th>
+                                            <th>Endpoint</th>
+                                            <th>API</th>
+                                            <th>Key</th>
+                                            <th aria-label="Actions" />
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {connections.map((conn) => (
+                                            <tr key={conn.connection_id}>
+                                                <td>
+                                                    <div className="cell-identity">
+                                                        <span className="cell-identity-name">
+                                                            {conn.name}
+                                                        </span>
+                                                        <span className="cell-identity-id">
+                                                            {conn.connection_id}
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td className="cell-wrap">
+                                                    <span className="mono-sm" title={conn.url}>
+                                                        {conn.url}
+                                                    </span>
+                                                </td>
+                                                <td className="muted">
+                                                    {apiFlavorLabel(conn.api_flavor)}
+                                                </td>
+                                                <td>
+                                                    {conn.has_api_key
+                                                        ? (
+                                                            <StatusBadge
+                                                                label={conn.api_key_secret
+                                                                    ?? "Literal in YAML"}
+                                                                tone="ok"
+                                                            />
+                                                        )
+                                                        : (
+                                                            <StatusBadge
+                                                                label="Not set"
+                                                                tone="neutral"
+                                                            />
+                                                        )}
+                                                </td>
+                                                <td className="actions-cell">
+                                                    <RowActions
+                                                        items={[
+                                                            {
+                                                                key: "export",
+                                                                label: "Export YAML",
+                                                                icon: <ArrowDownload20Regular />,
+                                                                onClick: () => {
+                                                                    void api.downloadConfigResource(
+                                                                        "connection",
+                                                                        conn.connection_id,
+                                                                    ).catch(reportError);
+                                                                },
+                                                            },
+                                                            {
+                                                                key: "delete",
+                                                                label: "Delete connection",
+                                                                icon: <Delete20Regular />,
+                                                                destructive: true,
+                                                                disabled: busy,
+                                                                confirm:
+                                                                    `Delete the connection "${conn.name}"? Agents using it stop working.`,
+                                                                onClick: () =>
+                                                                    deleteMutation.mutate(
+                                                                        conn.connection_id,
+                                                                    ),
+                                                            },
+                                                        ]}
+                                                        primary={{
+                                                            key: "edit",
+                                                            label: "Edit",
+                                                            icon: <Edit20Regular />,
+                                                            disabled: busy,
+                                                            onClick: () => openEdit(conn),
+                                                        }}
+                                                    />
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    )}
             </div>
 
-            {showForm && (
-                <form className="create-form card" onSubmit={(e) => { void handleSubmit(e); }}>
-                    <label>
-                        Connection ID
+            <FormDialog
+                busy={busy}
+                onOpenChange={setShowForm}
+                onSubmit={() => {
+                    void handleCreate();
+                }}
+                open={showForm}
+                submitLabel="Create connection"
+                title="New connection"
+            >
+                <div className="form-grid">
+                    <Field label="Connection ID" required>
                         <Input
                             autoComplete="username"
+                            onChange={(e) => setFormId(e.target.value)}
                             pattern="[a-z]+(?:-[a-z]+)*"
                             placeholder="openai"
                             required
                             value={formId}
-                            onChange={(e) => setFormId(e.target.value)}
                         />
-                    </label>
-                    <label>
-                        Display Name
+                    </Field>
+                    <Field label="Display name" required>
                         <Input
                             autoComplete="organization"
+                            onChange={(e) => setFormName(e.target.value)}
                             placeholder="OpenAI"
                             required
                             value={formName}
-                            onChange={(e) => setFormName(e.target.value)}
                         />
-                    </label>
-                    <label>
-                        URL
-                        <Input
-                            autoComplete="url"
-                            placeholder="https://api.openai.com/v1"
-                            required
-                            value={formUrl}
-                            onChange={(e) => setFormUrl(e.target.value)}
-                        />
-                    </label>
-                    <label>
-                        API Key Secret
-                        <SecretRefSelect
-                            noneLabel="No API key"
-                            value={formApiKeySecret}
-                            onChange={setFormApiKeySecret}
-                        />
-                    </label>
-                    <label>
-                        API Flavor
+                    </Field>
+                    <div className="span-2">
+                        <Field label="Endpoint URL" required>
+                            <Input
+                                autoComplete="url"
+                                onChange={(e) => setFormUrl(e.target.value)}
+                                placeholder="https://api.openai.com/v1"
+                                required
+                                value={formUrl}
+                            />
+                        </Field>
+                    </div>
+                    <Field label="API flavor" required>
                         <Select
+                            onChange={(e) =>
+                                setFormApiFlavor(e.target.value as ConnectionApiFlavor)}
                             required
                             value={formApiFlavor}
-                            onChange={(e) => setFormApiFlavor(e.target.value as ConnectionApiFlavor)}
                         >
                             {API_FLAVOR_OPTIONS.map((option) => (
                                 <option key={option.value} value={option.value}>
@@ -195,150 +303,70 @@ export default function ConnectionsView() {
                                 </option>
                             ))}
                         </Select>
-                    </label>
-                    <Button disabled={busy} type="submit">
-                        Create Connection
-                    </Button>
-                </form>
-            )}
+                    </Field>
+                    <SecretRefSelect
+                        label="API key secret"
+                        noneLabel="No API key"
+                        onChange={setFormApiKeySecret}
+                        value={formApiKeySecret}
+                    />
+                </div>
+            </FormDialog>
 
-            <div className="card-grid management-card-grid">
-                {connections.map((conn) => (
-                    <div className="card management-card" key={conn.connection_id}>
-                        <div className="card-body">
-                            <div className="management-card-heading">
-                                <div className="management-title-block">
-                                    <h3>{conn.name}</h3>
-                                    <code className="management-id">{conn.connection_id}</code>
-                                </div>
-                                <span className={`status-badge ${conn.has_api_key ? "active" : "stopped"}`}>
-                                    {conn.has_api_key ? "key set" : "no key"}
-                                </span>
-                            </div>
-                            <div className="card-meta">
-                                <div>
-                                    <strong>URL:</strong>{" "}
-                                    <span className="truncate-value" title={conn.url}>{conn.url}</span>
-                                </div>
-                                <div>
-                                    <strong>API Key:</strong>{" "}
-                                    {conn.api_key_secret
-                                        ? <code>{conn.api_key_secret}</code>
-                                        : (conn.has_api_key ? "literal value set in YAML" : "not set")}
-                                </div>
-                                <div>
-                                    <strong>API Flavor:</strong> {apiFlavorLabel(conn.api_flavor)}
-                                </div>
-                            </div>
-                            {editingId === conn.connection_id && (
-                                <form
-                                    className="create-form"
-                                    onSubmit={(e) => { void handleEditSubmit(e); }}
-                                >
-                                    <label>
-                                        Display Name
-                                        <Input
-                                            autoComplete="organization"
-                                            required
-                                            value={editName}
-                                            onChange={(e) => setEditName(e.target.value)}
-                                        />
-                                    </label>
-                                    <label>
-                                        URL
-                                        <Input
-                                            autoComplete="url"
-                                            required
-                                            value={editUrl}
-                                            onChange={(e) => setEditUrl(e.target.value)}
-                                        />
-                                    </label>
-                                    <label>
-                                        API Key Secret
-                                        <SecretRefSelect
-                                            literalLabel="Literal value authored in YAML (keep)"
-                                            noneLabel="No API key"
-                                            value={editApiKeySecret}
-                                            onChange={setEditApiKeySecret}
-                                        />
-                                    </label>
-                                    <label>
-                                        API Flavor
-                                        <Select
-                                            required
-                                            value={editApiFlavor}
-                                            onChange={(e) => setEditApiFlavor(e.target.value as ConnectionApiFlavor)}
-                                        >
-                                            {API_FLAVOR_OPTIONS.map((option) => (
-                                                <option key={option.value} value={option.value}>
-                                                    {option.label}
-                                                </option>
-                                            ))}
-                                        </Select>
-                                    </label>
-                                    <div className="card-footer-actions">
-                                        <Button
-                                            disabled={busy}
-                                            type="submit"
-                                        >
-                                            Save Changes
-                                        </Button>
-                                        <Button
-                                            className="secondary-button"
-                                            onClick={cancelEdit}
-                                            type="button"
-                                        >
-                                            Cancel
-                                        </Button>
-                                    </div>
-                                </form>
-                            )}
-                        </div>
-                        <div className="card-footer">
-                            <span className="muted">
-                                Created {new Date(conn.created_at).toLocaleDateString()}
-                            </span>
-                            <div className="card-footer-actions">
-                                <Button
-                                    className="secondary-button small"
-                                    onClick={() => {
-                                        void api.downloadConfigResource(
-                                            "connection",
-                                            conn.connection_id,
-                                        ).catch(reportError);
-                                    }}
-                                    type="button"
-                                >
-                                    Export YAML
-                                </Button>
-                                {editingId !== conn.connection_id && (
-                                    <Button
-                                        className="secondary-button small"
-                                        disabled={busy}
-                                        onClick={() => openEdit(conn)}
-                                        type="button"
-                                    >
-                                        Edit
-                                    </Button>
-                                )}
-                                <Button
-                                    className="danger-button small"
-                                    disabled={busy}
-                                    onClick={() => deleteMutation.mutate(conn.connection_id)}
-                                    type="button"
-                                >
-                                    Delete
-                                </Button>
-                            </div>
-                        </div>
+            <FormDialog
+                busy={busy}
+                onOpenChange={(open) => {
+                    if (!open) setEditingId(null);
+                }}
+                onSubmit={() => {
+                    void handleEditSubmit();
+                }}
+                open={editingId !== null}
+                submitLabel="Save changes"
+                title={`Edit ${editingId ?? ""}`}
+            >
+                <div className="form-grid">
+                    <Field label="Display name" required>
+                        <Input
+                            autoComplete="organization"
+                            onChange={(e) => setEditName(e.target.value)}
+                            required
+                            value={editName}
+                        />
+                    </Field>
+                    <Field label="API flavor" required>
+                        <Select
+                            onChange={(e) =>
+                                setEditApiFlavor(e.target.value as ConnectionApiFlavor)}
+                            required
+                            value={editApiFlavor}
+                        >
+                            {API_FLAVOR_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                    {option.label}
+                                </option>
+                            ))}
+                        </Select>
+                    </Field>
+                    <div className="span-2">
+                        <Field label="Endpoint URL" required>
+                            <Input
+                                autoComplete="url"
+                                onChange={(e) => setEditUrl(e.target.value)}
+                                required
+                                value={editUrl}
+                            />
+                        </Field>
                     </div>
-                ))}
-                {connections.length === 0 && (
-                    <div className="empty-state">
-                        No connections yet. Create one to add an LLM endpoint for your agents.
-                    </div>
-                )}
-            </div>
+                    <SecretRefSelect
+                        label="API key secret"
+                        literalLabel="Keep the literal value authored in YAML"
+                        noneLabel="No API key"
+                        onChange={setEditApiKeySecret}
+                        value={editApiKeySecret}
+                    />
+                </div>
+            </FormDialog>
         </div>
     );
 }

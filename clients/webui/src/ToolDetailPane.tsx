@@ -1,71 +1,60 @@
-import Editor from "@monaco-editor/react";
 import type { ToolCall } from "./types";
-import { Button } from "./fluent";
+import CodeEditor from "./CodeEditor";
+import {
+    Button,
+    Dialog,
+    DialogActions,
+    DialogBody,
+    DialogContent,
+    DialogSurface,
+    DialogTitle,
+    Field,
+} from "./fluent";
 
 type ToolDetailPaneProps = {
-    toolCall: ToolCall;
+    /** `null` keeps the dialog mounted but closed, so it can reopen instantly. */
+    toolCall: ToolCall | null;
     onClose: () => void;
 };
 
-function editorTheme(): string {
-    return document.documentElement.getAttribute("data-theme") === "dark"
-        ? "vs-dark"
-        : "light";
-}
-
+/** Read-only input and output for a single tool call. */
 export default function ToolDetailPane({ toolCall, onClose }: ToolDetailPaneProps) {
     return (
-        <div className="tool-detail-overlay" onClick={onClose}>
-            <div className="tool-detail-pane" onClick={(e) => e.stopPropagation()}>
-                <div className="tool-detail-header">
-                    <h3>⚙ {toolCall.tool}</h3>
-                    <Button className="icon-button" type="button" onClick={onClose}>
-                        ×
-                    </Button>
-                </div>
-                <div className="tool-detail-editors">
-                    <div className="tool-detail-section">
-                        <label>Input</label>
-                        <Editor
-                            height="200px"
-                            language="json"
-                            value={toolCall.input ?? ""}
-                            theme={editorTheme()}
-                            options={{
-                                readOnly: true,
-                                minimap: { enabled: false },
-                                lineNumbers: "on",
-                                scrollBeyondLastLine: false,
-                                wordWrap: "on",
-                                fontSize: 13,
-                                tabSize: 2,
-                                automaticLayout: true,
-                                fixedOverflowWidgets: true,
-                            }}
-                        />
-                    </div>
-                    <div className="tool-detail-section">
-                        <label>Output</label>
-                        <Editor
-                            height="200px"
-                            language="text"
-                            value={toolCall.output ?? ""}
-                            theme={editorTheme()}
-                            options={{
-                                readOnly: true,
-                                minimap: { enabled: false },
-                                lineNumbers: "on",
-                                scrollBeyondLastLine: false,
-                                wordWrap: "on",
-                                fontSize: 13,
-                                tabSize: 2,
-                                automaticLayout: true,
-                                fixedOverflowWidgets: true,
-                            }}
-                        />
-                    </div>
-                </div>
-            </div>
-        </div>
+        <Dialog
+            modalType="modal"
+            onOpenChange={(_, data) => {
+                if (!data.open) onClose();
+            }}
+            open={toolCall !== null}
+        >
+            <DialogSurface className="form-dialog-wide">
+                <DialogBody>
+                    <DialogTitle>{toolCall?.tool ?? "Tool call"}</DialogTitle>
+                    <DialogContent className="dialog-scroll">
+                        <Field label="Input">
+                            <CodeEditor
+                                ariaLabel="Tool call input"
+                                height="220px"
+                                language="json"
+                                readOnly
+                                value={toolCall?.input ?? ""}
+                            />
+                        </Field>
+                        <Field label="Output">
+                            <CodeEditor
+                                ariaLabel="Tool call output"
+                                height="260px"
+                                language="plaintext"
+                                readOnly
+                                value={toolCall?.output ?? ""}
+                            />
+                        </Field>
+                    </DialogContent>
+                    <DialogActions>
+                        <Button onClick={onClose}>Close</Button>
+                    </DialogActions>
+                </DialogBody>
+            </DialogSurface>
+        </Dialog>
     );
 }

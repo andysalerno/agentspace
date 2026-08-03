@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { webDarkTheme, webLightTheme } from "@fluentui/react-components";
+import { Dismiss20Regular } from "@fluentui/react-icons";
 import type { ViewId } from "./types";
 import Sidebar from "./Sidebar";
 import ChatView from "./ChatView";
@@ -17,15 +17,30 @@ import MemoryView from "./MemoryView";
 import ConfigurationView from "./ConfigurationView";
 import SecretsView from "./SecretsView";
 import { useErrorContext } from "./useErrorContext";
-import { Button, FluentProvider } from "./fluent";
+import { DarkModeContext } from "./monacoTheme";
+import {
+    Button,
+    FluentProvider,
+    MessageBar,
+    MessageBarActions,
+    MessageBarBody,
+    MotionBehaviourProvider,
+} from "./fluent";
+import { darkTheme, lightTheme } from "./theme";
 import { useWebuiInfo } from "./queries";
+
+const narrowViewport = "(max-width: 900px)";
+
+function storedSidebarPreference(): boolean {
+  return localStorage.getItem("sidebar-collapsed") === "true";
+}
 
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
-    return localStorage.getItem("sidebar-collapsed") === "true";
-  });
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    window.matchMedia(narrowViewport).matches || storedSidebarPreference()
+  );
   const [darkMode, setDarkMode] = useState(() => {
     const stored = localStorage.getItem("theme");
     if (stored) return stored === "dark";
@@ -42,9 +57,37 @@ export default function App() {
     localStorage.setItem("theme", darkMode ? "dark" : "light");
   }, [darkMode]);
 
+  /*
+   * There is no room for the navigation labels on a narrow viewport, so the
+   * sidebar collapses itself. Doing this in state rather than CSS keeps the
+   * component honest: it swaps the hidden labels for tooltips and routes the
+   * configuration submenu through an expand, so those views stay reachable.
+   */
   useEffect(() => {
-    localStorage.setItem("sidebar-collapsed", String(sidebarCollapsed));
-  }, [sidebarCollapsed]);
+    const query = window.matchMedia(narrowViewport);
+    const handleChange = (event: MediaQueryListEvent) => {
+      setSidebarCollapsed(event.matches || storedSidebarPreference());
+    };
+    query.addEventListener("change", handleChange);
+    return () => query.removeEventListener("change", handleChange);
+  }, []);
+
+  /** The collapse control. Only this remembers the choice. */
+  function handleToggleSidebar() {
+    setSidebarCollapsed((previous) => {
+      localStorage.setItem("sidebar-collapsed", String(!previous));
+      return !previous;
+    });
+  }
+
+  /*
+   * Clicking a navigation group while collapsed has to reveal its submenu, but
+   * that is navigation rather than a preference, so it is not persisted and a
+   * later viewport change can still collapse the sidebar again.
+   */
+  function handleExpandForGroup() {
+    setSidebarCollapsed(false);
+  }
 
   function handleNavigateToChat(sessionId: string) {
     setSelectedSessionId(sessionId);
@@ -94,35 +137,43 @@ export default function App() {
   return (
     <FluentProvider
       className="fluent-root"
-      theme={darkMode ? webDarkTheme : webLightTheme}
+      theme={darkMode ? darkTheme : lightTheme}
     >
+    <MotionBehaviourProvider value="skip">
+    <DarkModeContext.Provider value={darkMode}>
     <div className="app-shell">
       <Sidebar
         activeView={viewId}
         onNavigate={setViewId}
         onRefresh={handleRefresh}
         collapsed={sidebarCollapsed}
-        onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
+        onExpandForGroup={handleExpandForGroup}
+        onToggleCollapse={handleToggleSidebar}
         darkMode={darkMode}
         onToggleDarkMode={() => setDarkMode((prev) => !prev)}
         version={webuiVersion}
       />
       <div className="main-area">
         {error && (
-          <div className="error-banner">
-            <span>{error}</span>
-            <Button
-              className="dismiss-button"
-              onClick={clearError}
-              type="button"
-            >
-              ×
-            </Button>
-          </div>
+          <MessageBar className="app-message-bar" intent="error">
+            <MessageBarBody>{error}</MessageBarBody>
+            <MessageBarActions
+              containerAction={
+                <Button
+                  appearance="transparent"
+                  aria-label="Dismiss"
+                  icon={<Dismiss20Regular />}
+                  onClick={clearError}
+                />
+              }
+            />
+          </MessageBar>
         )}
         {renderView()}
       </div>
     </div>
+    </DarkModeContext.Provider>
+    </MotionBehaviourProvider>
     </FluentProvider>
   );
 }

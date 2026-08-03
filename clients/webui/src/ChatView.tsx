@@ -16,6 +16,17 @@ import type {
 } from "./types";
 import ToolDetailPane from "./ToolDetailPane";
 import {
+    Add20Regular,
+    ArrowClockwise20Regular,
+    Chat24Regular,
+    Code20Regular,
+    Delete20Regular,
+    MoreHorizontal20Regular,
+    Open20Regular,
+    Save20Regular,
+    Send20Regular,
+} from "@fluentui/react-icons";
+import {
     queryKeys,
     useAgents,
     useKernels,
@@ -24,7 +35,21 @@ import {
 } from "./queries";
 import { useErrorContext } from "./useErrorContext";
 import { promptSaveWorkspace, promptWorkspaceSaveDetails } from "./saveWorkspacePrompt";
-import { Button, Input, Select, Textarea } from "./fluent";
+import {
+    Button,
+    Field,
+    Input,
+    Menu,
+    MenuItem,
+    MenuList,
+    MenuPopover,
+    MenuTrigger,
+    Select,
+    Textarea,
+    Tooltip,
+} from "./fluent";
+import { EmptyState, FormDialog, StatusBadge } from "./ui";
+import { sessionTone } from "./status";
 import "./chat-workspace.css";
 
 type ChatViewProps = {
@@ -292,20 +317,6 @@ function sessionChannelLabel(channelName: string | null): string {
     return channelName?.trim() || "default channel";
 }
 
-function statusTone(status: string | undefined): "active" | "busy" | "error" | "neutral" {
-    const normalized = status?.toLowerCase() ?? "";
-    if (/(error|fail|stopped|unhealthy|cancel)/.test(normalized)) {
-        return "error";
-    }
-    if (/(active|busy|pending|running|start|stream|working)/.test(normalized)) {
-        return "busy";
-    }
-    if (/(ready|idle|complete|success|ok|online)/.test(normalized)) {
-        return "active";
-    }
-    return "neutral";
-}
-
 function hasMessageWithId(messages: ChatMessage[], message: ChatMessage): boolean {
     return messages.some((existing) => existing.message_id === message.message_id);
 }
@@ -409,9 +420,11 @@ function MessageMarkdown({
                             if (toolCall) {
                                 return (
                                     <Button
-                                        className="tool-call-tag inline-tool-call"
-                                        type="button"
+                                        appearance="outline"
+                                        className="inline-tool-call"
                                         onClick={() => onSelectToolCall?.(toolCall)}
+                                        size="small"
+                                        type="button"
                                     >
                                         {children}
                                     </Button>
@@ -672,8 +685,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         updateMessageInCache,
     ]);
 
-    async function handleCreateSession(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault();
+    async function handleCreateSession() {
         if (!newSessionAgentId) return;
         await createSessionMutation.mutateAsync({
             agent_id: newSessionAgentId,
@@ -877,320 +889,390 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     const serviceUrl = selectedKernel?.free_port_url
         ? browserReachableLocalUrl(selectedKernel.free_port_url)
         : null;
-    const selectedStatusTone = statusTone(selectedSession?.status);
+    const selectedTone = sessionTone(selectedSession?.status ?? "");
 
     return (
         <div className="chat-layout">
-            <aside className="chat-sessions-panel chat-session-rail">
-                <div className="chat-sessions-heading">
-                    <div className="rail-title-stack">
-                        <span className="rail-eyebrow">Workspace</span>
-                        <h3>
-                            Sessions
-                            <span className="rail-count">{sessions.length}</span>
-                        </h3>
-                    </div>
-                    <div className="rail-heading-actions">
-                        <Button
-                            aria-label="Delete all workspace sessions"
-                            className="secondary-button rail-delete-all-button"
-                            disabled={sessions.length === 0 || deletingSessions || saveWorkspaceMutation.isPending}
-                            onClick={handleDeleteAllSessions}
-                            title="Delete all workspace sessions"
-                            type="button"
-                        >
-                            {deleteAllSessionsMutation.isPending ? "Deleting..." : "Delete all"}
-                        </Button>
-                        <Button
-                            className="icon-button new-session-button"
-                            onClick={() => setShowNewSession(!showNewSession)}
-                            type="button"
-                            title="New session"
-                            aria-expanded={showNewSession}
-                        >
-                            {showNewSession ? "×" : "+"}
-                        </Button>
+            <aside className="session-rail">
+                <div className="session-rail-header">
+                    <h2>Sessions</h2>
+                    <div className="session-rail-header-actions">
+                        <Tooltip content="New session" relationship="label">
+                            <Button
+                                appearance="subtle"
+                                icon={<Add20Regular />}
+                                onClick={() => setShowNewSession(true)}
+                                size="small"
+                            />
+                        </Tooltip>
+                        <Menu positioning="below-end">
+                            <MenuTrigger disableButtonEnhancement>
+                                <Tooltip content="Session actions" relationship="label">
+                                    <Button
+                                        appearance="subtle"
+                                        icon={<MoreHorizontal20Regular />}
+                                        size="small"
+                                    />
+                                </Tooltip>
+                            </MenuTrigger>
+                            <MenuPopover>
+                                <MenuList>
+                                    <MenuItem
+                                        disabled={sessions.length === 0 || deletingSessions
+                                            || saveWorkspaceMutation.isPending}
+                                        icon={<Delete20Regular />}
+                                        onClick={handleDeleteAllSessions}
+                                        style={{ color: "var(--danger)" }}
+                                    >
+                                        Delete all sessions
+                                    </MenuItem>
+                                </MenuList>
+                            </MenuPopover>
+                        </Menu>
                     </div>
                 </div>
-                {showNewSession && (
-                    <form className="compact-form new-session-form" onSubmit={(e) => { void handleCreateSession(e); }}>
-                        <label>
-                            <span>Agent</span>
-                            <Select
-                                value={newSessionAgentId}
-                                onChange={(e) => setNewSessionAgentId(e.target.value)}
+                <div aria-label="Sessions" className="session-list">
+                    {sessions.map((session) => (
+                        <div
+                            className={`session-row${
+                                selectedSessionId === session.session_id ? " active" : ""
+                            }`}
+                            key={session.session_id}
+                        >
+                            <button
+                                aria-current={selectedSessionId === session.session_id}
+                                className="session-row-button"
+                                onClick={() => onSelectSession(session.session_id)}
+                                title={session.session_id}
+                                type="button"
                             >
-                                {agents.map((a) => (
-                                    <option key={a.agent_id} value={a.agent_id}>
-                                        {a.name}
-                                    </option>
-                                ))}
-                            </Select>
-                        </label>
-                        <label>
-                            <span>Channel</span>
-                            <Input
-                                placeholder="default channel"
-                                value={newSessionChannelName}
-                                onChange={(e) => setNewSessionChannelName(e.target.value)}
-                            />
-                        </label>
-                        <Button disabled={busy || !newSessionAgentId} type="submit">
-                            Start session
-                        </Button>
-                    </form>
-                )}
-                <div className="session-list" aria-label="Sessions">
-                    {sessions.map((session) => {
-                        const tone = statusTone(session.status);
-                        return (
-                            <div
-                                className={`session-row chat-session-row ${selectedSessionId === session.session_id ? "active" : ""}`}
-                                key={session.session_id}
-                            >
-                                <Button
-                                    className="session-item chat-session-card"
-                                    onClick={() => onSelectSession(session.session_id)}
-                                    type="button"
-                                    title={session.session_id}
-                                >
-                                    <span className={`status-dot status-${tone}`} aria-hidden="true" />
-                                    <span className="session-card-main">
-                                        <strong title={session.agent_id}>{session.agent_id}</strong>
-                                        <span className="session-card-meta">
-                                            <span title={session.session_id}>{compactSessionId(session.session_id)}</span>
-                                            <span>{session.message_count} msg</span>
-                                        </span>
-                                        <span className="session-card-channel" title={sessionChannelLabel(session.channel_name)}>
-                                            {sessionChannelLabel(session.channel_name)}
-                                        </span>
+                                <span className="session-row-title">
+                                    <span
+                                        aria-hidden="true"
+                                        className={`status-dot ${sessionTone(session.status)}`}
+                                    />
+                                    <span className="truncate">{session.agent_id}</span>
+                                </span>
+                                <span className="session-row-meta">
+                                    <span className="truncate">{session.status}</span>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="truncate">
+                                        {sessionChannelLabel(session.channel_name)}
                                     </span>
-                                    <span className={`session-status-pill status-${tone}`}>
-                                        {session.status}
-                                    </span>
-                                </Button>
+                                    <span aria-hidden="true">·</span>
+                                    <span className="nowrap">{session.message_count} msg</span>
+                                </span>
+                            </button>
+                            <Tooltip content="Delete session" relationship="description">
                                 <Button
-                                    aria-label={`Delete session ${session.session_id}`}
-                                    className="session-delete-button"
+                                    appearance="subtle"
+                                    aria-label={`Delete ${session.agent_id} session ${
+                                        session.session_id.slice(0, 8)
+                                    }`}
+                                    className="session-row-delete"
                                     disabled={deletingSessions || saveWorkspaceMutation.isPending}
+                                    icon={<Delete20Regular />}
                                     onClick={() => void handleDeleteSession(session.session_id)}
-                                    title="Delete session"
-                                    type="button"
-                                >
-                                    ×
-                                </Button>
-                            </div>
-                        );
-                    })}
-                    {sessions.length === 0 && (
-                        <div className="empty-state rail-empty-state">
-                            <span>No sessions yet</span>
-                            <Button className="secondary-button small" onClick={() => setShowNewSession(true)} type="button">
-                                Create one
-                            </Button>
+                                    size="small"
+                                />
+                            </Tooltip>
                         </div>
+                    ))}
+                    {sessions.length === 0 && (
+                        <p className="session-list-empty">
+                            No sessions yet. Start one to talk to an agent.
+                        </p>
                     )}
                 </div>
             </aside>
+
             <section className="chat-main">
-                {selectedSession ? (
-                    <>
-                        <div className="chat-header chat-workspace-header">
-                            <div className="chat-header-title">
-                                <div className="workspace-title-row">
-                                    <span className={`status-dot status-${selectedStatusTone}`} aria-hidden="true" />
-                                    <h2>{selectedSession.agent_id}</h2>
-                                    <span className={`workspace-status-chip status-${selectedStatusTone}`}>
-                                        {selectedSession.status}
-                                    </span>
+                {selectedSession
+                    ? (
+                        <>
+                            <header className="chat-header">
+                                <div className="chat-header-title">
+                                    <div className="chat-header-heading">
+                                        <h2>{selectedSession.agent_id}</h2>
+                                        <StatusBadge
+                                            label={selectedSession.status}
+                                            tone={selectedTone}
+                                        />
+                                    </div>
+                                    <div className="chat-header-meta">
+                                        <span title={selectedSession.session_id}>
+                                            {compactSessionId(selectedSession.session_id)}
+                                        </span>
+                                        <span aria-hidden="true">·</span>
+                                        <span>
+                                            {sessionChannelLabel(selectedSession.channel_name)}
+                                        </span>
+                                        <span aria-hidden="true">·</span>
+                                        <span>{transcriptMessages.length} messages</span>
+                                        <span aria-hidden="true">·</span>
+                                        <span>
+                                            kernel {selectedKernel?.status ?? "not attached"}
+                                        </span>
+                                    </div>
                                 </div>
-                                <div className="workspace-meta-grid">
-                                    <span>
-                                        <span>session</span>
-                                        <code title={selectedSession.session_id}>{selectedSession.session_id}</code>
-                                    </span>
-                                    <span>
-                                        <span>channel</span>
-                                        <strong>{sessionChannelLabel(selectedSession.channel_name)}</strong>
-                                    </span>
-                                    <span>
-                                        <span>messages</span>
-                                        <strong>{transcriptMessages.length}</strong>
-                                    </span>
-                                    <span>
-                                        <span>kernel</span>
-                                        <strong>{selectedKernel?.status ?? "not attached"}</strong>
-                                    </span>
-                                </div>
-                            </div>
-                            <div className="chat-header-actions">
-                                {selectedKernel ? (
-                                    <>
-                                        {vscodeUrl ? (
-                                            <a
-                                                className="secondary-button"
-                                                href={vscodeUrl}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                            >
-                                                VS Code
-                                            </a>
-                                        ) : (
-                                            <Button
-                                                className="secondary-button"
-                                                disabled
-                                                title="VS Code unavailable"
-                                                type="button"
-                                            >
-                                                VS Code
-                                            </Button>
-                                        )}
-                                        {serviceUrl ? (
-                                            <a
-                                                className="secondary-button"
-                                                href={serviceUrl}
-                                                target="_blank"
-                                                rel="noreferrer"
-                                            >
-                                                Service
-                                            </a>
-                                        ) : null}
+                                <div className="chat-header-actions">
+                                    {vscodeUrl !== null && (
                                         <Button
-                                            className="secondary-button"
-                                            disabled={busy}
-                                            onClick={() => void handleSaveWorkspace(selectedSession.session_id)}
-                                            type="button"
+                                            as="a"
+                                            href={vscodeUrl}
+                                            icon={<Code20Regular />}
+                                            rel="noreferrer"
+                                            size="small"
+                                            target="_blank"
                                         >
-                                            Save workspace
+                                            VS Code
                                         </Button>
-                                    </>
-                                ) : null}
-                                <Button
-                                    className="secondary-button"
-                                    disabled={busy}
-                                    onClick={handleResetSession}
-                                    type="button"
-                                >
-                                    Reset
-                                </Button>
-                                <Button
-                                    className="danger-button"
-                                    disabled={deletingSessions || saveWorkspaceMutation.isPending}
-                                    onClick={() => {
-                                        if (selectedSessionId) {
-                                            void handleDeleteSession(selectedSessionId);
-                                        }
-                                    }}
-                                    type="button"
-                                >
-                                    Delete
-                                </Button>
-                            </div>
-                        </div>
-                        <div className="transcript chat-transcript" aria-live={effectiveStreaming ? "polite" : "off"}>
-                            {transcriptMessages.length > 0 || displayedStreamingMessage ? (
-                                <>
-                                    {transcriptMessages.map((msg) => {
-                                        const messageStreaming = effectiveStreaming && msg.message_id === activeAssistantMessageId;
-                                        return (
-                                            <article
-                                                className={`message chat-message ${msg.role}${messageStreaming ? " streaming" : ""}`}
-                                                key={msg.message_id}
-                                            >
-                                                <header className="message-header">
-                                                    <span className="message-role">{messageRoleLabel(msg.role)}</span>
-                                                    <time dateTime={msg.created_at}>{formatTimestamp(msg.created_at)}</time>
-                                                </header>
-                                                {msg.reasoning && (
-                                                    <details className="reasoning-block">
-                                                        <summary>Reasoning</summary>
-                                                        <div className="reasoning-content">{msg.reasoning}</div>
-                                                    </details>
-                                                )}
-                                                <MessageMarkdown
-                                                    content={msg.content}
-                                                    toolCalls={msg.tool_calls}
-                                                    onSelectToolCall={setSelectedToolCall}
-                                                    streaming={messageStreaming}
-                                                />
-                                            </article>
-                                        );
-                                    })}
-                                    {displayedStreamingMessage && (
-                                        <article
-                                            className={`message chat-message ${displayedStreamingMessage.role} streaming`}
-                                            key={displayedStreamingMessage.message_id}
-                                        >
-                                            <header className="message-header">
-                                                <span className="message-role">{messageRoleLabel(displayedStreamingMessage.role)}</span>
-                                                <time dateTime={displayedStreamingMessage.created_at}>{formatTimestamp(displayedStreamingMessage.created_at)}</time>
-                                            </header>
-                                            {displayedStreamingMessage.reasoning && (
-                                                <details className="reasoning-block" open>
-                                                    <summary>Reasoning</summary>
-                                                    <div className="reasoning-content">
-                                                        {displayedStreamingMessage.reasoning}
-                                                    </div>
-                                                </details>
-                                            )}
-                                            <MessageMarkdown
-                                                content={displayedStreamingMessage.content}
-                                                toolCalls={displayedStreamingMessage.tool_calls}
-                                                onSelectToolCall={setSelectedToolCall}
-                                                streaming
-                                            />
-                                        </article>
                                     )}
-                                </>
-                            ) : (
-                                <div className="empty-state centered chat-empty-state">
-                                    <div className="empty-state-kicker">No transcript</div>
-                                    <h3>Ready for a focused agent turn</h3>
-                                    <p>Send the first prompt. Tool calls, reasoning, and streaming output stay inline.</p>
+                                    <Menu positioning="below-end">
+                                        <MenuTrigger disableButtonEnhancement>
+                                            <Tooltip content="Session actions" relationship="label">
+                                                <Button
+                                                    appearance="subtle"
+                                                    icon={<MoreHorizontal20Regular />}
+                                                    size="small"
+                                                />
+                                            </Tooltip>
+                                        </MenuTrigger>
+                                        <MenuPopover>
+                                            <MenuList>
+                                                {serviceUrl !== null && (
+                                                    <MenuItem
+                                                        icon={<Open20Regular />}
+                                                        onClick={() =>
+                                                            window.open(
+                                                                serviceUrl,
+                                                                "_blank",
+                                                                "noreferrer",
+                                                            )}
+                                                    >
+                                                        Open forwarded service
+                                                    </MenuItem>
+                                                )}
+                                                {selectedKernel !== null && (
+                                                    <MenuItem
+                                                        disabled={busy}
+                                                        icon={<Save20Regular />}
+                                                        onClick={() =>
+                                                            void handleSaveWorkspace(
+                                                                selectedSession.session_id,
+                                                            )}
+                                                    >
+                                                        Save workspace
+                                                    </MenuItem>
+                                                )}
+                                                <MenuItem
+                                                    disabled={busy}
+                                                    icon={<ArrowClockwise20Regular />}
+                                                    onClick={handleResetSession}
+                                                >
+                                                    Reset transcript
+                                                </MenuItem>
+                                                <MenuItem
+                                                    disabled={deletingSessions
+                                                        || saveWorkspaceMutation.isPending}
+                                                    icon={<Delete20Regular />}
+                                                    onClick={() => {
+                                                        if (selectedSessionId !== null) {
+                                                            void handleDeleteSession(
+                                                                selectedSessionId,
+                                                            );
+                                                        }
+                                                    }}
+                                                    style={{ color: "var(--danger)" }}
+                                                >
+                                                    Delete session
+                                                </MenuItem>
+                                            </MenuList>
+                                        </MenuPopover>
+                                    </Menu>
                                 </div>
-                            )}
-                        </div>
-                        <form className="composer chat-composer" onSubmit={handleSendMessage}>
-                            <div className="composer-input-shell">
-                                <div className="composer-toolbar">
-                                    <span>{sessionChannelLabel(selectedSession.channel_name)}</span>
-                                    <span>Enter sends · Shift+Enter newline</span>
-                                </div>
-                                <Textarea
-                                    placeholder="Ask the agent to inspect, edit, run, or explain…"
-                                    rows={2}
-                                    value={messageDraft}
-                                    onChange={(e) => setMessageDraft(e.target.value)}
-                                    onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
-                                        if (e.key === "Enter" && !e.shiftKey) {
-                                            e.preventDefault();
-                                            submitDraft();
-                                        }
-                                    }}
-                                />
+                            </header>
+
+                            <div
+                                aria-live={effectiveStreaming ? "polite" : "off"}
+                                className="transcript"
+                            >
+                                {transcriptMessages.length > 0 || displayedStreamingMessage
+                                    ? (
+                                        <div className="transcript-inner">
+                                            {transcriptMessages.map((msg) => {
+                                                const messageStreaming = effectiveStreaming
+                                                    && msg.message_id === activeAssistantMessageId;
+                                                return (
+                                                    <article
+                                                        className={`message ${msg.role}`}
+                                                        key={msg.message_id}
+                                                    >
+                                                        <header className="message-header">
+                                                            <span className="message-role">
+                                                                {messageRoleLabel(msg.role)}
+                                                            </span>
+                                                            <time dateTime={msg.created_at}>
+                                                                {formatTimestamp(msg.created_at)}
+                                                            </time>
+                                                        </header>
+                                                        {msg.reasoning && (
+                                                            <details className="reasoning-block">
+                                                                <summary>Reasoning</summary>
+                                                                <div className="reasoning-content">
+                                                                    {msg.reasoning}
+                                                                </div>
+                                                            </details>
+                                                        )}
+                                                        <MessageMarkdown
+                                                            content={msg.content}
+                                                            onSelectToolCall={setSelectedToolCall}
+                                                            streaming={messageStreaming}
+                                                            toolCalls={msg.tool_calls}
+                                                        />
+                                                    </article>
+                                                );
+                                            })}
+                                            {displayedStreamingMessage && (
+                                                <article
+                                                    className={`message ${displayedStreamingMessage.role}`}
+                                                    key={displayedStreamingMessage.message_id}
+                                                >
+                                                    <header className="message-header">
+                                                        <span className="message-role">
+                                                            {messageRoleLabel(
+                                                                displayedStreamingMessage.role,
+                                                            )}
+                                                        </span>
+                                                        <time
+                                                            dateTime={displayedStreamingMessage
+                                                                .created_at}
+                                                        >
+                                                            {formatTimestamp(
+                                                                displayedStreamingMessage
+                                                                    .created_at,
+                                                            )}
+                                                        </time>
+                                                    </header>
+                                                    {displayedStreamingMessage.reasoning && (
+                                                        <details className="reasoning-block" open>
+                                                            <summary>Reasoning</summary>
+                                                            <div className="reasoning-content">
+                                                                {displayedStreamingMessage
+                                                                    .reasoning}
+                                                            </div>
+                                                        </details>
+                                                    )}
+                                                    <MessageMarkdown
+                                                        content={displayedStreamingMessage.content}
+                                                        onSelectToolCall={setSelectedToolCall}
+                                                        streaming
+                                                        toolCalls={displayedStreamingMessage
+                                                            .tool_calls}
+                                                    />
+                                                </article>
+                                            )}
+                                        </div>
+                                    )
+                                    : (
+                                        <div className="transcript-inner">
+                                            <EmptyState
+                                                description="Send the first prompt. Reasoning, tool calls, and streaming output all appear inline."
+                                                icon={<Chat24Regular />}
+                                                title="No messages yet"
+                                            />
+                                        </div>
+                                    )}
                             </div>
-                            <Button className="composer-send-button" disabled={busy || !messageDraft.trim()} type="submit">
-                                Send
-                            </Button>
-                        </form>
-                    </>
-                ) : (
-                    <div className="empty-state centered chat-empty-state chat-empty-workspace">
-                        <div className="empty-state-kicker">AgentSpace chat</div>
-                        <h3>Select a session to enter the workspace</h3>
-                        <p>Create a fresh channel or jump back into an existing session from the rail.</p>
-                        <Button onClick={() => setShowNewSession(true)} type="button">
-                            New session
-                        </Button>
-                    </div>
-                )}
+
+                            <form className="composer" onSubmit={handleSendMessage}>
+                                <div className="composer-shell">
+                                    <Textarea
+                                        appearance="filled-lighter"
+                                        onChange={(e) => setMessageDraft(e.target.value)}
+                                        onKeyDown={(e: KeyboardEvent<HTMLTextAreaElement>) => {
+                                            if (e.key === "Enter" && !e.shiftKey) {
+                                                e.preventDefault();
+                                                submitDraft();
+                                            }
+                                        }}
+                                        placeholder="Ask the agent to inspect, edit, run, or explain…"
+                                        rows={3}
+                                        value={messageDraft}
+                                    />
+                                    <div className="composer-footer">
+                                        <span className="muted-sm">
+                                            Enter to send, Shift+Enter for a new line
+                                        </span>
+                                        <Button
+                                            appearance="primary"
+                                            disabled={busy || !messageDraft.trim()}
+                                            icon={<Send20Regular />}
+                                            type="submit"
+                                        >
+                                            Send
+                                        </Button>
+                                    </div>
+                                </div>
+                            </form>
+                        </>
+                    )
+                    : (
+                        <div className="chat-placeholder">
+                            <EmptyState
+                                action={
+                                    <Button
+                                        appearance="primary"
+                                        icon={<Add20Regular />}
+                                        onClick={() => setShowNewSession(true)}
+                                    >
+                                        New session
+                                    </Button>
+                                }
+                                description="Pick a session from the list, or start a new one to talk to an agent."
+                                icon={<Chat24Regular />}
+                                title="No session selected"
+                            />
+                        </div>
+                    )}
             </section>
-            {selectedToolCall && (
-                <ToolDetailPane
-                    toolCall={selectedToolCall}
-                    onClose={() => setSelectedToolCall(null)}
-                />
-            )}
+
+            <FormDialog
+                busy={busy || !newSessionAgentId}
+                onOpenChange={setShowNewSession}
+                onSubmit={() => {
+                    void handleCreateSession();
+                }}
+                open={showNewSession}
+                submitLabel="Start session"
+                title="New session"
+            >
+                <Field label="Agent" required>
+                    <Select
+                        onChange={(e) => setNewSessionAgentId(e.target.value)}
+                        value={newSessionAgentId}
+                    >
+                        {agents.map((a) => (
+                            <option key={a.agent_id} value={a.agent_id}>{a.name}</option>
+                        ))}
+                    </Select>
+                </Field>
+                <Field
+                    hint="Optional. Groups related sessions under a shared name."
+                    label="Channel"
+                >
+                    <Input
+                        onChange={(e) => setNewSessionChannelName(e.target.value)}
+                        placeholder="default channel"
+                        value={newSessionChannelName}
+                    />
+                </Field>
+            </FormDialog>
+
+            <ToolDetailPane
+                onClose={() => setSelectedToolCall(null)}
+                toolCall={selectedToolCall}
+            />
         </div>
     );
 }

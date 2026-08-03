@@ -1,197 +1,189 @@
-.memory-management-view {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-}
+/*
+ * Memory browser.
+ *
+ * Two panes: a filterable page tree on the left, the selected page's editor on
+ * the right. Everything reuses the shared vocabulary in styles.css; the rules
+ * here only cover the pane geometry and the markdown preview.
+ */
 
 .memory-layout {
   display: grid;
+  min-height: 0;
   flex: 1;
-  grid-template-columns: minmax(230px, 300px) minmax(0, 1fr);
-  min-height: 0;
-  overflow: hidden;
-}
-
-.memory-browser,
-.memory-page-panel {
-  background: var(--mgmt-panel);
-  border: 1px solid var(--mgmt-border);
-  min-height: 0;
+  grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-6) var(--space-6);
 }
 
 .memory-browser {
-  border-radius: var(--mgmt-radius) 0 0 var(--mgmt-radius);
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.memory-browser-filters {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 14px;
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--stroke-subtle);
+  gap: var(--space-3);
 }
 
-.memory-browser .fui-Input {
-  width: 100%;
+.memory-browser-filters .fui-SearchBox {
+  max-width: none;
 }
 
-.memory-page-panel {
-  border-left: 0;
-  border-radius: 0 var(--mgmt-radius) var(--mgmt-radius) 0;
-  overflow: auto;
-  padding: 18px;
-}
-
-.memory-tags {
+.tag-filters {
   display: flex;
+  max-height: 132px;
   flex-wrap: wrap;
-  gap: 5px;
+  overflow-y: auto;
+  gap: var(--space-1);
 }
 
-.memory-tag-filter {
-  border: 1px solid var(--mgmt-border);
-  border-radius: 999px;
-  color: var(--mgmt-muted);
+.tag-filter {
   display: inline-flex;
-  font-size: 0.72rem;
-  gap: 6px;
-  min-height: 24px !important;
-  padding: 2px 7px !important;
-  width: auto;
+  align-items: center;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--stroke);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-secondary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  gap: var(--space-1);
 }
 
-.memory-tag-filter.active,
-.memory-tabs .active {
-  background: var(--colorBrandBackground2);
-  border-color: var(--colorBrandStroke1);
-  color: var(--colorBrandForeground1);
+.tag-filter:hover {
+  background: var(--surface-hover);
+  color: var(--fg);
+}
+
+.tag-filter.active {
+  border-color: transparent;
+  background: var(--accent-bg);
+  color: #ffffff;
+}
+
+.tag-filter-count {
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
 }
 
 .memory-tree-scroll {
-  flex: 1;
   min-height: 0;
-  overflow: auto;
+  flex: 1;
+  padding: var(--space-1);
+  overflow-y: auto;
 }
 
-.memory-tree {
-  list-style: none;
-  margin: 0;
-  padding: 0 0 0 12px;
-}
-
-.memory-tree:first-child {
-  padding-left: 0;
-}
-
-.memory-tree li {
-  margin: 1px 0;
-}
-
-.memory-tree summary {
-  color: var(--mgmt-muted);
-  cursor: pointer;
-  font-size: 0.78rem;
-  padding: 4px 6px;
-}
-
-.memory-tree-page {
-  color: var(--mgmt-text);
+.memory-tree-scroll > .muted-sm {
   display: block;
-  font-size: 0.78rem;
-  justify-content: flex-start;
-  min-height: 28px !important;
-  overflow: hidden;
-  padding: 4px 8px !important;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  width: 100%;
+  padding: var(--space-3);
+  margin: 0;
 }
 
-.memory-tree-page.active {
-  background: var(--colorBrandBackground2);
-  color: var(--colorBrandForeground1);
+.memory-tree .memory-tree {
+  padding: 0 0 0 var(--space-3);
+  border-left: 1px solid var(--stroke-subtle);
+  margin-left: var(--space-3);
 }
 
-.memory-empty-browser {
-  color: var(--mgmt-muted);
-  font-size: 0.78rem;
-  line-height: 1.45;
-  padding: 12px 4px;
+.memory-tree-group {
+  padding: var(--space-1) var(--space-2);
+  color: var(--fg-muted);
+  font-size: var(--text-xs);
 }
 
-.memory-health {
-  border: 1px solid var(--mgmt-border);
-  border-radius: 999px;
-  font-size: 0.74rem;
-  padding: 4px 9px;
-}
-
-.memory-health.healthy {
-  color: var(--success);
-}
-
-.memory-health.warning {
-  color: var(--warning);
-}
-
-.memory-page-toolbar,
-.memory-save-row,
-.memory-tabs {
-  align-items: center;
+.memory-page {
   display: flex;
-  gap: 8px;
-  justify-content: space-between;
-}
-
-.memory-page-toolbar {
-  border-bottom: 1px solid var(--mgmt-border);
-  margin: -4px 0 14px;
-  padding-bottom: 12px;
-}
-
-.memory-page-toolbar > div:first-child {
-  display: flex;
+  min-height: 0;
   flex-direction: column;
-  gap: 3px;
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.memory-page > .fui-MessageBar {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.memory-page-placeholder {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+}
+
+.memory-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--stroke-subtle);
+  gap: var(--space-4);
+}
+
+.memory-page-heading {
   min-width: 0;
 }
 
-.memory-page-toolbar code {
+.memory-page-heading h2 {
   overflow: hidden;
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.memory-fields {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: 1fr 1fr;
-  margin-bottom: 12px;
+.memory-page-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
+  gap: var(--space-2);
 }
 
-.memory-fields label {
+.memory-page-body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  padding: var(--space-4);
+  gap: var(--space-4);
+  overflow-y: auto;
+}
+
+.memory-page-body > .form-grid {
+  gap: var(--space-3) var(--space-4);
+}
+
+.memory-editor {
   display: flex;
   flex-direction: column;
+  gap: var(--space-2);
 }
 
-.memory-fields .fui-Input {
-  width: 100%;
-}
-
-.memory-tabs {
-  justify-content: flex-start;
-  margin-bottom: 8px;
-}
-
-.memory-tabs .muted {
-  margin-left: auto;
+.memory-editor .editor-frame {
+  overflow: hidden;
 }
 
 .memory-preview {
-  border: 1px solid var(--mgmt-border);
-  border-radius: var(--mgmt-radius);
-  line-height: 1.55;
   min-height: 240px;
-  overflow-wrap: anywhere;
-  padding: 16px 20px;
+  padding: var(--space-4) var(--space-5);
+  border: 1px solid var(--stroke);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font-size: var(--text-md);
+  line-height: 1.6;
 }
 
 .memory-preview > :first-child {
@@ -202,119 +194,103 @@
   margin-bottom: 0;
 }
 
-.memory-preview pre,
+.memory-preview h1,
+.memory-preview h2,
+.memory-preview h3 {
+  margin: var(--space-5) 0 var(--space-2);
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.memory-preview h1 {
+  font-size: var(--text-xl);
+}
+
+.memory-preview h2 {
+  font-size: var(--text-lg);
+}
+
+.memory-preview h3 {
+  font-size: var(--text-md);
+}
+
+.memory-preview p,
+.memory-preview ul,
+.memory-preview ol {
+  margin: 0 0 var(--space-3);
+}
+
+.memory-preview ul,
+.memory-preview ol {
+  padding-left: var(--space-5);
+}
+
 .memory-preview code {
-  background: var(--mgmt-code-bg);
-  border-radius: 3px;
+  padding: 1px 4px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
   font-family: var(--font-mono);
+  font-size: var(--text-sm);
 }
 
 .memory-preview pre {
-  overflow: auto;
-  padding: 10px;
+  padding: var(--space-3);
+  border: 1px solid var(--stroke-subtle);
+  border-radius: var(--radius-md);
+  margin: 0 0 var(--space-3);
+  background: var(--surface-inset);
+  overflow-x: auto;
 }
 
-.memory-save-row {
-  justify-content: flex-start;
-  margin: 12px 0 18px;
+.memory-preview pre code {
+  padding: 0;
+  background: none;
+}
+
+.memory-preview blockquote {
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--stroke);
+  margin: 0 0 var(--space-3);
+  color: var(--fg-secondary);
+}
+
+.memory-preview table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 var(--space-3);
+}
+
+.memory-preview th,
+.memory-preview td {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--stroke-subtle);
+  text-align: left;
 }
 
 .memory-link-panels {
   display: grid;
-  gap: 12px;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--space-4);
 }
 
-.memory-link-panels section,
-.memory-integrity-panel {
-  background: var(--mgmt-panel-subtle);
-  border: 1px solid var(--mgmt-border);
-  border-radius: var(--mgmt-radius);
-  padding: 12px;
+.memory-link-panels .nav-list {
+  max-height: 200px;
+  overflow-y: auto;
 }
 
-.memory-link-panels h3,
-.memory-integrity-panel h3 {
-  font-size: 0.82rem;
-  margin: 0 0 8px;
+.list-empty {
+  padding: var(--space-2);
+  color: var(--fg-muted);
+  font-size: var(--text-sm);
 }
 
-.memory-link {
-  align-items: flex-start;
-  color: var(--mgmt-text);
-  display: flex;
-  flex-direction: column;
-  font-size: 0.76rem;
-  justify-content: center;
-  min-height: 30px !important;
-  padding: 4px 6px !important;
-  width: 100%;
-}
-
-.memory-link small {
-  color: var(--mgmt-muted);
-}
-
-.memory-broken {
-  color: var(--danger);
-  font-size: 0.68rem;
-}
-
-.memory-conflict,
-.memory-operation-error,
-.memory-unavailable {
-  background: var(--colorStatusDangerBackground1);
-  border: 1px solid var(--colorStatusDangerBorder1);
-  border-radius: var(--mgmt-radius);
-  color: var(--colorStatusDangerForeground1);
-  margin-bottom: 12px;
-  padding: 12px;
-}
-
-.memory-conflict {
-  display: grid;
-  gap: 5px;
-}
-
-.memory-conflict-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-.memory-operation-error {
-  align-items: center;
-  display: flex;
-  justify-content: space-between;
-}
-
-.memory-unavailable {
-  margin: 24px auto;
-  max-width: 620px;
-}
-
-.memory-unavailable h3 {
-  margin-top: 0;
-}
-
-.memory-integrity-panel {
-  margin-top: 12px;
-}
-
-.memory-integrity-panel > div {
-  display: grid;
-  gap: 2px;
-  margin-top: 8px;
-}
-
-@media (max-width: 900px) {
+@media (width <= 1000px) {
   .memory-layout {
-    grid-template-columns: 220px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    padding: var(--space-3) var(--space-4) var(--space-5);
   }
 
-  .memory-fields,
-  .memory-link-panels {
-    grid-template-columns: 1fr;
+  .memory-browser {
+    max-height: 320px;
   }
 }

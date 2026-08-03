@@ -1,12 +1,38 @@
-import type { FormEvent } from "react";
-import { useDeferredValue, useMemo, useState } from "react";
+import { Fragment, useDeferredValue, useMemo, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { ApiError, api } from "./api";
 import CodeEditor from "./CodeEditor";
-import { Button, Input } from "./fluent";
+import {
+  Button,
+  Field,
+  Input,
+  MessageBar,
+  MessageBarActions,
+  MessageBarBody,
+  SearchBox,
+  Tab,
+  TabList,
+} from "./fluent";
+import {
+  EmptyState,
+  FormDialog,
+  LoadingState,
+  RowActions,
+  StatusBadge,
+  ViewHeader,
+} from "./ui";
+import type { StatusTone } from "./ui";
+import {
+  Add20Regular,
+  ArrowMove20Regular,
+  BookOpen24Regular,
+  Delete20Regular,
+  Dismiss20Regular,
+  PlugDisconnected24Regular,
+} from "@fluentui/react-icons";
 import {
   queryKeys,
   useMemoryCheck,
@@ -90,37 +116,31 @@ function MemoryTree({
   onSelect: (path: string) => void;
 }) {
   return (
-    <ul className="memory-tree">
+    <ul className="nav-list memory-tree">
       {nodes.map((node) => (
         <li key={node.path}>
-          {node.children.length > 0 ? (
-            <details open>
-              <summary>{node.name}</summary>
-              {node.page && (
-                <Button
-                  className={`memory-tree-page list-item ${selectedPath === node.path ? "active" : ""}`}
-                  onClick={() => onSelect(node.path)}
-                  type="button"
-                >
-                  {node.page.title}
-                </Button>
-              )}
-              <MemoryTree
-                nodes={node.children}
-                selectedPath={selectedPath}
-                onSelect={onSelect}
-              />
-            </details>
-          ) : node.page ? (
-            <Button
-              className={`memory-tree-page list-item ${selectedPath === node.path ? "active" : ""}`}
+          {node.page !== undefined && node.page !== null && (
+            <button
+              className={`list-item${selectedPath === node.path ? " active" : ""}`}
               onClick={() => onSelect(node.path)}
               title={node.path}
               type="button"
             >
-              {node.page.title}
-            </Button>
-          ) : null}
+              <span className="truncate">{node.page.title || node.name}</span>
+            </button>
+          )}
+          {node.children.length > 0 && (
+            <>
+              {(node.page === undefined || node.page === null) && (
+                <div className="memory-tree-group">{node.name}</div>
+              )}
+              <MemoryTree
+                nodes={node.children}
+                onSelect={onSelect}
+                selectedPath={selectedPath}
+              />
+            </>
+          )}
         </li>
       ))}
     </ul>
@@ -280,8 +300,7 @@ export default function MemoryView() {
     );
   }
 
-  function handleCreate(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function handleCreate() {
     createMutation.mutate();
   }
 
@@ -331,360 +350,409 @@ export default function MemoryView() {
 
   if (serviceUnavailable) {
     return (
-      <div className="view-content management-view memory-management-view">
-        <div className="view-header">
-          <div>
-            <h2>Memory</h2>
-            <span className="muted">Shared durable knowledge for opted-in agents</span>
-          </div>
-        </div>
-        <div className="memory-unavailable" role="alert">
-          <h3>Memory service unavailable</h3>
-          <p>
-            The Web UI reached AgentSpace, but the private memory service could
-            not be contacted. Existing data has not been treated as an empty store.
-          </p>
-          <Button
-            onClick={() => void Promise.all([
-              healthQuery.refetch(),
-              pagesQuery.refetch(),
-            ])}
-            type="button"
-          >
-            Retry
-          </Button>
+      <div className="view-content">
+        <ViewHeader
+          description="Shared durable knowledge for opted-in agents"
+          title="Memory"
+        />
+        <div className="view-body">
+          <EmptyState
+            action={
+              <Button
+                onClick={() =>
+                  void Promise.all([healthQuery.refetch(), pagesQuery.refetch()])}
+              >
+                Retry
+              </Button>
+            }
+            description="The console reached AgentSpace, but the private memory service could not be contacted. Existing data has not been treated as an empty store."
+            icon={<PlugDisconnected24Regular />}
+            title="Memory service unavailable"
+          />
         </div>
       </div>
     );
   }
 
+  const issueCount = checkQuery.data?.issues.length ?? 0;
+  const integrity: { tone: StatusTone; label: string } = healthQuery.isError
+    ? { tone: "error", label: "Health check unavailable" }
+    : checkQuery.isError
+    ? { tone: "warn", label: "Integrity check unavailable" }
+    : checkQuery.isLoading
+    ? { tone: "neutral", label: "Checking integrity" }
+    : issueCount > 0
+    ? { tone: "warn", label: `${issueCount} integrity issue${issueCount === 1 ? "" : "s"}` }
+    : { tone: "ok", label: "Store healthy" };
+
   return (
-    <div className="view-content management-view memory-management-view">
-      <div className="view-header">
-        <div>
-          <h2>Memory</h2>
-          <span className="muted">
-            {pages.length} visible page{pages.length === 1 ? "" : "s"} · shared with memory-enabled agents
-          </span>
-        </div>
-        <div className="view-header-actions">
-          <span className={`memory-health ${healthQuery.isError || checkQuery.isError || checkQuery.data?.issues.length ? "warning" : "healthy"}`}>
-            {healthQuery.isError
-              ? "Health check unavailable"
-              : checkQuery.isError
-                ? "Integrity check unavailable"
-              : checkQuery.isLoading
-              ? "Checking integrity"
-              : checkQuery.data?.issues.length
-                ? `${checkQuery.data.issues.length} integrity issue${checkQuery.data.issues.length === 1 ? "" : "s"}`
-                : "Store healthy"}
-          </span>
-          <Button onClick={() => setShowCreate((current) => !current)} type="button">
-            {showCreate ? "Cancel" : "New Page"}
-          </Button>
-        </div>
-      </div>
-
-      {showCreate && (
-        <form className="create-form memory-create-form" onSubmit={handleCreate}>
-          <label>
-            Page path
-            <Input
-              placeholder="projects/agentspace"
-              required
-              value={newPath}
-              onChange={(event) => setNewPath(event.target.value)}
-            />
-          </label>
-          <label>
-            Title
-            <Input
-              placeholder="AgentSpace"
-              required
-              value={newTitle}
-              onChange={(event) => setNewTitle(event.target.value)}
-            />
-          </label>
-          <label>
-            Tags
-            <Input
-              placeholder="project, architecture"
-              value={newTags}
-              onChange={(event) => setNewTags(event.target.value)}
-            />
-          </label>
-          <Button disabled={createMutation.isPending} type="submit">
-            Create Page
-          </Button>
-        </form>
-      )}
-
-      {operationError && (
-        <div className="memory-operation-error" role="alert">
-          <span>{operationError}</span>
-          <Button className="secondary-button small" onClick={() => setOperationError(null)} type="button">
-            Dismiss
-          </Button>
-        </div>
-      )}
+    <div className="view-content">
+      <ViewHeader
+        actions={
+          <>
+            <StatusBadge label={integrity.label} tone={integrity.tone} />
+            <Button
+              appearance="primary"
+              icon={<Add20Regular />}
+              onClick={() => setShowCreate(true)}
+              type="button"
+            >
+              New page
+            </Button>
+          </>
+        }
+        description={`${pages.length} visible page${
+          pages.length === 1 ? "" : "s"
+        }, shared with memory-enabled agents`}
+        title="Memory"
+      />
 
       <div className="memory-layout">
         <aside className="memory-browser">
-          <Input
-            aria-label="Search memory"
-            placeholder="Search pages"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-          <div className="memory-tags" aria-label="Filter by tags">
-            {(tagsQuery.data ?? []).map(({ tag, count }) => (
-              <Button
-                className={`memory-tag-filter list-item ${selectedTags.includes(tag) ? "active" : ""}`}
-                key={tag}
-                onClick={() => toggleTag(tag)}
-                type="button"
-              >
-                <span>{tag}</span>
-                <span>{count}</span>
-              </Button>
-            ))}
-          </div>
-          <div className="memory-tree-scroll">
-            {pagesQuery.isLoading ? (
-              <div className="muted">Loading memory…</div>
-            ) : tree.length > 0 ? (
-              <MemoryTree nodes={tree} selectedPath={activePath} onSelect={selectPage} />
-            ) : (
-              <div className="memory-empty-browser">
-                {deferredSearch || selectedTags.length
-                  ? "No pages match these filters."
-                  : "The memory store is empty. Create the first page or let a memory-enabled agent write one."}
+          <div className="memory-browser-filters">
+            <SearchBox
+              aria-label="Search memory"
+              onChange={(_, data) => setSearch(data.value)}
+              placeholder="Search pages"
+              value={search}
+            />
+            {(tagsQuery.data ?? []).length > 0 && (
+              <div aria-label="Filter by tags" className="tag-filters">
+                {(tagsQuery.data ?? []).map(({ tag, count }) => (
+                  <button
+                    aria-pressed={selectedTags.includes(tag)}
+                    className={`tag-filter${selectedTags.includes(tag) ? " active" : ""}`}
+                    key={tag}
+                    onClick={() => toggleTag(tag)}
+                    type="button"
+                  >
+                    <span>{tag}</span>
+                    <span className="tag-filter-count">{count}</span>
+                  </button>
+                ))}
               </div>
             )}
           </div>
+          <div className="memory-tree-scroll">
+            {pagesQuery.isLoading
+              ? <p className="muted-sm">Loading memory…</p>
+              : tree.length > 0
+              ? <MemoryTree nodes={tree} onSelect={selectPage} selectedPath={activePath} />
+              : (
+                <p className="muted-sm">
+                  {deferredSearch || selectedTags.length
+                    ? "No pages match these filters."
+                    : "The memory store is empty. Create the first page or let a memory-enabled agent write one."}
+                </p>
+              )}
+          </div>
         </aside>
 
-        <main className="memory-page-panel">
-          {!activePath ? (
-            <div className="empty-state centered">
-              Select a page, create one, or ask a memory-enabled agent to write it.
-            </div>
-          ) : pageQuery.isError ? (
-            <div className="empty-state centered">
-              <p>This page is no longer available.</p>
-              <Button
-                className="secondary-button"
-                onClick={() => {
-                  setSelectedPath(null);
-                  setDraft(null);
-                  setConflict(null);
-                }}
-                type="button"
-              >
-                Select first visible page
-              </Button>
-            </div>
-          ) : pageQuery.isLoading || !draft ? (
-            <div className="empty-state centered">Loading page…</div>
-          ) : (
-            <>
-              <div className="memory-page-toolbar">
-                <div>
-                  <code>{draft.path}</code>
-                  <span className="muted">
-                    Updated {new Date(pageQuery.data?.updated_at ?? "").toLocaleString()}
-                  </span>
-                </div>
-                <div className="view-header-actions">
+        <main className="memory-page">
+          {operationError && (
+            <MessageBar intent="error">
+              <MessageBarBody>{operationError}</MessageBarBody>
+              <MessageBarActions
+                containerAction={
                   <Button
-                    className="secondary-button small"
-                    disabled={dirty || moveMutation.isPending}
-                    onClick={handleMove}
-                    title={dirty ? "Save or discard edits before moving." : undefined}
-                    type="button"
-                  >
-                    Move
-                  </Button>
-                  <Button
-                    className="danger-button small"
-                    disabled={deleteMutation.isPending}
-                    onClick={handleDelete}
-                    type="button"
-                  >
-                    Delete
-                  </Button>
-                </div>
-              </div>
-
-              {conflict && (
-                <div className="memory-conflict" role="alert">
-                  <strong>This page changed after you opened it.</strong>
-                  <span>
-                    Your draft was not saved, so the newer agent or browser edit remains intact.
-                  </span>
-                  <small>{conflict.message}</small>
-                  {conflict.actualRevision && (
-                    <small>Latest revision: {conflict.actualRevision.slice(0, 12)}</small>
-                  )}
-                  <div className="memory-conflict-actions">
-                    <Button
-                      className="secondary-button small"
-                      disabled={saveCopyMutation.isPending}
-                      onClick={saveDraftAsCopy}
-                      type="button"
-                    >
-                      Save my draft as a new page
-                    </Button>
-                    <Button className="secondary-button small" onClick={() => void reloadLatest()} type="button">
-                      Reload latest and discard my draft
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              <div className="memory-fields">
-                <label>
-                  Title
-                  <Input
-                    value={draft.title}
-                    onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+                    appearance="transparent"
+                    aria-label="Dismiss"
+                    icon={<Dismiss20Regular />}
+                    onClick={() => setOperationError(null)}
                   />
-                </label>
-                <label>
-                  Tags
-                  <Input
-                    value={draft.tags}
-                    onChange={(event) => setDraft({ ...draft, tags: event.target.value })}
-                  />
-                </label>
-              </div>
-
-              <div className="memory-tabs">
-                <Button
-                  className={`secondary-button small ${tab === "edit" ? "active" : ""}`}
-                  onClick={() => setTab("edit")}
-                  type="button"
-                >
-                  Edit
-                </Button>
-                <Button
-                  className={`secondary-button small ${tab === "preview" ? "active" : ""}`}
-                  onClick={() => setTab("preview")}
-                  type="button"
-                >
-                  Preview
-                </Button>
-                <span className="muted">{dirty ? "Unsaved changes" : "Saved"}</span>
-              </div>
-
-              {tab === "edit" ? (
-                <CodeEditor
-                  height="min(46vh, 520px)"
-                  value={draft.body}
-                  onChange={(body) => setDraft({ ...draft, body })}
-                />
-              ) : (
-                <div className="memory-preview">
-                  <ReactMarkdown
-                    remarkPlugins={markdownPlugins}
-                    components={{
-                      a: ({ href, children, ...props }) => {
-                        const memoryPath = resolveMemoryLink(draft.path, href);
-                        if (memoryPath) {
-                          return (
-                            <a
-                              {...props}
-                              href={`#memory/${memoryPath}`}
-                              onClick={(event) => {
-                                event.preventDefault();
-                                selectPage(memoryPath);
-                              }}
-                            >
-                              {children}
-                            </a>
-                          );
-                        }
-                        return (
-                          <a {...props} href={href} rel="noreferrer noopener" target="_blank">
-                            {children}
-                          </a>
-                        );
-                      },
-                    }}
-                  >
-                    {draft.body}
-                  </ReactMarkdown>
-                </div>
-              )}
-
-              <div className="memory-save-row">
-                <Button
-                  disabled={!dirty || saveMutation.isPending || conflict !== null}
-                  onClick={() => saveMutation.mutate(draft)}
-                  type="button"
-                >
-                  Save
-                </Button>
-                {dirty && (
-                  <Button
-                    className="secondary-button"
-                    onClick={discardDraft}
-                    type="button"
-                  >
-                    Discard
-                  </Button>
-                )}
-              </div>
-
-              <div className="memory-link-panels">
-                <section>
-                  <h3>Outgoing links</h3>
-                  {(linksQuery.data?.outgoing ?? []).map((link) => (
-                    <Button
-                      className="memory-link list-item"
-                      disabled={!link.resolved_path}
-                      key={`${link.raw_target}-${link.text}`}
-                      onClick={() => link.resolved_path && selectPage(link.resolved_path)}
-                      type="button"
-                    >
-                      <span>{link.text || link.raw_target}</span>
-                      {link.broken && <span className="memory-broken">broken</span>}
-                    </Button>
-                  ))}
-                  {!linksQuery.data?.outgoing.length && <span className="muted">No outgoing links.</span>}
-                </section>
-                <section>
-                  <h3>Backlinks</h3>
-                  {(linksQuery.data?.backlinks ?? []).map((link) => (
-                    <Button
-                      className="memory-link list-item"
-                      key={`${link.from}-${link.raw_target}`}
-                      onClick={() => selectPage(link.from)}
-                      type="button"
-                    >
-                      <span>{link.from}</span>
-                      <small>{link.text}</small>
-                    </Button>
-                  ))}
-                  {!linksQuery.data?.backlinks.length && <span className="muted">No backlinks.</span>}
-                </section>
-              </div>
-
-              {!!checkQuery.data?.issues.length && (
-                <section className="memory-integrity-panel">
-                  <h3>Integrity findings</h3>
-                  {checkQuery.data.issues.map((issue, index) => (
-                    <div key={`${issue.path ?? "store"}-${index}`}>
-                      <code>{issue.path ?? "store"}</code>
-                      <span>{issue.message}</span>
-                    </div>
-                  ))}
-                </section>
-              )}
-            </>
+                }
+              />
+            </MessageBar>
           )}
+
+          {!activePath
+            ? (
+              <div className="memory-page-placeholder">
+                <EmptyState
+                  description="Select a page from the browser, create one, or ask a memory-enabled agent to write it."
+                  icon={<BookOpen24Regular />}
+                  title="No page selected"
+                />
+              </div>
+            )
+            : pageQuery.isError
+            ? (
+              <div className="memory-page-placeholder">
+                <EmptyState
+                  action={
+                    <Button
+                      onClick={() => {
+                        setSelectedPath(null);
+                        setDraft(null);
+                        setConflict(null);
+                      }}
+                    >
+                      Select first visible page
+                    </Button>
+                  }
+                  description="It may have been moved or deleted."
+                  icon={<BookOpen24Regular />}
+                  title="This page is no longer available"
+                />
+              </div>
+            )
+            : pageQuery.isLoading || !draft
+            ? (
+              <div className="memory-page-placeholder">
+                <LoadingState label="Loading page…" />
+              </div>
+            )
+            : (
+              <>
+                <header className="memory-page-header">
+                  <div className="memory-page-heading">
+                    <h2>{draft.title || draft.path}</h2>
+                    <div className="memory-page-meta">
+                      <span className="mono-sm">{draft.path}</span>
+                      <span aria-hidden="true">·</span>
+                      <span>
+                        Updated{" "}
+                        {new Date(pageQuery.data?.updated_at ?? "").toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="view-header-actions">
+                    <span className="muted-sm">{dirty ? "Unsaved changes" : "Saved"}</span>
+                    {dirty && <Button onClick={discardDraft} size="small">Discard</Button>}
+                    <Button
+                      appearance="primary"
+                      disabled={!dirty || saveMutation.isPending || conflict !== null}
+                      onClick={() => saveMutation.mutate(draft)}
+                      size="small"
+                    >
+                      Save
+                    </Button>
+                    <RowActions
+                      items={[
+                        {
+                          key: "move",
+                          label: "Move or rename",
+                          icon: <ArrowMove20Regular />,
+                          disabled: dirty || moveMutation.isPending,
+                          onClick: handleMove,
+                        },
+                        {
+                          key: "delete",
+                          label: "Delete page",
+                          icon: <Delete20Regular />,
+                          destructive: true,
+                          disabled: deleteMutation.isPending,
+                          onClick: handleDelete,
+                        },
+                      ]}
+                    />
+                  </div>
+                </header>
+
+                <div className="memory-page-body">
+                  {conflict && (
+                    <MessageBar intent="warning">
+                      <MessageBarBody>
+                        <strong>This page changed after you opened it.</strong>{" "}
+                        Your draft was not saved, so the newer agent or browser edit remains
+                        intact. {conflict.message}
+                        {conflict.actualRevision && (
+                          <> Latest revision: {conflict.actualRevision.slice(0, 12)}.</>
+                        )}
+                      </MessageBarBody>
+                      <MessageBarActions>
+                        <Button
+                          disabled={saveCopyMutation.isPending}
+                          onClick={saveDraftAsCopy}
+                          size="small"
+                        >
+                          Save my draft as a new page
+                        </Button>
+                        <Button onClick={() => void reloadLatest()} size="small">
+                          Reload latest and discard my draft
+                        </Button>
+                      </MessageBarActions>
+                    </MessageBar>
+                  )}
+
+                  <div className="form-grid">
+                    <Field label="Title">
+                      <Input
+                        onChange={(event) =>
+                          setDraft({ ...draft, title: event.target.value })}
+                        value={draft.title}
+                      />
+                    </Field>
+                    <Field hint="Comma separated." label="Tags">
+                      <Input
+                        onChange={(event) => setDraft({ ...draft, tags: event.target.value })}
+                        value={draft.tags}
+                      />
+                    </Field>
+                  </div>
+
+                  <div className="memory-editor">
+                    <TabList
+                      onTabSelect={(_, data) => setTab(data.value as "edit" | "preview")}
+                      selectedValue={tab}
+                      size="small"
+                    >
+                      <Tab value="edit">Edit</Tab>
+                      <Tab value="preview">Preview</Tab>
+                    </TabList>
+                    {tab === "edit"
+                      ? (
+                        <CodeEditor
+                          ariaLabel="Page body"
+                          height="min(42vh, 420px)"
+                          onChange={(body) => setDraft({ ...draft, body })}
+                          value={draft.body}
+                        />
+                      )
+                      : (
+                        <div className="memory-preview">
+                          <ReactMarkdown
+                            components={{
+                              a: ({ href, children, ...props }) => {
+                                const memoryPath = resolveMemoryLink(draft.path, href);
+                                if (memoryPath) {
+                                  return (
+                                    <a
+                                      {...props}
+                                      href={`#memory/${memoryPath}`}
+                                      onClick={(event) => {
+                                        event.preventDefault();
+                                        selectPage(memoryPath);
+                                      }}
+                                    >
+                                      {children}
+                                    </a>
+                                  );
+                                }
+                                return (
+                                  <a
+                                    {...props}
+                                    href={href}
+                                    rel="noreferrer noopener"
+                                    target="_blank"
+                                  >
+                                    {children}
+                                  </a>
+                                );
+                              },
+                            }}
+                            remarkPlugins={markdownPlugins}
+                          >
+                            {draft.body}
+                          </ReactMarkdown>
+                        </div>
+                      )}
+                  </div>
+
+                  <div className="memory-link-panels">
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h3>Outgoing links</h3>
+                      </div>
+                      <ul className="nav-list">
+                        {(linksQuery.data?.outgoing ?? []).map((link) => (
+                          <li key={`${link.raw_target}-${link.text}`}>
+                            <button
+                              className="list-item"
+                              disabled={!link.resolved_path}
+                              onClick={() =>
+                                link.resolved_path && selectPage(link.resolved_path)}
+                              type="button"
+                            >
+                              <span className="truncate">{link.text || link.raw_target}</span>
+                              {link.broken && <span className="tag">broken</span>}
+                            </button>
+                          </li>
+                        ))}
+                        {!linksQuery.data?.outgoing.length && (
+                          <li className="list-empty">No outgoing links.</li>
+                        )}
+                      </ul>
+                    </section>
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h3>Backlinks</h3>
+                      </div>
+                      <ul className="nav-list">
+                        {(linksQuery.data?.backlinks ?? []).map((link) => (
+                          <li key={`${link.from}-${link.raw_target}`}>
+                            <button
+                              className="list-item"
+                              onClick={() => selectPage(link.from)}
+                              type="button"
+                            >
+                              <span className="truncate">{link.from}</span>
+                              <span className="muted-sm truncate">{link.text}</span>
+                            </button>
+                          </li>
+                        ))}
+                        {!linksQuery.data?.backlinks.length && (
+                          <li className="list-empty">No backlinks.</li>
+                        )}
+                      </ul>
+                    </section>
+                  </div>
+
+                  {issueCount > 0 && (
+                    <section className="panel">
+                      <div className="panel-header">
+                        <h3>Integrity findings</h3>
+                      </div>
+                      <div className="panel-body">
+                        <dl className="detail-list stacked">
+                          {(checkQuery.data?.issues ?? []).map((issue, index) => (
+                            <Fragment key={`${issue.path ?? "store"}-${index}`}>
+                              <dt className="mono-sm">{issue.path ?? "store"}</dt>
+                              <dd>{issue.message}</dd>
+                            </Fragment>
+                          ))}
+                        </dl>
+                      </div>
+                    </section>
+                  )}
+                </div>
+              </>
+            )}
         </main>
       </div>
+
+      <FormDialog
+        busy={createMutation.isPending}
+        onOpenChange={setShowCreate}
+        onSubmit={handleCreate}
+        open={showCreate}
+        submitLabel="Create page"
+        title="New page"
+      >
+        <Field hint="Slash separated, without the .md suffix." label="Page path" required>
+          <Input
+            onChange={(event) => setNewPath(event.target.value)}
+            placeholder="projects/agentspace"
+            required
+            value={newPath}
+          />
+        </Field>
+        <Field label="Title" required>
+          <Input
+            onChange={(event) => setNewTitle(event.target.value)}
+            placeholder="AgentSpace"
+            required
+            value={newTitle}
+          />
+        </Field>
+        <Field hint="Comma separated." label="Tags">
+          <Input
+            onChange={(event) => setNewTags(event.target.value)}
+            placeholder="project, architecture"
+            value={newTags}
+          />
+        </Field>
+      </FormDialog>
     </div>
   );
 }

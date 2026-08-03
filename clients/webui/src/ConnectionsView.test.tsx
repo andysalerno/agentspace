@@ -1,9 +1,12 @@
 import type { ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "./api";
+import { IN_DIALOG } from "./dialogTestQuery";
+import { FluentProvider } from "./fluent";
+import { lightTheme } from "./theme";
 import ConnectionsView from "./ConnectionsView";
 import { ErrorProvider } from "./ErrorContext";
 import type { Connection, SecretStatus } from "./types";
@@ -17,9 +20,12 @@ function wrapper() {
   });
   function TestWrapper({ children }: { children: ReactNode }) {
     return (
-      <QueryClientProvider client={client}>
-        <ErrorProvider>{children}</ErrorProvider>
-      </QueryClientProvider>
+      // Mirrors the app shell so dialogs portal the way they do in the app.
+      <FluentProvider theme={lightTheme}>
+        <QueryClientProvider client={client}>
+          <ErrorProvider>{children}</ErrorProvider>
+        </QueryClientProvider>
+      </FluentProvider>
     );
   }
   return TestWrapper;
@@ -62,19 +68,33 @@ describe("ConnectionsView", () => {
     const user = userEvent.setup();
     render(<ConnectionsView />, { wrapper: wrapper() });
 
-    await user.click(screen.getByRole("button", { name: "New Connection" }));
-    await user.type(screen.getByLabelText(/Connection ID/), "openai");
-    await user.type(screen.getByLabelText(/Display Name/), "OpenAI");
-    await user.type(screen.getByLabelText(/URL/), "https://api.openai.com/v1");
+    await user.click(screen.getAllByRole("button", { name: "New connection" })[0]);
+    // Typed input is used sparingly here: tabster's modal focus trap blurs the
+    // active element under jsdom, which drops keystrokes.
+    fireEvent.change(await screen.findByLabelText(/Connection ID/), {
+      target: { value: "openai" },
+    });
+    fireEvent.change(screen.getByLabelText(/Display name/), {
+      target: { value: "OpenAI" },
+    });
+    fireEvent.change(screen.getByLabelText(/Endpoint URL/), {
+      target: { value: "https://api.openai.com/v1" },
+    });
 
     // Unset declarations remain selectable so a connection can be wired up
-    // before its value is installed.
-    const picker = await screen.findByLabelText(/API Key Secret/);
+    // before its value is installed. The options arrive with the secrets
+    // query, which resolves after the picker itself renders.
+    const picker = await screen.findByLabelText(/API key secret/);
     expect(
-      screen.getByRole("option", { name: "UNSET_KEY (value not set)" }),
+      await screen.findByRole("option", {
+        name: "UNSET_KEY (value not set)",
+        ...IN_DIALOG,
+      }),
     ).toBeTruthy();
-    await user.selectOptions(picker, "OPENAI_API_KEY");
-    await user.click(screen.getByRole("button", { name: "Create Connection" }));
+    fireEvent.change(picker, { target: { value: "OPENAI_API_KEY" } });
+    await user.click(
+      await screen.findByRole("button", { name: "Create connection", ...IN_DIALOG }),
+    );
 
     await waitFor(() => {
       expect(create).toHaveBeenCalledWith({
@@ -100,10 +120,11 @@ describe("ConnectionsView", () => {
     render(<ConnectionsView />, { wrapper: wrapper() });
 
     await user.click(await screen.findByRole("button", { name: "Edit" }));
-    const name = screen.getByLabelText(/Display Name/);
-    await user.clear(name);
-    await user.type(name, "Renamed");
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    const name = screen.getByLabelText(/Display name/);
+    fireEvent.change(name, { target: { value: "Renamed" } });
+    await user.click(
+      await screen.findByRole("button", { name: "Save changes", ...IN_DIALOG }),
+    );
 
     // The literal is not representable in the picker, so the field is omitted
     // rather than sent as a clear.
@@ -129,8 +150,10 @@ describe("ConnectionsView", () => {
     render(<ConnectionsView />, { wrapper: wrapper() });
 
     await user.click(await screen.findByRole("button", { name: "Edit" }));
-    await user.selectOptions(await screen.findByLabelText(/API Key Secret/), "");
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.selectOptions(await screen.findByLabelText(/API key secret/), "");
+    await user.click(
+      await screen.findByRole("button", { name: "Save changes", ...IN_DIALOG }),
+    );
 
     await waitFor(() => {
       expect(update).toHaveBeenCalledWith("openai", {
@@ -150,8 +173,10 @@ describe("ConnectionsView", () => {
     render(<ConnectionsView />, { wrapper: wrapper() });
 
     await user.click(await screen.findByRole("button", { name: "Edit" }));
-    await user.selectOptions(await screen.findByLabelText(/API Key Secret/), "");
-    await user.click(screen.getByRole("button", { name: "Save Changes" }));
+    await user.selectOptions(await screen.findByLabelText(/API key secret/), "");
+    await user.click(
+      await screen.findByRole("button", { name: "Save changes", ...IN_DIALOG }),
+    );
 
     await waitFor(() => {
       expect(update).toHaveBeenCalledWith("openai", {
