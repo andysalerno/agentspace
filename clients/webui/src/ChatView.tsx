@@ -963,9 +963,12 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     <span className="nowrap">{session.message_count} msg</span>
                                 </span>
                             </button>
-                            <Tooltip content="Delete session" relationship="label">
+                            <Tooltip content="Delete session" relationship="description">
                                 <Button
                                     appearance="subtle"
+                                    aria-label={`Delete ${session.agent_id} session ${
+                                        session.session_id.slice(0, 8)
+                                    }`}
                                     className="session-row-delete"
                                     disabled={deletingSessions || saveWorkspaceMutation.isPending}
                                     icon={<Delete20Regular />}

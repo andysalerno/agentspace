@@ -17,6 +17,7 @@ import MemoryView from "./MemoryView";
 import ConfigurationView from "./ConfigurationView";
 import SecretsView from "./SecretsView";
 import { useErrorContext } from "./useErrorContext";
+import { DarkModeContext } from "./monacoTheme";
 import {
     Button,
     FluentProvider,
@@ -139,6 +140,7 @@ export default function App() {
       theme={darkMode ? darkTheme : lightTheme}
     >
     <MotionBehaviourProvider value="skip">
+    <DarkModeContext.Provider value={darkMode}>
     <div className="app-shell">
       <Sidebar
         activeView={viewId}
@@ -170,6 +172,7 @@ export default function App() {
         {renderView()}
       </div>
     </div>
+    </DarkModeContext.Provider>
     </MotionBehaviourProvider>
     </FluentProvider>
   );

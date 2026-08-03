@@ -28,6 +28,7 @@ import {
 } from "./fluent";
 import { EmptyState, RowActions, StatusBadge, ViewHeader } from "./ui";
 import { statusTone } from "./status";
+import { useMonacoTheme } from "./monacoTheme";
 
 const LOG_POLL_INTERVAL_MS = 1000;
 const DEFAULT_LOG_TAIL = 2000;
@@ -190,9 +191,7 @@ export default function KernelsView() {
         }
     }
 
-    const editorTheme = document.documentElement.getAttribute("data-theme") === "dark"
-        ? "vs-dark"
-        : "light";
+    const editorTheme = useMonacoTheme();
 
     const killDisabled = killMutation.isPending
         || deleteSessionMutation.isPending

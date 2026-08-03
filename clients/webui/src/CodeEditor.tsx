@@ -1,4 +1,5 @@
 import Editor from "@monaco-editor/react";
+import { useMonacoTheme } from "./monacoTheme";
 
 type CodeEditorProps = {
     value: string;
@@ -18,6 +19,7 @@ export default function CodeEditor(
     { value, ariaLabel, onChange, language = "markdown", height = "200px", readOnly = false }:
         CodeEditorProps,
 ) {
+    const theme = useMonacoTheme();
     return (
         <div className="editor-frame">
             <Editor
@@ -39,9 +41,7 @@ export default function CodeEditor(
                     readOnly,
                     domReadOnly: readOnly,
                 }}
-                theme={document.documentElement.getAttribute("data-theme") === "dark"
-                    ? "vs-dark"
-                    : "light"}
+                theme={theme}
                 value={value}
             />
         </div>
