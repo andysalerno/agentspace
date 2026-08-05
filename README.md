@@ -7,6 +7,30 @@ agents. It wraps external agent CLIs behind a shared kernel protocol, runs
 sessions in isolated containers, and exposes them through a web application,
 an HTTP API, terminal clients, and gateway integrations.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/webui-chat-dark.png">
+  <img alt="AgentSpace web UI chat view, showing an agent session transcript with tool calls" src="docs/images/webui-chat-light.png">
+</picture>
+
+<details>
+<summary>More screenshots</summary>
+
+Agents, each bound to a harness, model connection, skills, and workspaces:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/webui-agents-dark.png">
+  <img alt="AgentSpace web UI agents view, listing configured agents and their kernels" src="docs/images/webui-agents-light.png">
+</picture>
+
+The shared Markdown memory corpus, with links, backlinks, and integrity checks:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/webui-memory-dark.png">
+  <img alt="AgentSpace web UI memory view, editing a Markdown memory page" src="docs/images/webui-memory-light.png">
+</picture>
+
+</details>
+
 > [!IMPORTANT]
 > AgentSpace is a personal, experimental project built for my own use. It is
 > under active development, has no stability or compatibility guarantees, and
