@@ -43,6 +43,24 @@ git stash pop
 just webui-screenshots tools/webui-screenshots/after
 ```
 
+## Regenerating the README screenshots
+
+The images in `docs/images/` come from this harness and are the only captures
+committed to the repository. To refresh them:
+
+```bash
+just webui-screenshots
+ONLY=agents HEIGHT=560 just webui-screenshots tools/webui-screenshots/short
+
+cp tools/webui-screenshots/out/{light,dark}-chat-session.png docs/images/   # -> webui-chat-<theme>.png
+cp tools/webui-screenshots/short/{light,dark}-agents.png docs/images/       # -> webui-agents-<theme>.png
+cp tools/webui-screenshots/out/{light,dark}-memory.png docs/images/         # -> webui-memory-<theme>.png
+```
+
+The shorter viewport for `agents` trims the empty space below a small table.
+The README pairs each light/dark file in a `<picture>` element so GitHub picks
+the theme that matches the reader's.
+
 ## Verifying your container
 
 Run a single view. This exercises the real code path, including the sysroot
