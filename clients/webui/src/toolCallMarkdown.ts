@@ -67,6 +67,9 @@ const protectedTypes = new Set([
 /** A half-open source range, in UTF-16 code units. */
 type Span = { start: number; end: number };
 
+/** A range a chip may be spliced into, tagged with its top-level block. */
+type Anchor = Span & { block: number };
+
 type ProtectedRegion = Span & {
     /**
      * Set on a fenced block that runs to the end of the content without a
@@ -74,6 +77,8 @@ type ProtectedRegion = Span & {
      * past yet, so chips inside it go in front of the block.
      */
     unclosed: boolean;
+    /** Index of the top-level block this region belongs to. */
+    block: number;
     /** Start of the top-level block this region belongs to. */
     blockStart: number;
     /** End of the top-level block this region belongs to. */
@@ -83,7 +88,7 @@ type ProtectedRegion = Span & {
 /** The parsed shape of one message, reused across every chip in that message. */
 type Document = {
     /** Ranges of plain text a chip may be spliced into at any position. */
-    anchors: Span[];
+    anchors: Anchor[];
     /** Top-level blocks, in source order. */
     blocks: Span[];
     regions: ProtectedRegion[];
@@ -164,6 +169,42 @@ function spanOf(node: SyntaxNode): Span | null {
 const containerPrefix = /^(?:[ \t]*>)*[ \t]*/;
 
 /**
+ * Tokens inside a text node that stand for a single rendered character.
+ *
+ * A text node's source is not literal text: a backslash escape or a character
+ * reference is several source characters that render as one, and splicing a
+ * chip between them turns the token back into the literal characters it was
+ * hiding. Both are indivisible as far as placement is concerned.
+ */
+const indivisibleToken = /\\[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]|&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[a-zA-Z][a-zA-Z\d]{1,31});/g;
+
+/** Break a range wherever an indivisible token would be split by a chip. */
+function splitIndivisibleTokens(content: string, span: Span): Span[] {
+    const spans: Span[] = [];
+    let cursor = span.start;
+    indivisibleToken.lastIndex = span.start;
+    for (
+        let token = indivisibleToken.exec(content);
+        token !== null && token.index < span.end;
+        token = indivisibleToken.exec(content)
+    ) {
+        const end = token.index + token[0].length;
+        if (end > span.end) {
+            break;
+        }
+        if (token.index > cursor) {
+            spans.push({ start: cursor, end: token.index });
+        }
+        cursor = end;
+    }
+    if (cursor < span.end) {
+        spans.push({ start: cursor, end: span.end });
+    }
+    // A range that is nothing but one token still admits a chip at its edges.
+    return spans.length > 0 ? spans : [{ start: span.start, end: span.start }];
+}
+
+/**
  * Split a text node into the ranges a chip may actually be spliced into.
  *
  * A text node spans its source verbatim, so when it runs over a line ending
@@ -183,7 +224,7 @@ function textAnchors(content: string, span: Span): Span[] {
                 ? lineStart
                 : lineStart + (containerPrefix.exec(content.slice(lineStart, lineEnd))?.[0].length ?? 0);
         if (start < lineEnd) {
-            anchors.push({ start, end: lineEnd });
+            anchors.push(...splitIndivisibleTokens(content, { start, end: lineEnd }));
         }
         if (newline < 0) {
             break;
@@ -211,13 +252,16 @@ function isUnclosedFence(content: string, span: Span): boolean {
     if (!opening) {
         return false;
     }
-    const closing = new RegExp(`^\\${opening[1][0]}{3,}[ \t]*$`);
+    // A closing fence must use the same character and be at least as long as
+    // the opening one, so ```` is not closed by ```.
+    const marker = opening[1];
+    const closing = new RegExp(`^${marker[0]}{${marker.length},}[ \t\r]*$`);
     return !lines.slice(1).some((line) => closing.test(stripContainerPrefix(line)));
 }
 
 function parseDocument(content: string): Document {
     const tree: Root = parser.parse(content);
-    const anchors: Span[] = [];
+    const anchors: Anchor[] = [];
     const regions: ProtectedRegion[] = [];
     const blocks: Span[] = [];
 
@@ -226,6 +270,7 @@ function parseDocument(content: string): Document {
         if (!block) {
             continue;
         }
+        const blockIndex = blocks.length;
         blocks.push(block);
 
         const stack: { node: SyntaxNode; guarded: boolean }[] = [{ node: child, guarded: false }];
@@ -243,21 +288,27 @@ function parseDocument(content: string): Document {
                     regions.push({
                         ...span,
                         unclosed: node.type === "code" && isUnclosedFence(content, span),
+                        block: blockIndex,
                         blockStart: block.start,
                         blockEnd: block.end,
                     });
                 } else if (node.type === "text") {
-                    anchors.push(...textAnchors(content, span));
+                    for (const anchor of textAnchors(content, span)) {
+                        anchors.push({ ...anchor, block: blockIndex });
+                    }
                 }
             }
+            // A chip absorbed into a heading is rendered at heading size and
+            // becomes part of the heading's accessible name, so headings host
+            // no anchors even though a chip there would parse correctly.
+            const anchorable = node.type !== "heading";
             for (const nested of node.children ?? []) {
-                stack.push({ node: nested, guarded: guarded || isProtected });
+                stack.push({ node: nested, guarded: guarded || isProtected || !anchorable });
             }
         }
     }
 
     anchors.sort((left, right) => left.start - right.start);
-    blocks.sort((left, right) => left.start - right.start);
     return { anchors, blocks, regions };
 }
 
@@ -280,12 +331,22 @@ function enclosingRegion(doc: Document, offset: number): ProtectedRegion | null 
     return found;
 }
 
-/** The latest position at or before `offset` that a chip may be spliced into. */
-function anchorAtOrBefore(doc: Document, offset: number): number | null {
+/**
+ * The latest position at or before `offset` that a chip may be spliced into.
+ *
+ * A chip may only reach back into the block it belongs to or the one directly
+ * before it. Reaching further would hop over a whole block that had already
+ * streamed by the time the tool ran, putting the chip ahead of content it
+ * came after.
+ */
+function anchorAtOrBefore(doc: Document, offset: number, minBlock: number): number | null {
     let best: number | null = null;
     for (const anchor of doc.anchors) {
         if (anchor.start > offset) {
             break;
+        }
+        if (anchor.block < minBlock) {
+            continue;
         }
         const candidate = Math.min(offset, anchor.end);
         if (best === null || candidate > best) {
@@ -295,9 +356,18 @@ function anchorAtOrBefore(doc: Document, offset: number): number | null {
     return best;
 }
 
-/** The earliest position at or after `offset` that a chip may be spliced into. */
-function anchorAtOrAfter(doc: Document, offset: number): number | null {
+/**
+ * The earliest position at or after `offset` that a chip may be spliced into,
+ * looking no further ahead than `maxBlock`.
+ *
+ * The bound is what stops a chip escaping a code block from being flung
+ * several blocks down the message, past content that had not streamed yet.
+ */
+function anchorAtOrAfter(doc: Document, offset: number, maxBlock: number): number | null {
     for (const anchor of doc.anchors) {
+        if (anchor.block > maxBlock) {
+            continue;
+        }
         if (anchor.end >= offset) {
             return Math.max(offset, anchor.start);
         }
@@ -305,13 +375,13 @@ function anchorAtOrAfter(doc: Document, offset: number): number | null {
     return null;
 }
 
-function blockAt(doc: Document, offset: number): Span | null {
-    let previous: Span | null = null;
-    for (const block of doc.blocks) {
+function blockIndexAt(doc: Document, offset: number): number {
+    let previous = 0;
+    for (const [index, block] of doc.blocks.entries()) {
         if (offset <= block.end) {
-            return block.start <= offset ? block : (previous ?? block);
+            return block.start <= offset ? index : previous;
         }
-        previous = block;
+        previous = index;
     }
     return previous;
 }
@@ -350,23 +420,24 @@ function resolveInsertion(content: string, doc: Document, rawOffset: number): In
 
     const region = enclosingRegion(doc, offset);
     if (region?.unclosed) {
-        const before = anchorAtOrBefore(doc, region.blockStart);
+        const before = anchorAtOrBefore(doc, region.blockStart, region.block - 1);
         if (before !== null) {
             return spacedInsertion(content, before);
         }
-        const after = anchorAtOrAfter(doc, region.blockStart);
+        const after = anchorAtOrAfter(doc, region.blockStart, region.block);
         return after !== null ? spacedInsertion(content, after) : ownParagraph(region.blockStart);
     }
     if (region) {
-        const after = anchorAtOrAfter(doc, region.end);
+        const after = anchorAtOrAfter(doc, region.end, region.block + 1);
         if (after !== null) {
             return spacedInsertion(content, after);
         }
-        const before = anchorAtOrBefore(doc, region.start);
+        const before = anchorAtOrBefore(doc, region.start, region.block - 1);
         return before !== null ? spacedInsertion(content, before) : ownParagraph(region.blockEnd);
     }
 
-    const before = anchorAtOrBefore(doc, offset);
+    const block = blockIndexAt(doc, offset);
+    const before = anchorAtOrBefore(doc, offset, block - 1);
     if (before !== null) {
         return spacedInsertion(content, before);
     }
@@ -375,12 +446,8 @@ function resolveInsertion(content: string, doc: Document, rawOffset: number): In
     // still can — an offset on a list marker belongs with that item's text —
     // but jumping into a later block would reorder the chip against content
     // that streamed after it.
-    const block = blockAt(doc, offset);
-    const after = anchorAtOrAfter(doc, offset);
-    if (after !== null && block && after <= block.end) {
-        return spacedInsertion(content, after);
-    }
-    return ownParagraph(block ? block.start : offset);
+    const after = anchorAtOrAfter(doc, offset, block);
+    return after !== null ? spacedInsertion(content, after) : ownParagraph(doc.blocks[block].start);
 }
 
 /** Convert a character-counted offset into a UTF-16 index into `content`. */

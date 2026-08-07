@@ -50,6 +50,11 @@ const trickyContent: [string, string][] = [
     ["a nested code span in a link", "See [the `--all` flag](https://host/x) now."],
     ["a link reference", "See [the docs][ref] now.\n\n[ref]: https://host/x"],
     ["inline html", "Before <span title=\"a b\">middle</span> after."],
+    ["backslash escapes", "Escaped \\* here and \\_more\\_ and \\\\ too."],
+    ["character references", "Ten &amp; twenty &#39; and &#x2713; done."],
+    ["a fence longer than its inner one", "Patch:\n\n````rust\nfn a() {}\n```\nstill code\n"],
+    ["a fence before a heading", "Intro\n\n```\ncode\n```\n\n## Next\n\nBody."],
+    ["a closed block before an open one", "Text.\n\n```\nclosed\n```\n\n```rust\nfn main() {"],
 ];
 
 /**
@@ -150,6 +155,25 @@ describe("inline tool call rendering", () => {
         expect(chipLabels[0]).not.toContain("\n");
     });
 
+    it("keeps a chip out of a heading", () => {
+        const content = "Intro\n\n```\ncode\n```\n\n## Next\n\nBody.";
+        const { container } = renderMessage(content, [{ tool: "grep", content_offset: 12 }]);
+        expect(container.querySelector("h2")?.textContent).toBe("Next");
+        expect(container.querySelector(`h2 a[href^="${toolCallHrefPrefix}"]`)).toBeNull();
+    });
+
+    it("does not park a chip ahead of a block that had already streamed", () => {
+        // The chip belongs to the unclosed fence, so it must not jump back
+        // over the closed block between it and the only paragraph of text.
+        const content = "Text.\n\n```\nclosed\n```\n\n```rust\nfn main() {";
+        const { container } = renderMessage(content, [{ tool: "edit", content_offset: 30 }]);
+        const nodes = [...container.children];
+        const chip = nodes.findIndex((node) => node.querySelector(`a[href^="${toolCallHrefPrefix}"]`));
+        expect(chip).toBeGreaterThan(nodes.findIndex((node) => node.tagName === "PRE"));
+        expect(container.querySelectorAll("pre")).toHaveLength(2);
+        expect(nodes[0].textContent).toBe("Text.");
+    });
+
     it("does not let a tool title inject markdown into the message", () => {
         const { chipLabels, container } = renderMessage("Working.", [
             { tool: "](#) **injected** [x", content_offset: 8 },
@@ -181,6 +205,8 @@ const fragments = [
     "---",
     "Text with <span title=\"x y\">html</span> inline.",
     "- outer\n\n  ```js\n  const a = 1;\n  ```",
+    "Escaped \\* and \\_ and &amp; and &#39; here.",
+    "````\nouter ``` inner\n````",
 ];
 
 function seededRandom(seed: number): () => number {
