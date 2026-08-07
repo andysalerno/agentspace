@@ -17,6 +17,8 @@ type TerminalPaneProps = {
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 
+const maxTerminalCols = 500;
+const maxTerminalRows = 300;
 const terminalFont = '"Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, monospace';
 
 function terminalTheme() {
@@ -96,11 +98,12 @@ export default function TerminalPane({ sessionId, onClose }: TerminalPaneProps) 
 
         const terminal = new Terminal({
             allowProposedApi: false,
-            cursorBlink: true,
+            cursorBlink: false,
             cursorStyle: "block",
             fontFamily: terminalFont,
             fontSize: 13,
             lineHeight: 1.2,
+            screenReaderMode: true,
             scrollback: 10_000,
             theme: terminalTheme(),
         });
@@ -125,8 +128,14 @@ export default function TerminalPane({ sessionId, onClose }: TerminalPaneProps) 
             if (host.clientWidth === 0 || host.clientHeight === 0) {
                 return;
             }
-            fitAddon.fit();
-            sendResize();
+            const dimensions = fitAddon.proposeDimensions();
+            if (dimensions === undefined) {
+                return;
+            }
+            terminal.resize(
+                Math.min(maxTerminalCols, dimensions.cols),
+                Math.min(maxTerminalRows, dimensions.rows),
+            );
         };
 
         const resizeObserver = new ResizeObserver(fit);
