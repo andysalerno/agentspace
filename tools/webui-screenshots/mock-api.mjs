@@ -53,9 +53,15 @@ let response = SendMessageResponse::new(assistant, events, session);
 
 Let me know which you prefer and I'll implement it.`;
 
+// Offsets are character counts into the assistant text, matching the API. These
+// land inside a fenced code block and a table on purpose: chips must not be
+// spliced into either. See clients/webui/src/toolCallMarkdown.ts.
+const offsetOf = (marker) => [...longAnswer.slice(0, longAnswer.indexOf(marker))].length;
+const longToolTitle = `bash\ncd services/client_service_rs && cargo test --all-features -- --nocapture session::stream::tests`;
+
 const messages = [
   { message_id: "m1", session_id: "se-1a2b3c4d", role: "user", content: "Can you look at why the session stream drops tool call events near the end of a turn?", created_at: then },
-  { message_id: "m2", session_id: "se-1a2b3c4d", role: "assistant", content: longAnswer, created_at: then, reasoning: "The user is asking about dropped events. I should read the session router and the stream collector to find where the response is constructed relative to the stream drain.", tool_calls: [ { tool: "grep", tool_call_id: "tc1", status: "completed", kind: "search", input: '{"pattern":"SendMessageResponse","path":"services/client_service_rs"}', output: "services/client_service_rs/src/routes/sessions.rs:214\nservices/client_service_rs/src/stream.rs:88" }, { tool: "view", tool_call_id: "tc2", status: "completed", kind: "read", input: '{"path":"services/client_service_rs/src/stream.rs"}', output: "pub async fn drain(&mut self) -> Result<Vec<Event>> { ... }" } ] },
+  { message_id: "m2", session_id: "se-1a2b3c4d", role: "assistant", content: longAnswer, created_at: then, reasoning: "The user is asking about dropped events. I should read the session router and the stream collector to find where the response is constructed relative to the stream drain.", tool_calls: [ { tool: "grep", tool_call_id: "tc1", status: "completed", kind: "search", content_offset: offsetOf("\n\nThe session router"), input: '{"pattern":"SendMessageResponse","path":"services/client_service_rs"}', output: "services/client_service_rs/src/routes/sessions.rs:214\nservices/client_service_rs/src/stream.rs:88" }, { tool: "view", tool_call_id: "tc2", status: "completed", kind: "read", content_offset: offsetOf("let events"), input: '{"path":"services/client_service_rs/src/stream.rs"}', output: "pub async fn drain(&mut self) -> Result<Vec<Event>> { ... }" }, { tool: longToolTitle, tool_call_id: "tc4", status: "completed", kind: "execute", content_offset: offsetOf("| Buffer"), input: '{"command":"cargo test --all-features"}', output: "test result: ok. 214 passed; 0 failed" } ] },
   { message_id: "m3", session_id: "se-1a2b3c4d", role: "user", content: "Go with option 2.", created_at: now },
   { message_id: "m4", session_id: "se-1a2b3c4d", role: "assistant", content: "Done. I reordered the await in `sessions.rs` and added a regression test covering a turn with a trailing tool call.", created_at: now, tool_calls: [{ tool: "edit", tool_call_id: "tc3", status: "completed", kind: "edit", input: '{"path":"services/client_service_rs/src/routes/sessions.rs"}', output: "1 edit applied" }] },
 ];
