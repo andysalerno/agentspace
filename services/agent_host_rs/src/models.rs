@@ -359,6 +359,8 @@ pub struct DockerKernelSession {
     pub container_name: String,
     pub session_workspace_volume_name: String,
     pub base_url: String,
+    #[serde(skip)]
+    pub terminal_token: String,
     pub vscode_url: Option<String>,
     pub free_port_url: Option<String>,
 }

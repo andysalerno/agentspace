@@ -8,11 +8,15 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
-    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
+    extract::{
+        DefaultBodyLimit, OriginalUri, Path, Query, State,
+        ws::{Message as BrowserMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, time::sleep};
@@ -113,6 +117,7 @@ pub fn router() -> Router<AppState> {
             "/sessions/{session_id}/messages/stream",
             post(stream_message),
         )
+        .route("/sessions/{session_id}/terminal", get(open_terminal))
         .route(
             "/sessions/{session_id}/workspace/save",
             post(save_session_workspace),
@@ -1168,6 +1173,151 @@ async fn stream_turn(
         "turn stream attached"
     );
     Ok(ndjson_stream_response(receiver))
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct TerminalSize {
+    #[serde(default = "default_terminal_cols")]
+    cols: u16,
+    #[serde(default = "default_terminal_rows")]
+    rows: u16,
+}
+
+const fn default_terminal_cols() -> u16 {
+    120
+}
+
+const fn default_terminal_rows() -> u16 {
+    32
+}
+
+async fn open_terminal(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(size): Query<TerminalSize>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    validate_terminal_size(size.cols, size.rows)?;
+    validate_websocket_origin(&state, &headers)?;
+    let session = require_session(&state, &session_id)?;
+    let upstream_url =
+        state
+            .agent_host
+            .terminal_url(&session.agent_host_session_id, size.cols, size.rows)?;
+    let connection = tokio::time::timeout(
+        state.agent_host.timeout(),
+        tokio_tungstenite::connect_async(upstream_url.as_str()),
+    )
+    .await
+    .map_err(|_elapsed| {
+        ApiError::gateway_timeout(format!(
+            "agent terminal did not connect within {:?}",
+            state.agent_host.timeout()
+        ))
+    })?;
+    let (upstream, _response) = connection.map_err(|error| {
+        ApiError::bad_gateway(format!("failed to connect to agent terminal: {error}"))
+    })?;
+    Ok(upgrade
+        .on_upgrade(move |socket| bridge_terminal(socket, upstream))
+        .into_response())
+}
+
+fn validate_terminal_size(cols: u16, rows: u16) -> Result<(), ApiError> {
+    if cols == 0 || rows == 0 || cols > 500 || rows > 300 {
+        return Err(ApiError::unprocessable(
+            "terminal size must be between 1x1 and 500x300".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_websocket_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let origin = origin
+        .to_str()
+        .map_err(|_| ApiError::forbidden("invalid WebSocket Origin header".to_owned()))?;
+    if state
+        .config
+        .cors_allowed_origins()
+        .iter()
+        .any(|allowed| allowed == origin)
+    {
+        return Ok(());
+    }
+    Err(ApiError::forbidden(format!(
+        "WebSocket origin {origin:?} is not allowed"
+    )))
+}
+
+async fn bridge_terminal(
+    browser: WebSocket,
+    upstream: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) {
+    let (mut browser_send, mut browser_receive) = browser.split();
+    let (mut upstream_send, mut upstream_receive) = upstream.split();
+
+    loop {
+        tokio::select! {
+            browser_message = browser_receive.next() => {
+                let Some(Ok(message)) = browser_message else {
+                    break;
+                };
+                let message = match message {
+                    BrowserMessage::Text(text) => {
+                        tokio_tungstenite::tungstenite::Message::Text(text.to_string().into())
+                    }
+                    BrowserMessage::Binary(bytes) => {
+                        tokio_tungstenite::tungstenite::Message::Binary(bytes)
+                    }
+                    BrowserMessage::Ping(bytes) => {
+                        tokio_tungstenite::tungstenite::Message::Ping(bytes)
+                    }
+                    BrowserMessage::Pong(bytes) => {
+                        tokio_tungstenite::tungstenite::Message::Pong(bytes)
+                    }
+                    BrowserMessage::Close(_) => break,
+                };
+                if upstream_send.send(message).await.is_err() {
+                    break;
+                }
+            }
+            upstream_message = upstream_receive.next() => {
+                let Some(Ok(message)) = upstream_message else {
+                    break;
+                };
+                let message = match message {
+                    tokio_tungstenite::tungstenite::Message::Text(text) => {
+                        BrowserMessage::Text(text.to_string().into())
+                    }
+                    tokio_tungstenite::tungstenite::Message::Binary(bytes) => {
+                        BrowserMessage::Binary(bytes)
+                    }
+                    tokio_tungstenite::tungstenite::Message::Ping(bytes) => {
+                        BrowserMessage::Ping(bytes)
+                    }
+                    tokio_tungstenite::tungstenite::Message::Pong(bytes) => {
+                        BrowserMessage::Pong(bytes)
+                    }
+                    tokio_tungstenite::tungstenite::Message::Close(_) => break,
+                    tokio_tungstenite::tungstenite::Message::Frame(_) => continue,
+                };
+                if browser_send.send(message).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let _ = upstream_send
+        .send(tokio_tungstenite::tungstenite::Message::Close(None))
+        .await;
+    let _ = browser_send.send(BrowserMessage::Close(None)).await;
 }
 
 async fn reset_session(
@@ -4615,6 +4765,14 @@ impl ApiError {
         }
     }
 
+    const fn forbidden(detail: String) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            detail,
+            extra: None,
+        }
+    }
+
     const fn unprocessable(detail: String) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -4847,31 +5005,183 @@ mod tests {
         convert::Infallible,
         error::Error,
         net::SocketAddr,
-        sync::{Arc, Mutex},
+        sync::{Arc, Mutex, PoisonError},
         time::{Duration, Instant},
     };
 
     use axum::{
         Json, Router,
         body::{Body, to_bytes},
-        extract::{Path, State},
+        extract::{
+            Path, State,
+            ws::{Message as UpstreamMessage, WebSocket, WebSocketUpgrade},
+        },
         http::{HeaderValue, Method, Request, StatusCode, header},
         response::{IntoResponse, Response},
         routing::{get, post},
     };
+    use futures_util::{SinkExt, StreamExt};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
-    use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::sleep};
+    use tokio::{
+        net::TcpListener,
+        sync::{Notify, mpsc},
+        task::JoinHandle,
+        time::sleep,
+    };
     use tokio_stream::wrappers::ReceiverStream;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{Message as BrowserTestMessage, error::Error as TungsteniteError},
+    };
     use tower::ServiceExt;
 
-    use super::send_stream_item;
+    use super::{send_stream_item, validate_terminal_size, validate_websocket_origin};
     use crate::{
         ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient, build_router,
     };
 
     fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
         test_router_with_agent_host("http://127.0.0.1:9", Duration::from_millis(50))
+    }
+
+    #[test]
+    fn terminal_dimensions_are_bounded() {
+        assert!(validate_terminal_size(80, 24).is_ok());
+        assert_eq!(
+            validate_terminal_size(0, 24).map_err(|error| error.status),
+            Err(StatusCode::UNPROCESSABLE_ENTITY)
+        );
+        assert_eq!(
+            validate_terminal_size(80, 301).map_err(|error| error.status),
+            Err(StatusCode::UNPROCESSABLE_ENTITY)
+        );
+    }
+
+    #[test]
+    fn terminal_websocket_origin_uses_configured_allowlist()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", BTreeMap::new())
+            .with_cors_allowed_origins(["https://allowed.example"]);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let state = AppState::with_agent_host(config, agent_host)?;
+        let mut headers = axum::http::HeaderMap::new();
+
+        assert!(validate_websocket_origin(&state, &headers).is_ok());
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://allowed.example"),
+        );
+        assert!(validate_websocket_origin(&state, &headers).is_ok());
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://blocked.example"),
+        );
+        assert_eq!(
+            validate_websocket_origin(&state, &headers).map_err(|error| error.status),
+            Err(StatusCode::FORBIDDEN)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_proxy_forwards_frames_and_browser_disconnect()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let harness = TerminalProxyHarness::start(TerminalCloseInitiator::Browser).await?;
+        let (mut browser, _response) = connect_async(&harness.browser_url).await?;
+
+        assert_terminal_server_frames(&mut browser).await?;
+        send_terminal_browser_frames(&mut browser).await?;
+        browser.send(BrowserTestMessage::Close(None)).await?;
+        harness.wait_until_closed().await?;
+
+        let messages = harness.messages();
+        assert!(messages.iter().any(|message| message == "binary"));
+        assert!(messages.iter().any(|message| message == "text"));
+        assert!(messages.iter().any(|message| message == "ping"));
+        assert!(messages.iter().any(|message| message == "close"));
+        harness.stop().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_proxy_closes_browser_when_upstream_disconnects()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let harness = TerminalProxyHarness::start(TerminalCloseInitiator::Upstream).await?;
+        let (mut browser, _response) = connect_async(&harness.browser_url).await?;
+
+        assert_terminal_server_frames(&mut browser).await?;
+        send_terminal_browser_frames(&mut browser).await?;
+        let close = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(message) = browser.next().await {
+                    let message = message?;
+                    if matches!(message, BrowserTestMessage::Close(_)) {
+                        return Ok::<_, TungsteniteError>(message);
+                    }
+                }
+            }
+        })
+        .await??;
+        assert!(matches!(close, BrowserTestMessage::Close(_)));
+        harness.stop().await;
+        Ok(())
+    }
+
+    async fn assert_terminal_server_frames(
+        browser: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        let mut binary = false;
+        let mut text = false;
+        let mut ping = false;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !(binary && text && ping) {
+                let message = browser
+                    .next()
+                    .await
+                    .ok_or_else(|| std::io::Error::other("terminal proxy closed early"))??;
+                match message {
+                    BrowserTestMessage::Binary(bytes) => {
+                        binary = bytes == b"terminal ready".as_slice();
+                    }
+                    BrowserTestMessage::Text(value) => {
+                        text = value.as_str() == "terminal status";
+                    }
+                    BrowserTestMessage::Ping(bytes) => {
+                        ping = bytes == b"upstream ping".as_slice();
+                    }
+                    BrowserTestMessage::Pong(_)
+                    | BrowserTestMessage::Close(_)
+                    | BrowserTestMessage::Frame(_) => {}
+                }
+            }
+            Ok::<_, Box<dyn Error + Send + Sync>>(())
+        })
+        .await??;
+        Ok(())
+    }
+
+    async fn send_terminal_browser_frames(
+        browser: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Result<(), Box<dyn Error + Send + Sync>> {
+        browser
+            .send(BrowserTestMessage::Binary(b"browser input".to_vec().into()))
+            .await?;
+        browser
+            .send(BrowserTestMessage::Text(
+                json!({"type": "resize", "cols": 132, "rows": 48})
+                    .to_string()
+                    .into(),
+            ))
+            .await?;
+        browser
+            .send(BrowserTestMessage::Ping(b"browser ping".to_vec().into()))
+            .await?;
+        Ok(())
     }
 
     fn test_router_with_agent_host(
@@ -4899,6 +5209,123 @@ mod tests {
     struct StreamingUpstream {
         base_url: String,
         handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum TerminalCloseInitiator {
+        Browser,
+        Upstream,
+    }
+
+    struct TerminalUpstreamState {
+        close_initiator: TerminalCloseInitiator,
+        messages: Mutex<Vec<String>>,
+        closed: Notify,
+    }
+
+    struct TerminalProxyHarness {
+        browser_url: String,
+        upstream_state: Arc<TerminalUpstreamState>,
+        client_handle: JoinHandle<Result<(), std::io::Error>>,
+        upstream_handle: JoinHandle<Result<(), std::io::Error>>,
+    }
+
+    impl TerminalProxyHarness {
+        async fn start(
+            close_initiator: TerminalCloseInitiator,
+        ) -> Result<Self, Box<dyn Error + Send + Sync>> {
+            let upstream_state = Arc::new(TerminalUpstreamState {
+                close_initiator,
+                messages: Mutex::new(Vec::new()),
+                closed: Notify::new(),
+            });
+            let upstream_app = Router::new()
+                .route("/sessions", post(upstream_create_session))
+                .route(
+                    concat!("/sessions/", "{", "session_id", "}"),
+                    get(upstream_get_session),
+                )
+                .route(
+                    concat!("/sessions/", "{", "session_id", "}", "/terminal"),
+                    get(upstream_terminal),
+                )
+                .with_state(upstream_state.clone());
+            let upstream_listener = TcpListener::bind("127.0.0.1:0").await?;
+            let upstream_address = upstream_listener.local_addr()?;
+            let upstream_base_url = format_base_url(upstream_address);
+            let upstream_handle =
+                tokio::spawn(axum::serve(upstream_listener, upstream_app).into_future());
+
+            let app = test_router_with_agent_host(&upstream_base_url, Duration::from_secs(1))?;
+            let (status, _agent) = request_json(
+                app.clone(),
+                Method::POST,
+                "/agents",
+                Some(json!({ "agent_id": "agent-one", "name": "Agent One" })),
+            )
+            .await?;
+            if status != StatusCode::OK {
+                return Err(std::io::Error::other("failed to create terminal test agent").into());
+            }
+            let (status, session) = request_json(
+                app.clone(),
+                Method::POST,
+                "/sessions",
+                Some(json!({ "agent_id": "agent-one" })),
+            )
+            .await?;
+            if status != StatusCode::OK {
+                return Err(std::io::Error::other("failed to create terminal test session").into());
+            }
+            let session_id = session
+                .get("session_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| std::io::Error::other("terminal test session_id missing"))?;
+
+            let client_listener = TcpListener::bind("127.0.0.1:0").await?;
+            let client_address = client_listener.local_addr()?;
+            let client_handle = tokio::spawn(axum::serve(client_listener, app).into_future());
+
+            Ok(Self {
+                browser_url: format!(
+                    "ws://{client_address}/sessions/{session_id}/terminal?cols=80&rows=24"
+                ),
+                upstream_state,
+                client_handle,
+                upstream_handle,
+            })
+        }
+
+        fn messages(&self) -> Vec<String> {
+            self.upstream_state
+                .messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+
+        async fn wait_until_closed(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if self.messages().iter().any(|message| message == "close") {
+                        return;
+                    }
+                    let notified = self.upstream_state.closed.notified();
+                    if !self.messages().iter().any(|message| message == "close") {
+                        notified.await;
+                    }
+                }
+            })
+            .await?;
+            Ok(())
+        }
+
+        async fn stop(self) {
+            self.client_handle.abort();
+            self.upstream_handle.abort();
+            let _ = self.client_handle.await;
+            let _ = self.upstream_handle.await;
+        }
     }
 
     impl StreamingUpstream {
@@ -4940,6 +5367,69 @@ mod tests {
 
     async fn upstream_get_session(Path(session_id): Path<String>) -> Json<Value> {
         Json(json!({ "session_id": session_id, "status": "idle" }))
+    }
+
+    async fn upstream_terminal(
+        State(state): State<Arc<TerminalUpstreamState>>,
+        upgrade: WebSocketUpgrade,
+    ) -> Response {
+        upgrade
+            .on_upgrade(move |socket| run_upstream_terminal(socket, state))
+            .into_response()
+    }
+
+    async fn run_upstream_terminal(mut socket: WebSocket, state: Arc<TerminalUpstreamState>) {
+        let _ = socket
+            .send(UpstreamMessage::Binary(b"terminal ready".to_vec().into()))
+            .await;
+        let _ = socket
+            .send(UpstreamMessage::Text("terminal status".into()))
+            .await;
+        let _ = socket
+            .send(UpstreamMessage::Ping(b"upstream ping".to_vec().into()))
+            .await;
+
+        let mut received_binary = false;
+        let mut received_text = false;
+        let mut received_ping = false;
+        let mut sent_close = false;
+        while let Some(Ok(message)) = socket.next().await {
+            let label = match message {
+                UpstreamMessage::Binary(bytes) => {
+                    received_binary = bytes == b"browser input".as_slice();
+                    "binary"
+                }
+                UpstreamMessage::Text(text) => {
+                    received_text = text.as_str().contains("\"type\":\"resize\"");
+                    "text"
+                }
+                UpstreamMessage::Ping(bytes) => {
+                    received_ping = bytes == b"browser ping".as_slice();
+                    "ping"
+                }
+                UpstreamMessage::Pong(_) => "pong",
+                UpstreamMessage::Close(_) => "close",
+            };
+            state
+                .messages
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(label.to_owned());
+            if label == "close" {
+                state.closed.notify_waiters();
+                return;
+            }
+            if state.close_initiator == TerminalCloseInitiator::Upstream
+                && received_binary
+                && received_text
+                && received_ping
+                && !sent_close
+            {
+                sent_close = true;
+                let _ = socket.send(UpstreamMessage::Close(None)).await;
+            }
+        }
+        state.closed.notify_waiters();
     }
 
     async fn upstream_download_skill(Path(skill_id): Path<String>) -> Response {
