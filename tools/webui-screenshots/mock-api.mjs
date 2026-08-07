@@ -238,7 +238,7 @@ terminalServer.on("connection", (socket) => {
     if (!isBinary) return;
     const input = Buffer.from(data);
     socket.send(input);
-    if (input.includes(10)) {
+    if (input.includes(10) || input.includes(13)) {
       socket.send(Buffer.from("\r\nroot@agentspace:/workspace# "));
     }
   });

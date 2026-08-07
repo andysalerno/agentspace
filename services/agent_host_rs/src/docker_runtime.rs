@@ -33,8 +33,8 @@ use crate::{
         RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
     },
     sessions::{
-        EventStream, KernelRuntime, RuntimeCreateSession, RuntimeTerminal, TerminalCloser,
-        TerminalResizer,
+        EventStream, KernelRuntime, RuntimeCreateSession, RuntimeTerminal, TerminalCleanupGuard,
+        TerminalCloser, TerminalResizer,
     },
 };
 
@@ -1240,17 +1240,18 @@ impl DockerBackend for BollardDockerBackend {
                 }),
             )
             .await?;
-        let StartExecResults::Attached { output, input } = attached else {
-            return Err(AgentHostError::runtime(
-                "Docker terminal unexpectedly started in detached mode",
-            ));
-        };
         let control = Arc::new(DockerTerminalControl {
             docker,
             exec_id,
             container_name: container_name.to_owned(),
             terminal_id,
         });
+        let cleanup = TerminalCleanupGuard::new(control.clone());
+        let StartExecResults::Attached { output, input } = attached else {
+            return Err(AgentHostError::runtime(
+                "Docker terminal unexpectedly started in detached mode",
+            ));
+        };
         control.resize(cols, rows).await?;
         Ok(RuntimeTerminal {
             input,
@@ -1260,7 +1261,7 @@ impl DockerBackend for BollardDockerBackend {
                     .map_err(AgentHostError::from)
             })),
             resizer: control.clone(),
-            closer: control,
+            cleanup,
         })
     }
 }
