@@ -68,6 +68,25 @@ const trickyContent: [string, string][] = [
     ["a lone carriage return", "alpha\rbeta"],
 ];
 
+/*
+ * Documents for the ordering invariant below. Kept separate from
+ * `trickyContent` because a document that cannot host a chip safely at some
+ * offset legitimately relocates it -- "a*b*c" has to move the chip out of the
+ * way rather than create emphasis that was not there -- and not corrupting
+ * the message outranks placing it in stream order.
+ */
+const orderedContent: [string, string][] = [
+    ["a closed block between paragraphs", "Intro.\n\n```\nx\n```\n\nAfter."],
+    ["a trailing closed block", "Intro text here.\n\n```js\nconst x = 1;\n```"],
+    ["an inline code span", "Alpha `code` omega"],
+    ["a leading table", "| a | b |\n| - | - |\n| 1 | 2 |\n\nTail text."],
+    ["a table between paragraphs", "Head.\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\nTail."],
+    ["a closed block before an open one", "One.\n\n```\nclosed\n```\n\n```rust\nfn main() {"],
+    ["an image", "![img](http://h/i.png) after image"],
+    ["a quote before a block", "> quote\n\n```\ncode\n```\n\nend"],
+    ["carriage-return line endings", "```\rcode\r```"],
+];
+
 /**
  * The rendered document with the chips themselves taken back out.
  *
@@ -198,6 +217,33 @@ describe("inline tool call rendering", () => {
                 expect(chipLabels, `${content} @ ${offset}`).toEqual(["⚙ grep"]);
             }
         }
+    });
+
+    /*
+     * A tool call's offset is where it happened in the stream, so a chip must
+     * never sit ahead of content that had already arrived. Checking that
+     * placement only ever moves forward as the offset does catches that
+     * whole class -- an offset at the very end of a code block, or in the gap
+     * after one, used to anchor to text in front of the block while an offset
+     * in the middle of it correctly went behind.
+     */
+    it.each(orderedContent)("places chips in offset order in %s", (_name, content) => {
+        const chipLink = "[⚙ grep](#tool-call-0)";
+        let previous = -1;
+        for (let offset = 0; offset <= [...content].length; offset += 1) {
+            const markdown = addInlineToolCalls(content, [{ tool: "grep", content_offset: offset }]);
+            const at = markdown.indexOf(chipLink);
+            expect(at, `offset ${offset} of ${JSON.stringify(content)}`).toBeGreaterThanOrEqual(previous);
+            previous = at;
+        }
+    });
+
+    it("keeps a chip behind a block that has already closed", () => {
+        // The block finished streaming before the tool ran, so the chip
+        // belongs after it even though there is no text there to anchor to.
+        const content = "Intro text here.\n\n```js\nconst x = 1;\n```";
+        const markdown = addInlineToolCalls(content, [{ tool: "grep", content_offset: 30 }]);
+        expect(markdown.indexOf("[⚙ grep](#tool-call-0)")).toBeGreaterThan(markdown.indexOf("const x = 1;"));
     });
 
     it("does not split a CRLF into two line endings", () => {

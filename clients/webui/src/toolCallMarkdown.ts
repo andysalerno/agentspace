@@ -255,7 +255,7 @@ function isUnclosedFence(content: string, span: Span): boolean {
     if (span.end < content.length) {
         return false;
     }
-    const lines = content.slice(span.start, span.end).split("\n");
+    const lines = content.slice(span.start, span.end).split(lineEnding);
     const opening = /^(`{3,}|~{3,})/.exec(stripContainerPrefix(lines[0]));
     if (!opening) {
         return false;
@@ -328,7 +328,12 @@ function parseDocument(content: string, tree: Root): Document {
 function enclosingRegion(doc: Document, offset: number): ProtectedRegion | null {
     let found: ProtectedRegion | null = null;
     for (const region of doc.regions) {
-        if (region.start >= offset || offset >= region.end) {
+        // The end boundary counts as inside: an offset there belongs to the
+        // content the block just finished, so it has to leave through the same
+        // escape as the rest of the block. Left to the generic path it would
+        // anchor to text *before* the block, placing the chip earlier than one
+        // whose offset falls in the middle of it.
+        if (region.start >= offset || offset > region.end) {
             continue;
         }
         if (!found || region.end - region.start > found.end - found.start) {
@@ -338,13 +343,18 @@ function enclosingRegion(doc: Document, offset: number): ProtectedRegion | null 
     return found;
 }
 
+/** Whether a block that had already finished by `offset` sits after `from`. */
+function crossesCompletedRegion(doc: Document, from: number, offset: number): boolean {
+    return doc.regions.some((region) => region.start >= from && region.end <= offset);
+}
+
 /**
  * The latest position at or before `offset` that a chip may be spliced into.
  *
  * A chip may only reach back into the block it belongs to or the one directly
- * before it. Reaching further would hop over a whole block that had already
- * streamed by the time the tool ran, putting the chip ahead of content it
- * came after.
+ * before it, and never past a block that has already finished. Reaching
+ * further would hop over content that had streamed by the time the tool ran,
+ * putting the chip ahead of what it came after.
  */
 function anchorAtOrBefore(doc: Document, offset: number, minBlock: number): number | null {
     let best: number | null = null;
@@ -352,7 +362,7 @@ function anchorAtOrBefore(doc: Document, offset: number, minBlock: number): numb
         if (anchor.start > offset) {
             break;
         }
-        if (anchor.block < minBlock) {
+        if (anchor.block < minBlock || crossesCompletedRegion(doc, anchor.end, offset)) {
             continue;
         }
         const candidate = Math.min(offset, anchor.end);
@@ -439,8 +449,10 @@ function resolveInsertion(content: string, doc: Document, rawOffset: number): In
         if (after !== null) {
             return spacedInsertion(content, after);
         }
-        const before = anchorAtOrBefore(doc, region.start, region.block - 1);
-        return before !== null ? spacedInsertion(content, before) : ownParagraph(region.blockEnd);
+        // The block is finished, so the chip belongs behind it. With no text
+        // after it to anchor to, it goes on its own line there rather than
+        // back into whatever preceded the block.
+        return ownParagraph(region.blockEnd);
     }
 
     const block = blockIndexAt(doc, offset);
@@ -454,7 +466,15 @@ function resolveInsertion(content: string, doc: Document, rawOffset: number): In
     // but jumping into a later block would reorder the chip against content
     // that streamed after it.
     const after = anchorAtOrAfter(doc, offset, block);
-    return after !== null ? spacedInsertion(content, after) : ownParagraph(doc.blocks[block].start);
+    if (after !== null) {
+        return spacedInsertion(content, after);
+    }
+
+    // No text either side can take it, so it goes on its own line -- behind
+    // the block when the offset has already passed the end of it, which is
+    // where an offset landing in the gap between two blocks belongs.
+    const { start, end } = doc.blocks[block];
+    return ownParagraph(offset >= end ? end : start);
 }
 
 /**
