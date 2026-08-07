@@ -87,7 +87,6 @@ def test_terminal_websocket_requires_token_and_proxies_io(
 ) -> None:
     FakeTerminalSession.instances.clear()
     monkeypatch.setenv("KERNEL_HOST_TERMINAL_TOKEN", "secret")
-    monkeypatch.setenv("KERNEL_WORKDIR", "/workspace")
     monkeypatch.setattr(app_module, "TerminalSession", FakeTerminalSession)
     test_app = FastAPI()
     test_app.websocket("/terminal")(app_module.terminal)

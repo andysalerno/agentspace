@@ -146,7 +146,7 @@ async def terminal(websocket: WebSocket, cols: int = 120, rows: int = 32) -> Non
         session = await TerminalSession.open(
             cols,
             rows,
-            workdir=os.environ.get("KERNEL_WORKDIR", "/workspace"),
+            workdir="/workspace",
         )
         receive_task = asyncio.create_task(_terminal_receive(websocket, session))
         send_task = asyncio.create_task(_terminal_send(websocket, session))
