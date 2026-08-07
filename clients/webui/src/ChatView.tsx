@@ -362,7 +362,12 @@ function MessageMarkdown({
     toolCalls?: ToolCall[];
 }) {
     const renderedContent = toolCalls.length > 0 ? content.trim() : content;
-    const markdownContent = addInlineToolCalls(renderedContent, toolCalls);
+    // Placing chips parses the message, so it is kept off the path taken by
+    // renders that changed neither the text nor the tool calls.
+    const markdownContent = useMemo(
+        () => addInlineToolCalls(renderedContent, toolCalls),
+        [renderedContent, toolCalls],
+    );
 
     return (
         <div className="message-content">

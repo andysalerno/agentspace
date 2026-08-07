@@ -165,6 +165,9 @@ function spanOf(node: SyntaxNode): Span | null {
     return { start, end };
 }
 
+/** Every line ending CommonMark recognises, not just the Unix one. */
+const lineEnding = /\r\n|\r|\n/g;
+
 /** Indentation and block quote markers that a container repeats on each line. */
 const containerPrefix = /^(?:[ \t]*>)*[ \t]*/;
 
@@ -174,9 +177,12 @@ const containerPrefix = /^(?:[ \t]*>)*[ \t]*/;
  * A text node's source is not literal text: a backslash escape or a character
  * reference is several source characters that render as one, and splicing a
  * chip between them turns the token back into the literal characters it was
- * hiding. Both are indivisible as far as placement is concerned.
+ * hiding. A CRLF is likewise one line ending, and a chip landing between the
+ * two halves makes it two, which remark-breaks renders as a second <br>. All
+ * are indivisible as far as placement is concerned.
  */
-const indivisibleToken = /\\[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]|&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[a-zA-Z][a-zA-Z\d]{1,31});/g;
+const indivisibleToken =
+    /\r\n|\\[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]|&(?:#\d{1,7}|#[xX][\da-fA-F]{1,6}|[a-zA-Z][a-zA-Z\d]{1,31});/g;
 
 /** Break a range wherever an indivisible token would be split by a chip. */
 function splitIndivisibleTokens(content: string, span: Span): Span[] {
@@ -217,7 +223,9 @@ function textAnchors(content: string, span: Span): Span[] {
     const anchors: Span[] = [];
     let lineStart = span.start;
     while (lineStart < span.end) {
-        const newline = content.indexOf("\n", lineStart);
+        lineEnding.lastIndex = lineStart;
+        const ending = lineEnding.exec(content);
+        const newline = ending?.index ?? -1;
         const lineEnd = newline < 0 || newline > span.end ? span.end : newline;
         const start =
             lineStart === span.start
@@ -226,10 +234,10 @@ function textAnchors(content: string, span: Span): Span[] {
         if (start < lineEnd) {
             anchors.push(...splitIndivisibleTokens(content, { start, end: lineEnd }));
         }
-        if (newline < 0) {
+        if (newline < 0 || ending === null) {
             break;
         }
-        lineStart = newline + 1;
+        lineStart = newline + ending[0].length;
     }
     return anchors;
 }
@@ -259,8 +267,7 @@ function isUnclosedFence(content: string, span: Span): boolean {
     return !lines.slice(1).some((line) => closing.test(stripContainerPrefix(line)));
 }
 
-function parseDocument(content: string): Document {
-    const tree: Root = parser.parse(content);
+function parseDocument(content: string, tree: Root): Document {
     const anchors: Anchor[] = [];
     const regions: ProtectedRegion[] = [];
     const blocks: Span[] = [];
@@ -499,17 +506,47 @@ function collectSignature(node: SyntaxNode, depth: number, structure: string[], 
     }
 }
 
-function documentSignature(source: string): string {
+function signatureOf(tree: Root): string {
     const structure: string[] = [];
     const text: string[] = [];
-    for (const child of parser.parse(source).children) {
+    for (const child of tree.children) {
         collectSignature(child, 0, structure, text);
     }
     return `${structure.join("|")}\u0000${text.join("").replace(/\s+/g, "")}`;
 }
 
-function applyInsertion(content: string, insertion: Insertion, link: string): string {
-    return `${content.slice(0, insertion.at)}${insertion.prefix}${link}${insertion.suffix}${content.slice(insertion.at)}`;
+function documentSignature(source: string): string {
+    return signatureOf(parser.parse(source));
+}
+
+interface Placement {
+    index: number;
+    insertion: Insertion;
+    link: string;
+}
+
+/** Splice every placed chip into `content` in document order. */
+function splice(content: string, placements: Placement[]): string {
+    const ordered = placements
+        .slice()
+        .sort((left, right) => left.insertion.at - right.insertion.at || left.index - right.index);
+
+    let cursor = 0;
+    let markdown = "";
+    for (const { insertion, link } of ordered) {
+        const at = Math.max(insertion.at, cursor);
+        markdown = `${markdown}${content.slice(cursor, at)}`;
+        let prefix = insertion.prefix;
+        if (markdown === "") {
+            prefix = "";
+        } else if (prefix === "" && !/\s$/.test(markdown)) {
+            // Only reachable when the previous chip ended here; keep them apart.
+            prefix = " ";
+        }
+        markdown = `${markdown}${prefix}${link}${insertion.suffix}`;
+        cursor = at;
+    }
+    return `${markdown}${content.slice(cursor)}`;
 }
 
 /** Convert a character-counted offset into a UTF-16 index into `content`. */
@@ -528,59 +565,53 @@ export function addInlineToolCalls(content: string, toolCalls: ToolCall[]): stri
         return content;
     }
 
-    const doc = parseDocument(content);
-    const signature = documentSignature(content);
+    const tree = parser.parse(content);
+    const doc = parseDocument(content, tree);
+    const signature = signatureOf(tree);
     const characters = [...content];
 
-    const insertions = toolCalls
-        .map((toolCall, index) => {
-            const link = toolCallLink(toolCall, index);
-            const offset = toolCallOffset(toolCall, characters);
-            const preferred = resolveInsertion(content, doc, offset);
-            // In preference order: where the chip belongs, the front of its
-            // block, its own paragraph in front of that block, and the front
-            // of the message, which nothing downstream can absorb.
-            const blockStart = doc.blocks[blockIndexAt(doc, offset)]?.start ?? 0;
-            const candidates = [
-                preferred,
-                spacedInsertion(content, blockStart),
-                ownParagraph(blockStart),
-                ownParagraph(0),
-            ];
-            const insertion =
-                candidates.find(
-                    (candidate) => documentSignature(applyInsertion(content, candidate, link)) === signature,
-                ) ?? ownParagraph(0);
-            return { index, insertion, link };
-        })
-        .sort((left, right) => left.insertion.at - right.insertion.at || left.index - right.index);
+    const offsets = toolCalls.map((toolCall) => toolCallOffset(toolCall, characters));
+    const links = toolCalls.map((toolCall, index) => toolCallLink(toolCall, index));
+    const placements = offsets.map((offset, index) => ({
+        index,
+        insertion: resolveInsertion(content, doc, offset),
+        link: links[index],
+    }));
 
-    let cursor = 0;
-    let markdown = "";
-    for (const { insertion, link } of insertions) {
-        const at = Math.max(insertion.at, cursor);
-        markdown = `${markdown}${content.slice(cursor, at)}`;
-        let prefix = insertion.prefix;
-        if (markdown === "") {
-            prefix = "";
-        } else if (prefix === "" && !/\s$/.test(markdown)) {
-            // Only reachable when the previous chip ended here; keep them apart.
-            prefix = " ";
-        }
-        markdown = `${markdown}${prefix}${link}${insertion.suffix}`;
-        cursor = at;
-    }
-    const combined = `${markdown}${content.slice(cursor)}`;
-
-    // Each chip was checked on its own; chips that ended up adjacent could in
-    // principle still interact, so the finished message is checked too.
+    // The rules are usually right, so the whole message is checked once rather
+    // than each chip in turn: two parses, however many tool calls there are.
+    // This runs on every render of a streaming message, so the common path has
+    // to stay independent of the number of chips.
+    const combined = splice(content, placements);
     if (documentSignature(combined) === signature) {
         return combined;
     }
-    const front = insertions
-        .slice()
-        .sort((left, right) => left.index - right.index)
-        .map(({ link }) => link)
-        .join(" ");
-    return `${front}\n\n${content}`;
+
+    // Something in there does not survive a reparse. Find a position for each
+    // chip that does, in preference order: where it belongs, the front of its
+    // block, its own paragraph before that block, and the front of the
+    // message, which nothing downstream can absorb.
+    const repaired = placements.map((placement) => {
+        const offset = offsets[placement.index];
+        const blockStart = doc.blocks[blockIndexAt(doc, offset)]?.start ?? 0;
+        const candidates = [
+            placement.insertion,
+            spacedInsertion(content, blockStart),
+            ownParagraph(blockStart),
+            ownParagraph(0),
+        ];
+        const insertion =
+            candidates.find(
+                (candidate) =>
+                    documentSignature(splice(content, [{ ...placement, insertion: candidate }])) === signature,
+            ) ?? ownParagraph(0);
+        return { ...placement, insertion };
+    });
+
+    // Chips were checked one at a time; adjacent ones could still interact.
+    const rebuilt = splice(content, repaired);
+    if (documentSignature(rebuilt) === signature) {
+        return rebuilt;
+    }
+    return `${links.join(" ")}\n\n${content}`;
 }

@@ -63,6 +63,9 @@ const trickyContent: [string, string][] = [
     ["an unterminated html block", "<script>\nconst x = 1;"],
     ["an unterminated html block after text", "Before.\n\n<div>\nstuff here"],
     ["an over-indented closing fence", "```\ncode\n    ```"],
+    ["windows line endings", "alpha\r\nbeta\r\ngamma"],
+    ["windows line endings in a quote", "> alpha\r\n> beta"],
+    ["a lone carriage return", "alpha\rbeta"],
 ];
 
 /**
@@ -194,6 +197,16 @@ describe("inline tool call rendering", () => {
                 const { chipLabels } = renderMessage(content, [{ tool: "grep", content_offset: offset }]);
                 expect(chipLabels, `${content} @ ${offset}`).toEqual(["⚙ grep"]);
             }
+        }
+    });
+
+    it("does not split a CRLF into two line endings", () => {
+        // remark-breaks renders a line ending as <br>, so a chip landing
+        // between the CR and the LF would show up as a second break.
+        const content = "alpha\r\nbeta";
+        for (let offset = 0; offset <= [...content].length; offset += 1) {
+            const { container } = renderMessage(content, [{ tool: "grep", content_offset: offset }]);
+            expect(container.querySelectorAll("br"), `offset ${offset}`).toHaveLength(1);
         }
     });
 
