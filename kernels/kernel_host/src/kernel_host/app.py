@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -8,11 +9,16 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from kernel_host.service import service_from_env
+from kernel_host.terminal import (
+    TerminalSession,
+    terminal_authorized,
+    valid_terminal_size,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator
@@ -20,6 +26,10 @@ if TYPE_CHECKING:
     from kernel.events import KernelEvent
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_terminal_task_error(error: BaseException) -> None:
+    raise error
 
 
 @asynccontextmanager
@@ -116,6 +126,96 @@ async def history() -> dict[str, Any]:
 @app.get("/logs")
 async def logs() -> dict[str, Any]:
     return {"lines": await service.logs()}
+
+
+@app.websocket("/terminal")
+async def terminal(websocket: WebSocket, cols: int = 120, rows: int = 32) -> None:
+    if not terminal_authorized(
+        websocket.headers.get("authorization"),
+        os.environ.get("KERNEL_HOST_TERMINAL_TOKEN"),
+    ):
+        await websocket.close(code=1008, reason="terminal authorization failed")
+        return
+    if not valid_terminal_size(cols, rows):
+        await websocket.close(code=1008, reason="invalid terminal size")
+        return
+
+    await websocket.accept()
+    session: TerminalSession | None = None
+    try:
+        session = await TerminalSession.open(
+            cols,
+            rows,
+            workdir=os.environ.get("KERNEL_WORKDIR", "/workspace"),
+        )
+        receive_task = asyncio.create_task(_terminal_receive(websocket, session))
+        send_task = asyncio.create_task(_terminal_send(websocket, session))
+        _done, pending = await asyncio.wait(
+            {receive_task, send_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        results = await asyncio.gather(
+            receive_task,
+            send_task,
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, (asyncio.CancelledError, WebSocketDisconnect)):
+                continue
+            if isinstance(result, BaseException):
+                _raise_terminal_task_error(result)
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        logger.exception("interactive terminal failed")
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await websocket.send_json(
+                {"type": "error", "message": "interactive terminal failed"}
+            )
+    finally:
+        if session is not None:
+            await session.close()
+        with suppress(RuntimeError, WebSocketDisconnect):
+            await websocket.close()
+
+
+async def _terminal_receive(
+    websocket: WebSocket,
+    session: TerminalSession,
+) -> None:
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        if data := message.get("bytes"):
+            await session.write(data)
+            continue
+        control = message.get("text")
+        if not isinstance(control, str):
+            continue
+        try:
+            payload = json.loads(control)
+            if payload.get("type") != "resize":
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": "unsupported terminal control message",
+                    }
+                )
+                return
+            cols = int(payload["cols"])
+            rows = int(payload["rows"])
+            await session.resize(cols, rows)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+            await websocket.send_json({"type": "error", "message": str(error)})
+            return
+
+
+async def _terminal_send(websocket: WebSocket, session: TerminalSession) -> None:
+    while output := await session.read():
+        await websocket.send_bytes(output)
 
 
 @app.post("/reset")

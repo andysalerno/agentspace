@@ -10,9 +10,8 @@ use bollard::{
     Docker,
     container::LogOutput,
     errors::Error as BollardError,
-    exec::{StartExecOptions, StartExecResults},
     models::{
-        ContainerCreateBody, ExecConfig, HostConfig, PortBinding as DockerPortBinding, PortMap,
+        ContainerCreateBody, HostConfig, PortBinding as DockerPortBinding, PortMap,
         VolumeCreateRequest,
     },
     query_parameters::{
@@ -20,10 +19,19 @@ use bollard::{
         RemoveVolumeOptionsBuilder, StatsOptionsBuilder, WaitContainerOptionsBuilder,
     },
 };
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::{sync::Mutex as AsyncMutex, time};
+use tokio::{net::TcpStream, sync::Mutex as AsyncMutex, time};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{
+        Message as TungsteniteMessage,
+        client::IntoClientRequest,
+        error::Error as TungsteniteError,
+        http::{HeaderValue, header::AUTHORIZATION},
+    },
+};
 use uuid::Uuid;
 
 use crate::{
@@ -34,7 +42,7 @@ use crate::{
     },
     sessions::{
         EventStream, KernelRuntime, RuntimeCreateSession, RuntimeTerminal, TerminalCleanupGuard,
-        TerminalCloser, TerminalResizer,
+        TerminalCloser, TerminalInput, TerminalResizer,
     },
 };
 
@@ -111,8 +119,9 @@ impl DockerKernelRuntime {
         &self,
         container_name: &str,
         request: &RuntimeCreateSession,
+        terminal_token: &str,
     ) -> Result<(), AgentHostError> {
-        let environment = self.kernel_environment(request);
+        let environment = self.kernel_environment(request, terminal_token);
         let ports = self.kernel_ports(&environment);
         let volumes = self.kernel_volumes(container_name, request).await?;
 
@@ -133,7 +142,11 @@ impl DockerKernelRuntime {
             .await
     }
 
-    fn kernel_environment(&self, request: &RuntimeCreateSession) -> BTreeMap<String, String> {
+    fn kernel_environment(
+        &self,
+        request: &RuntimeCreateSession,
+        terminal_token: &str,
+    ) -> BTreeMap<String, String> {
         let mut environment = request.env.clone();
         environment.insert("KERNEL_HARNESS".to_owned(), request.harness.to_string());
         if !request.additional_paths.is_empty() {
@@ -157,6 +170,10 @@ impl DockerKernelRuntime {
         environment.insert(
             "KERNEL_FREE_PORT".to_owned(),
             self.config.free_port_container_port.to_string(),
+        );
+        environment.insert(
+            "KERNEL_HOST_TERMINAL_TOKEN".to_owned(),
+            terminal_token.to_owned(),
         );
         environment
     }
@@ -439,7 +456,9 @@ impl KernelRuntime for DockerKernelRuntime {
             .config
             .base_url_template
             .replace(CONTAINER_NAME_PLACEHOLDER, &container_name);
-        self.run_kernel_container(&container_name, &request).await?;
+        let terminal_token = Uuid::new_v4().simple().to_string();
+        self.run_kernel_container(&container_name, &request, &terminal_token)
+            .await?;
         let vscode_url = self
             .url_for_container_port(
                 &container_name,
@@ -461,6 +480,7 @@ impl KernelRuntime for DockerKernelRuntime {
             container_name,
             session_workspace_volume_name: session_workspace_volume_name(&request.session_id),
             base_url,
+            terminal_token,
             vscode_url,
             free_port_url,
         }))
@@ -572,9 +592,7 @@ impl KernelRuntime for DockerKernelRuntime {
         rows: u16,
     ) -> Result<RuntimeTerminal, AgentHostError> {
         let handle = Self::docker_session(session)?;
-        self.backend
-            .open_terminal(&handle.container_name, cols, rows)
-            .await
+        open_kernel_terminal(handle, cols, rows).await
     }
 
     fn container_name(&self, session: &KernelRuntimeSession) -> Option<String> {
@@ -805,17 +823,6 @@ pub trait DockerBackend: Send + Sync {
         &self,
         container_name: &str,
     ) -> Result<Option<DockerStats>, AgentHostError>;
-
-    async fn open_terminal(
-        &self,
-        _container_name: &str,
-        _cols: u16,
-        _rows: u16,
-    ) -> Result<RuntimeTerminal, AgentHostError> {
-        Err(AgentHostError::runtime(
-            "interactive terminals are not supported by this Docker backend",
-        ))
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -917,100 +924,125 @@ impl BollardDockerBackend {
     }
 }
 
-struct DockerTerminalControl {
-    docker: Docker,
-    exec_id: String,
-    container_name: String,
-    terminal_id: String,
+type KernelTerminalSink = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, TungsteniteMessage>;
+
+struct KernelTerminalControl {
+    sink: AsyncMutex<KernelTerminalSink>,
+}
+
+impl KernelTerminalControl {
+    async fn send(&self, message: TungsteniteMessage) -> Result<(), AgentHostError> {
+        self.sink
+            .lock()
+            .await
+            .send(message)
+            .await
+            .map_err(kernel_terminal_error)
+    }
 }
 
 #[async_trait]
-impl TerminalResizer for DockerTerminalControl {
+impl TerminalInput for KernelTerminalControl {
+    async fn write(&self, input: &[u8]) -> Result<(), AgentHostError> {
+        self.send(TungsteniteMessage::Binary(input.to_vec().into()))
+            .await
+    }
+}
+
+#[async_trait]
+impl TerminalResizer for KernelTerminalControl {
     async fn resize(&self, cols: u16, rows: u16) -> Result<(), AgentHostError> {
-        self.docker
-            .resize_exec(
-                &self.exec_id,
-                bollard::exec::ResizeExecOptions {
-                    width: cols,
-                    height: rows,
-                },
-            )
-            .await?;
-        Ok(())
+        self.send(TungsteniteMessage::Text(
+            json!({"type": "resize", "cols": cols, "rows": rows})
+                .to_string()
+                .into(),
+        ))
+        .await
     }
 }
 
 #[async_trait]
-impl TerminalCloser for DockerTerminalControl {
+impl TerminalCloser for KernelTerminalControl {
     async fn close(&self) -> Result<(), AgentHostError> {
-        let kill_exec = self
-            .docker
-            .create_exec(
-                &self.container_name,
-                ExecConfig {
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    cmd: Some(vec![
-                        "/usr/local/bin/python".to_owned(),
-                        "-c".to_owned(),
-                        r#"
-import os
-import pathlib
-import signal
-import sys
-import time
-
-needle = f"AGENTSPACE_TERMINAL_ID={sys.argv[1]}".encode()
-
-def signal_terminals(signum):
-    groups = set()
-    for entry in pathlib.Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            environ = (entry / "environ").read_bytes().split(b"\0")
-            if needle in environ:
-                groups.add(os.getpgid(int(entry.name)))
-        except (FileNotFoundError, PermissionError, ProcessLookupError):
-            pass
-    for group in groups:
-        try:
-            os.killpg(group, signum)
-        except ProcessLookupError:
-            pass
-
-for signum, delay in (
-    (signal.SIGHUP, 0.25),
-    (signal.SIGTERM, 0.5),
-    (signal.SIGKILL, 0),
-):
-    signal_terminals(signum)
-    if delay:
-        time.sleep(delay)
-"#
-                        .trim()
-                        .to_owned(),
-                        self.terminal_id.clone(),
-                    ]),
-                    ..ExecConfig::default()
-                },
-            )
-            .await?
-            .id;
-        let started = self
-            .docker
-            .start_exec(&kill_exec, None::<StartExecOptions>)
-            .await?;
-        let StartExecResults::Attached { mut output, .. } = started else {
-            return Err(AgentHostError::runtime(
-                "terminal cleanup unexpectedly started detached",
-            ));
-        };
-        while let Some(chunk) = output.next().await {
-            chunk?;
+        match self
+            .sink
+            .lock()
+            .await
+            .send(TungsteniteMessage::Close(None))
+            .await
+        {
+            Ok(()) | Err(TungsteniteError::ConnectionClosed | TungsteniteError::AlreadyClosed) => {
+                Ok(())
+            }
+            Err(error) => Err(kernel_terminal_error(error)),
         }
-        Ok(())
     }
+}
+
+async fn open_kernel_terminal(
+    handle: &DockerKernelSession,
+    cols: u16,
+    rows: u16,
+) -> Result<RuntimeTerminal, AgentHostError> {
+    let url = kernel_terminal_url(&handle.base_url, cols, rows)?;
+    let mut request = url
+        .as_str()
+        .into_client_request()
+        .map_err(kernel_terminal_error)?;
+    request.headers_mut().insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", handle.terminal_token))
+            .map_err(|error| AgentHostError::runtime(format!("invalid terminal token: {error}")))?,
+    );
+    let (socket, _response) = connect_async(request)
+        .await
+        .map_err(kernel_terminal_error)?;
+    let (sink, mut stream) = socket.split();
+    let control = Arc::new(KernelTerminalControl {
+        sink: AsyncMutex::new(sink),
+    });
+    let output = Box::pin(try_stream! {
+        while let Some(message) = stream.next().await {
+            match message.map_err(kernel_terminal_error)? {
+                TungsteniteMessage::Binary(output) => yield output.to_vec(),
+                TungsteniteMessage::Text(error) => {
+                    Err(AgentHostError::runtime(format!(
+                        "kernel terminal returned an error: {error}"
+                    )))?;
+                }
+                TungsteniteMessage::Close(_) => break,
+                TungsteniteMessage::Ping(_)
+                | TungsteniteMessage::Pong(_)
+                | TungsteniteMessage::Frame(_) => {}
+            }
+        }
+    });
+    Ok(RuntimeTerminal {
+        input: control.clone(),
+        output,
+        resizer: control.clone(),
+        cleanup: TerminalCleanupGuard::new(control),
+    })
+}
+
+fn kernel_terminal_url(base_url: &str, cols: u16, rows: u16) -> Result<String, AgentHostError> {
+    let websocket_base = if let Some(rest) = base_url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else if let Some(rest) = base_url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else {
+        return Err(AgentHostError::runtime(format!(
+            "unsupported kernel URL scheme in {base_url:?}"
+        )));
+    };
+    Ok(format!(
+        "{}/terminal?cols={cols}&rows={rows}",
+        websocket_base.trim_end_matches('/')
+    ))
+}
+
+fn kernel_terminal_error(error: impl std::fmt::Display) -> AgentHostError {
+    AgentHostError::runtime(format!("kernel terminal WebSocket failed: {error}"))
 }
 
 #[async_trait]
@@ -1195,74 +1227,6 @@ impl DockerBackend for BollardDockerBackend {
             Err(error) if is_bollard_not_found(&error) => Ok(None),
             Err(error) => Err(error.into()),
         }
-    }
-
-    async fn open_terminal(
-        &self,
-        container_name: &str,
-        cols: u16,
-        rows: u16,
-    ) -> Result<RuntimeTerminal, AgentHostError> {
-        let docker = self.docker()?;
-        let terminal_id = Uuid::new_v4().simple().to_string();
-        let exec_id = docker
-            .create_exec(
-                container_name,
-                ExecConfig {
-                    attach_stdin: Some(true),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    tty: Some(true),
-                    cmd: Some(vec![
-                        "/bin/sh".to_owned(),
-                        "-lc".to_owned(),
-                        "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi"
-                            .to_owned(),
-                    ]),
-                    env: Some(vec![
-                        "TERM=xterm-256color".to_owned(),
-                        "COLORTERM=truecolor".to_owned(),
-                        format!("AGENTSPACE_TERMINAL_ID={terminal_id}"),
-                    ]),
-                    working_dir: Some(SESSION_WORKSPACE_MOUNT_PATH.to_owned()),
-                    ..ExecConfig::default()
-                },
-            )
-            .await?
-            .id;
-        let attached = docker
-            .start_exec(
-                &exec_id,
-                Some(StartExecOptions {
-                    tty: true,
-                    output_capacity: Some(64 * 1024),
-                    ..StartExecOptions::default()
-                }),
-            )
-            .await?;
-        let control = Arc::new(DockerTerminalControl {
-            docker,
-            exec_id,
-            container_name: container_name.to_owned(),
-            terminal_id,
-        });
-        let cleanup = TerminalCleanupGuard::new(control.clone());
-        let StartExecResults::Attached { output, input } = attached else {
-            return Err(AgentHostError::runtime(
-                "Docker terminal unexpectedly started in detached mode",
-            ));
-        };
-        control.resize(cols, rows).await?;
-        Ok(RuntimeTerminal {
-            input,
-            output: Box::pin(output.map(|chunk| {
-                chunk
-                    .map(|output| output.into_bytes().to_vec())
-                    .map_err(AgentHostError::from)
-            })),
-            resizer: control.clone(),
-            cleanup,
-        })
     }
 }
 
@@ -1601,7 +1565,7 @@ mod tests {
 
     use super::{
         ContainerRunSpec, DockerBackend, DockerKernelRuntime, DockerRuntimeConfig, DockerStats,
-        PortBinding, VolumeMount, btree_map, container_create_body,
+        PortBinding, VolumeMount, btree_map, container_create_body, kernel_terminal_url,
         session_workspace_volume_name_from_container, summarize_docker_stats,
     };
     use crate::{
@@ -1737,7 +1701,7 @@ mod tests {
         };
 
         runtime
-            .run_kernel_container("agentspace-kernel-test", &request)
+            .run_kernel_container("agentspace-kernel-test", &request, "terminal-token")
             .await
             .unwrap_or_else(|error| panic!("run failed: {error}"));
 
@@ -1750,6 +1714,10 @@ mod tests {
             assert_eq!(spec.name.as_deref(), Some("agentspace-kernel-test"));
             assert_eq!(spec.environment["KERNEL_HARNESS"], "echo");
             assert_eq!(spec.environment["KERNEL_FREE_PORT"], "8081");
+            assert_eq!(
+                spec.environment["KERNEL_HOST_TERMINAL_TOKEN"],
+                "terminal-token"
+            );
             assert_eq!(
                 spec.ports,
                 vec![
@@ -1794,6 +1762,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn kernel_terminal_url_uses_private_kernel_endpoint() {
+        assert_eq!(
+            kernel_terminal_url("http://agentspace-kernel-test:8000", 80, 24)
+                .unwrap_or_else(|error| panic!("terminal URL failed: {error}")),
+            "ws://agentspace-kernel-test:8000/terminal?cols=80&rows=24"
+        );
+        assert_eq!(
+            kernel_terminal_url("https://kernel.example/internal/", 132, 48)
+                .unwrap_or_else(|error| panic!("terminal URL failed: {error}")),
+            "wss://kernel.example/internal/terminal?cols=132&rows=48"
+        );
+    }
+
     #[tokio::test]
     async fn skill_volume_is_shared_and_retained_when_sessions_are_destroyed() {
         let backend = FakeDockerBackend::default();
@@ -1820,11 +1802,11 @@ mod tests {
         };
 
         runtime
-            .run_kernel_container("agentspace-kernel-one", &request)
+            .run_kernel_container("agentspace-kernel-one", &request, "terminal-token-one")
             .await
             .unwrap_or_else(|error| panic!("first run failed: {error}"));
         runtime
-            .run_kernel_container("agentspace-kernel-two", &request)
+            .run_kernel_container("agentspace-kernel-two", &request, "terminal-token-two")
             .await
             .unwrap_or_else(|error| panic!("second run failed: {error}"));
         runtime
@@ -1832,6 +1814,7 @@ mod tests {
                 container_name: "agentspace-kernel-one".to_owned(),
                 session_workspace_volume_name: "agentspace-session-workspace-one".to_owned(),
                 base_url: "http://agentspace-kernel-one:8000".to_owned(),
+                terminal_token: "terminal-token".to_owned(),
                 vscode_url: None,
                 free_port_url: None,
             }))
@@ -1959,7 +1942,7 @@ mod tests {
         };
 
         runtime
-            .run_kernel_container("agentspace-kernel-test", &request)
+            .run_kernel_container("agentspace-kernel-test", &request, "terminal-token")
             .await
             .unwrap_or_else(|error| panic!("run failed: {error}"));
 

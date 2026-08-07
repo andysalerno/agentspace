@@ -21,10 +21,7 @@ use axum::{
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::{
-    io::{AsyncWrite, AsyncWriteExt},
-    sync::RwLock,
-};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
@@ -45,6 +42,11 @@ pub type TerminalOutput = Pin<Box<dyn Stream<Item = Result<Vec<u8>, AgentHostErr
 #[async_trait]
 pub trait TerminalResizer: Send + Sync {
     async fn resize(&self, cols: u16, rows: u16) -> Result<(), AgentHostError>;
+}
+
+#[async_trait]
+pub trait TerminalInput: Send + Sync {
+    async fn write(&self, input: &[u8]) -> Result<(), AgentHostError>;
 }
 
 #[async_trait]
@@ -89,7 +91,7 @@ impl Drop for TerminalCleanupGuard {
 }
 
 pub struct RuntimeTerminal {
-    pub input: Pin<Box<dyn AsyncWrite + Send>>,
+    pub input: Arc<dyn TerminalInput>,
     pub output: TerminalOutput,
     pub resizer: Arc<dyn TerminalResizer>,
     pub(crate) cleanup: TerminalCleanupGuard,
@@ -1101,7 +1103,7 @@ async fn bridge_terminal(mut socket: WebSocket, mut terminal: RuntimeTerminal) {
             socket_message = socket.recv() => {
                 match socket_message {
                     Some(Ok(Message::Binary(input))) => {
-                        if terminal.input.write_all(&input).await.is_err() {
+                        if terminal.input.write(&input).await.is_err() {
                             break;
                         }
                     }
@@ -1163,7 +1165,6 @@ async fn bridge_terminal(mut socket: WebSocket, mut terminal: RuntimeTerminal) {
     if let Err(error) = terminal.cleanup.close().await {
         tracing::warn!(%error, "failed to terminate interactive terminal process");
     }
-    let _ = terminal.input.shutdown().await;
     let _ = socket.send(Message::Close(None)).await;
 }
 
@@ -1290,14 +1291,12 @@ impl IntoResponse for ApiError {
 mod tests {
     use std::{
         collections::BTreeMap,
-        fs, io,
+        fs,
         path::{Path, PathBuf},
-        pin::Pin,
         sync::{
             Arc, Mutex, MutexGuard, PoisonError,
             atomic::{AtomicUsize, Ordering},
         },
-        task::{Context, Poll},
         time::Duration,
     };
 
@@ -1310,13 +1309,13 @@ mod tests {
     use futures_util::{SinkExt, StreamExt, stream};
     use http_body_util::BodyExt;
     use serde_json::{Value as JsonValue, json};
-    use tokio::{io::AsyncWrite, sync::Notify, time::timeout};
+    use tokio::{sync::Notify, time::timeout};
     use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
     use tower::ServiceExt;
 
     use super::{
         CreateSessionRequest, EventStream, KernelRuntime, RuntimeCreateSession, RuntimeTerminal,
-        SessionRegistry, TerminalCleanupGuard, TerminalCloser, TerminalResizer,
+        SessionRegistry, TerminalCleanupGuard, TerminalCloser, TerminalInput, TerminalResizer,
         validate_terminal_size,
     };
     use crate::{
@@ -1357,26 +1356,15 @@ mod tests {
         state: Arc<FakeTerminalState>,
     }
 
-    impl AsyncWrite for FakeTerminalInput {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _context: &mut Context<'_>,
-            buffer: &[u8],
-        ) -> Poll<io::Result<usize>> {
+    #[async_trait]
+    impl TerminalInput for FakeTerminalInput {
+        async fn write(&self, buffer: &[u8]) -> Result<(), AgentHostError> {
             self.state
                 .input
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .extend_from_slice(buffer);
-            Poll::Ready(Ok(buffer.len()))
-        }
-
-        fn poll_flush(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_shutdown(self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
+            Ok(())
         }
     }
 
@@ -1559,7 +1547,7 @@ mod tests {
                 state: state.clone(),
             });
             Ok(RuntimeTerminal {
-                input: Box::pin(FakeTerminalInput { state }),
+                input: Arc::new(FakeTerminalInput { state }),
                 output: Box::pin(
                     stream::once(async { Ok(b"terminal ready".to_vec()) }).chain(stream::pending()),
                 ),
