@@ -2,8 +2,6 @@ import type { FormEvent, KeyboardEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
-import remarkBreaks from "remark-breaks";
-import remarkGfm from "remark-gfm";
 import { api } from "./api";
 import { browserReachableLocalUrl } from "./browserUrls";
 import type {
@@ -15,6 +13,13 @@ import type {
     ToolCall,
 } from "./types";
 import ToolDetailPane from "./ToolDetailPane";
+import {
+    addInlineToolCalls,
+    characterLength,
+    messageMarkdownPlugins,
+    toolCallHrefPrefix,
+    toolCallTooltip,
+} from "./toolCallMarkdown";
 import {
     Add20Regular,
     ArrowClockwise20Regular,
@@ -56,9 +61,6 @@ type ChatViewProps = {
     selectedSessionId: string | null;
     onSelectSession: (sessionId: string | null) => void;
 };
-
-const markdownPlugins = [remarkGfm, remarkBreaks];
-const toolCallHrefPrefix = "#tool-call-";
 
 function createLocalMessage(
     sessionId: string,
@@ -116,7 +118,7 @@ function applyEventToAssistant(
             {
                 tool: event.tool,
                 input: event.input ? JSON.stringify(event.input, null, 2) : undefined,
-                content_offset: message.content.trim().length,
+                content_offset: characterLength(message.content.trim()),
             } satisfies ToolCall,
         ];
         return { ...message, tool_calls: nextToolCalls };
@@ -177,7 +179,7 @@ function upsertToolCall(message: ChatMessage, update: AcpSessionUpdate): ChatMes
         toolCalls.push({
             tool: typeof update.title === "string" && update.title ? update.title : toolCallId ?? "tool",
             tool_call_id: toolCallId,
-            content_offset: message.content.trim().length,
+            content_offset: characterLength(message.content.trim()),
         });
         toolIndex = toolCalls.length - 1;
     }
@@ -238,49 +240,6 @@ function contentText(content: unknown): string {
         return contentText(block.content);
     }
     return JSON.stringify(block);
-}
-
-function escapeMarkdownLinkText(value: string): string {
-    return value.replace(/([\\[\]])/g, "\\$1");
-}
-
-function toolCallLink(toolCall: ToolCall, index: number): string {
-    return `[⚙ ${escapeMarkdownLinkText(toolCall.tool)}](${toolCallHrefPrefix}${index})`;
-}
-
-function toolCallOffset(toolCall: ToolCall, contentLength: number): number {
-    const offset = toolCall.content_offset;
-    if (offset === undefined || !Number.isFinite(offset)) {
-        return 0;
-    }
-    return Math.min(Math.max(Math.trunc(offset), 0), contentLength);
-}
-
-function addInlineToolCalls(content: string, toolCalls: ToolCall[]): string {
-    if (toolCalls.length === 0) {
-        return content;
-    }
-
-    const orderedToolCalls = toolCalls
-        .map((toolCall, index) => ({
-            index,
-            offset: toolCallOffset(toolCall, content.length),
-            toolCall,
-        }))
-        .sort((a, b) => a.offset - b.offset || a.index - b.index);
-    let cursor = 0;
-    let markdown = "";
-
-    for (const { index, offset, toolCall } of orderedToolCalls) {
-        markdown = `${markdown}${content.slice(cursor, offset)}`;
-        const needsLeadingSpace = markdown.length > 0 && !/\s$/.test(markdown);
-        const nextCharacter = content.slice(offset, offset + 1);
-        const needsTrailingSpace = nextCharacter !== "" && !/\s/.test(nextCharacter);
-        markdown = `${markdown}${needsLeadingSpace ? " " : ""}${toolCallLink(toolCall, index)}${needsTrailingSpace ? " " : ""}`;
-        cursor = offset;
-    }
-
-    return `${markdown}${content.slice(cursor)}`;
 }
 
 function compactSessionId(sessionId: string): string {
@@ -403,12 +362,17 @@ function MessageMarkdown({
     toolCalls?: ToolCall[];
 }) {
     const renderedContent = toolCalls.length > 0 ? content.trim() : content;
-    const markdownContent = addInlineToolCalls(renderedContent, toolCalls);
+    // Placing chips parses the message, so it is kept off the path taken by
+    // renders that changed neither the text nor the tool calls.
+    const markdownContent = useMemo(
+        () => addInlineToolCalls(renderedContent, toolCalls),
+        [renderedContent, toolCalls],
+    );
 
     return (
         <div className="message-content">
             <ReactMarkdown
-                remarkPlugins={markdownPlugins}
+                remarkPlugins={messageMarkdownPlugins}
                 components={{
                     a: ({ href, children, ...props }) => {
                         if (href?.startsWith(toolCallHrefPrefix)) {
@@ -424,9 +388,10 @@ function MessageMarkdown({
                                         className="inline-tool-call"
                                         onClick={() => onSelectToolCall?.(toolCall)}
                                         size="small"
+                                        title={toolCallTooltip(toolCall.tool)}
                                         type="button"
                                     >
-                                        {children}
+                                        <span className="inline-tool-call-label">{children}</span>
                                     </Button>
                                 );
                             }
