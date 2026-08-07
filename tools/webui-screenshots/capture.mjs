@@ -33,6 +33,7 @@ const viewport = {
 const views = [
   ["chat", ["Chat"]],
   ["chat-session", ["Chat", { css: ".session-row-button" }]],
+  ["chat-terminal", ["Chat", { css: ".session-row-button" }, "Terminal"]],
   ["agents", ["Agents"]],
   ["workspaces", ["Workspaces"]],
   ["sessions", ["Sessions"]],

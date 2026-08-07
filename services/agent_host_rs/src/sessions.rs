@@ -10,15 +10,21 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
-    http::{StatusCode, header},
+    extract::{
+        Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::{
+    io::{AsyncWrite, AsyncWriteExt},
+    sync::RwLock,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -34,6 +40,24 @@ use crate::{
 };
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostError>> + Send>>;
+pub type TerminalOutput = Pin<Box<dyn Stream<Item = Result<Vec<u8>, AgentHostError>> + Send>>;
+
+#[async_trait]
+pub trait TerminalResizer: Send + Sync {
+    async fn resize(&self, cols: u16, rows: u16) -> Result<(), AgentHostError>;
+}
+
+#[async_trait]
+pub trait TerminalCloser: Send + Sync {
+    async fn close(&self) -> Result<(), AgentHostError>;
+}
+
+pub struct RuntimeTerminal {
+    pub input: Pin<Box<dyn AsyncWrite + Send>>,
+    pub output: TerminalOutput,
+    pub resizer: Arc<dyn TerminalResizer>,
+    pub closer: Arc<dyn TerminalCloser>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeCreateSession {
@@ -94,6 +118,17 @@ pub trait KernelRuntime: Send + Sync {
         &self,
         session: &KernelRuntimeSession,
     ) -> Result<Option<DockerStatsSummary>, AgentHostError>;
+
+    async fn open_terminal(
+        &self,
+        _session: &KernelRuntimeSession,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<RuntimeTerminal, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "interactive terminals are not supported by this runtime",
+        ))
+    }
 
     fn container_name(&self, session: &KernelRuntimeSession) -> Option<String>;
 
@@ -400,6 +435,19 @@ impl SessionRegistry {
         self.inner
             .runtime
             .container_logs(&record.runtime_session, tail)
+            .await
+    }
+
+    pub async fn open_terminal(
+        &self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<RuntimeTerminal, AgentHostError> {
+        let record = self.get_record(session_id).await?;
+        self.inner
+            .runtime
+            .open_terminal(&record.runtime_session, cols, rows)
             .await
     }
 
@@ -859,6 +907,7 @@ pub fn router() -> Router<AppState> {
             "/sessions/{session_id}/container-logs",
             get(session_container_logs),
         )
+        .route("/sessions/{session_id}/terminal", get(open_terminal))
         .route("/sessions/{session_id}/reset", post(reset_session))
         .route(
             "/sessions/{session_id}/workspace/snapshot",
@@ -947,6 +996,139 @@ async fn stream_message(
         header::HeaderValue::from_static("no"),
     );
     Ok(response)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct TerminalSize {
+    #[serde(default = "default_terminal_cols")]
+    cols: u16,
+    #[serde(default = "default_terminal_rows")]
+    rows: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TerminalControl {
+    Resize { cols: u16, rows: u16 },
+}
+
+const fn default_terminal_cols() -> u16 {
+    120
+}
+
+const fn default_terminal_rows() -> u16 {
+    32
+}
+
+fn validate_terminal_size(cols: u16, rows: u16) -> Result<(), AgentHostError> {
+    if cols == 0 || rows == 0 || cols > 500 || rows > 300 {
+        return Err(AgentHostError::validation(
+            "terminal size must be between 1x1 and 500x300",
+        ));
+    }
+    Ok(())
+}
+
+async fn open_terminal(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(size): Query<TerminalSize>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    if headers.contains_key(header::ORIGIN) {
+        return Err(AgentHostError::Forbidden {
+            message: "browser clients must connect to terminals through client_service".to_owned(),
+        }
+        .into());
+    }
+    validate_terminal_size(size.cols, size.rows)?;
+    let terminal = state
+        .sessions
+        .open_terminal(&session_id, size.cols, size.rows)
+        .await?;
+    Ok(upgrade
+        .on_upgrade(move |socket| bridge_terminal(socket, terminal))
+        .into_response())
+}
+
+async fn bridge_terminal(mut socket: WebSocket, mut terminal: RuntimeTerminal) {
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                    break;
+                }
+            }
+            socket_message = socket.recv() => {
+                match socket_message {
+                    Some(Ok(Message::Binary(input))) => {
+                        if terminal.input.write_all(&input).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(control))) => {
+                        let parsed = serde_json::from_str::<TerminalControl>(&control);
+                        let result = match parsed {
+                            Ok(TerminalControl::Resize { cols, rows }) => {
+                                validate_terminal_size(cols, rows).map(|()| (cols, rows))
+                            }
+                            Err(error) => Err(AgentHostError::validation(format!(
+                                "invalid terminal control message: {error}"
+                            ))),
+                        };
+                        match result {
+                            Ok((cols, rows)) => {
+                                if terminal.resizer.resize(cols, rows).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                let payload = json!({
+                                    "type": "error",
+                                    "message": error.to_string(),
+                                });
+                                let _ = socket.send(Message::Text(payload.to_string().into())).await;
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                }
+            }
+            output = terminal.output.next() => {
+                match output {
+                    Some(Ok(output)) => {
+                        if socket.send(Message::Binary(output.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(error)) => {
+                        let payload = json!({
+                            "type": "error",
+                            "message": error.to_string(),
+                        });
+                        let _ = socket.send(Message::Text(payload.to_string().into())).await;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    if let Err(error) = terminal.closer.close().await {
+        tracing::warn!(%error, "failed to terminate interactive terminal process");
+    }
+    let _ = terminal.input.shutdown().await;
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 async fn history(
@@ -1055,6 +1237,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             AgentHostError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
+            AgentHostError::Forbidden { .. } => StatusCode::FORBIDDEN,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AgentHostError::Runtime { .. }
             | AgentHostError::Docker { .. }
@@ -1089,6 +1272,7 @@ mod tests {
 
     use super::{
         CreateSessionRequest, EventStream, KernelRuntime, RuntimeCreateSession, SessionRegistry,
+        validate_terminal_size,
     };
     use crate::{
         AppConfig, AppState, build_router,
@@ -1119,6 +1303,13 @@ mod tests {
         fn state(&self) -> MutexGuard<'_, FakeState> {
             self.state.lock().unwrap_or_else(PoisonError::into_inner)
         }
+    }
+
+    #[test]
+    fn terminal_dimensions_are_bounded() {
+        assert!(validate_terminal_size(80, 24).is_ok());
+        assert!(validate_terminal_size(0, 24).is_err());
+        assert!(validate_terminal_size(501, 24).is_err());
     }
 
     #[async_trait]

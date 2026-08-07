@@ -10,8 +10,9 @@ use bollard::{
     Docker,
     container::LogOutput,
     errors::Error as BollardError,
+    exec::{StartExecOptions, StartExecResults},
     models::{
-        ContainerCreateBody, HostConfig, PortBinding as DockerPortBinding, PortMap,
+        ContainerCreateBody, ExecConfig, HostConfig, PortBinding as DockerPortBinding, PortMap,
         VolumeCreateRequest,
     },
     query_parameters::{
@@ -23,6 +24,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{sync::Mutex as AsyncMutex, time};
+use uuid::Uuid;
 
 use crate::{
     errors::AgentHostError,
@@ -30,7 +32,10 @@ use crate::{
         DockerKernelSession, DockerStatsSummary, HarnessName, KernelEvent, KernelRuntimeSession,
         RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
     },
-    sessions::{EventStream, KernelRuntime, RuntimeCreateSession},
+    sessions::{
+        EventStream, KernelRuntime, RuntimeCreateSession, RuntimeTerminal, TerminalCloser,
+        TerminalResizer,
+    },
 };
 
 const SESSION_WORKSPACE_MOUNT_PATH: &str = "/workspace";
@@ -560,6 +565,18 @@ impl KernelRuntime for DockerKernelRuntime {
         Ok(summarize_docker_stats(&raw))
     }
 
+    async fn open_terminal(
+        &self,
+        session: &KernelRuntimeSession,
+        cols: u16,
+        rows: u16,
+    ) -> Result<RuntimeTerminal, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        self.backend
+            .open_terminal(&handle.container_name, cols, rows)
+            .await
+    }
+
     fn container_name(&self, session: &KernelRuntimeSession) -> Option<String> {
         Self::docker_session(session)
             .ok()
@@ -788,6 +805,17 @@ pub trait DockerBackend: Send + Sync {
         &self,
         container_name: &str,
     ) -> Result<Option<DockerStats>, AgentHostError>;
+
+    async fn open_terminal(
+        &self,
+        _container_name: &str,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<RuntimeTerminal, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "interactive terminals are not supported by this Docker backend",
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -886,6 +914,102 @@ impl BollardDockerBackend {
                 "failed to connect to Docker: {message}"
             ))),
         }
+    }
+}
+
+struct DockerTerminalControl {
+    docker: Docker,
+    exec_id: String,
+    container_name: String,
+    terminal_id: String,
+}
+
+#[async_trait]
+impl TerminalResizer for DockerTerminalControl {
+    async fn resize(&self, cols: u16, rows: u16) -> Result<(), AgentHostError> {
+        self.docker
+            .resize_exec(
+                &self.exec_id,
+                bollard::exec::ResizeExecOptions {
+                    width: cols,
+                    height: rows,
+                },
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl TerminalCloser for DockerTerminalControl {
+    async fn close(&self) -> Result<(), AgentHostError> {
+        let kill_exec = self
+            .docker
+            .create_exec(
+                &self.container_name,
+                ExecConfig {
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    cmd: Some(vec![
+                        "/usr/local/bin/python".to_owned(),
+                        "-c".to_owned(),
+                        r#"
+import os
+import pathlib
+import signal
+import sys
+import time
+
+needle = f"AGENTSPACE_TERMINAL_ID={sys.argv[1]}".encode()
+
+def signal_terminals(signum):
+    groups = set()
+    for entry in pathlib.Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            environ = (entry / "environ").read_bytes().split(b"\0")
+            if needle in environ:
+                groups.add(os.getpgid(int(entry.name)))
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            pass
+    for group in groups:
+        try:
+            os.killpg(group, signum)
+        except ProcessLookupError:
+            pass
+
+for signum, delay in (
+    (signal.SIGHUP, 0.25),
+    (signal.SIGTERM, 0.5),
+    (signal.SIGKILL, 0),
+):
+    signal_terminals(signum)
+    if delay:
+        time.sleep(delay)
+"#
+                        .trim()
+                        .to_owned(),
+                        self.terminal_id.clone(),
+                    ]),
+                    ..ExecConfig::default()
+                },
+            )
+            .await?
+            .id;
+        let started = self
+            .docker
+            .start_exec(&kill_exec, None::<StartExecOptions>)
+            .await?;
+        let StartExecResults::Attached { mut output, .. } = started else {
+            return Err(AgentHostError::runtime(
+                "terminal cleanup unexpectedly started detached",
+            ));
+        };
+        while let Some(chunk) = output.next().await {
+            chunk?;
+        }
+        Ok(())
     }
 }
 
@@ -1071,6 +1195,73 @@ impl DockerBackend for BollardDockerBackend {
             Err(error) if is_bollard_not_found(&error) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn open_terminal(
+        &self,
+        container_name: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<RuntimeTerminal, AgentHostError> {
+        let docker = self.docker()?;
+        let terminal_id = Uuid::new_v4().simple().to_string();
+        let exec_id = docker
+            .create_exec(
+                container_name,
+                ExecConfig {
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    tty: Some(true),
+                    cmd: Some(vec![
+                        "/bin/sh".to_owned(),
+                        "-lc".to_owned(),
+                        "if command -v bash >/dev/null 2>&1; then exec bash -l; else exec sh -l; fi"
+                            .to_owned(),
+                    ]),
+                    env: Some(vec![
+                        "TERM=xterm-256color".to_owned(),
+                        "COLORTERM=truecolor".to_owned(),
+                        format!("AGENTSPACE_TERMINAL_ID={terminal_id}"),
+                    ]),
+                    working_dir: Some(SESSION_WORKSPACE_MOUNT_PATH.to_owned()),
+                    ..ExecConfig::default()
+                },
+            )
+            .await?
+            .id;
+        let attached = docker
+            .start_exec(
+                &exec_id,
+                Some(StartExecOptions {
+                    tty: true,
+                    output_capacity: Some(64 * 1024),
+                    ..StartExecOptions::default()
+                }),
+            )
+            .await?;
+        let StartExecResults::Attached { output, input } = attached else {
+            return Err(AgentHostError::runtime(
+                "Docker terminal unexpectedly started in detached mode",
+            ));
+        };
+        let control = Arc::new(DockerTerminalControl {
+            docker,
+            exec_id,
+            container_name: container_name.to_owned(),
+            terminal_id,
+        });
+        control.resize(cols, rows).await?;
+        Ok(RuntimeTerminal {
+            input,
+            output: Box::pin(output.map(|chunk| {
+                chunk
+                    .map(|output| output.into_bytes().to_vec())
+                    .map_err(AgentHostError::from)
+            })),
+            resizer: control.clone(),
+            closer: control,
+        })
     }
 }
 

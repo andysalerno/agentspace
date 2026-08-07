@@ -2,6 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT ?? 8010);
 const DIST = process.env.WEBUI_DIST
@@ -226,6 +227,32 @@ const server = http.createServer(async (req, res) => {
   const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".json": "application/json", ".map": "application/json" };
   res.writeHead(200, { "content-type": types[ext] ?? "application/octet-stream", "cache-control": "no-store" });
   fs.createReadStream(full).pipe(res);
+});
+
+const terminalServer = new WebSocketServer({ noServer: true });
+terminalServer.on("connection", (socket) => {
+  socket.send(Buffer.from(
+    "\u001b[1;32mAgentSpace terminal\u001b[0m\r\nroot@agentspace:/workspace# ",
+  ));
+  socket.on("message", (data, isBinary) => {
+    if (!isBinary) return;
+    const input = Buffer.from(data);
+    socket.send(input);
+    if (input.includes(10)) {
+      socket.send(Buffer.from("\r\nroot@agentspace:/workspace# "));
+    }
+  });
+});
+
+server.on("upgrade", (request, socket, head) => {
+  const url = new URL(request.url, "http://x");
+  if (/^\/api\/sessions\/[^/]+\/terminal$/.test(url.pathname)) {
+    terminalServer.handleUpgrade(request, socket, head, (websocket) => {
+      terminalServer.emit("connection", websocket, request);
+    });
+    return;
+  }
+  socket.destroy();
 });
 
 server.listen(PORT, () => {

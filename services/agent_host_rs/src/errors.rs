@@ -8,6 +8,7 @@ use bollard::errors::Error as BollardError;
 #[derive(Debug)]
 pub enum AgentHostError {
     SessionNotFound { session_id: String },
+    Forbidden { message: String },
     Validation { message: String },
     Runtime { message: String },
     Docker { source: BollardError },
@@ -43,9 +44,9 @@ impl Display for AgentHostError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::SessionNotFound { session_id } => write!(formatter, "{session_id}"),
-            Self::Validation { message } | Self::Runtime { message } => {
-                formatter.write_str(message)
-            }
+            Self::Forbidden { message }
+            | Self::Validation { message }
+            | Self::Runtime { message } => formatter.write_str(message),
             Self::Docker { source } => write!(formatter, "Docker request failed: {source}"),
             Self::Http { source } => write!(formatter, "kernel HTTP request failed: {source}"),
             Self::Io { source } => write!(formatter, "I/O error: {source}"),
@@ -61,7 +62,10 @@ impl Error for AgentHostError {
             Self::Http { source } => Some(source),
             Self::Io { source } => Some(source),
             Self::Json { source } => Some(source),
-            Self::SessionNotFound { .. } | Self::Validation { .. } | Self::Runtime { .. } => None,
+            Self::SessionNotFound { .. }
+            | Self::Forbidden { .. }
+            | Self::Validation { .. }
+            | Self::Runtime { .. } => None,
         }
     }
 }
