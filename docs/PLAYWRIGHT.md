@@ -17,7 +17,7 @@ tool. Screenshots are captured for every view in both light and dark themes.
 
 ## Status
 
-The harness works and has been verified end to end: 14 views x 2 themes = 28
+The harness works and has been verified end to end: 15 views x 2 themes = 30
 screenshots, no page errors, with Monaco and markdown rendering correctly.
 
 `dev.Dockerfile` was updated to install the Chromium runtime libraries and

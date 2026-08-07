@@ -1,5 +1,13 @@
 import type { FormEvent, KeyboardEvent } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+    lazy,
+    Suspense,
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { api } from "./api";
@@ -30,6 +38,7 @@ import {
     Open20Regular,
     Save20Regular,
     Send20Regular,
+    WindowConsole20Regular,
 } from "@fluentui/react-icons";
 import {
     queryKeys,
@@ -56,6 +65,8 @@ import {
 import { EmptyState, FormDialog, StatusBadge } from "./ui";
 import { sessionTone } from "./status";
 import "./chat-workspace.css";
+
+const TerminalPane = lazy(() => import("./TerminalPane"));
 
 type ChatViewProps = {
     selectedSessionId: string | null;
@@ -427,6 +438,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
     const [selectedNewSessionAgentId, setNewSessionAgentId] = useState("");
     const [newSessionChannelName, setNewSessionChannelName] = useState("");
     const [showNewSession, setShowNewSession] = useState(false);
+    const [terminalOpen, setTerminalOpen] = useState(false);
     const [selectedToolCall, setSelectedToolCall] = useState<ToolCall | null>(null);
 
     // Fall back to the first agent until the user picks one explicitly.
@@ -981,6 +993,17 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     </div>
                                 </div>
                                 <div className="chat-header-actions">
+                                    {selectedKernel !== null && (
+                                        <Button
+                                            appearance={terminalOpen ? "primary" : "secondary"}
+                                            aria-pressed={terminalOpen}
+                                            icon={<WindowConsole20Regular />}
+                                            onClick={() => setTerminalOpen((open) => !open)}
+                                            size="small"
+                                        >
+                                            Terminal
+                                        </Button>
+                                    )}
                                     {vscodeUrl !== null && (
                                         <Button
                                             as="a"
@@ -1180,6 +1203,21 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                                     </div>
                                 </div>
                             </form>
+                            {terminalOpen && selectedKernel !== null && (
+                                <Suspense
+                                    fallback={
+                                        <div className="terminal-pane terminal-pane-loading">
+                                            Loading terminal…
+                                        </div>
+                                    }
+                                >
+                                    <TerminalPane
+                                        key={selectedSession.session_id}
+                                        onClose={() => setTerminalOpen(false)}
+                                        sessionId={selectedSession.session_id}
+                                    />
+                                </Suspense>
+                            )}
                         </>
                     )
                     : (
