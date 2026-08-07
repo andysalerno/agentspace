@@ -138,3 +138,21 @@ async def test_terminal_session_runs_in_workspace_and_resizes(
 
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+@pytest.mark.asyncio
+async def test_terminal_cleanup_kills_environment_scrubbing_process(
+    tmp_path: Path,
+) -> None:
+    session = await TerminalSession.open(80, 24, workdir=str(tmp_path))
+    pid = session.pid
+    await session.write(
+        b"exec env -i PATH=/usr/bin:/bin sh -c "
+        b"'trap \"\" HUP TERM; while sleep 1; do :; done'\r"
+    )
+    await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(session.close(), timeout=2.0)
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

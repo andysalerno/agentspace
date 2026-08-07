@@ -4,6 +4,7 @@ import asyncio
 import errno
 import fcntl
 import hmac
+import logging
 import os
 import pathlib
 import pty
@@ -19,6 +20,9 @@ MIN_TERMINAL_COLS = 1
 MIN_TERMINAL_ROWS = 1
 MAX_TERMINAL_COLS = 500
 MAX_TERMINAL_ROWS = 300
+REAP_TIMEOUT_SECONDS = 1.0
+
+logger = logging.getLogger(__name__)
 
 
 def valid_terminal_size(cols: int, rows: int) -> bool:
@@ -71,8 +75,14 @@ def _matching_process_groups(terminal_id: str) -> set[int]:
     return groups
 
 
-def _signal_process_groups(terminal_id: str, signum: signal.Signals) -> None:
-    for group in _matching_process_groups(terminal_id):
+def _signal_process_groups(
+    terminal_id: str,
+    original_process_group: int,
+    signum: signal.Signals,
+) -> None:
+    groups = _matching_process_groups(terminal_id)
+    groups.add(original_process_group)
+    for group in groups:
         with suppress(ProcessLookupError):
             os.killpg(group, signum)
 
@@ -165,20 +175,24 @@ class TerminalSession:
             (signal.SIGTERM, 0.5),
             (signal.SIGKILL, 0.0),
         ):
-            _signal_process_groups(self.terminal_id, signum)
+            _signal_process_groups(self.terminal_id, self.pid, signum)
             if delay:
                 await asyncio.sleep(delay)
 
         with suppress(OSError):
             os.close(self.master_fd)
-        await self._reap()
+        if not await self._reap(REAP_TIMEOUT_SECONDS):
+            logger.warning("terminal shell %s was not reaped before timeout", self.pid)
 
-    async def _reap(self) -> None:
+    async def _reap(self, max_wait_seconds: float) -> bool:
+        deadline = asyncio.get_running_loop().time() + max_wait_seconds
         while True:
             try:
                 waited_pid = _waitpid_nohang(self.pid)
             except ChildProcessError:
-                return
+                return True
             if waited_pid == self.pid:
-                return
+                return True
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
             await asyncio.sleep(0.01)
