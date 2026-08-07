@@ -450,6 +450,68 @@ function resolveInsertion(content: string, doc: Document, rawOffset: number): In
     return after !== null ? spacedInsertion(content, after) : ownParagraph(doc.blocks[block].start);
 }
 
+/**
+ * A fingerprint of everything about a document that a chip must not change.
+ *
+ * The rules above choose *good* positions, but three rounds of review have
+ * each turned up another construct they mishandled, so correctness does not
+ * rest on them: a candidate is spliced in, reparsed, and accepted only if the
+ * document still has the same block structure and the same text. That catches
+ * whole classes of hazard without enumerating them -- the padding around a
+ * chip activating a block marker or an emphasis run that was inert before, or
+ * an unterminated html block or fence swallowing the chip itself.
+ *
+ * The chips are excluded from the fingerprint, along with the paragraphs that
+ * exist only to hold one, since those are exactly what the caller is adding.
+ */
+function isChipLink(node: SyntaxNode): boolean {
+    const url: unknown = (node as { url?: unknown }).url;
+    return node.type === "link" && typeof url === "string" && url.startsWith(toolCallHrefPrefix);
+}
+
+function isChipParagraph(node: SyntaxNode): boolean {
+    if (node.type !== "paragraph") {
+        return false;
+    }
+    const children = node.children ?? [];
+    return (
+        children.length > 0 &&
+        children.every((child) => {
+            const value: unknown = (child as { value?: unknown }).value;
+            return isChipLink(child) || (typeof value === "string" && value.trim() === "");
+        })
+    );
+}
+
+function collectSignature(node: SyntaxNode, depth: number, structure: string[], text: string[]): void {
+    if (isChipLink(node) || isChipParagraph(node)) {
+        return;
+    }
+    if (node.type !== "text") {
+        structure.push(`${depth}:${node.type}`);
+    }
+    const value: unknown = (node as { value?: unknown }).value;
+    if (typeof value === "string") {
+        text.push(value);
+    }
+    for (const child of node.children ?? []) {
+        collectSignature(child, depth + 1, structure, text);
+    }
+}
+
+function documentSignature(source: string): string {
+    const structure: string[] = [];
+    const text: string[] = [];
+    for (const child of parser.parse(source).children) {
+        collectSignature(child, 0, structure, text);
+    }
+    return `${structure.join("|")}\u0000${text.join("").replace(/\s+/g, "")}`;
+}
+
+function applyInsertion(content: string, insertion: Insertion, link: string): string {
+    return `${content.slice(0, insertion.at)}${insertion.prefix}${link}${insertion.suffix}${content.slice(insertion.at)}`;
+}
+
 /** Convert a character-counted offset into a UTF-16 index into `content`. */
 function toolCallOffset(toolCall: ToolCall, characters: string[]): number {
     const offset = toolCall.content_offset;
@@ -467,18 +529,35 @@ export function addInlineToolCalls(content: string, toolCalls: ToolCall[]): stri
     }
 
     const doc = parseDocument(content);
+    const signature = documentSignature(content);
     const characters = [...content];
+
     const insertions = toolCalls
-        .map((toolCall, index) => ({
-            index,
-            insertion: resolveInsertion(content, doc, toolCallOffset(toolCall, characters)),
-            toolCall,
-        }))
+        .map((toolCall, index) => {
+            const link = toolCallLink(toolCall, index);
+            const offset = toolCallOffset(toolCall, characters);
+            const preferred = resolveInsertion(content, doc, offset);
+            // In preference order: where the chip belongs, the front of its
+            // block, its own paragraph in front of that block, and the front
+            // of the message, which nothing downstream can absorb.
+            const blockStart = doc.blocks[blockIndexAt(doc, offset)]?.start ?? 0;
+            const candidates = [
+                preferred,
+                spacedInsertion(content, blockStart),
+                ownParagraph(blockStart),
+                ownParagraph(0),
+            ];
+            const insertion =
+                candidates.find(
+                    (candidate) => documentSignature(applyInsertion(content, candidate, link)) === signature,
+                ) ?? ownParagraph(0);
+            return { index, insertion, link };
+        })
         .sort((left, right) => left.insertion.at - right.insertion.at || left.index - right.index);
 
     let cursor = 0;
     let markdown = "";
-    for (const { index, insertion, toolCall } of insertions) {
+    for (const { insertion, link } of insertions) {
         const at = Math.max(insertion.at, cursor);
         markdown = `${markdown}${content.slice(cursor, at)}`;
         let prefix = insertion.prefix;
@@ -488,9 +567,20 @@ export function addInlineToolCalls(content: string, toolCalls: ToolCall[]): stri
             // Only reachable when the previous chip ended here; keep them apart.
             prefix = " ";
         }
-        markdown = `${markdown}${prefix}${toolCallLink(toolCall, index)}${insertion.suffix}`;
+        markdown = `${markdown}${prefix}${link}${insertion.suffix}`;
         cursor = at;
     }
+    const combined = `${markdown}${content.slice(cursor)}`;
 
-    return `${markdown}${content.slice(cursor)}`;
+    // Each chip was checked on its own; chips that ended up adjacent could in
+    // principle still interact, so the finished message is checked too.
+    if (documentSignature(combined) === signature) {
+        return combined;
+    }
+    const front = insertions
+        .slice()
+        .sort((left, right) => left.index - right.index)
+        .map(({ link }) => link)
+        .join(" ");
+    return `${front}\n\n${content}`;
 }

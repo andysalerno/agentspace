@@ -55,6 +55,14 @@ const trickyContent: [string, string][] = [
     ["a fence longer than its inner one", "Patch:\n\n````rust\nfn a() {}\n```\nstill code\n"],
     ["a fence before a heading", "Intro\n\n```\ncode\n```\n\n## Next\n\nBody."],
     ["a closed block before an open one", "Text.\n\n```\nclosed\n```\n\n```rust\nfn main() {"],
+    ["an inert hash", "#heading text here"],
+    ["an inert dash", "-not a list item"],
+    ["an inert ordered marker", "1.not an ordered item"],
+    ["an inert quote marker", ">not a quote here"],
+    ["intraword emphasis markers", "a*b*c and d_e_f stay plain"],
+    ["an unterminated html block", "<script>\nconst x = 1;"],
+    ["an unterminated html block after text", "Before.\n\n<div>\nstuff here"],
+    ["an over-indented closing fence", "```\ncode\n    ```"],
 ];
 
 /**
@@ -174,6 +182,31 @@ describe("inline tool call rendering", () => {
         expect(nodes[0].textContent).toBe("Text.");
     });
 
+    /*
+     * Placement is chosen by rules, but guaranteed by re-parsing: whatever the
+     * rules pick, a chip that would change the document is rejected in favour
+     * of a position that cannot. These are the cases where the rules alone
+     * reach for a position that does not survive that check.
+     */
+    it("keeps the chip visible when a block would otherwise swallow it", () => {
+        for (const content of ["<script>\nconst x = 1;", "```\ncode\n    ```"]) {
+            for (let offset = 0; offset <= [...content].length; offset += 1) {
+                const { chipLabels } = renderMessage(content, [{ tool: "grep", content_offset: offset }]);
+                expect(chipLabels, `${content} @ ${offset}`).toEqual(["⚙ grep"]);
+            }
+        }
+    });
+
+    it("does not let the chip's own padding activate a block marker", () => {
+        // The space that keeps a chip off its neighbours would turn the inert
+        // "#" of this paragraph into a heading marker.
+        const { container, text } = renderMessage("#heading text here", [
+            { tool: "grep", content_offset: 1 },
+        ]);
+        expect(container.querySelector("h1")).toBeNull();
+        expect(text).toContain("#heading text here");
+    });
+
     it("does not let a tool title inject markdown into the message", () => {
         const { chipLabels, container } = renderMessage("Working.", [
             { tool: "](#) **injected** [x", content_offset: 8 },
@@ -207,6 +240,9 @@ const fragments = [
     "- outer\n\n  ```js\n  const a = 1;\n  ```",
     "Escaped \\* and \\_ and &amp; and &#39; here.",
     "````\nouter ``` inner\n````",
+    "#not a heading and -not a list.",
+    "a*b*c and 1.not ordered.",
+    "<script>\nconst x = 1;",
 ];
 
 function seededRandom(seed: number): () => number {
