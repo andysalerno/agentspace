@@ -4,14 +4,24 @@
  * Tool calls are recorded with a `content_offset` — the number of characters of
  * assistant text that had streamed when the call started. To draw a chip at
  * that point the offset is turned into a markdown link that the renderer swaps
- * for a button. Splicing text into markdown is only safe at some positions, so
- * every offset is first moved to the nearest position that cannot corrupt the
- * surrounding document (never inside a fence, a code span, a link, or ahead of
- * a block marker), and labels are collapsed, truncated and escaped so a long or
- * multi-line tool title can neither blow up the chip nor break out of it.
+ * for a button.
+ *
+ * Splicing text into markdown is only safe at some positions, and deciding
+ * which ones by pattern-matching the source does not work: code spans and
+ * fences may be nested in block quotes or list items, link destinations may
+ * contain balanced parentheses, and a code span may run across a line ending.
+ * So the content is parsed with the same remark pipeline that renders it and
+ * every decision is made against the resulting syntax tree. Offsets inside a
+ * construct that a chip would corrupt are relocated to the nearest position
+ * that parses identically with the chip present, and labels are collapsed,
+ * truncated and escaped so a long or multi-line tool title can neither blow up
+ * the chip nor break out of it.
  */
+import type { Root } from "mdast";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
 import type { ToolCall } from "./types";
 
 /** Remark plugins every assistant/user message is rendered with. */
@@ -27,45 +37,75 @@ const maxLabelCharacters = 40;
 const maxTooltipCharacters = 400;
 
 const asciiPunctuation = /[!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~]/g;
-const fenceOpen = /^ {0,3}(`{3,}|~{3,})/;
-const heading = /^ {0,3}#{1,6}(?:\s|$)/;
-const blockQuote = /^ {0,3}>/;
-const listItem = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
-const thematicBreak = /^ {0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/;
-const htmlBlock = /^ {0,3}<[a-zA-Z!/?]/;
-const indentedCode = /^(?: {4}|\t)/;
-const tableDelimiter = /^[|\-: \t]+$/;
 
 /**
- * How a line may be joined with a chip.
+ * Constructs whose interior a chip cannot be spliced into.
  *
- * - `text`: plain paragraph text; safe anywhere on the line.
- * - `structure`: heading, list item or block quote; safe except at line start,
- *   where a chip would displace the marker.
- * - `fence` / `code` / `table` / `raw`: never safe; chips move to a block
- *   boundary instead.
+ * Some would swallow the chip and render it as literal text (code, math), some
+ * would be broken by it (links and images, whose text cannot nest a link), and
+ * some would be restructured by it (tables, whose cells are delimited by the
+ * source layout). Chips landing inside any of them move to a boundary instead.
  */
-type LineKind = "blank" | "code" | "fence" | "raw" | "structure" | "table" | "text";
+const protectedTypes = new Set([
+    "code",
+    "definition",
+    "footnoteDefinition",
+    "footnoteReference",
+    "html",
+    "image",
+    "imageReference",
+    "inlineCode",
+    "inlineMath",
+    "link",
+    "linkReference",
+    "math",
+    "table",
+    "thematicBreak",
+    "yaml",
+]);
 
-type Line = {
-    /** Position of this line within the scanned content. */
-    index: number;
-    /** Index of the first character of the line. */
-    start: number;
-    /** Index just past the last character of the line, excluding the newline. */
-    end: number;
-    /** Index of the next line's start, or the content length for the last line. */
-    next: number;
-    kind: LineKind;
-    /** First line of a fenced code block or a table, which a chip may precede. */
-    blockStart: boolean;
-    /** Set on the opening line of a fence that never closes (still streaming). */
+/** A half-open source range, in UTF-16 code units. */
+type Span = { start: number; end: number };
+
+type ProtectedRegion = Span & {
+    /**
+     * Set on a fenced block that runs to the end of the content without a
+     * closing fence, i.e. one that is still streaming. It has no end to escape
+     * past yet, so chips inside it go in front of the block.
+     */
     unclosed: boolean;
+    /** Start of the top-level block this region belongs to. */
+    blockStart: number;
+    /** End of the top-level block this region belongs to. */
+    blockEnd: number;
 };
 
-type Region = { start: number; end: number };
+/** The parsed shape of one message, reused across every chip in that message. */
+type Document = {
+    /** Ranges of plain text a chip may be spliced into at any position. */
+    anchors: Span[];
+    /** Top-level blocks, in source order. */
+    blocks: Span[];
+    regions: ProtectedRegion[];
+};
 
 type Insertion = { at: number; prefix: string; suffix: string };
+
+type SyntaxNode = {
+    type: string;
+    position?: {
+        start: { offset?: number | undefined };
+        end: { offset?: number | undefined };
+    };
+    children?: SyntaxNode[];
+};
+
+/*
+ * Only the parse step matters here, so the pipeline carries the parser and the
+ * extensions that change how source is parsed. `remark-breaks` is a tree
+ * transform rather than a parser extension, so it has no bearing on offsets.
+ */
+const parser = unified().use(remarkParse).use(remarkGfm);
 
 /**
  * Count Unicode scalar values rather than UTF-16 code units.
@@ -111,185 +151,169 @@ function toolCallLink(toolCall: ToolCall, index: number): string {
     return `[⚙ ${escapeMarkdownText(toolCallLabel(toolCall.tool))}](${toolCallHrefPrefix}${index})`;
 }
 
-function scanLines(content: string): Line[] {
-    const lines: Line[] = [];
-    let cursor = 0;
-    for (;;) {
-        const newline = content.indexOf("\n", cursor);
-        const end = newline < 0 ? content.length : newline;
-        lines.push({
-            index: lines.length,
-            start: cursor,
-            end,
-            next: newline < 0 ? content.length : newline + 1,
-            kind: "blank",
-            blockStart: false,
-            unclosed: false,
-        });
+function spanOf(node: SyntaxNode): Span | null {
+    const start = node.position?.start.offset;
+    const end = node.position?.end.offset;
+    if (start === undefined || end === undefined || end <= start) {
+        return null;
+    }
+    return { start, end };
+}
+
+/** Indentation and block quote markers that a container repeats on each line. */
+const containerPrefix = /^(?:[ \t]*>)*[ \t]*/;
+
+/**
+ * Split a text node into the ranges a chip may actually be spliced into.
+ *
+ * A text node spans its source verbatim, so when it runs over a line ending
+ * inside a block quote or a list it also covers the `>` markers and the
+ * indentation that continue the container on the next line. Splicing a chip
+ * into one of those would drop the line out of its container, so each
+ * continuation line contributes an anchor that starts after its prefix.
+ */
+function textAnchors(content: string, span: Span): Span[] {
+    const anchors: Span[] = [];
+    let lineStart = span.start;
+    while (lineStart < span.end) {
+        const newline = content.indexOf("\n", lineStart);
+        const lineEnd = newline < 0 || newline > span.end ? span.end : newline;
+        const start =
+            lineStart === span.start
+                ? lineStart
+                : lineStart + (containerPrefix.exec(content.slice(lineStart, lineEnd))?.[0].length ?? 0);
+        if (start < lineEnd) {
+            anchors.push({ start, end: lineEnd });
+        }
         if (newline < 0) {
             break;
         }
-        cursor = newline + 1;
+        lineStart = newline + 1;
     }
-    return lines;
+    return anchors;
 }
 
-function closesFence(text: string, marker: string): boolean {
-    const trimmed = text.trim();
-    return trimmed.startsWith(marker) && trimmed.split("").every((char) => char === marker[0]);
+/** Strip the block quote markers and indentation a container adds to a line. */
+function stripContainerPrefix(line: string): string {
+    return line.replace(/^[ \t]*(?:>[ \t]?)*/, "");
 }
 
-function classifyLine(text: string): LineKind {
-    if (text.trim() === "") {
-        return "blank";
+/**
+ * Whether a fenced block never closes, which means the message is still
+ * streaming it and everything after the opening fence is provisional.
+ */
+function isUnclosedFence(content: string, span: Span): boolean {
+    if (span.end < content.length) {
+        return false;
     }
-    if (indentedCode.test(text) || thematicBreak.test(text) || htmlBlock.test(text)) {
-        return "raw";
+    const lines = content.slice(span.start, span.end).split("\n");
+    const opening = /^(`{3,}|~{3,})/.exec(stripContainerPrefix(lines[0]));
+    if (!opening) {
+        return false;
     }
-    if (heading.test(text) || blockQuote.test(text) || listItem.test(text)) {
-        return "structure";
-    }
-    return "text";
+    const closing = new RegExp(`^\\${opening[1][0]}{3,}[ \t]*$`);
+    return !lines.slice(1).some((line) => closing.test(stripContainerPrefix(line)));
 }
 
-function isTableDelimiter(text: string): boolean {
-    const trimmed = text.trim();
-    return trimmed.includes("|") && trimmed.includes("-") && tableDelimiter.test(trimmed);
-}
+function parseDocument(content: string): Document {
+    const tree: Root = parser.parse(content);
+    const anchors: Span[] = [];
+    const regions: ProtectedRegion[] = [];
+    const blocks: Span[] = [];
 
-function markFences(content: string, lines: Line[]): void {
-    let marker: string | null = null;
-    let opened: Line | null = null;
-    for (const line of lines) {
-        const text = content.slice(line.start, line.end);
-        if (marker === null) {
-            const opening = fenceOpen.exec(text);
-            if (opening) {
-                line.kind = "fence";
-                line.blockStart = true;
-                marker = opening[1];
-                opened = line;
-                continue;
+    for (const child of tree.children) {
+        const block = spanOf(child);
+        if (!block) {
+            continue;
+        }
+        blocks.push(block);
+
+        const stack: { node: SyntaxNode; guarded: boolean }[] = [{ node: child, guarded: false }];
+        while (stack.length > 0) {
+            const entry = stack.pop();
+            if (!entry) {
+                break;
             }
-            line.kind = classifyLine(text);
+            const { node, guarded } = entry;
+            const span = spanOf(node);
+            const isProtected = protectedTypes.has(node.type);
+
+            if (span && !guarded) {
+                if (isProtected) {
+                    regions.push({
+                        ...span,
+                        unclosed: node.type === "code" && isUnclosedFence(content, span),
+                        blockStart: block.start,
+                        blockEnd: block.end,
+                    });
+                } else if (node.type === "text") {
+                    anchors.push(...textAnchors(content, span));
+                }
+            }
+            for (const nested of node.children ?? []) {
+                stack.push({ node: nested, guarded: guarded || isProtected });
+            }
+        }
+    }
+
+    anchors.sort((left, right) => left.start - right.start);
+    blocks.sort((left, right) => left.start - right.start);
+    return { anchors, blocks, regions };
+}
+
+/**
+ * The outermost protected region strictly containing `offset`.
+ *
+ * An offset exactly on a region boundary is left alone: a chip there sits
+ * beside the construct rather than inside it.
+ */
+function enclosingRegion(doc: Document, offset: number): ProtectedRegion | null {
+    let found: ProtectedRegion | null = null;
+    for (const region of doc.regions) {
+        if (region.start >= offset || offset >= region.end) {
             continue;
         }
-        line.kind = closesFence(text, marker) ? "fence" : "code";
-        if (line.kind === "fence") {
-            marker = null;
-            opened = null;
+        if (!found || region.end - region.start > found.end - found.start) {
+            found = region;
         }
     }
-    if (opened) {
-        // A fence that is still streaming swallows everything to the end, so a
-        // chip inside it has to be placed before the block instead.
-        opened.unclosed = true;
-    }
+    return found;
 }
 
-function markTables(content: string, lines: Line[]): void {
-    for (const [index, line] of lines.entries()) {
-        if (line.kind === "code" || line.kind === "fence") {
-            continue;
+/** The latest position at or before `offset` that a chip may be spliced into. */
+function anchorAtOrBefore(doc: Document, offset: number): number | null {
+    let best: number | null = null;
+    for (const anchor of doc.anchors) {
+        if (anchor.start > offset) {
+            break;
         }
-        const text = content.slice(line.start, line.end);
-        if (!isTableDelimiter(text)) {
-            continue;
-        }
-        const header = lines[index - 1];
-        if (!header || header.kind === "blank" || !content.slice(header.start, header.end).includes("|")) {
-            continue;
-        }
-        let first = line;
-        for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-            const row = lines[cursor];
-            if (row.kind === "blank" || row.kind === "code" || row.kind === "fence") break;
-            if (!content.slice(row.start, row.end).includes("|")) break;
-            row.kind = "table";
-            first = row;
-        }
-        first.blockStart = true;
-        for (let cursor = index; cursor < lines.length; cursor += 1) {
-            const row = lines[cursor];
-            if (row.kind === "blank" || row.kind === "code" || row.kind === "fence") break;
-            if (cursor > index && !content.slice(row.start, row.end).includes("|")) break;
-            row.kind = "table";
+        const candidate = Math.min(offset, anchor.end);
+        if (best === null || candidate > best) {
+            best = candidate;
         }
     }
+    return best;
 }
 
-/** Code spans and links on a single line: splicing inside either breaks them. */
-function inlineRegions(content: string, line: Line): Region[] {
-    const text = content.slice(line.start, line.end);
-    const regions: Region[] = [];
-
-    const backticks = /`+/g;
-    let open: RegExpExecArray | null = null;
-    for (let run = backticks.exec(text); run !== null; run = backticks.exec(text)) {
-        if (open === null) {
-            open = run;
-            continue;
-        }
-        if (run[0].length === open[0].length) {
-            regions.push({
-                start: line.start + open.index,
-                end: line.start + run.index + run[0].length,
-            });
-            open = null;
-        }
-    }
-
-    const links = /!?\[[^\]\n]*\]\([^)\n]*\)/g;
-    for (let link = links.exec(text); link !== null; link = links.exec(text)) {
-        regions.push({
-            start: line.start + link.index,
-            end: line.start + link.index + link[0].length,
-        });
-    }
-
-    return regions;
-}
-
-function lineAt(lines: Line[], offset: number): Line {
-    for (const line of lines) {
-        if (offset <= line.end) {
-            return line;
-        }
-    }
-    return lines[lines.length - 1];
-}
-
-function blockStartLine(lines: Line[], line: Line): Line {
-    let current = line;
-    while (!current.blockStart && current.index > 0) {
-        current = lines[current.index - 1];
-    }
-    return current;
-}
-
-function blockEnd(lines: Line[], line: Line, kinds: LineKind[]): number {
-    let index = line.index;
-    while (index + 1 < lines.length && kinds.includes(lines[index + 1].kind)) {
-        index += 1;
-    }
-    return lines[index].next;
-}
-
-function previousContentLine(lines: Line[], line: Line): Line | null {
-    for (let cursor = line.index - 1; cursor >= 0; cursor -= 1) {
-        if (lines[cursor].kind !== "blank") {
-            return lines[cursor];
+/** The earliest position at or after `offset` that a chip may be spliced into. */
+function anchorAtOrAfter(doc: Document, offset: number): number | null {
+    for (const anchor of doc.anchors) {
+        if (anchor.end >= offset) {
+            return Math.max(offset, anchor.start);
         }
     }
     return null;
 }
 
-function trimmedLineEnd(content: string, line: Line): number {
-    let end = line.end;
-    while (end > line.start && /\s/.test(content.charAt(end - 1))) {
-        end -= 1;
+function blockAt(doc: Document, offset: number): Span | null {
+    let previous: Span | null = null;
+    for (const block of doc.blocks) {
+        if (offset <= block.end) {
+            return block.start <= offset ? block : (previous ?? block);
+        }
+        previous = block;
     }
-    return end;
+    return previous;
 }
 
 function spacedInsertion(content: string, at: number): Insertion {
@@ -297,6 +321,8 @@ function spacedInsertion(content: string, at: number): Insertion {
     const after = content.charAt(at);
     return {
         at,
+        // A chip pressed against neighbouring text would glue onto it, and a
+        // preceding `!` would even turn the chip's link into an image.
         prefix: at > 0 && before !== "" && !/\s/.test(before) ? " " : "",
         suffix: after !== "" && !/\s/.test(after) ? " " : "",
     };
@@ -309,66 +335,60 @@ function ownParagraph(at: number): Insertion {
 /**
  * Move a raw offset to the closest position where a chip can be spliced in
  * without changing how the surrounding markdown parses.
+ *
+ * Escaping a protected construct has a direction: a chip pushed out the back
+ * of a code block stays behind it, while one pushed out of a fence that is
+ * still streaming goes in front of the whole block. Everywhere else the chip
+ * attaches to the end of the text that had already streamed, which is where it
+ * belongs in reading order.
  */
-function resolveInsertion(content: string, lines: Line[], rawOffset: number): Insertion {
-    let offset = Math.min(Math.max(rawOffset, 0), content.length);
-    let line = lineAt(lines, offset);
-    const opensBlock = line.blockStart && content.slice(line.start, offset).trim() === "";
+function resolveInsertion(content: string, doc: Document, rawOffset: number): Insertion {
+    const offset = Math.min(Math.max(rawOffset, 0), content.length);
+    if (doc.blocks.length === 0) {
+        return spacedInsertion(content, content.length);
+    }
 
-    if ((line.kind === "fence" || line.kind === "code") && !opensBlock) {
-        const opening = blockStartLine(lines, line);
-        if (opening.unclosed) {
-            offset = opening.start;
-            line = opening;
-        } else {
-            offset = blockEnd(lines, line, ["fence", "code"]);
-            line = lineAt(lines, offset);
+    const region = enclosingRegion(doc, offset);
+    if (region?.unclosed) {
+        const before = anchorAtOrBefore(doc, region.blockStart);
+        if (before !== null) {
+            return spacedInsertion(content, before);
         }
-    } else if (line.kind === "table" && !opensBlock) {
-        offset = blockEnd(lines, line, ["table"]);
-        line = lineAt(lines, offset);
-    } else if (line.kind !== "fence" && line.kind !== "code" && line.kind !== "table") {
-        const region = inlineRegions(content, line).find(
-            (candidate) => candidate.start < offset && offset < candidate.end,
-        );
-        if (region) {
-            offset = region.end;
+        const after = anchorAtOrAfter(doc, region.blockStart);
+        return after !== null ? spacedInsertion(content, after) : ownParagraph(region.blockStart);
+    }
+    if (region) {
+        const after = anchorAtOrAfter(doc, region.end);
+        if (after !== null) {
+            return spacedInsertion(content, after);
         }
+        const before = anchorAtOrBefore(doc, region.start);
+        return before !== null ? spacedInsertion(content, before) : ownParagraph(region.blockEnd);
     }
 
-    if (content.slice(line.start, offset).trim() !== "") {
-        if (line.kind === "text" || line.kind === "structure") {
-            return spacedInsertion(content, offset);
-        }
-        return ownParagraph(line.next);
+    const before = anchorAtOrBefore(doc, offset);
+    if (before !== null) {
+        return spacedInsertion(content, before);
     }
 
-    if (content.slice(offset).trim() === "") {
-        return spacedInsertion(content, offset);
+    // Nothing before the offset can host a chip. Text later in the same block
+    // still can — an offset on a list marker belongs with that item's text —
+    // but jumping into a later block would reorder the chip against content
+    // that streamed after it.
+    const block = blockAt(doc, offset);
+    const after = anchorAtOrAfter(doc, offset);
+    if (after !== null && block && after <= block.end) {
+        return spacedInsertion(content, after);
     }
-
-    // Blank lines cannot host a chip; the next line that carries content can.
-    while (line.kind === "blank" && line.index + 1 < lines.length) {
-        line = lines[line.index + 1];
-        offset = line.start;
-    }
-
-    const previous = previousContentLine(lines, line);
-    if (previous && (previous.kind === "text" || previous.kind === "structure")) {
-        return spacedInsertion(content, trimmedLineEnd(content, previous));
-    }
-    if (line.kind === "text") {
-        return spacedInsertion(content, line.start);
-    }
-    return ownParagraph(line.start);
+    return ownParagraph(block ? block.start : offset);
 }
 
-function toolCallOffset(toolCall: ToolCall, content: string): number {
+/** Convert a character-counted offset into a UTF-16 index into `content`. */
+function toolCallOffset(toolCall: ToolCall, characters: string[]): number {
     const offset = toolCall.content_offset;
     if (offset === undefined || !Number.isFinite(offset)) {
         return 0;
     }
-    const characters = [...content];
     const clamped = Math.min(Math.max(Math.trunc(offset), 0), characters.length);
     return characters.slice(0, clamped).join("").length;
 }
@@ -379,14 +399,12 @@ export function addInlineToolCalls(content: string, toolCalls: ToolCall[]): stri
         return content;
     }
 
-    const lines = scanLines(content);
-    markFences(content, lines);
-    markTables(content, lines);
-
+    const doc = parseDocument(content);
+    const characters = [...content];
     const insertions = toolCalls
         .map((toolCall, index) => ({
             index,
-            insertion: resolveInsertion(content, lines, toolCallOffset(toolCall, content)),
+            insertion: resolveInsertion(content, doc, toolCallOffset(toolCall, characters)),
             toolCall,
         }))
         .sort((left, right) => left.insertion.at - right.insertion.at || left.index - right.index);

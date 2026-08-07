@@ -40,7 +40,43 @@ const trickyContent: [string, string][] = [
     ["astral characters", "Shipped 🎉 the fix 🚀 already"],
     ["a thematic break", "Before\n\n---\n\nAfter"],
     ["indented code", "Example:\n\n    indented code line\n\nAfter."],
+    ["multi-line indented code", "Example:\n\n    line one\n    line two\n\nAfter."],
+    ["a link with balanced parentheses", "See [docs](https://host/a_(b)) for details."],
+    ["a code span across a line ending", "Run `foo\nbar` now."],
+    ["a fence inside a block quote", "Note:\n\n> ```rust\n> fn main() {}\n> ```\n\nAfter."],
+    ["a fence inside a list item", "Steps:\n\n- run it:\n\n  ```sh\n  cargo test\n  ```\n\nAfter."],
+    ["an unterminated fence in a block quote", "Note:\n\n> ```rust\n> fn main() {"],
+    ["an image", "Here ![alt text](https://host/i_(1).png) it is."],
+    ["a nested code span in a link", "See [the `--all` flag](https://host/x) now."],
+    ["a link reference", "See [the docs][ref] now.\n\n[ref]: https://host/x"],
+    ["inline html", "Before <span title=\"a b\">middle</span> after."],
 ];
+
+/**
+ * The rendered document with the chips themselves taken back out.
+ *
+ * Whitespace is discarded from the comparisons this feeds: a chip is
+ * deliberately padded so it cannot glue onto its neighbours, which splits a
+ * word it lands inside. That padding is the intended behaviour, whereas any
+ * change to the characters themselves is corruption.
+ */
+function withoutChips(container: HTMLElement): HTMLElement {
+    const clone = container.cloneNode(true) as HTMLElement;
+    for (const chip of clone.querySelectorAll(`a[href^="${toolCallHrefPrefix}"]`)) {
+        chip.remove();
+    }
+    return clone;
+}
+
+function documentText(root: HTMLElement): string {
+    return (root.textContent ?? "").replace(/\s+/g, "");
+}
+
+function structureOf(root: HTMLElement): string {
+    return [...root.querySelectorAll("pre code, table, li, blockquote, img, a, h1, h2, h3")]
+        .map((node) => `${node.tagName}:${documentText(node as HTMLElement)}`)
+        .join("|");
+}
 
 describe("inline tool call rendering", () => {
     it.each(trickyContent)("keeps chip syntax out of the text of %s", (_name, content) => {
@@ -51,6 +87,24 @@ describe("inline tool call rendering", () => {
             expect(chipLabels).toEqual(["⚙ grep"]);
             expect(text).not.toContain(toolCallHrefPrefix);
             expect(text).not.toContain("](");
+        }
+    });
+
+    /*
+     * The strongest guarantee this module owes: adding a chip may add the chip,
+     * and nothing else. Rendering with and without one must produce the same
+     * text and the same block structure, at every offset.
+     */
+    it.each(trickyContent)("leaves %s otherwise unchanged at every offset", (_name, content) => {
+        const original = withoutChips(renderMessage(content, []).container);
+        const expectedText = documentText(original);
+        const expectedStructure = structureOf(original);
+
+        for (let offset = 0; offset <= [...content].length; offset += 1) {
+            const { container } = renderMessage(content, [{ tool: "grep", content_offset: offset }]);
+            const stripped = withoutChips(container);
+            expect(documentText(stripped), `offset ${offset}`).toBe(expectedText);
+            expect(structureOf(stripped), `offset ${offset}`).toBe(expectedStructure);
         }
     });
 
@@ -103,4 +157,65 @@ describe("inline tool call rendering", () => {
         expect(chipLabels).toEqual(["⚙ ](#) **injected** [x"]);
         expect(container.querySelector("strong")).toBeNull();
     });
+});
+
+/*
+ * The hand-written cases above cover constructs one at a time. Real messages
+ * nest them, and it is the combinations that tend to break a placement rule,
+ * so compose documents out of fragments and check the same invariant. The
+ * generator is seeded, so a failure names a document that can be replayed.
+ */
+const fragments = [
+    "Plain sentence with `a span` in it.",
+    "Trailing text.",
+    "```rust\nfn main() { let x = (1, 2); }\n```",
+    "> quoted line\n> more quoted",
+    "- alpha `x`\n- beta [l](http://h/a_(b))",
+    "1. first\n2. second",
+    "## A heading `with code`",
+    "| col | val |\n| --- | --- |\n| a | 1 |",
+    "    indented code\n    second line",
+    "See [docs](https://host/p_(1)/q) and ![img](https://host/i.png).",
+    "Run `foo\nbar` across lines.",
+    "> ```sh\n> cargo test\n> ```",
+    "---",
+    "Text with <span title=\"x y\">html</span> inline.",
+    "- outer\n\n  ```js\n  const a = 1;\n  ```",
+];
+
+function seededRandom(seed: number): () => number {
+    let state = seed >>> 0;
+    return () => {
+        state = (state * 1664525 + 1013904223) >>> 0;
+        return state / 0x100000000;
+    };
+}
+
+describe("inline tool call rendering (composed documents)", () => {
+    it("leaves randomly composed markdown unchanged apart from the chip", () => {
+        const random = seededRandom(20260807);
+        for (let document = 0; document < 40; document += 1) {
+            const count = 2 + Math.floor(random() * 3);
+            const content = Array.from(
+                { length: count },
+                () => fragments[Math.floor(random() * fragments.length)],
+            ).join("\n\n");
+
+            const original = withoutChips(renderMessage(content, []).container);
+            const expectedText = documentText(original);
+            const expectedStructure = structureOf(original);
+            const length = [...content].length;
+
+            for (let offset = 0; offset <= length; offset += 5) {
+                const { container, chipLabels } = renderMessage(content, [
+                    { tool: "grep", content_offset: offset },
+                ]);
+                const where = `document ${document} offset ${offset}: ${JSON.stringify(content)}`;
+                expect(chipLabels, where).toEqual(["⚙ grep"]);
+                const stripped = withoutChips(container);
+                expect(documentText(stripped), where).toBe(expectedText);
+                expect(structureOf(stripped), where).toBe(expectedStructure);
+            }
+        }
+    }, 30_000);
 });
