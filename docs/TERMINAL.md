@@ -37,7 +37,11 @@ Terminal dimensions are limited to 500 columns by 300 rows.
 
 ## Security
 
-Browser WebSocket origins are checked against
+Browser WebSocket upgrades are accepted when the `Origin` header is same-origin
+with the request authority (the `X-Forwarded-Host` or `Host` header), which is
+always the case for the Web UI because it proxies `/api` from its own origin.
+This works for plain-HTTP local deployments on any host name, LAN address, or
+port without configuration. Cross-origin upgrades must be listed in
 `CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`. Requests without an `Origin` header
 remain available to trusted service and CLI clients. `agent_host` rejects
 browser-originated terminal upgrades so browser access must pass through

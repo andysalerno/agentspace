@@ -1248,9 +1248,94 @@ fn validate_websocket_origin(state: &AppState, headers: &HeaderMap) -> Result<()
     {
         return Ok(());
     }
+    if is_same_origin_request(origin, headers) {
+        return Ok(());
+    }
     Err(ApiError::forbidden(format!(
         "WebSocket origin {origin:?} is not allowed"
     )))
+}
+
+/// Same-origin upgrades are always allowed: the page opening the socket was
+/// served from the same authority the request is addressed to, so the
+/// allowlist only has to govern genuine cross-origin access. This keeps
+/// plain-HTTP deployments reachable at any host name or port (LAN IP, machine
+/// hostname, custom port) without extra configuration.
+///
+/// The scheme is deliberately ignored because a reverse proxy may terminate
+/// TLS in front of `client_service`; the authority is what identifies the
+/// origin's trust boundary here.
+fn is_same_origin_request(origin: &str, headers: &HeaderMap) -> bool {
+    let Some((origin_host, origin_port)) = origin_authority(origin) else {
+        return false;
+    };
+    let Some(request_authority) = request_authority(headers) else {
+        return false;
+    };
+    let Some((request_host, request_port)) = split_authority(&request_authority) else {
+        return false;
+    };
+    if origin_host != request_host {
+        return false;
+    }
+    match (origin_port, request_port) {
+        // A proxy that drops the port from the forwarded authority (nginx's
+        // `$host`) leaves nothing to compare, so host equality has to suffice.
+        (Some(origin_port), Some(request_port)) => origin_port == request_port,
+        _ => true,
+    }
+}
+
+/// Resolve the authority the browser addressed, preferring the value forwarded
+/// by a reverse proxy. Browsers cannot set either header from page script, so
+/// both are trustworthy for a cross-site request check.
+fn request_authority(headers: &HeaderMap) -> Option<String> {
+    for name in [HeaderName::from_static("x-forwarded-host"), header::HOST] {
+        if let Some(value) = headers.get(&name).and_then(|value| value.to_str().ok()) {
+            let value = value.split(',').next().unwrap_or_default().trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Split an `Origin` value into its lowercase host and port, applying the
+/// scheme's default port when the origin omits one.
+fn origin_authority(origin: &str) -> Option<(String, Option<u16>)> {
+    let (scheme, rest) = origin.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let (host, port) = split_authority(authority)?;
+    let port = port.or_else(|| match scheme.to_ascii_lowercase().as_str() {
+        "http" | "ws" => Some(80),
+        "https" | "wss" => Some(443),
+        _ => None,
+    });
+    Some((host, port))
+}
+
+/// Split a `host[:port]` authority into its lowercase host and optional port,
+/// preserving bracketed IPv6 literals.
+fn split_authority(authority: &str) -> Option<(String, Option<u16>)> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, remainder) = rest.split_once(']')?;
+        let port = match remainder {
+            "" => None,
+            remainder => Some(remainder.strip_prefix(':')?.parse().ok()?),
+        };
+        return Some((format!("[{}]", host.to_ascii_lowercase()), port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() => {
+            Some((host.to_ascii_lowercase(), Some(port.parse().ok()?)))
+        }
+        _ => Some((authority.to_ascii_lowercase(), None)),
+    }
 }
 
 async fn bridge_terminal(
@@ -5039,7 +5124,7 @@ mod tests {
             Path, State,
             ws::{Message as UpstreamMessage, WebSocket, WebSocketUpgrade},
         },
-        http::{HeaderValue, Method, Request, StatusCode, header},
+        http::{HeaderName, HeaderValue, Method, Request, StatusCode, header},
         response::{IntoResponse, Response},
         routing::{get, post},
     };
@@ -5148,6 +5233,80 @@ mod tests {
             header::ORIGIN,
             HeaderValue::from_static("https://blocked.example"),
         );
+        assert_eq!(
+            validate_websocket_origin(&state, &headers).map_err(|error| error.status),
+            Err(StatusCode::FORBIDDEN)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_websocket_allows_same_origin_requests() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", BTreeMap::new())
+            .with_cors_allowed_origins(["https://allowed.example"]);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let state = AppState::with_agent_host(config, agent_host)?;
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://192.168.1.5:8003"),
+        );
+        headers.insert(header::HOST, HeaderValue::from_static("192.168.1.5:8003"));
+        assert!(validate_websocket_origin(&state, &headers).is_ok());
+
+        // A proxy that forwards the authority without its port still matches.
+        headers.insert(header::HOST, HeaderValue::from_static("192.168.1.5"));
+        assert!(validate_websocket_origin(&state, &headers).is_ok());
+
+        // A different port on the same host is a different origin.
+        headers.insert(header::HOST, HeaderValue::from_static("192.168.1.5:9999"));
+        assert_eq!(
+            validate_websocket_origin(&state, &headers).map_err(|error| error.status),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        // A different host is rejected regardless of the forwarded port.
+        headers.insert(header::HOST, HeaderValue::from_static("evil.example:8003"));
+        assert_eq!(
+            validate_websocket_origin(&state, &headers).map_err(|error| error.status),
+            Err(StatusCode::FORBIDDEN)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_websocket_same_origin_handles_forwarded_host_and_defaults()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", BTreeMap::new())
+            .with_cors_allowed_origins(["https://allowed.example"]);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let state = AppState::with_agent_host(config, agent_host)?;
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://Agentspace.local"),
+        );
+        headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1:8002"));
+        headers.insert(
+            HeaderName::from_static("x-forwarded-host"),
+            HeaderValue::from_static("agentspace.local:80"),
+        );
+        assert!(validate_websocket_origin(&state, &headers).is_ok());
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://[::1]:8003"),
+        );
+        headers.insert(header::HOST, HeaderValue::from_static("[::1]:8003"));
+        assert!(validate_websocket_origin(&state, &headers).is_ok());
+
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::ORIGIN, HeaderValue::from_static("null"));
+        headers.insert(header::HOST, HeaderValue::from_static("null"));
         assert_eq!(
             validate_websocket_origin(&state, &headers).map_err(|error| error.status),
             Err(StatusCode::FORBIDDEN)
@@ -6048,7 +6207,7 @@ mod tests {
         assert_eq!(
             response
                 .headers()
-                .get(header::HeaderName::from_static("x-accel-buffering")),
+                .get(HeaderName::from_static("x-accel-buffering")),
             Some(&HeaderValue::from_static("no"))
         );
 
