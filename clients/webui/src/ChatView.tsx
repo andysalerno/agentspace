@@ -185,15 +185,34 @@ function upsertToolCall(message: ChatMessage, update: AcpSessionUpdate): ChatMes
     }
 
     const current = toolCalls[toolIndex];
+    const terminalChunk = terminalOutputDelta(update);
+    const output = toolOutput(update) ?? current.output;
     toolCalls[toolIndex] = {
         ...current,
         tool: typeof update.title === "string" && update.title ? update.title : current.tool,
         status: typeof update.status === "string" ? update.status : current.status,
         kind: typeof update.kind === "string" ? update.kind : current.kind,
         input: Object.hasOwn(update, "rawInput") ? jsonText(update.rawInput) : current.input,
-        output: toolOutput(update) ?? current.output,
+        output: terminalChunk === undefined ? output : `${output ?? ""}${terminalChunk}`,
     };
     return { ...message, tool_calls: toolCalls };
+}
+
+/**
+ * Incremental terminal output from ACP agents that stream shell tool output
+ * through `_meta` (for example the `pi-acp` adapter) instead of tool content.
+ */
+function terminalOutputDelta(update: AcpSessionUpdate): string | undefined {
+    const meta = update._meta;
+    if (typeof meta !== "object" || meta === null) {
+        return undefined;
+    }
+    const terminalOutput = (meta as Record<string, unknown>).terminal_output;
+    if (typeof terminalOutput !== "object" || terminalOutput === null) {
+        return undefined;
+    }
+    const data = (terminalOutput as Record<string, unknown>).data;
+    return typeof data === "string" && data !== "" ? data : undefined;
 }
 
 function toolOutput(update: AcpSessionUpdate): string | undefined {

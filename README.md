@@ -62,7 +62,8 @@ harnesses:
 Harness adapters currently represented in the system include ACP, GitHub
 Copilot CLI, Claude Code, Codex, OpenCode, and an in-process echo harness.
 Their maturity and required external authentication vary. The echo harness is
-the easiest way to exercise the stack without credentials.
+the easiest way to exercise the stack without credentials. The ACP harness can
+run either opencode or pi; see [docs/ACP_AGENTS.md](docs/ACP_AGENTS.md).
 
 ## Architecture
 
