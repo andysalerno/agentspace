@@ -46,7 +46,9 @@ it, so no agent-specific credentials setup is required.
 `pi` (under `PI_CODING_AGENT_DIR`, default `~/.pi/agent`):
 
 - `models.json` — `customprovider` with the Connection's base URL, API key, and
-  model, using `openai-completions` or `openai-responses` per API flavor.
+  model, using `openai-completions` or `openai-responses` per API flavor. pi
+  reads `apiKey` as an expression (`$NAME` interpolates from the environment, a
+  leading `!` runs a shell command), so the key is escaped before it is written.
 - `settings.json` — pins `defaultProvider`/`defaultModel`, and lists the
   AgentSpace skills mount (`/workspace/.agents/skills`, override with
   `KERNEL_ACP_SKILLS_DIR`) under `skills`.

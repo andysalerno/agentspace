@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import sys
 from typing import TYPE_CHECKING
 
@@ -16,6 +18,46 @@ from kernel_acp.agents import OpencodeAgent, PiAgent
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _resolve_pi_value(value: str) -> str:
+    """Resolve a value the way pi resolves ``apiKey`` in ``models.json``.
+
+    Mirrors the rules in pi's ``docs/models.md``: a leading ``!`` executes the
+    value as a shell command, ``$NAME``/``${NAME}`` interpolates from the
+    environment anywhere in the string, and ``$$``/``$!`` are the escapes for a
+    literal ``$``/``!``. Used as a test oracle so provisioning can be checked
+    against pi's actual behaviour rather than against its own escaping.
+    """
+    if value.startswith("!"):
+        msg = f"pi would run this value as a shell command: {value!r}"
+        raise AssertionError(msg)
+    resolved: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char != "$":
+            resolved.append(char)
+            index += 1
+            continue
+        following = value[index + 1 : index + 2]
+        if following in {"$", "!"}:
+            resolved.append(following)
+            index += 2
+            continue
+        if following == "{":
+            end = value.index("}", index)
+            resolved.append(os.environ.get(value[index + 2 : end], ""))
+            index = end + 1
+            continue
+        name = re.match(r"[A-Za-z_][A-Za-z0-9_]*", value[index + 1 :])
+        if name is None:
+            resolved.append(char)
+            index += 1
+            continue
+        resolved.append(os.environ.get(name.group(0), ""))
+        index += 1 + len(name.group(0))
+    return "".join(resolved)
 
 
 async def _drain(kernel: AcpKernel) -> list[KernelEvent]:
@@ -518,6 +560,34 @@ class TestPiAgent:
 
         settings = json.loads((config_dir / "settings.json").read_text())
         assert settings["skills"] == ["/opt/preset-skills", str(skills_dir)]
+
+    @pytest.mark.parametrize(
+        "api_key",
+        [
+            "sk-plain-key",
+            "sk-we$ird-key",
+            "$HOME-key",
+            "$$literal",
+            "!id -u",
+            "!!double-bang",
+        ],
+    )
+    def test_provision_writes_api_keys_pi_resolves_back_to_the_original(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+        api_key: str,
+    ) -> None:
+        # pi resolves apiKey as an expression: `$NAME` interpolates from the
+        # environment and a leading `!` runs a shell command. The written value
+        # has to survive that resolver unchanged.
+        agent.provision({**env, "CONNECTION_API_KEY": api_key})
+
+        models = json.loads((tmp_path / "pi" / "models.json").read_text())
+        written = models["providers"]["customprovider"]["apiKey"]
+        assert not written.startswith("!")
+        assert _resolve_pi_value(written) == api_key
 
     def test_provision_uses_responses_api_for_responses_flavor(
         self,

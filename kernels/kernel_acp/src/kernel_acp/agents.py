@@ -315,7 +315,7 @@ class PiAgent:
         providers[PI_PROVIDER_NAME] = {
             "baseUrl": connection.base_url,
             "api": self._api_type(connection.api_flavor),
-            "apiKey": connection.api_key,
+            "apiKey": _pi_literal(connection.api_key),
             "models": [
                 {
                     "id": connection.model_name,
@@ -403,6 +403,21 @@ def get_agent(name: str) -> AcpAgent:
 def _invalid_api_flavor_error(flavors: Mapping[str, str]) -> ValueError:
     valid = ", ".join(flavors)
     return ValueError(f"CONNECTION_API_FLAVOR must be one of: {valid}")
+
+
+def _pi_literal(value: str) -> str:
+    """Escape a secret so pi's ``models.json`` resolver treats it literally.
+
+    pi resolves ``apiKey`` as a config expression: ``$NAME``/``${NAME}`` is
+    interpolated from the environment anywhere in the value, and a leading
+    ``!`` runs the rest as a shell command. Writing a key verbatim would
+    therefore mangle any key containing ``$`` and would execute a key starting
+    with ``!``. ``$$`` and ``$!`` are pi's escapes for those two characters.
+    """
+    escaped = value.replace("$", "$$")
+    if escaped.startswith("!"):
+        escaped = f"${escaped}"
+    return escaped
 
 
 def _load_json_object(path: Path, description: str) -> dict[str, object]:
