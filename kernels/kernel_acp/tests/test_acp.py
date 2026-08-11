@@ -5,17 +5,59 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import sys
 from typing import TYPE_CHECKING
 
-import kernel_acp as acp_module
 import pytest
 from kernel.events import EventType, KernelEvent, KernelStatus
 from kernel.protocol import KernelConfig
 from kernel_acp import AcpKernel
+from kernel_acp.agents import OpencodeAgent, PiAgent
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+
+def _resolve_pi_value(value: str) -> str:
+    """Resolve a value the way pi resolves ``apiKey`` in ``models.json``.
+
+    Mirrors the rules in pi's ``docs/models.md``: a leading ``!`` executes the
+    value as a shell command, ``$NAME``/``${NAME}`` interpolates from the
+    environment anywhere in the string, and ``$$``/``$!`` are the escapes for a
+    literal ``$``/``!``. Used as a test oracle so provisioning can be checked
+    against pi's actual behaviour rather than against its own escaping.
+    """
+    if value.startswith("!"):
+        msg = f"pi would run this value as a shell command: {value!r}"
+        raise AssertionError(msg)
+    resolved: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char != "$":
+            resolved.append(char)
+            index += 1
+            continue
+        following = value[index + 1 : index + 2]
+        if following in {"$", "!"}:
+            resolved.append(following)
+            index += 2
+            continue
+        if following == "{":
+            end = value.index("}", index)
+            resolved.append(os.environ.get(value[index + 2 : end], ""))
+            index = end + 1
+            continue
+        name = re.match(r"[A-Za-z_][A-Za-z0-9_]*", value[index + 1 :])
+        if name is None:
+            resolved.append(char)
+            index += 1
+            continue
+        resolved.append(os.environ.get(name.group(0), ""))
+        index += 1 + len(name.group(0))
+    return "".join(resolved)
 
 
 async def _drain(kernel: AcpKernel) -> list[KernelEvent]:
@@ -166,6 +208,20 @@ class TestAcpMapping:
     def test_build_command_defaults_to_opencode_acp(self, kernel: AcpKernel) -> None:
         assert kernel._build_command() == ["opencode", "acp"]
 
+    def test_build_command_defaults_to_pi_acp_for_pi_agent(
+        self,
+        kernel: AcpKernel,
+    ) -> None:
+        kernel._config = KernelConfig(env={"KERNEL_ACP_AGENT": "pi"})
+
+        assert kernel._build_command() == ["pi-acp"]
+
+    def test_build_command_rejects_unknown_agent(self, kernel: AcpKernel) -> None:
+        kernel._config = KernelConfig(env={"KERNEL_ACP_AGENT": "nope"})
+
+        with pytest.raises(ValueError, match="KERNEL_ACP_AGENT must be one of"):
+            kernel._build_command()
+
     def test_build_command_from_env(self, kernel: AcpKernel) -> None:
         kernel._config = KernelConfig(
             env={
@@ -188,16 +244,14 @@ class TestAcpMapping:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
-        monkeypatch.setattr(
-            acp_module,
-            "CUSTOM_AGENT_PATH",
-            tmp_path / ".config" / "opencode" / "agents" / "custom.md",
-        )
+        monkeypatch.setenv("HOME", str(tmp_path))
         kernel._config = KernelConfig(env={"KERNEL_SYSTEM_PROMPT": "be concise"})
 
-        kernel._write_custom_agent_prompt()
+        OpencodeAgent().write_custom_agent_prompt(kernel._config.env)
 
-        custom_agent = acp_module.CUSTOM_AGENT_PATH.read_text()
+        custom_agent = (
+            tmp_path / ".config" / "opencode" / "agents" / "custom.md"
+        ).read_text()
         assert "mode: primary" in custom_agent
         assert "be concise" in custom_agent
         assert kernel._build_command() == ["opencode", "acp"]
@@ -210,11 +264,7 @@ class TestAcpMapping:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setattr(
-            acp_module,
-            "CUSTOM_AGENT_PATH",
-            tmp_path / ".config" / "opencode" / "agents" / "custom.md",
-        )
+        monkeypatch.setenv("HOME", str(tmp_path))
         kernel._config = KernelConfig(
             env={
                 "KERNEL_SYSTEM_PROMPT": "be concise",
@@ -222,10 +272,26 @@ class TestAcpMapping:
             },
         )
 
-        kernel._write_custom_agent_prompt()
+        OpencodeAgent().write_custom_agent_prompt(kernel._config.env)
 
         opencode_config = json.loads(kernel._build_env()["OPENCODE_CONFIG_CONTENT"])
         assert opencode_config == {"share": "disabled", "default_agent": "custom"}
+
+    def test_build_env_applies_pi_startup_defaults(
+        self,
+        kernel: AcpKernel,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("PI_OFFLINE", raising=False)
+        monkeypatch.setenv("PI_TELEMETRY", "1")
+        kernel._config = KernelConfig(env={"KERNEL_ACP_AGENT": "pi"})
+
+        env = kernel._build_env()
+
+        assert env["PI_OFFLINE"] == "1"
+        assert env["PI_SKIP_VERSION_CHECK"] == "1"
+        assert env["PI_TELEMETRY"] == "1"
+        assert "OPENCODE_CONFIG_CONTENT" not in env
 
     def test_write_custom_agent_prompt_clears_stale_prompt(
         self,
@@ -234,26 +300,33 @@ class TestAcpMapping:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
         custom_agent_path = tmp_path / ".config" / "opencode" / "agents" / "custom.md"
-        monkeypatch.setattr(acp_module, "CUSTOM_AGENT_PATH", custom_agent_path)
         custom_agent_path.parent.mkdir(parents=True)
         custom_agent_path.write_text("stale prompt")
 
-        kernel._write_custom_agent_prompt()
+        OpencodeAgent().write_custom_agent_prompt({})
 
         assert custom_agent_path.read_text() == ""
         assert kernel._build_command() == ["opencode", "acp"]
         assert "OPENCODE_CONFIG_CONTENT" not in kernel._build_env()
 
-    def test_write_opencode_config_uses_connection_env(
+
+class TestOpencodeAgent:
+    @pytest.fixture
+    def agent(self) -> OpencodeAgent:
+        return OpencodeAgent()
+
+    def test_write_config_uses_connection_env(
         self,
-        kernel: AcpKernel,
+        agent: OpencodeAgent,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
-        kernel._config = KernelConfig(
-            env={
+
+        agent.write_config(
+            {
                 "CONNECTION_URL": "https://connection.test/v1",
                 "CONNECTION_API_KEY": "from-connection",
                 "KERNEL_ACP_BASE_URL": "https://legacy.test/v1",
@@ -261,8 +334,6 @@ class TestAcpMapping:
                 "KERNEL_ACP_MODEL_NAME": "model-a",
             },
         )
-
-        kernel._write_opencode_config()
 
         config_path = tmp_path / ".config" / "opencode" / "opencode.json"
         config = json.loads(config_path.read_text())
@@ -284,15 +355,16 @@ class TestAcpMapping:
         }
         assert config["permission"]["webfetch"] == "deny"
 
-    def test_write_opencode_config_uses_openai_provider_for_responses_flavor(
+    def test_write_config_uses_openai_provider_for_responses_flavor(
         self,
-        kernel: AcpKernel,
+        agent: OpencodeAgent,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
-        kernel._config = KernelConfig(
-            env={
+
+        agent.write_config(
+            {
                 "CONNECTION_URL": "https://connection.test/v1",
                 "CONNECTION_API_KEY": "from-connection",
                 "CONNECTION_API_FLAVOR": "responses",
@@ -300,28 +372,25 @@ class TestAcpMapping:
             },
         )
 
-        kernel._write_opencode_config()
-
         config_path = tmp_path / ".config" / "opencode" / "opencode.json"
         config = json.loads(config_path.read_text())
         assert config["provider"]["customprovider"]["npm"] == "@ai-sdk/openai"
 
-    def test_write_opencode_config_accepts_legacy_opencode_model_name(
+    def test_write_config_accepts_legacy_opencode_model_name(
         self,
-        kernel: AcpKernel,
+        agent: OpencodeAgent,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
-        kernel._config = KernelConfig(
-            env={
+
+        agent.write_config(
+            {
                 "CONNECTION_URL": "https://connection.test/v1",
                 "CONNECTION_API_KEY": "from-connection",
                 "KERNEL_OPENCODE_MODEL_NAME": "model-a",
             },
         )
-
-        kernel._write_opencode_config()
 
         config_path = tmp_path / ".config" / "opencode" / "opencode.json"
         config = json.loads(config_path.read_text())
@@ -330,20 +399,13 @@ class TestAcpMapping:
             "model-a": {"name": "model-a"},
         }
 
-    def test_write_opencode_config_preserves_unrelated_existing_config(
+    def test_write_config_preserves_unrelated_existing_config(
         self,
-        kernel: AcpKernel,
+        agent: OpencodeAgent,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
-        kernel._config = KernelConfig(
-            env={
-                "CONNECTION_URL": "https://connection.test/v1",
-                "CONNECTION_API_KEY": "from-connection",
-                "KERNEL_ACP_MODEL_NAME": "model-a",
-            },
-        )
         config_path = tmp_path / ".config" / "opencode" / "opencode.json"
         config_path.parent.mkdir(parents=True)
         config_path.write_text(
@@ -361,7 +423,13 @@ class TestAcpMapping:
             ),
         )
 
-        kernel._write_opencode_config()
+        agent.write_config(
+            {
+                "CONNECTION_URL": "https://connection.test/v1",
+                "CONNECTION_API_KEY": "from-connection",
+                "KERNEL_ACP_MODEL_NAME": "model-a",
+            },
+        )
 
         config = json.loads(config_path.read_text())
         assert config["$schema"] == "https://example.test/schema.json"
@@ -373,18 +441,249 @@ class TestAcpMapping:
         assert config["permission"]["question"] == "deny"
         assert config["theme"] == "dark"
 
-    def test_write_opencode_config_reports_missing_required_env(
+    def test_write_config_reports_missing_required_env(
         self,
-        kernel: AcpKernel,
+        agent: OpencodeAgent,
     ) -> None:
-        kernel._config = KernelConfig(env={"KERNEL_ACP_MODEL_NAME": "model-a"})
-
         with pytest.raises(ValueError, match="CONNECTION_URL") as exc_info:
-            kernel._write_opencode_config()
+            agent.write_config({"KERNEL_ACP_MODEL_NAME": "model-a"})
 
         message = str(exc_info.value)
         assert "CONNECTION_URL" in message
         assert "CONNECTION_API_KEY" in message
+
+
+class TestPiAgent:
+    @pytest.fixture
+    def agent(self) -> PiAgent:
+        return PiAgent()
+
+    @pytest.fixture
+    def env(self, tmp_path: Path) -> dict[str, str]:
+        return {
+            "PI_CODING_AGENT_DIR": str(tmp_path / "pi"),
+            "CONNECTION_URL": "https://connection.test/v1",
+            "CONNECTION_API_KEY": "from-connection",
+            "KERNEL_ACP_MODEL_NAME": "model-a",
+        }
+
+    def test_default_command_uses_pi_acp_adapter(self, agent: PiAgent) -> None:
+        assert agent.default_command() == ["pi-acp"]
+
+    def test_config_dir_defaults_to_home(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("PI_CODING_AGENT_DIR", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        assert agent.config_dir({}) == tmp_path / ".pi" / "agent"
+
+    def test_config_dir_honours_process_environment_override(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("PI_CODING_AGENT_DIR", str(tmp_path / "from-process"))
+
+        assert agent.config_dir({}) == tmp_path / "from-process"
+
+    def test_config_dir_expands_a_home_relative_override(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config_dir = agent.config_dir({"PI_CODING_AGENT_DIR": "~/pi-config"})
+
+        assert config_dir == tmp_path / "pi-config"
+
+    def test_config_dir_rejects_a_relative_override(
+        self,
+        agent: PiAgent,
+    ) -> None:
+        # Provisioning and pi run in different working directories, so a
+        # relative override would be written and read in different places.
+        with pytest.raises(ValueError, match="must be an absolute path"):
+            agent.config_dir({"PI_CODING_AGENT_DIR": ".pi-agent"})
+
+    def test_provision_writes_provider_settings_and_prompt(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        agent.provision({**env, "KERNEL_SYSTEM_PROMPT": "be concise"})
+
+        config_dir = tmp_path / "pi"
+        models = json.loads((config_dir / "models.json").read_text())
+        provider = models["providers"]["customprovider"]
+        assert provider["baseUrl"] == "https://connection.test/v1"
+        assert provider["apiKey"] == "from-connection"
+        assert provider["api"] == "openai-completions"
+        assert provider["models"] == [{"id": "model-a", "name": "model-a"}]
+
+        settings = json.loads((config_dir / "settings.json").read_text())
+        assert settings["defaultProvider"] == "customprovider"
+        assert settings["defaultModel"] == "model-a"
+        assert settings["defaultProjectTrust"] == "never"
+        assert settings["enableInstallTelemetry"] is False
+
+        assert (config_dir / "SYSTEM.md").read_text() == "be concise"
+
+    def test_provision_points_at_the_managed_skills_mount(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+
+        agent.provision({**env, "KERNEL_ACP_SKILLS_DIR": str(skills_dir)})
+
+        settings = json.loads((tmp_path / "pi" / "settings.json").read_text())
+        # Skills load through an explicit path so the workspace stays untrusted.
+        assert settings["skills"] == [str(skills_dir)]
+        assert settings["defaultProjectTrust"] == "never"
+
+    def test_provision_skips_a_skills_mount_that_is_absent(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        agent.provision({**env, "KERNEL_ACP_SKILLS_DIR": str(tmp_path / "missing")})
+
+        settings = json.loads((tmp_path / "pi" / "settings.json").read_text())
+        assert settings["skills"] == []
+
+    def test_provision_keeps_skill_paths_already_configured(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        config_dir = tmp_path / "pi"
+        config_dir.mkdir(parents=True)
+        (config_dir / "settings.json").write_text(
+            json.dumps({"skills": ["/opt/preset-skills"]}),
+        )
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+
+        agent.provision({**env, "KERNEL_ACP_SKILLS_DIR": str(skills_dir)})
+
+        settings = json.loads((config_dir / "settings.json").read_text())
+        assert settings["skills"] == ["/opt/preset-skills", str(skills_dir)]
+
+    @pytest.mark.parametrize(
+        "api_key",
+        [
+            "sk-plain-key",
+            "sk-we$ird-key",
+            "$HOME-key",
+            "$$literal",
+            "!id -u",
+            "!!double-bang",
+        ],
+    )
+    def test_provision_writes_api_keys_pi_resolves_back_to_the_original(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+        api_key: str,
+    ) -> None:
+        # pi resolves apiKey as an expression: `$NAME` interpolates from the
+        # environment and a leading `!` runs a shell command. The written value
+        # has to survive that resolver unchanged.
+        agent.provision({**env, "CONNECTION_API_KEY": api_key})
+
+        models = json.loads((tmp_path / "pi" / "models.json").read_text())
+        written = models["providers"]["customprovider"]["apiKey"]
+        assert not written.startswith("!")
+        assert _resolve_pi_value(written) == api_key
+
+    def test_provision_uses_responses_api_for_responses_flavor(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        agent.provision({**env, "CONNECTION_API_FLAVOR": "responses"})
+
+        models = json.loads((tmp_path / "pi" / "models.json").read_text())
+        assert models["providers"]["customprovider"]["api"] == "openai-responses"
+
+    def test_provision_rejects_unknown_api_flavor(
+        self,
+        agent: PiAgent,
+        env: dict[str, str],
+    ) -> None:
+        with pytest.raises(ValueError, match="CONNECTION_API_FLAVOR must be one of"):
+            agent.provision({**env, "CONNECTION_API_FLAVOR": "nope"})
+
+    def test_provision_preserves_unrelated_config(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        config_dir = tmp_path / "pi"
+        config_dir.mkdir(parents=True)
+        (config_dir / "models.json").write_text(
+            json.dumps(
+                {"providers": {"ollama": {"baseUrl": "http://localhost:11434"}}}
+            ),
+        )
+        (config_dir / "settings.json").write_text(json.dumps({"theme": "light"}))
+
+        agent.provision(env)
+
+        models = json.loads((config_dir / "models.json").read_text())
+        assert models["providers"]["ollama"] == {"baseUrl": "http://localhost:11434"}
+        assert models["providers"]["customprovider"]["models"] == [
+            {"id": "model-a", "name": "model-a"},
+        ]
+        settings = json.loads((config_dir / "settings.json").read_text())
+        assert settings["theme"] == "light"
+        assert settings["defaultModel"] == "model-a"
+
+    def test_provision_removes_stale_system_prompt(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        config_dir = tmp_path / "pi"
+        config_dir.mkdir(parents=True)
+        (config_dir / "SYSTEM.md").write_text("stale prompt")
+
+        agent.provision(env)
+
+        assert not (config_dir / "SYSTEM.md").exists()
+
+    def test_provision_reports_missing_required_env(self, agent: PiAgent) -> None:
+        with pytest.raises(ValueError, match="CONNECTION_URL") as exc_info:
+            agent.provision({"KERNEL_ACP_MODEL_NAME": "model-a"})
+
+        message = str(exc_info.value)
+        assert "CONNECTION_URL" in message
+        assert "CONNECTION_API_KEY" in message
+
+
+class TestAcpRequests:
+    @pytest.fixture
+    def kernel(self) -> AcpKernel:
+        k = AcpKernel()
+        k._session_id = "test-session"
+        return k
 
     def test_permission_response_prefers_allow_once(self, kernel: AcpKernel) -> None:
         result = kernel._permission_response(

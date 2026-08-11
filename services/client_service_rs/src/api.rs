@@ -3294,6 +3294,24 @@ fn upsert_tool_call(
     if let Some(output) = tool_output(update) {
         call.output = Some(output);
     }
+    if let Some(chunk) = terminal_output_delta(update) {
+        call.output.get_or_insert_with(String::new).push_str(&chunk);
+    }
+}
+
+/// Incremental terminal output from ACP agents that stream shell tool output
+/// through `_meta` (for example the `pi-acp` adapter) instead of tool content.
+fn terminal_output_delta(update: &JsonObject) -> Option<String> {
+    let data = update
+        .get("_meta")?
+        .get("terminal_output")?
+        .get("data")?
+        .as_str()?;
+    if data.is_empty() {
+        None
+    } else {
+        Some(data.to_owned())
+    }
 }
 
 fn tool_output(update: &JsonObject) -> Option<String> {
@@ -3378,6 +3396,11 @@ fn content_text(content: Option<&Value>) -> String {
             }
             if object.get("type").and_then(Value::as_str) == Some("content") {
                 return content_text(object.get("content"));
+            }
+            // A terminal block is a handle to live output, not content: the
+            // output itself arrives in later `_meta.terminal_output` updates.
+            if object.get("type").and_then(Value::as_str) == Some("terminal") {
+                return String::new();
             }
             serde_json::to_string(&Value::Object(object.clone())).unwrap_or_default()
         }
@@ -4869,6 +4892,54 @@ mod tests {
     use crate::{
         ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient, build_router,
     };
+
+    #[test]
+    fn extract_tool_calls_collects_streamed_terminal_output() {
+        let events = [
+            json!({
+                "type": "session/update",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "call_1",
+                    "title": "cat notes.txt",
+                    "kind": "execute",
+                    "status": "pending",
+                    "content": [{"type": "terminal", "terminalId": "call_1"}]
+                }
+            }),
+            json!({
+                "type": "session/update",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "in_progress",
+                    "_meta": {"terminal_output": {"terminal_id": "call_1", "data": "hello "}}
+                }
+            }),
+            json!({
+                "type": "session/update",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call_1",
+                    "status": "completed",
+                    "_meta": {"terminal_output": {"terminal_id": "call_1", "data": "file\n"}}
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|event| match event {
+            Value::Object(object) => object,
+            other => panic!("event fixture should be an object: {other}"),
+        })
+        .collect::<Vec<_>>();
+
+        let calls = super::extract_tool_calls(&events);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].tool, "cat notes.txt");
+        assert_eq!(calls[0].status.as_deref(), Some("completed"));
+        assert_eq!(calls[0].output.as_deref(), Some("hello file\n"));
+    }
 
     fn test_router() -> Result<Router, Box<dyn Error + Send + Sync>> {
         test_router_with_agent_host("http://127.0.0.1:9", Duration::from_millis(50))

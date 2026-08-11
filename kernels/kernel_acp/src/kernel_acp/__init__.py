@@ -25,41 +25,18 @@ from kernel.events import (
 )
 from kernel.protocol import KernelConfig
 
+from kernel_acp.agents import DEFAULT_AGENT, AcpAgent, get_agent
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
-DEFAULT_ACP_COMMAND = "opencode acp"
-CUSTOM_AGENT_NAME = "custom"
-CUSTOM_AGENT_PATH = (
-    Path.home() / ".config" / "opencode" / "agents" / f"{CUSTOM_AGENT_NAME}.md"
-)
 PROTOCOL_VERSION = 1
 _STREAM_BUFFER_LIMIT = 16 * 1024 * 1024
 _DEFAULT_TERMINAL_OUTPUT_LIMIT = 1024 * 1024
 _UNHANDLED: object = object()
-_DEFAULT_API_FLAVOR = "chat_completions"
-_OPENCODE_PROVIDER_NPM_BY_API_FLAVOR = {
-    "chat_completions": "@ai-sdk/openai-compatible",
-    "responses": "@ai-sdk/openai",
-}
-_OPENCODE_PERMISSION_CONFIG = {
-    "*": "allow",
-    "bash": {
-        "*": "allow",
-    },
-    "webfetch": "deny",
-    "doom_loop": "deny",
-    "external_directory": {
-        "*": "deny",
-        "/tmp/**": "allow",  # noqa: S108
-    },
-    "websearch": "deny",
-    "question": "deny",
-    "lsp": "deny",
-}
 
 
 class AcpRequestError(ValueError):
@@ -117,6 +94,10 @@ class AcpKernel:
     def _workspace_dir(self) -> str:
         return self._config.env.get("KERNEL_ACP_WORKSPACE_DIR", DEFAULT_WORKSPACE_DIR)
 
+    @property
+    def _agent(self) -> AcpAgent:
+        return get_agent(self._config.env.get("KERNEL_ACP_AGENT", DEFAULT_AGENT))
+
     async def start(self, config: KernelConfig) -> None:
         started_at = perf_counter()
         self._config = config
@@ -127,8 +108,8 @@ class AcpKernel:
         self._terminals = {}
 
         try:
-            self._write_opencode_config()
-            self._write_custom_agent_prompt()
+            agent = self._agent
+            agent.provision(config.env)
             cmd = self._build_command()
             env = self._build_env(cmd)
         except ValueError as exc:
@@ -136,10 +117,10 @@ class AcpKernel:
             await self._finish(KernelStatus.ERROR)
             return
         except OSError as exc:
-            logger.exception("failed to write opencode config")
+            logger.exception("failed to write ACP agent config")
             detail = exc.strerror or type(exc).__name__
             await self._queue.put(
-                error(f"failed to write opencode config: {detail}"),
+                error(f"failed to write ACP agent config: {detail}"),
             )
             await self._finish(KernelStatus.ERROR)
             return
@@ -255,8 +236,8 @@ class AcpKernel:
         self._status = KernelStatus.DONE
 
     def _build_command(self) -> list[str]:
-        raw = self._config.env.get("KERNEL_ACP_COMMAND", DEFAULT_ACP_COMMAND)
-        cmd = shlex.split(raw)
+        raw = self._config.env.get("KERNEL_ACP_COMMAND", "")
+        cmd = shlex.split(raw) if raw else self._agent.default_command()
         if not cmd:
             msg = "KERNEL_ACP_COMMAND must contain an executable"
             raise ValueError(msg)
@@ -268,136 +249,10 @@ class AcpKernel:
 
         return cmd
 
-    def _should_use_custom_opencode_default_agent(self, cmd: list[str]) -> bool:
-        if not self._has_custom_agent_prompt():
-            return False
-        executable = Path(cmd[0]).name if cmd else ""
-        return executable == "opencode" and "acp" in cmd[1:]
-
     def _build_env(self, cmd: list[str] | None = None) -> dict[str, str]:
         env = {**os.environ}
         env.update({key: value for key, value in self._config.env.items() if value})
-        if self._should_use_custom_opencode_default_agent(cmd or self._build_command()):
-            env["OPENCODE_CONFIG_CONTENT"] = self._opencode_config_content(
-                env.get("OPENCODE_CONFIG_CONTENT"),
-            )
-        return env
-
-    def _opencode_config_content(self, raw: str | None) -> str:
-        config: dict[str, object] = {}
-        if raw:
-            parsed = json.loads(raw)
-            if not isinstance(parsed, dict):
-                msg = "OPENCODE_CONFIG_CONTENT must be a JSON object"
-                raise ValueError(msg)
-            config = cast("dict[str, object]", parsed)
-        config["default_agent"] = CUSTOM_AGENT_NAME
-        return json.dumps(config, separators=(",", ":"))
-
-    def _write_opencode_config(self) -> None:
-        """Write opencode provider and permission config for opencode ACP servers."""
-        env_get = self._config.env.get
-        base_url = (
-            env_get("CONNECTION_URL")
-            or env_get("KERNEL_ACP_BASE_URL")
-            or env_get("KERNEL_OPENCODE_BASE_URL")
-        )
-        api_key = (
-            env_get("CONNECTION_API_KEY")
-            or env_get("KERNEL_ACP_API_KEY")
-            or env_get("KERNEL_OPENCODE_API_KEY")
-        )
-        model_name = env_get("KERNEL_ACP_MODEL_NAME") or env_get(
-            "KERNEL_OPENCODE_MODEL_NAME",
-        )
-        required = {
-            "CONNECTION_URL": base_url,
-            "CONNECTION_API_KEY": api_key,
-            "KERNEL_ACP_MODEL_NAME": model_name,
-        }
-        missing = [name for name, value in required.items() if not value]
-        if missing:
-            msg = (
-                "ACP kernel is missing required environment "
-                f"variable(s): {', '.join(missing)}. Assign a Connection with "
-                "a URL and API key, and set KERNEL_ACP_MODEL_NAME on the agent "
-                "or kernel configuration."
-            )
-            raise ValueError(msg)
-        base_url = cast("str", base_url)
-        api_key = cast("str", api_key)
-        model_name = cast("str", model_name)
-
-        config_path = Path.home() / ".config" / "opencode" / "opencode.json"
-        config: dict[str, object] = {
-            "$schema": "https://opencode.ai/config.json",
-        }
-        if config_path.exists():
-            loaded = json.loads(config_path.read_text())
-            if not isinstance(loaded, dict):
-                msg = f"opencode config must be a JSON object: {config_path}"
-                raise ValueError(msg)
-            config = cast("dict[str, object]", loaded)
-            config.setdefault("$schema", "https://opencode.ai/config.json")
-        config["model"] = f"customprovider/{model_name}"
-        config["provider"] = {
-            "customprovider": {
-                "npm": self._opencode_provider_npm(),
-                "name": "customprovider",
-                "options": {
-                    "baseURL": base_url,
-                    "apiKey": api_key,
-                },
-                "models": {
-                    model_name: {
-                        "name": model_name,
-                    },
-                },
-            },
-        }
-        config["permission"] = _OPENCODE_PERMISSION_CONFIG
-
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(config, indent=2))
-        logger.info("wrote opencode config to %s", config_path)
-
-    def _opencode_provider_npm(self) -> str:
-        api_flavor = (
-            self._config.env.get("CONNECTION_API_FLAVOR")
-            or self._config.env.get("KERNEL_ACP_API_FLAVOR")
-            or _DEFAULT_API_FLAVOR
-        )
-        provider_npm = _OPENCODE_PROVIDER_NPM_BY_API_FLAVOR.get(api_flavor)
-        if provider_npm is None:
-            valid = ", ".join(_OPENCODE_PROVIDER_NPM_BY_API_FLAVOR)
-            msg = f"CONNECTION_API_FLAVOR must be one of: {valid}"
-            raise ValueError(msg)
-        return provider_npm
-
-    def _write_custom_agent_prompt(self) -> None:
-        prompt = self._config.env.get("KERNEL_SYSTEM_PROMPT", "")
-        CUSTOM_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
-        content = ""
-        if prompt.strip():
-            content = (
-                "---\n"
-                "description: AgentSpace custom system prompt\n"
-                "mode: primary\n"
-                "---\n"
-                f"{prompt}"
-            )
-        CUSTOM_AGENT_PATH.write_text(content)
-        logger.info(
-            "wrote opencode custom agent prompt to %s (%d chars)",
-            CUSTOM_AGENT_PATH,
-            len(prompt),
-        )
-
-    def _has_custom_agent_prompt(self) -> bool:
-        try:
-            return bool(CUSTOM_AGENT_PATH.read_text().strip())
-        except OSError:
-            return False
+        return self._agent.process_env(env, cmd or self._build_command())
 
     async def _initialize(self) -> None:
         result = await self._request(

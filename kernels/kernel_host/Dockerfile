@@ -60,6 +60,9 @@ RUN apt-get update && \
     curl -fsSL https://claude.ai/install.sh | bash && \
     curl -fsSL https://opencode.ai/install | bash -s -- --version 1.18.9 && \
     npm install -g firecrawl-cli && \
+    npm install -g --ignore-scripts \
+        @earendil-works/pi-coding-agent@0.84.1 \
+        pi-acp@0.0.33 && \
     curl -fsSL https://code-server.dev/install.sh | \
         sh -s -- --method=standalone --prefix=/usr/local && \
     apt-get autoremove -y && \

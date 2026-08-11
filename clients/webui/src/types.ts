@@ -175,6 +175,7 @@ export type AcpSessionUpdate = Record<string, unknown> & {
   status?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
+  _meta?: unknown;
 };
 
 export type ChatMessage = {
