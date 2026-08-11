@@ -303,7 +303,18 @@ class PiAgent:
             "PI_CODING_AGENT_DIR",
         )
         if override:
-            return Path(override)
+            # Provisioning runs in the kernel's working directory, but pi is
+            # spawned in the workspace, so a relative override would be written
+            # to one directory and read from another and silently ignored.
+            path = Path(override).expanduser()
+            if not path.is_absolute():
+                msg = (
+                    "PI_CODING_AGENT_DIR must be an absolute path, got "
+                    f"{override!r}. pi resolves it against its own working "
+                    "directory, which is not the kernel's."
+                )
+                raise ValueError(msg)
+            return path
         return Path.home() / ".pi" / "agent"
 
     def write_models_config(self, env: Mapping[str, str]) -> None:

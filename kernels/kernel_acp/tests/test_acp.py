@@ -491,6 +491,27 @@ class TestPiAgent:
 
         assert agent.config_dir({}) == tmp_path / "from-process"
 
+    def test_config_dir_expands_a_home_relative_override(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        config_dir = agent.config_dir({"PI_CODING_AGENT_DIR": "~/pi-config"})
+
+        assert config_dir == tmp_path / "pi-config"
+
+    def test_config_dir_rejects_a_relative_override(
+        self,
+        agent: PiAgent,
+    ) -> None:
+        # Provisioning and pi run in different working directories, so a
+        # relative override would be written and read in different places.
+        with pytest.raises(ValueError, match="must be an absolute path"):
+            agent.config_dir({"PI_CODING_AGENT_DIR": ".pi-agent"})
+
     def test_provision_writes_provider_settings_and_prompt(
         self,
         agent: PiAgent,
