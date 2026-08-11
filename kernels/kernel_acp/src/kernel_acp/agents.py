@@ -34,6 +34,9 @@ DEFAULT_API_FLAVOR = CHAT_COMPLETIONS_FLAVOR
 OPENCODE_CUSTOM_AGENT_NAME = "custom"
 OPENCODE_PROVIDER_NAME = "customprovider"
 PI_PROVIDER_NAME = "customprovider"
+# Where agent_host mounts AgentSpace-managed skills for the ACP harness. See
+# ``skills_mount_path`` in services/agent_host_rs/src/docker_runtime.rs.
+PI_SKILLS_DIR = "/workspace/.agents/skills"
 
 _OPENCODE_PROVIDER_NPM_BY_API_FLAVOR = {
     CHAT_COMPLETIONS_FLAVOR: "@ai-sdk/openai-compatible",
@@ -331,13 +334,34 @@ class PiAgent:
         settings = _load_json_object(path, "pi settings")
         settings["defaultProvider"] = PI_PROVIDER_NAME
         settings["defaultModel"] = connection.model_name
-        # The workspace is agent-owned, and AgentSpace mounts skills into it as
-        # project resources, so project-local pi resources must be trusted.
-        settings["defaultProjectTrust"] = "always"
+        # Leave project trust off. Trusting the workspace would also load
+        # project-local `.pi/settings.json`, extensions and packages, which pi
+        # executes at startup with this process's environment (including the
+        # Connection API key) before the model takes a turn. AgentSpace-managed
+        # skills are instead pointed at explicitly below, which loads them as
+        # data without trusting anything else the workspace ships.
+        settings["defaultProjectTrust"] = "never"
+        settings["skills"] = self._skills(env, settings.get("skills"))
         settings["enableInstallTelemetry"] = False
         settings["quietStartup"] = True
         _write_json(path, settings)
         logger.info("wrote pi settings to %s", path)
+
+    def _skills(self, env: Mapping[str, str], configured: object) -> list[str]:
+        """Add the managed skills mount to any skill paths already configured."""
+        skills: list[str] = []
+        if isinstance(configured, list):
+            skills = [
+                entry
+                for entry in cast("list[object]", configured)
+                if isinstance(entry, str)
+            ]
+        skills_dir = env.get("KERNEL_ACP_SKILLS_DIR", PI_SKILLS_DIR)
+        # pi warns about skill paths that resolve to nothing, and the mount is
+        # absent whenever the session has no skills attached.
+        if skills_dir and skills_dir not in skills and Path(skills_dir).is_dir():
+            skills.append(skills_dir)
+        return skills
 
     def write_system_prompt(self, env: Mapping[str, str]) -> None:
         """Replace pi's default system prompt with the AgentSpace prompt."""

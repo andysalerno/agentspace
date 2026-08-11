@@ -468,10 +468,56 @@ class TestPiAgent:
         settings = json.loads((config_dir / "settings.json").read_text())
         assert settings["defaultProvider"] == "customprovider"
         assert settings["defaultModel"] == "model-a"
-        assert settings["defaultProjectTrust"] == "always"
+        assert settings["defaultProjectTrust"] == "never"
         assert settings["enableInstallTelemetry"] is False
 
         assert (config_dir / "SYSTEM.md").read_text() == "be concise"
+
+    def test_provision_points_at_the_managed_skills_mount(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+
+        agent.provision({**env, "KERNEL_ACP_SKILLS_DIR": str(skills_dir)})
+
+        settings = json.loads((tmp_path / "pi" / "settings.json").read_text())
+        # Skills load through an explicit path so the workspace stays untrusted.
+        assert settings["skills"] == [str(skills_dir)]
+        assert settings["defaultProjectTrust"] == "never"
+
+    def test_provision_skips_a_skills_mount_that_is_absent(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        agent.provision({**env, "KERNEL_ACP_SKILLS_DIR": str(tmp_path / "missing")})
+
+        settings = json.loads((tmp_path / "pi" / "settings.json").read_text())
+        assert settings["skills"] == []
+
+    def test_provision_keeps_skill_paths_already_configured(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+        env: dict[str, str],
+    ) -> None:
+        config_dir = tmp_path / "pi"
+        config_dir.mkdir(parents=True)
+        (config_dir / "settings.json").write_text(
+            json.dumps({"skills": ["/opt/preset-skills"]}),
+        )
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+
+        agent.provision({**env, "KERNEL_ACP_SKILLS_DIR": str(skills_dir)})
+
+        settings = json.loads((config_dir / "settings.json").read_text())
+        assert settings["skills"] == ["/opt/preset-skills", str(skills_dir)]
 
     def test_provision_uses_responses_api_for_responses_flavor(
         self,

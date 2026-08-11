@@ -32,6 +32,7 @@ it, so no agent-specific credentials setup is required.
 | `KERNEL_ACP_WORKSPACE_DIR` | Working directory (default `/workspace`) |
 | `KERNEL_ACP_MCP_SERVERS` | JSON array passed to `session/new` |
 | `KERNEL_ACP_PERMISSION_OPTION` | Preferred `session/request_permission` option id |
+| `KERNEL_ACP_SKILLS_DIR` | Skills mount exposed to `pi` (default `/workspace/.agents/skills`) |
 
 ## What each backend writes
 
@@ -46,8 +47,9 @@ it, so no agent-specific credentials setup is required.
 
 - `models.json` — `customprovider` with the Connection's base URL, API key, and
   model, using `openai-completions` or `openai-responses` per API flavor.
-- `settings.json` — pins `defaultProvider`/`defaultModel` and trusts the
-  workspace so AgentSpace-mounted skills under `/workspace/.agents/skills` load.
+- `settings.json` — pins `defaultProvider`/`defaultModel`, and lists the
+  AgentSpace skills mount (`/workspace/.agents/skills`, override with
+  `KERNEL_ACP_SKILLS_DIR`) under `skills`.
 - `SYSTEM.md` — the system prompt, removed when no prompt is configured.
 
 The backend also defaults `PI_OFFLINE`, `PI_SKIP_VERSION_CHECK`, and
@@ -56,6 +58,12 @@ the agent to override.
 
 ## Notes
 
+- pi's project trust stays off (`defaultProjectTrust: "never"`). Trusting the
+  workspace would also load its `.pi/settings.json`, extensions, and packages,
+  which pi executes at startup with the kernel's environment — including the
+  Connection API key — before the model takes a turn. Naming the skills
+  directory explicitly loads AgentSpace's skills as data without granting the
+  workspace that reach.
 - pi executes tools in-process rather than delegating through ACP `fs/*` and
   `terminal/*`, so its shell output arrives as incremental
   `_meta.terminal_output` updates on the tool call. AgentSpace appends those to
