@@ -38,10 +38,16 @@ Terminal dimensions are limited to 500 columns by 300 rows.
 ## Security
 
 Browser WebSocket upgrades are accepted when the `Origin` header is same-origin
-with the request authority (the `X-Forwarded-Host` or `Host` header), which is
-always the case for the Web UI because it proxies `/api` from its own origin.
-This works for plain-HTTP local deployments on any host name, LAN address, or
-port without configuration. Cross-origin upgrades must be listed in
+with the origin the request was addressed to, which is always the case for the
+Web UI because it proxies `/api` from its own origin. The comparison covers the
+scheme, host, and port: the host comes from `X-Forwarded-Host` or `Host`, the
+scheme from `X-Forwarded-Proto` (defaulting to `http`, since TLS is terminated
+by the proxy in front of `client_service`), and the port from the forwarded
+authority, `X-Forwarded-Port`, or the scheme's default. A page served from
+another port or scheme on the same host is therefore rejected. This works for
+plain-HTTP local deployments on any host name, LAN address, or port without
+configuration; the bundled Web UI proxy forwards `Host` as `$http_host`, which
+preserves the client-facing port. Cross-origin upgrades must be listed in
 `CLIENT_SERVICE_CORS_ALLOWED_ORIGINS`. Requests without an `Origin` header
 remain available to trusted service and CLI clients. `agent_host` rejects
 browser-originated terminal upgrades so browser access must pass through

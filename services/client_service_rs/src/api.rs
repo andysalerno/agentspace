@@ -1257,62 +1257,83 @@ fn validate_websocket_origin(state: &AppState, headers: &HeaderMap) -> Result<()
 }
 
 /// Same-origin upgrades are always allowed: the page opening the socket was
-/// served from the same authority the request is addressed to, so the
-/// allowlist only has to govern genuine cross-origin access. This keeps
-/// plain-HTTP deployments reachable at any host name or port (LAN IP, machine
-/// hostname, custom port) without extra configuration.
+/// served from the same origin the request is addressed to, so the allowlist
+/// only has to govern genuine cross-origin access. This keeps plain-HTTP
+/// deployments reachable at any host name, LAN address, or port without extra
+/// configuration.
 ///
-/// The scheme is deliberately ignored because a reverse proxy may terminate
-/// TLS in front of `client_service`; the authority is what identifies the
-/// origin's trust boundary here.
+/// The comparison covers the full effective origin — scheme, host, and port —
+/// because a same-host page served on another port or over another scheme is a
+/// different origin and must not reach a shell. The external scheme and port
+/// are resolved from the reverse proxy's forwarding metadata, which browsers
+/// cannot set from page script, so both remain trustworthy here.
 fn is_same_origin_request(origin: &str, headers: &HeaderMap) -> bool {
-    let Some((origin_host, origin_port)) = origin_authority(origin) else {
+    let Some(origin) = parse_origin(origin) else {
         return false;
     };
-    let Some(request_authority) = request_authority(headers) else {
+    let Some(request) = request_origin(headers) else {
         return false;
     };
-    let Some((request_host, request_port)) = split_authority(&request_authority) else {
-        return false;
-    };
-    if origin_host != request_host {
-        return false;
-    }
-    match (origin_port, request_port) {
-        // A proxy that drops the port from the forwarded authority (nginx's
-        // `$host`) leaves nothing to compare, so host equality has to suffice.
-        (Some(origin_port), Some(request_port)) => origin_port == request_port,
-        _ => true,
-    }
+    origin == request
 }
 
-/// Resolve the authority the browser addressed, preferring the value forwarded
-/// by a reverse proxy. Browsers cannot set either header from page script, so
-/// both are trustworthy for a cross-site request check.
-fn request_authority(headers: &HeaderMap) -> Option<String> {
-    for name in [HeaderName::from_static("x-forwarded-host"), header::HOST] {
-        if let Some(value) = headers.get(&name).and_then(|value| value.to_str().ok()) {
-            let value = value.split(',').next().unwrap_or_default().trim();
-            if !value.is_empty() {
-                return Some(value.to_owned());
-            }
-        }
-    }
-    None
+/// Resolve the origin the browser addressed from the request headers.
+fn request_origin(headers: &HeaderMap) -> Option<(String, String, u16)> {
+    let scheme = forwarded_header(headers, "x-forwarded-proto")
+        .map_or_else(|| "http".to_owned(), |scheme| scheme.to_ascii_lowercase());
+    let scheme = normalize_scheme(&scheme)?;
+    let authority = forwarded_header(headers, "x-forwarded-host")
+        .or_else(|| header_value(headers, &header::HOST))?;
+    let (host, port) = split_authority(&authority)?;
+    // A proxy that drops the port from the forwarded authority can still
+    // report it separately; otherwise the external scheme's default applies.
+    let port = port
+        .or_else(|| {
+            forwarded_header(headers, "x-forwarded-port").and_then(|port| port.parse().ok())
+        })
+        .or_else(|| default_port(&scheme))?;
+    Some((scheme, host, port))
 }
 
-/// Split an `Origin` value into its lowercase host and port, applying the
-/// scheme's default port when the origin omits one.
-fn origin_authority(origin: &str) -> Option<(String, Option<u16>)> {
+/// Split an `Origin` value into its normalized scheme, lowercase host, and
+/// port, applying the scheme's default port when the origin omits one.
+fn parse_origin(origin: &str) -> Option<(String, String, u16)> {
     let (scheme, rest) = origin.split_once("://")?;
+    let scheme = normalize_scheme(&scheme.to_ascii_lowercase())?;
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let (host, port) = split_authority(authority)?;
-    let port = port.or_else(|| match scheme.to_ascii_lowercase().as_str() {
-        "http" | "ws" => Some(80),
-        "https" | "wss" => Some(443),
+    let port = port.or_else(|| default_port(&scheme))?;
+    Some((scheme, host, port))
+}
+
+/// Collapse the WebSocket schemes onto the HTTP schemes they share an origin
+/// with, and reject anything else.
+fn normalize_scheme(scheme: &str) -> Option<String> {
+    match scheme {
+        "http" | "ws" => Some("http".to_owned()),
+        "https" | "wss" => Some("https".to_owned()),
         _ => None,
-    });
-    Some((host, port))
+    }
+}
+
+fn default_port(scheme: &str) -> Option<u16> {
+    match scheme {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    }
+}
+
+/// Read the first value of a comma-separated forwarding header.
+fn forwarded_header(headers: &HeaderMap, name: &'static str) -> Option<String> {
+    let value = header_value(headers, &HeaderName::from_static(name))?;
+    let value = value.split(',').next().unwrap_or_default().trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn header_value(headers: &HeaderMap, name: &HeaderName) -> Option<String> {
+    let value = headers.get(name)?.to_str().ok()?.trim();
+    (!value.is_empty()).then(|| value.to_owned())
 }
 
 /// Split a `host[:port]` authority into its lowercase host and optional port,
@@ -5256,9 +5277,20 @@ mod tests {
         headers.insert(header::HOST, HeaderValue::from_static("192.168.1.5:8003"));
         assert!(validate_websocket_origin(&state, &headers).is_ok());
 
-        // A proxy that forwards the authority without its port still matches.
+        // A proxy that forwards the authority without its port has to report
+        // the external port separately; an unqualified authority falls back to
+        // the scheme's default port and no longer matches.
         headers.insert(header::HOST, HeaderValue::from_static("192.168.1.5"));
+        assert_eq!(
+            validate_websocket_origin(&state, &headers).map_err(|error| error.status),
+            Err(StatusCode::FORBIDDEN)
+        );
+        headers.insert(
+            HeaderName::from_static("x-forwarded-port"),
+            HeaderValue::from_static("8003"),
+        );
         assert!(validate_websocket_origin(&state, &headers).is_ok());
+        headers.remove(HeaderName::from_static("x-forwarded-port"));
 
         // A different port on the same host is a different origin.
         headers.insert(header::HOST, HeaderValue::from_static("192.168.1.5:9999"));
@@ -5311,6 +5343,52 @@ mod tests {
             validate_websocket_origin(&state, &headers).map_err(|error| error.status),
             Err(StatusCode::FORBIDDEN)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_websocket_rejects_same_host_cross_origin_requests()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", BTreeMap::new())
+            .with_cors_allowed_origins(["https://allowed.example"]);
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let state = AppState::with_agent_host(config, agent_host)?;
+
+        // A page on another port of the same host is cross-origin, even though
+        // the browser omits the target's default port from `Host`.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://agentspace.local:9999"),
+        );
+        headers.insert(header::HOST, HeaderValue::from_static("agentspace.local"));
+        assert_eq!(
+            validate_websocket_origin(&state, &headers).map_err(|error| error.status),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        // A plain-HTTP page cannot upgrade against the TLS-terminated origin.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://agentspace.local"),
+        );
+        headers.insert(header::HOST, HeaderValue::from_static("agentspace.local"));
+        headers.insert(
+            HeaderName::from_static("x-forwarded-proto"),
+            HeaderValue::from_static("https"),
+        );
+        assert_eq!(
+            validate_websocket_origin(&state, &headers).map_err(|error| error.status),
+            Err(StatusCode::FORBIDDEN)
+        );
+
+        // The matching HTTPS page behind that same proxy is accepted.
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://agentspace.local"),
+        );
+        assert!(validate_websocket_origin(&state, &headers).is_ok());
         Ok(())
     }
 
