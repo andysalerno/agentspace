@@ -112,6 +112,29 @@ impl AgentHostClient {
             .await
     }
 
+    pub fn terminal_url(&self, session_id: &str, cols: u16, rows: u16) -> AgentHostResult<Url> {
+        let mut url = self.endpoint(&["sessions", session_id, "terminal"])?;
+        let scheme = match url.scheme() {
+            "http" => "ws",
+            "https" => "wss",
+            scheme => {
+                return Err(AgentHostError::InvalidBaseUrl {
+                    raw: url.to_string(),
+                    message: format!("unsupported WebSocket base URL scheme {scheme:?}"),
+                });
+            }
+        };
+        url.set_scheme(scheme)
+            .map_err(|()| AgentHostError::InvalidBaseUrl {
+                raw: url.to_string(),
+                message: "failed to convert agent_host URL to WebSocket scheme".to_owned(),
+            })?;
+        url.query_pairs_mut()
+            .append_pair("cols", &cols.to_string())
+            .append_pair("rows", &rows.to_string());
+        Ok(url)
+    }
+
     pub async fn list_sessions(&self, with_stats: bool) -> AgentHostResult<JsonArray> {
         let mut url = self.endpoint(&["sessions"])?;
         if with_stats {
@@ -1765,6 +1788,20 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
 
     use super::{AgentHostClient, AgentHostError, JsonObject};
+
+    #[test]
+    fn terminal_url_uses_websocket_scheme_and_dimensions()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let client =
+            AgentHostClient::new("https://agent-host.example/base", Duration::from_secs(1))?;
+        let url = client.terminal_url("kernel session", 132, 41)?;
+
+        assert_eq!(
+            url.as_str(),
+            "wss://agent-host.example/sessions/kernel%20session/terminal?cols=132&rows=41"
+        );
+        Ok(())
+    }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedRequest {

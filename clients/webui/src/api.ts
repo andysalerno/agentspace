@@ -35,6 +35,22 @@ import type {
 const apiBase = "/api";
 type ConfigSource = string | Blob;
 
+export function terminalWebSocketUrl(
+  sessionId: string,
+  cols: number,
+  rows: number,
+  locationHref = window.location.href,
+): string {
+  const url = new URL(
+    `${apiBase}/sessions/${encodeURIComponent(sessionId)}/terminal`,
+    locationHref,
+  );
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("cols", String(cols));
+  url.searchParams.set("rows", String(rows));
+  return url.toString();
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly payload: unknown;

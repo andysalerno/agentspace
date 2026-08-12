@@ -10,8 +10,11 @@ use async_trait::async_trait;
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, Query, State},
-    http::{StatusCode, header},
+    extract::{
+        Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -34,6 +37,65 @@ use crate::{
 };
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostError>> + Send>>;
+pub type TerminalOutput = Pin<Box<dyn Stream<Item = Result<Vec<u8>, AgentHostError>> + Send>>;
+
+#[async_trait]
+pub trait TerminalResizer: Send + Sync {
+    async fn resize(&self, cols: u16, rows: u16) -> Result<(), AgentHostError>;
+}
+
+#[async_trait]
+pub trait TerminalInput: Send + Sync {
+    async fn write(&self, input: &[u8]) -> Result<(), AgentHostError>;
+}
+
+#[async_trait]
+pub trait TerminalCloser: Send + Sync {
+    async fn close(&self) -> Result<(), AgentHostError>;
+}
+
+pub(crate) struct TerminalCleanupGuard {
+    closer: Option<Arc<dyn TerminalCloser>>,
+}
+
+impl TerminalCleanupGuard {
+    pub(crate) fn new(closer: Arc<dyn TerminalCloser>) -> Self {
+        Self {
+            closer: Some(closer),
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), AgentHostError> {
+        let Some(closer) = self.closer.take() else {
+            return Ok(());
+        };
+        closer.close().await
+    }
+}
+
+impl Drop for TerminalCleanupGuard {
+    fn drop(&mut self) {
+        let Some(closer) = self.closer.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::error!("cannot schedule interactive terminal cleanup outside a Tokio runtime");
+            return;
+        };
+        runtime.spawn(async move {
+            if let Err(error) = closer.close().await {
+                tracing::warn!(%error, "failed to terminate dropped interactive terminal process");
+            }
+        });
+    }
+}
+
+pub struct RuntimeTerminal {
+    pub input: Arc<dyn TerminalInput>,
+    pub output: TerminalOutput,
+    pub resizer: Arc<dyn TerminalResizer>,
+    pub(crate) cleanup: TerminalCleanupGuard,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeCreateSession {
@@ -94,6 +156,17 @@ pub trait KernelRuntime: Send + Sync {
         &self,
         session: &KernelRuntimeSession,
     ) -> Result<Option<DockerStatsSummary>, AgentHostError>;
+
+    async fn open_terminal(
+        &self,
+        _session: &KernelRuntimeSession,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<RuntimeTerminal, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "interactive terminals are not supported by this runtime",
+        ))
+    }
 
     fn container_name(&self, session: &KernelRuntimeSession) -> Option<String>;
 
@@ -400,6 +473,19 @@ impl SessionRegistry {
         self.inner
             .runtime
             .container_logs(&record.runtime_session, tail)
+            .await
+    }
+
+    pub async fn open_terminal(
+        &self,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<RuntimeTerminal, AgentHostError> {
+        let record = self.get_record(session_id).await?;
+        self.inner
+            .runtime
+            .open_terminal(&record.runtime_session, cols, rows)
             .await
     }
 
@@ -859,6 +945,7 @@ pub fn router() -> Router<AppState> {
             "/sessions/{session_id}/container-logs",
             get(session_container_logs),
         )
+        .route("/sessions/{session_id}/terminal", get(open_terminal))
         .route("/sessions/{session_id}/reset", post(reset_session))
         .route(
             "/sessions/{session_id}/workspace/snapshot",
@@ -947,6 +1034,138 @@ async fn stream_message(
         header::HeaderValue::from_static("no"),
     );
     Ok(response)
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct TerminalSize {
+    #[serde(default = "default_terminal_cols")]
+    cols: u16,
+    #[serde(default = "default_terminal_rows")]
+    rows: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TerminalControl {
+    Resize { cols: u16, rows: u16 },
+}
+
+const fn default_terminal_cols() -> u16 {
+    120
+}
+
+const fn default_terminal_rows() -> u16 {
+    32
+}
+
+fn validate_terminal_size(cols: u16, rows: u16) -> Result<(), AgentHostError> {
+    if cols == 0 || rows == 0 || cols > 500 || rows > 300 {
+        return Err(AgentHostError::validation(
+            "terminal size must be between 1x1 and 500x300",
+        ));
+    }
+    Ok(())
+}
+
+async fn open_terminal(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(size): Query<TerminalSize>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    if headers.contains_key(header::ORIGIN) {
+        return Err(AgentHostError::Forbidden {
+            message: "browser clients must connect to terminals through client_service".to_owned(),
+        }
+        .into());
+    }
+    validate_terminal_size(size.cols, size.rows)?;
+    let terminal = state
+        .sessions
+        .open_terminal(&session_id, size.cols, size.rows)
+        .await?;
+    Ok(upgrade
+        .on_upgrade(move |socket| bridge_terminal(socket, terminal))
+        .into_response())
+}
+
+async fn bridge_terminal(mut socket: WebSocket, mut terminal: RuntimeTerminal) {
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
+    heartbeat.tick().await;
+    loop {
+        tokio::select! {
+            _ = heartbeat.tick() => {
+                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
+                    break;
+                }
+            }
+            socket_message = socket.recv() => {
+                match socket_message {
+                    Some(Ok(Message::Binary(input))) => {
+                        if terminal.input.write(&input).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Text(control))) => {
+                        let parsed = serde_json::from_str::<TerminalControl>(&control);
+                        let result = match parsed {
+                            Ok(TerminalControl::Resize { cols, rows }) => {
+                                validate_terminal_size(cols, rows).map(|()| (cols, rows))
+                            }
+                            Err(error) => Err(AgentHostError::validation(format!(
+                                "invalid terminal control message: {error}"
+                            ))),
+                        };
+                        match result {
+                            Ok((cols, rows)) => {
+                                if terminal.resizer.resize(cols, rows).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                let payload = json!({
+                                    "type": "error",
+                                    "message": error.to_string(),
+                                });
+                                let _ = socket.send(Message::Text(payload.to_string().into())).await;
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if socket.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                }
+            }
+            output = terminal.output.next() => {
+                match output {
+                    Some(Ok(output)) => {
+                        if socket.send(Message::Binary(output.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Err(error)) => {
+                        let payload = json!({
+                            "type": "error",
+                            "message": error.to_string(),
+                        });
+                        let _ = socket.send(Message::Text(payload.to_string().into())).await;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    if let Err(error) = terminal.cleanup.close().await {
+        tracing::warn!(%error, "failed to terminate interactive terminal process");
+    }
+    let _ = socket.send(Message::Close(None)).await;
 }
 
 async fn history(
@@ -1055,6 +1274,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
             AgentHostError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
+            AgentHostError::Forbidden { .. } => StatusCode::FORBIDDEN,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AgentHostError::Runtime { .. }
             | AgentHostError::Docker { .. }
@@ -1073,7 +1293,11 @@ mod tests {
         collections::BTreeMap,
         fs,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex, MutexGuard, PoisonError},
+        sync::{
+            Arc, Mutex, MutexGuard, PoisonError,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use async_trait::async_trait;
@@ -1082,13 +1306,17 @@ mod tests {
         body::Body,
         http::{Method, Request, StatusCode, header},
     };
-    use futures_util::{StreamExt, stream};
+    use futures_util::{SinkExt, StreamExt, stream};
     use http_body_util::BodyExt;
     use serde_json::{Value as JsonValue, json};
+    use tokio::{sync::Notify, time::timeout};
+    use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
     use tower::ServiceExt;
 
     use super::{
-        CreateSessionRequest, EventStream, KernelRuntime, RuntimeCreateSession, SessionRegistry,
+        CreateSessionRequest, EventStream, KernelRuntime, RuntimeCreateSession, RuntimeTerminal,
+        SessionRegistry, TerminalCleanupGuard, TerminalCloser, TerminalInput, TerminalResizer,
+        validate_terminal_size,
     };
     use crate::{
         AppConfig, AppState, build_router,
@@ -1113,12 +1341,73 @@ mod tests {
         summaries: BTreeMap<String, RuntimeSessionSummary>,
         histories: BTreeMap<String, Vec<Vec<KernelEvent>>>,
         fail_summary: bool,
+        terminal: Arc<FakeTerminalState>,
+    }
+
+    #[derive(Default)]
+    struct FakeTerminalState {
+        input: Mutex<Vec<u8>>,
+        sizes: Mutex<Vec<(u16, u16)>>,
+        close_count: AtomicUsize,
+        close_notify: Notify,
+    }
+
+    struct FakeTerminalInput {
+        state: Arc<FakeTerminalState>,
+    }
+
+    #[async_trait]
+    impl TerminalInput for FakeTerminalInput {
+        async fn write(&self, buffer: &[u8]) -> Result<(), AgentHostError> {
+            self.state
+                .input
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buffer);
+            Ok(())
+        }
+    }
+
+    struct FakeTerminalControl {
+        state: Arc<FakeTerminalState>,
+    }
+
+    #[async_trait]
+    impl TerminalResizer for FakeTerminalControl {
+        async fn resize(&self, cols: u16, rows: u16) -> Result<(), AgentHostError> {
+            self.state
+                .sizes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((cols, rows));
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl TerminalCloser for FakeTerminalControl {
+        async fn close(&self) -> Result<(), AgentHostError> {
+            self.state.close_count.fetch_add(1, Ordering::SeqCst);
+            self.state.close_notify.notify_waiters();
+            Ok(())
+        }
     }
 
     impl FakeRuntime {
         fn state(&self) -> MutexGuard<'_, FakeState> {
             self.state.lock().unwrap_or_else(PoisonError::into_inner)
         }
+
+        fn terminal_state(&self) -> Arc<FakeTerminalState> {
+            self.state().terminal.clone()
+        }
+    }
+
+    #[test]
+    fn terminal_dimensions_are_bounded() {
+        assert!(validate_terminal_size(80, 24).is_ok());
+        assert!(validate_terminal_size(0, 24).is_err());
+        assert!(validate_terminal_size(501, 24).is_err());
     }
 
     #[async_trait]
@@ -1242,6 +1531,31 @@ mod tests {
             }))
         }
 
+        async fn open_terminal(
+            &self,
+            _session: &KernelRuntimeSession,
+            cols: u16,
+            rows: u16,
+        ) -> Result<RuntimeTerminal, AgentHostError> {
+            let state = self.terminal_state();
+            state
+                .sizes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push((cols, rows));
+            let control = Arc::new(FakeTerminalControl {
+                state: state.clone(),
+            });
+            Ok(RuntimeTerminal {
+                input: Arc::new(FakeTerminalInput { state }),
+                output: Box::pin(
+                    stream::once(async { Ok(b"terminal ready".to_vec()) }).chain(stream::pending()),
+                ),
+                resizer: control.clone(),
+                cleanup: TerminalCleanupGuard::new(control),
+            })
+        }
+
         fn container_name(&self, session: &KernelRuntimeSession) -> Option<String> {
             Some(session_key(session))
         }
@@ -1306,6 +1620,100 @@ mod tests {
                 "vscode_url": "http://127.0.0.1:12345",
             }))
         }
+    }
+
+    #[tokio::test]
+    async fn terminal_websocket_forwards_io_resize_and_cleanup() {
+        let runtime = FakeRuntime::default();
+        let terminal_state = runtime.terminal_state();
+        let registry = SessionRegistry::with_runtime(Arc::new(runtime));
+        let session = registry
+            .create_session(CreateSessionRequest {
+                harness: HarnessName::Echo,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("failed to create terminal test session: {error}"));
+        let mut state = AppState::new(AppConfig::new("127.0.0.1", 0, BTreeMap::new()));
+        state.sessions = registry;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("failed to bind terminal test server: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("failed to read terminal test address: {error}"));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state))
+                .await
+                .unwrap_or_else(|error| panic!("terminal test server failed: {error}"));
+        });
+
+        let url = format!(
+            "ws://{address}/sessions/{}/terminal?cols=80&rows=24",
+            session.session_id
+        );
+        let (mut socket, _) = connect_async(url)
+            .await
+            .unwrap_or_else(|error| panic!("failed to connect terminal test client: {error}"));
+        let ready = timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap_or_else(|error| panic!("terminal output timed out: {error}"))
+            .unwrap_or_else(|| panic!("terminal socket closed before output"))
+            .unwrap_or_else(|error| panic!("terminal output failed: {error}"));
+        assert_eq!(
+            ready,
+            TungsteniteMessage::Binary(b"terminal ready".to_vec().into())
+        );
+
+        socket
+            .send(TungsteniteMessage::Binary(b"pwd\r".to_vec().into()))
+            .await
+            .unwrap_or_else(|error| panic!("failed to send terminal input: {error}"));
+        socket
+            .send(TungsteniteMessage::Text(
+                json!({"type": "resize", "cols": 132, "rows": 48})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("failed to send terminal resize: {error}"));
+        socket
+            .send(TungsteniteMessage::Close(None))
+            .await
+            .unwrap_or_else(|error| panic!("failed to close terminal socket: {error}"));
+
+        timeout(Duration::from_secs(1), async {
+            while terminal_state.close_count.load(Ordering::SeqCst) == 0 {
+                let notified = terminal_state.close_notify.notified();
+                if terminal_state.close_count.load(Ordering::SeqCst) == 0 {
+                    notified.await;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|error| panic!("terminal cleanup timed out: {error}"));
+
+        assert_eq!(
+            *terminal_state
+                .input
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            b"pwd\r"
+        );
+        assert_eq!(
+            *terminal_state
+                .sizes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+            vec![(80, 24), (132, 48)]
+        );
+        assert_eq!(terminal_state.close_count.load(Ordering::SeqCst), 1);
+
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]
