@@ -779,3 +779,338 @@ terminal, a lost process/container/host can resume the same durable Copilot
 session, VS Code opens the same workspace, all destructive and recovery states
 are explicit, and the full validation and acceptance suites pass without
 regressing Chat.
+
+## Review of Proposed Design
+
+Reviewer notes appended after an independent read of the plan and verification
+against the current tree and the installed Copilot CLI. Nothing above this
+section was modified.
+
+### Summary judgment
+
+The core architecture is sound and should proceed. The decision to let a
+container-local multiplexer own the PTY, to make the durable `client_service`
+session ID the stable runtime identity, and to keep terminal bytes out of the
+`Kernel` event protocol are all correct and are the decisions that matter most.
+The plan is unusually specific about failure modes, which is welcome.
+
+The issues below are concentrated in three places: the security story is
+weaker than the plan claims, one component boundary is not implementable as
+written, and several small pieces of state ("did we launch before?", "is the
+pane alive?", "who is attached?") are inferred where they should be observed.
+
+### Verification of the plan's factual claims
+
+Claims checked against the tree at review time:
+
+| Claim | Result |
+| --- | --- |
+| Shared Copilot config volume mounted at `/root/.copilot` | Confirmed (`docker_runtime.rs`, `AGENT_HOST_COPILOT_VOLUME`) |
+| `agent_host` registry is in-memory only and generates its own UUID | Confirmed (`sessions.rs`) |
+| `agent_host` destroys all sessions on graceful shutdown | Confirmed (`main.rs` -> `AppState::shutdown` -> `destroy_all_sessions`) |
+| No PTY, Docker exec/resize, or WebSocket support today | Confirmed; `bollard` is the Docker client and does support exec + resize |
+| Axum `ws` feature not enabled in either service | Confirmed |
+| Only `agentspace.role=kernel` is labeled; no adoption logic | Confirmed |
+| `ensure_column` migration helper exists | Confirmed (currently used only for `workspaces.status`) |
+| Nginx template does not forward `Upgrade`/`Connection` | Confirmed |
+| A resume token already surfaces from the runtime but is not persisted by `client_service` | Confirmed |
+| Copilot flags `--session-id`, `--resume`, `--agent`, `--add-dir`, `--mouse`, `--no-auto-update`, `--effort` | All confirmed present |
+| `COPILOT_PROVIDER_*` / `COPILOT_MODEL` BYOK mapping | Confirmed correct against `copilot help providers` |
+
+Two corrections:
+
+1. The plan describes the shared-skills hazard as a CLI concern. It is a
+   **pre-existing defect that affects Chat today**: `skills_mount_path` returns
+   `/root/.copilot/skills` for the `copilot-cli` harness, that path lives inside
+   the shared Copilot volume, and `kernel_host` symlinks enabled skills into it
+   at startup. Concurrent Chat containers already race here. Fixing this only
+   for CLI would violate the plan's own "do not let Chat and CLI drift" rule on
+   day one. Fix it for both surfaces, or state explicitly that Chat keeps the
+   broken behavior for now.
+2. `COPILOT_PROVIDER_WIRE_API` defaults to `completions`, not `responses`. The
+   mapping table is still correct; just note that the `chat_completions` case is
+   a no-op default and should be set explicitly anyway for clarity.
+
+### Substantive concerns
+
+Ordered by how expensive they are to fix late.
+
+#### 1. The terminal is a remote shell. The non-goal is not achievable as stated.
+
+"Building a general remote shell" is listed as a non-goal, and the mitigation
+table claims the allowlisted `tmux attach-session` argv prevents it. It does
+not. There are two independent escapes:
+
+- tmux's prefix key is available to the attached client; `C-b :` then
+  `new-window` yields an arbitrary shell in the container.
+- Copilot CLI itself has a bash tool and will be launched with broad
+  permissions. Anyone who can open CLI View can run commands in that container
+  regardless of what tmux allows.
+
+Recommendation: delete the claim and replace it with an accurate statement of
+the trust boundary — *any principal who can open a CLI session has command
+execution inside that session's container*. Then harden what is cheap to
+harden: launch tmux with a dedicated locked config (`-f`), `unbind-key -a` on
+both key tables, and no prefix. That removes the accidental escape and the
+"I broke the pane layout" support burden, without pretending the container is
+sandboxed from its own user.
+
+#### 2. There is no authentication on the transport, only an origin allowlist.
+
+`client_service` currently has a CORS origin allowlist and no authentication.
+The plan carries that forward, reusing "the configured browser-origin
+allowlist for WebSocket `Origin` validation" as the only stated control on an
+endpoint that grants container command execution. Origin validation is a CSRF
+control; it authenticates nothing.
+
+This is tolerable for the rest of the API today and is materially less
+tolerable for this endpoint. It also has a concrete design consequence:
+browsers cannot set request headers on a WebSocket handshake, so a bearer token
+cannot simply be added later without reworking the client.
+
+Recommendation: decide the mechanism now, even if the initial implementation is
+a no-op. The cleanest browser-compatible option is a **single-use, short-TTL
+attach ticket**: `POST /terminal/ensure` returns a ticket, the WS URL carries it
+as a query parameter, `client_service` consumes it on upgrade. It is
+revocable, auditable, survives a future auth system, and avoids putting a
+long-lived credential in a URL. If a ticket is judged premature, say so
+explicitly in the plan and note that the Nginx access log must not record the
+query string.
+
+#### 3. The `CopilotCliLauncher` boundary is not implementable as written.
+
+The plan places `CopilotCliLauncher` in `agent_host` (Rust) and simultaneously
+instructs `kernel_host` to "factor any Copilot argv/environment translation
+shared with `kernel_copilot`" (Python). These cannot both happen; the
+translation cannot be shared across the language boundary, so it will be
+duplicated and will drift on model, effort, `--add-dir`, and resume semantics —
+precisely the drift the plan is trying to prevent.
+
+Recommendation: move launch-spec construction into `kernel_host`, exposed as a
+small internal HTTP endpoint (`POST /terminal/ensure`, `GET /terminal`).
+`agent_host` then owns only the generic, Copilot-agnostic terminal runtime:
+exec-attach, byte transport, resize, and lifecycle. This:
+
+- puts all Copilot argv/env knowledge in one Python module next to
+  `kernel_copilot`, where it can genuinely be shared;
+- does **not** add a `Kernel` protocol method, so it respects the plan's own
+  (correct) rule that PTY bytes are not kernel events — `kernel_host`'s HTTP API
+  is not the `Kernel` protocol;
+- keeps the `ensure_terminal` / `attach_terminal` / `terminal_summary` /
+  `stop_terminal` interface intact, just with a thinner `ensure_terminal`; and
+- makes idempotency a local, atomic problem (see next item).
+
+#### 4. Prefer tmux's atomicity over a per-session async lock.
+
+The risk table mitigates duplicate recovery with "per-session async lock around
+ensure/start/adopt". A lock in `agent_host` process memory does not survive an
+`agent_host` restart mid-`ensure`, which is exactly the scenario the plan cares
+about.
+
+`tmux new-session -d -s <name>` already fails atomically inside the tmux server
+when the session exists. Making `ensure` unconditionally attempt creation and
+treat "duplicate session" as success gives correctness that does not depend on
+any in-memory state. Keep the lock as a latency optimization, not as the
+correctness argument.
+
+#### 5. `--session-id` alone removes the first-launch/recovery state machine.
+
+The plan branches: `--session-id=<uuid>` on first launch, `--resume=<uuid>` on
+recovery. The installed CLI documents `--session-id <id>` as "Resume an
+existing session or task by ID, **or** set the UUID for a new session". One
+flag covers both.
+
+This matters because the branch is driven by persisted state ("have we launched
+before?") that can be wrong after a crash between generating the UUID and the
+process actually starting. In that window the plan would run
+`--resume=<uuid>`, which hard-errors and exits — and under `remain-on-exit`
+the pane stays alive, so `ensure` would report success while the user stares at
+a dead pane. Always passing `--session-id` eliminates the state, the branch,
+and that failure mode. Recommend dropping `--resume` from the design entirely.
+
+#### 6. Liveness must be observed, not inferred.
+
+`remain-on-exit on` is the right choice, but it means a live tmux session no
+longer implies a live Copilot process; `has-session` becomes useless as a
+health check. The UI states the plan promises (`live` / `exited` / `error`)
+cannot be derived from what `terminal_summary` currently proposes to return.
+
+Recommendation: `terminal_summary` should read pane state directly, e.g.
+`tmux list-panes -F '#{pane_dead} #{pane_dead_status} #{pane_pid}'`, and return
+a three-way `running` / `exited(status)` / `missing`. Also add
+`attach_kind: "started" | "attached" | "resumed"` to the `ensure` response and
+to the WS `ready` frame — the Persistence section requires the UI to
+distinguish a reattached live terminal from a resumed Copilot session, but no
+proposed field carries that information.
+
+#### 7. Two scrollback buffers will fight; pick one now.
+
+xterm.js maintains its own scrollback, which will be empty after every
+reattach, while tmux holds the real history. The plan hedges ("restore captured
+tmux history before the live redraw if testing shows..."), but that hedge is
+actively wrong when Copilot is in the alternate screen: `capture-pane` returns
+the alt screen, and replaying it before attach double-draws.
+
+Recommendation: decide now that **tmux owns history**. Set xterm
+`scrollback: 0`, do not replay `capture-pane`, and expose scrollback through an
+explicit UI control that enters tmux copy-mode. This is one coherent model
+instead of two competing ones, and it removes a whole class of "the terminal
+duplicated my output" bugs.
+
+#### 8. Mouse ownership is unresolved.
+
+`--mouse=on` (Copilot) and tmux `mouse on` both want wheel and click events, and
+the plan asks for both scrollback-by-wheel and full alternate-screen mouse
+support without saying who wins. Recommendation: tmux `mouse off`, Copilot
+`--mouse=on`. That matches a local Copilot session exactly, which is the stated
+goal, and it composes with item 7. Make this an explicit tested decision rather
+than something discovered during Phase 5.
+
+#### 9. Locale and character width are unaddressed.
+
+The kernel image is `python:3.14-slim` and sets no `LANG`/`LC_ALL`. tmux is not
+UTF-8 safe without a UTF-8 locale (or `-u`), and the design stacks three
+independent width tables — Copilot's, tmux's, and xterm's Unicode 11 addon. If
+they disagree, emoji and box drawing smear and the cursor desynchronizes, which
+is the single most visible failure mode for this feature.
+
+Recommendation: add `ENV LANG=C.UTF-8` alongside the tmux install, pin the tmux
+version, and promote emoji/CJK width to a named acceptance test with a fixed
+sample string rather than the current "verify colors, emoji, paste".
+
+#### 10. Orphaned execs and phantom tmux clients need reconciliation.
+
+Every attachment creates a Docker exec that nothing explicitly reaps. If
+`agent_host` dies mid-stream, the exec survives holding a dangling stream and
+tmux keeps a phantom client — which continues to constrain window size under
+any `window-size` policy other than `latest`. Nothing in the plan removes them,
+and the header's "number of active attachments" has no source.
+
+Recommendation: add periodic reconciliation of `tmux list-clients` against
+known attachments with `detach-client` for the strays, set
+`destroy-unattached off`, and source the attachment count from that
+reconciliation.
+
+#### 11. Phase 2 is a disk-growth regression without a cleanup path.
+
+Removing destructive shutdown from `agent_host` is correct for this feature but
+changes operational behavior for **Chat** as well: every ordinary service
+restart now leaks a container and a session-workspace volume. Today
+`stack-down` removes only *running* containers labeled `agentspace.role=kernel`
+and removes no volumes at all, so the leak is currently unbounded and silent.
+
+The plan acknowledges this in one sentence. It deserves concrete scope in
+Phase 2: remove exited kernel containers, remove `agentspace.managed=true`
+session-workspace volumes with no owning client session, and provide either an
+age/idle reaper or an explicit cleanup API. Otherwise Phase 2 ships a
+regression that Phase 6 is expected to notice.
+
+#### 12. Volume labels key off the wrong identity.
+
+Session-workspace volumes are named from the first 12 characters of the session
+ID and labeled `agentspace.container_name=<container>`. Under the new stable-ID
+scheme, adoption and garbage collection would key off a truncated,
+collision-prone value. Relabel volumes with `agentspace.session_id=<full id>`
+and treat the truncated name purely as a display detail.
+
+Relatedly: the plan says migration "does not need to rewrite old running
+sessions", which is reasonable, but the consequence is that pre-migration
+sessions are permanently unadoptable. Say so explicitly and make it a supported
+non-error state in the UI rather than something that surfaces as a recovery
+failure.
+
+#### 13. Secrets are readable from inside the terminal.
+
+"Resolve at launch, persist references only, redact logs" does not cover the
+new exposure: `COPILOT_PROVIDER_API_KEY` sits in the container environment and
+the session's user has command execution (item 1). Copilot CLI provides
+`--secret-env-vars=<names>`, which strips values from shell and MCP child
+environments and redacts them from output. Use it for the provider key and any
+`CONNECTION_*` duplicates, and state plainly in the plan that the container
+environment is not a secrecy boundary against the session's own user.
+
+#### 14. Put the generated agent profile in `.github/agents`, for the same reason as skills.
+
+The plan moves skills to `/workspace/.github/skills` to escape the shared
+volume, then leaves the generated system-prompt profile in shared
+`/root/.copilot/agents` with a collision-resistant name and a bespoke
+"delete only that owned profile" cleanup path. `.github/agents` is an equally
+documented repo-level location. Using it makes profile lifetime identical to
+the session workspace, removes the collision concern, and deletes the cleanup
+path entirely. One caveat to resolve: decide whether AgentSpace-owned files
+under `.github/` are excluded from **save workspace**.
+
+#### 15. Chat has no BYOK translation today.
+
+`kernel_copilot` passes `COPILOT_MODEL` and generic `CONNECTION_*` and never
+sets `COPILOT_PROVIDER_*`. CLI would therefore be the first path where a
+Connection actually takes effect for the `copilot-cli` harness. Given the
+plan's explicit anti-drift requirement, this should be named as either in scope
+or out of scope; silence guarantees that Chat and CLI disagree about which
+model answered.
+
+### Smaller notes
+
+- The WS framing says "Client binary frame: UTF-8 encoded terminal input
+  bytes." Terminal input is not necessarily valid UTF-8 (raw key sequences,
+  pasted binary). Specify **raw bytes** in both directions.
+- Define WebSocket close codes for queue overflow, origin rejection, auth
+  failure, and session-gone. The plan requires distinct client behavior for
+  these but gives the client no way to tell them apart.
+- Snapshot the resolved model and reasoning effort onto the session alongside
+  `cli_harness` and `cli_connection_id`. The plan's stated rationale — "later
+  edits to the agent do not silently change which provider the session resumes
+  with" — applies equally to the model, and silently changing models across a
+  resume is worse than changing endpoints.
+- `history-limit` must be set before the pane is created; it belongs in the
+  locked tmux config file, not in a post-attach `set-option`.
+- `COPILOT_PROVIDER_BEARER_TOKEN` takes precedence over the API key. Ensure it
+  cannot be inherited from a stray environment and silently override the
+  configured connection.
+- `POST /terminal/ensure` is a non-idempotent verb doing an idempotent thing.
+  Document the idempotency key (the session ID) and concurrent-call semantics in
+  the API contract itself, not only in prose.
+- The acceptance matrix is almost entirely manual, which means it runs once.
+  Commit to a fake in-process terminal runtime for unit tests plus a small
+  Docker-gated integration suite, and mark which of the ten items are
+  automated.
+- Docs to update at completion: `docs/OVERVIEW.md`, `docs/PLAYWRIGHT.md` for the
+  new fixtures, and a new `docs/TERMINAL_PROTOCOL.md` for the frame protocol,
+  which the plan promises to document but does not assign a home.
+
+### On the PM note about multi-browser support
+
+The PM's note offers to drop shared multi-browser attachment if it costs
+robustness. Worth flagging that the trade is not available in the shape it
+implies: tmux is what buys *disconnect survival*, and multi-client attach is a
+free consequence of tmux rather than an extra mechanism layered on top. The
+real cost of multi-attach is confined to phantom-client reconciliation
+(item 10) and the mixed-size policy (already in the risk table, one-line fix by
+switching to `window-size smallest`).
+
+So the escape hatch should be scoped as "enforce a single active attachment in
+`client_service`" — a policy check, cheap to add and cheap to remove — rather
+than "remove the multiplexer", which would sacrifice the plan's primary
+requirement. Recommend keeping multi-attach and noting the policy-level
+fallback.
+
+### Phasing
+
+Phase ordering is good. One suggestion: Phase 2 is both independently
+shippable and the only phase that changes existing Chat behavior. Land and soak
+it separately from Phase 3 so that any Chat regression in stable IDs, adoption,
+or non-destructive shutdown is not entangled with terminal work during
+diagnosis.
+
+### What the plan gets right
+
+Recorded so it is not lost in revision: tmux owning the PTY rather than a
+WebSocket or an `agent_host` task; stable client-side session IDs with label
+based adoption and idempotent ensure; a separate `CliHarnessName` enum instead
+of implying every kernel harness has a CLI; a nested optional `cli` block
+instead of three independently invalid flat fields; refusing to model PTY bytes
+as a `Kernel` protocol method; binary frames with bounded per-attachment
+queues; reusing existing Connection and secret entities instead of duplicating
+credentials; distinguishing reattach from resume in the UI; and an unusually
+honest non-goals list. The failure-mode coverage is well above average for a
+plan at this stage.
