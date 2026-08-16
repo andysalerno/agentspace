@@ -32,7 +32,8 @@ use crate::{
     models::{
         CleanupAction, CleanupReport, CleanupResource, CleanupResourceIdentity,
         CleanupResourceKind, DockerKernelSession, DockerStatsSummary, HarnessName, InteractionMode,
-        KernelEvent, KernelRuntimeSession, RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
+        KernelEvent, KernelRuntimeSession, RuntimeSessionSummary, ServiceSummary,
+        TelemetrySnapshot, WorkspaceMount,
     },
     sessions::{EventStream, KernelRuntime, RuntimeCreateSession},
     terminal::{ATTACHMENT_ID_ENV, TerminalExec, TerminalStatus},
@@ -810,6 +811,41 @@ impl DockerKernelRuntime {
             _ => Err(AgentHostError::upstream_unavailable(detail)),
         }
     }
+
+    async fn telemetry_request(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TelemetrySnapshot, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        let response = self
+            .client
+            .get(format!("{}/telemetry", handle.base_url))
+            .send()
+            .await
+            .map_err(|error| {
+                AgentHostError::upstream_unavailable(format!(
+                    "kernel telemetry provider is unavailable: {error}"
+                ))
+            })?;
+        if response.status().is_success() {
+            return response.json::<TelemetrySnapshot>().await.map_err(|error| {
+                AgentHostError::upstream_unavailable(format!(
+                    "kernel telemetry provider returned an invalid response: {error}"
+                ))
+            });
+        }
+
+        let status = response.status();
+        let detail = response
+            .json::<KernelErrorResponse>()
+            .await
+            .ok()
+            .map_or_else(
+                || format!("kernel telemetry provider returned HTTP {status}"),
+                |payload| payload.detail,
+            );
+        Err(AgentHostError::upstream_unavailable(detail))
+    }
 }
 
 #[async_trait]
@@ -1367,6 +1403,13 @@ impl KernelRuntime for DockerKernelRuntime {
             Some(tmux_client_id),
         )
         .await
+    }
+
+    async fn telemetry(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TelemetrySnapshot, AgentHostError> {
+        self.telemetry_request(session).await
     }
 
     async fn terminal_attach(
@@ -2627,15 +2670,16 @@ mod tests {
         docker_runtime::skills_mount_path,
         errors::AgentHostError,
         models::{
-            CleanupAction, CleanupResourceIdentity, DockerKernelSession, HarnessName,
-            InteractionMode, KernelRuntimeSession, WorkspaceMount, WorkspaceMountMode,
+            CacheSignalState, CleanupAction, CleanupResourceIdentity, DockerKernelSession,
+            HarnessName, InteractionMode, KernelRuntimeSession, TelemetryContentMode,
+            TelemetryState, WorkspaceMount, WorkspaceMountMode,
         },
         sessions::{KernelRuntime, RuntimeCreateSession},
         skills::{SkillVolumeMode, SkillVolumeResource},
         terminal::{TerminalAttachKind, TerminalExec, TerminalState},
     };
 
-    type TerminalHttpCalls = Arc<Mutex<Vec<(String, JsonValue)>>>;
+    type KernelHttpCalls = Arc<Mutex<Vec<(String, JsonValue)>>>;
 
     #[derive(Clone, Default)]
     struct FakeDockerBackend {
@@ -3003,8 +3047,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn docker_runtime_proxies_structured_terminal_controls() {
-        let calls: TerminalHttpCalls = Arc::new(Mutex::new(Vec::new()));
+    #[allow(clippy::too_many_lines)]
+    async fn docker_runtime_proxies_structured_terminal_controls_and_telemetry() {
+        let calls: KernelHttpCalls = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap_or_else(|error| panic!("failed to bind terminal server: {error}"));
@@ -3017,6 +3062,7 @@ mod tests {
             .route("/terminal/stop", post(terminal_proxy_stub))
             .route("/terminal/resume", post(terminal_proxy_stub))
             .route("/terminal/detach-client", post(terminal_proxy_stub))
+            .route("/telemetry", get(telemetry_proxy_stub))
             .with_state(calls.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let runtime = DockerKernelRuntime::new(
@@ -3061,6 +3107,10 @@ mod tests {
             .terminal_detach_client(&session, "/dev/pts/7")
             .await
             .unwrap_or_else(|error| panic!("detach failed: {error}"));
+        let telemetry = runtime
+            .telemetry(&session)
+            .await
+            .unwrap_or_else(|error| panic!("telemetry failed: {error}"));
 
         let calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(
@@ -3074,15 +3124,30 @@ mod tests {
                 "/terminal/stop",
                 "/terminal/resume",
                 "/terminal/detach-client",
+                "/telemetry",
             ]
         );
         assert_eq!(calls[4].1, json!({ "tmux_client_id": "/dev/pts/7" }));
+        assert_eq!(calls[5].1, JsonValue::Null);
+        assert_eq!(telemetry.state, TelemetryState::Live);
+        assert_eq!(telemetry.content_mode, TelemetryContentMode::Metadata);
+        assert_eq!(
+            telemetry
+                .latest_call
+                .as_ref()
+                .and_then(|call| call.model.as_deref()),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(
+            telemetry.cache_signal.as_ref().map(|signal| signal.state),
+            Some(CacheSignalState::CacheResetSuspected)
+        );
         drop(calls);
         server.abort();
     }
 
     async fn terminal_proxy_stub(
-        State(calls): State<TerminalHttpCalls>,
+        State(calls): State<KernelHttpCalls>,
         request: Request<axum::body::Body>,
     ) -> Json<JsonValue> {
         let path = request.uri().path().to_owned();
@@ -3099,7 +3164,32 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push((path, body));
-        Json(json!({
+        Json(terminal_proxy_payload())
+    }
+
+    async fn telemetry_proxy_stub(
+        State(calls): State<KernelHttpCalls>,
+        request: Request<axum::body::Body>,
+    ) -> Json<JsonValue> {
+        let path = request.uri().path().to_owned();
+        let bytes = to_bytes(request.into_body(), 16 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("failed to read telemetry request: {error}"));
+        let body = if bytes.is_empty() {
+            JsonValue::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("failed to parse telemetry request: {error}"))
+        };
+        calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((path, body));
+        Json(telemetry_proxy_payload())
+    }
+
+    fn terminal_proxy_payload() -> JsonValue {
+        json!({
             "state": "running",
             "exit_status": null,
             "attach_kind": "attached",
@@ -3111,7 +3201,119 @@ mod tests {
             "pane_pid": 42,
             "attachment_count": 0,
             "clients": [],
-        }))
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn telemetry_proxy_payload() -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "state": "live",
+            "reason": null,
+            "content_mode": "metadata",
+            "source_version": "1.0.81-0",
+            "observed_at": "2026-08-15T00:00:00Z",
+            "received_at": "2026-08-15T00:00:01Z",
+            "session": {
+                "raw_input_tokens": 12,
+                "effective_input_tokens": 9,
+                "output_tokens": 3,
+                "total_tokens": 15,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 5,
+                "fresh_input_tokens": 7,
+                "cache_reuse_percent": 22.5,
+                "nano_aiu": 8,
+                "opaque_cost": 0.5
+            },
+            "latest_call": {
+                "started_at": "2026-08-15T00:00:00Z",
+                "ended_at": "2026-08-15T00:00:01Z",
+                "duration_ms": 1000,
+                "model": "gpt-5.6-sol",
+                "requested_model": "gpt-5.6-sol",
+                "provider": "openai",
+                "agent_id": "builtin:task",
+                "agent_name": "task",
+                "is_subagent": true,
+                "cache_reporting": "reported",
+                "token_accounting_convention": "inclusive",
+                "usage": {
+                    "raw_input_tokens": 6,
+                    "effective_input_tokens": 4,
+                    "output_tokens": 2,
+                    "total_tokens": 8,
+                    "reasoning_output_tokens": 1,
+                    "cache_read_input_tokens": 2,
+                    "cache_write_input_tokens": 1,
+                    "other_input_tokens": 1,
+                    "fresh_input_tokens": 3,
+                    "cache_reuse_percent": 33.3,
+                    "nano_aiu": 4,
+                    "opaque_cost": 0.25
+                }
+            },
+            "last_interaction": {
+                "raw_input_tokens": 10,
+                "effective_input_tokens": 8,
+                "output_tokens": 3,
+                "total_tokens": 13,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 5,
+                "fresh_input_tokens": 6,
+                "cache_reuse_percent": 20.0,
+                "nano_aiu": 6,
+                "opaque_cost": 0.4
+            },
+            "context": {
+                "tokens": 111,
+                "limit": 222,
+                "message_count": 3,
+                "observed_at": "2026-08-15T00:00:00Z"
+            },
+            "counts": {
+                "interactions": 1,
+                "model_calls": 2,
+                "tool_calls": 3,
+                "subagent_invocations": 4,
+                "subagent_model_calls": 5,
+                "errors": 6
+            },
+            "subagents": {
+                "invocations": 1,
+                "model_calls": 2,
+                "effective_input_tokens": 3,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 5,
+                "cache_write_input_tokens": 6,
+                "duration_ms": 7
+            },
+            "cache_signal": {
+                "state": "cache_reset_suspected",
+                "confidence": "medium",
+                "reason": "context_discontinuity"
+            },
+            "reporting": {
+                "model_calls": 2,
+                "cache_reported_calls": 1,
+                "convention_resolved_calls": 2,
+                "effective_input_covered_calls": 2,
+                "context_reported": true
+            },
+            "warnings": {
+                "total": 2,
+                "items": [
+                    {
+                        "code": "malformed_record",
+                        "count": 2
+                    }
+                ]
+            }
+        })
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ use crate::{
     models::{
         CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName, InteractionMode,
         KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus, RuntimeSessionSummary,
-        ServiceSummary, SessionSummary, WorkspaceMount, WorkspaceMountMode,
+        ServiceSummary, SessionSummary, TelemetrySnapshot, WorkspaceMount, WorkspaceMountMode,
     },
     skills::{SkillRegistry, SkillVolumeResource},
     terminal::{TerminalConnection, TerminalExec, TerminalService, TerminalStatus},
@@ -203,6 +203,15 @@ pub trait KernelRuntime: Send + Sync {
     ) -> Result<(), AgentHostError> {
         Err(AgentHostError::runtime(
             "terminal resize is not supported by this runtime",
+        ))
+    }
+
+    async fn telemetry(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TelemetrySnapshot, AgentHostError> {
+        Ok(TelemetrySnapshot::unavailable(
+            "telemetry is unavailable for this runtime",
         ))
     }
 }
@@ -622,6 +631,11 @@ impl SessionRegistry {
             .runtime
             .open_workspace_vscode(request.workspace_id, request.volume_name)
             .await
+    }
+
+    pub async fn telemetry(&self, session_id: &str) -> Result<TelemetrySnapshot, AgentHostError> {
+        let record = self.get_record(session_id).await?;
+        self.inner.runtime.telemetry(&record.runtime_session).await
     }
 
     pub async fn terminal_status(
@@ -1202,6 +1216,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/sessions/{session_id}/history", get(history))
         .route("/sessions/{session_id}/logs", get(session_logs))
+        .route("/sessions/{session_id}/telemetry", get(session_telemetry))
         .route(
             "/sessions/{session_id}/container-logs",
             get(session_container_logs),
@@ -1311,6 +1326,18 @@ async fn session_logs(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let lines = state.sessions.logs(&session_id).await?;
     Ok(Json(json!({ "lines": lines })))
+}
+
+async fn session_telemetry(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<TelemetrySnapshot>, ApiError> {
+    state
+        .sessions
+        .telemetry(&session_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 async fn session_container_logs(
@@ -1461,9 +1488,14 @@ mod tests {
         AppConfig, AppState, build_router,
         errors::AgentHostError,
         models::{
-            CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName,
-            InteractionMode, KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus,
-            RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
+            ActivityCounts, CacheReportingState, CacheSignal, CacheSignalConfidence,
+            CacheSignalReason, CacheSignalState, CleanupReport, CleanupResourceIdentity,
+            ContextUsage, DockerStatsSummary, HarnessName, InteractionMode, KernelEvent,
+            KernelEventType, KernelRuntimeSession, KernelStatus, ModelCallSummary,
+            ReportingCoverage, RuntimeSessionSummary, SubagentBreakdown, TelemetryContentMode,
+            TelemetrySnapshot, TelemetryState, TelemetryWarning, TelemetryWarningCode,
+            TelemetryWarningSummary, TokenAccountingConvention, UsageBreakdown, WorkspaceMount,
+            WorkspaceMountMode,
         },
         skills::{SkillRegistry, SkillVolumeMode, SkillVolumeResource, SkillsService},
     };
@@ -1480,7 +1512,9 @@ mod tests {
         sent: Vec<(String, String)>,
         summaries: BTreeMap<String, RuntimeSessionSummary>,
         histories: BTreeMap<String, Vec<Vec<KernelEvent>>>,
+        telemetry: BTreeMap<String, TelemetrySnapshot>,
         fail_summary: bool,
+        fail_telemetry: bool,
     }
 
     impl FakeRuntime {
@@ -1496,6 +1530,7 @@ mod tests {
             request: RuntimeCreateSession,
         ) -> Result<KernelRuntimeSession, AgentHostError> {
             let container_name = format!("container-{}", &request.session_id[..8]);
+            let harness = request.harness;
             {
                 let mut state = self.state();
                 state.created.push(request);
@@ -1509,6 +1544,10 @@ mod tests {
                     },
                 );
                 state.histories.insert(container_name.clone(), Vec::new());
+                state.telemetry.insert(
+                    container_name.clone(),
+                    telemetry_snapshot_for_harness(harness),
+                );
             }
             Ok(KernelRuntimeSession::opaque(container_name))
         }
@@ -1693,6 +1732,140 @@ mod tests {
                 "container_name": format!("editor-{workspace_id}"),
                 "vscode_url": "http://127.0.0.1:12345",
             }))
+        }
+
+        async fn telemetry(
+            &self,
+            session: &KernelRuntimeSession,
+        ) -> Result<TelemetrySnapshot, AgentHostError> {
+            let key = session_key(session);
+            {
+                let state = self.state();
+                if state.fail_telemetry {
+                    return Err(AgentHostError::upstream_unavailable(
+                        "kernel telemetry provider is unavailable",
+                    ));
+                }
+                state.telemetry.get(&key).cloned()
+            }
+            .ok_or_else(|| AgentHostError::runtime("missing telemetry"))
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn telemetry_snapshot_for_harness(harness: HarnessName) -> TelemetrySnapshot {
+        if harness != HarnessName::CopilotCli {
+            return TelemetrySnapshot::unavailable(format!(
+                "telemetry is unavailable for harness {}",
+                harness.as_str()
+            ));
+        }
+
+        TelemetrySnapshot {
+            schema_version: 1,
+            state: TelemetryState::Live,
+            reason: None,
+            content_mode: TelemetryContentMode::Metadata,
+            source_version: Some("1.0.81-0".to_owned()),
+            observed_at: Some("2026-08-15T00:00:00Z".to_owned()),
+            received_at: Some("2026-08-15T00:00:01Z".to_owned()),
+            session: UsageBreakdown {
+                raw_input_tokens: Some(12),
+                effective_input_tokens: Some(9),
+                output_tokens: Some(3),
+                total_tokens: Some(15),
+                reasoning_output_tokens: Some(1),
+                cache_read_input_tokens: Some(2),
+                cache_write_input_tokens: Some(1),
+                other_input_tokens: Some(5),
+                fresh_input_tokens: Some(7),
+                cache_reuse_percent: Some(22.5),
+                nano_aiu: Some(8),
+                opaque_cost: Some(0.5),
+            },
+            latest_call: Some(ModelCallSummary {
+                started_at: Some("2026-08-15T00:00:00Z".to_owned()),
+                ended_at: Some("2026-08-15T00:00:01Z".to_owned()),
+                duration_ms: Some(1_000),
+                model: Some("gpt-5.6-sol".to_owned()),
+                requested_model: Some("gpt-5.6-sol".to_owned()),
+                provider: Some("openai".to_owned()),
+                agent_id: Some("builtin:task".to_owned()),
+                agent_name: Some("task".to_owned()),
+                is_subagent: true,
+                cache_reporting: CacheReportingState::Reported,
+                token_accounting_convention: TokenAccountingConvention::Inclusive,
+                usage: UsageBreakdown {
+                    raw_input_tokens: Some(6),
+                    effective_input_tokens: Some(4),
+                    output_tokens: Some(2),
+                    total_tokens: Some(8),
+                    reasoning_output_tokens: Some(1),
+                    cache_read_input_tokens: Some(2),
+                    cache_write_input_tokens: Some(1),
+                    other_input_tokens: Some(1),
+                    fresh_input_tokens: Some(3),
+                    cache_reuse_percent: Some(33.3),
+                    nano_aiu: Some(4),
+                    opaque_cost: Some(0.25),
+                },
+            }),
+            last_interaction: Some(UsageBreakdown {
+                raw_input_tokens: Some(10),
+                effective_input_tokens: Some(8),
+                output_tokens: Some(3),
+                total_tokens: Some(13),
+                reasoning_output_tokens: Some(1),
+                cache_read_input_tokens: Some(2),
+                cache_write_input_tokens: Some(1),
+                other_input_tokens: Some(5),
+                fresh_input_tokens: Some(6),
+                cache_reuse_percent: Some(20.0),
+                nano_aiu: Some(6),
+                opaque_cost: Some(0.4),
+            }),
+            context: Some(ContextUsage {
+                tokens: Some(111),
+                limit: Some(222),
+                message_count: Some(3),
+                observed_at: Some("2026-08-15T00:00:00Z".to_owned()),
+            }),
+            counts: ActivityCounts {
+                interactions: 1,
+                model_calls: 2,
+                tool_calls: 3,
+                subagent_invocations: 4,
+                subagent_model_calls: 5,
+                errors: 6,
+            },
+            subagents: SubagentBreakdown {
+                invocations: 1,
+                model_calls: 2,
+                effective_input_tokens: Some(3),
+                output_tokens: Some(4),
+                cache_read_input_tokens: Some(5),
+                cache_write_input_tokens: Some(6),
+                duration_ms: Some(7),
+            },
+            cache_signal: Some(CacheSignal {
+                state: CacheSignalState::CacheResetSuspected,
+                confidence: Some(CacheSignalConfidence::Medium),
+                reason: Some(CacheSignalReason::ContextDiscontinuity),
+            }),
+            reporting: ReportingCoverage {
+                model_calls: 2,
+                cache_reported_calls: 1,
+                convention_resolved_calls: 2,
+                effective_input_covered_calls: 2,
+                context_reported: true,
+            },
+            warnings: TelemetryWarningSummary {
+                total: 2,
+                items: vec![TelemetryWarning {
+                    code: TelemetryWarningCode::MalformedRecord,
+                    count: 2,
+                }],
+            },
         }
     }
 
@@ -2242,6 +2415,12 @@ mod tests {
         .await;
         let (logs_status, logs) =
             empty_request(&app, Method::GET, &format!("/sessions/{session_id}/logs")).await;
+        let (telemetry_status, telemetry) = empty_request(
+            &app,
+            Method::GET,
+            &format!("/sessions/{session_id}/telemetry"),
+        )
+        .await;
         let (container_logs_status, container_logs) = empty_request(
             &app,
             Method::GET,
@@ -2267,10 +2446,75 @@ mod tests {
         assert_eq!(history["history"][0][2]["content"], "hello");
         assert_eq!(logs_status, StatusCode::OK);
         assert_eq!(logs["lines"][0], r#"{"type":"stub","data":{}}"#);
+        assert_eq!(telemetry_status, StatusCode::OK);
+        assert_eq!(telemetry["state"], "live");
+        assert_eq!(telemetry["content_mode"], "metadata");
+        assert_eq!(telemetry["latest_call"]["cache_reporting"], "reported");
+        assert_eq!(
+            telemetry["latest_call"]["token_accounting_convention"],
+            "inclusive"
+        );
+        assert_eq!(telemetry["cache_signal"]["state"], "cache_reset_suspected");
+        assert_eq!(
+            telemetry["warnings"]["items"][0]["code"],
+            "malformed_record"
+        );
         assert_eq!(container_logs_status, StatusCode::OK);
         assert_eq!(container_logs["lines"].as_array().map(Vec::len), Some(2));
         assert_eq!(deleted_status, StatusCode::NO_CONTENT);
         assert_eq!(after_status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn telemetry_route_returns_unavailable_for_unsupported_sessions() {
+        let app = router_with_runtime(FakeRuntime::default());
+        let (status, created) = json_request(
+            &app,
+            Method::POST,
+            "/sessions",
+            json!({ "harness": "echo" }),
+        )
+        .await;
+        let session_id = session_id_from(&created);
+        let (telemetry_status, telemetry) = empty_request(
+            &app,
+            Method::GET,
+            &format!("/sessions/{session_id}/telemetry"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(telemetry_status, StatusCode::OK);
+        assert_eq!(telemetry["state"], "unavailable");
+        assert!(
+            telemetry["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("harness echo"))
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_route_uses_standard_not_found_and_service_unavailable() {
+        let runtime = FakeRuntime::default();
+        let app = router_with_runtime(runtime.clone());
+        let (_status, _created, session_id) = create_mounted_session(&app).await;
+
+        let missing_status =
+            status_request(&app, Method::GET, "/sessions/missing-session/telemetry").await;
+        runtime.state().fail_telemetry = true;
+        let (upstream_status, upstream_error) = empty_request(
+            &app,
+            Method::GET,
+            &format!("/sessions/{session_id}/telemetry"),
+        )
+        .await;
+
+        assert_eq!(missing_status, StatusCode::NOT_FOUND);
+        assert_eq!(upstream_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            upstream_error["detail"],
+            "kernel telemetry provider is unavailable"
+        );
     }
 
     #[tokio::test]

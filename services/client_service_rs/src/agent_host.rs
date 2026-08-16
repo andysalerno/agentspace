@@ -8,6 +8,7 @@ use std::{
 };
 
 use reqwest::{Method, StatusCode, Url, header};
+use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
@@ -15,7 +16,7 @@ use tokio_tungstenite::{
     tungstenite::{Error as WebSocketError, protocol::WebSocketConfig},
 };
 
-use crate::models::WorkspaceMountRecord;
+use crate::models::{TelemetrySnapshot, WorkspaceMountRecord};
 
 const BASE_URL_ENV: &str = "CLIENT_SERVICE_AGENT_HOST_BASE_URL";
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:8001";
@@ -157,6 +158,16 @@ impl AgentHostClient {
 
     pub async fn terminal_resume(&self, session_id: &str) -> AgentHostResult<JsonObject> {
         self.terminal_control(session_id, "resume", None).await
+    }
+
+    pub async fn telemetry(&self, session_id: &str) -> AgentHostResult<TelemetrySnapshot> {
+        self.request_typed(
+            Method::GET,
+            self.endpoint(&["sessions", session_id, "telemetry"])?,
+            None,
+            "telemetry snapshot",
+        )
+        .await
     }
 
     pub fn terminal_websocket_url(&self, session_id: &str) -> AgentHostResult<Url> {
@@ -718,6 +729,29 @@ impl AgentHostClient {
                     value: other,
                 };
                 log_agent_host_response_shape_error(&trace_context, "array of objects", &error);
+                Err(error)
+            }
+        }
+    }
+
+    async fn request_typed<T>(
+        &self,
+        method: Method,
+        url: Url,
+        json_payload: Option<JsonObject>,
+        expected: &'static str,
+    ) -> AgentHostResult<T>
+    where
+        T: DeserializeOwned,
+    {
+        let trace_context = RequestTraceContext::from_url_and_payload(&url, json_payload.as_ref());
+        let value = self.request_json(method, url, json_payload).await?;
+
+        match serde_json::from_value(value) {
+            Ok(parsed) => Ok(parsed),
+            Err(source) => {
+                let error = AgentHostError::Json { source };
+                log_agent_host_response_shape_error(&trace_context, expected, &error);
                 Err(error)
             }
         }
@@ -2066,6 +2100,7 @@ mod tests {
             .route("/sessions/{session_id}/history", get(history))
             .route("/sessions/{session_id}/logs", get(logs))
             .route("/sessions/{session_id}/container-logs", get(container_logs))
+            .route("/sessions/{session_id}/telemetry", get(telemetry))
             .route("/sessions/{session_id}/reset", post(reset_session))
             .route("/skills", post(create_skill).get(list_skills))
             .route("/skills/{skill_id}/download", get(download_skill))
@@ -2229,6 +2264,127 @@ mod tests {
             None,
         )?;
         Ok(Json(json!({ "session_id": session_id, "reset": true })))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn telemetry(
+        State(state): State<TestState>,
+        Path(session_id): Path<String>,
+    ) -> Result<Json<Value>, StatusCode> {
+        state.record(
+            Method::GET,
+            format!("/sessions/{session_id}/telemetry"),
+            None,
+            None,
+        )?;
+        Ok(Json(json!({
+            "schema_version": 1,
+            "state": "live",
+            "reason": null,
+            "content_mode": "metadata",
+            "source_version": "1.0.81-0",
+            "observed_at": "2026-08-15T00:00:00Z",
+            "received_at": "2026-08-15T00:00:01Z",
+            "session": {
+                "raw_input_tokens": 12,
+                "effective_input_tokens": 9,
+                "output_tokens": 3,
+                "total_tokens": 15,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 5,
+                "fresh_input_tokens": 7,
+                "cache_reuse_percent": 22.5,
+                "nano_aiu": 8,
+                "opaque_cost": 0.5
+            },
+            "latest_call": {
+                "started_at": "2026-08-15T00:00:00Z",
+                "ended_at": "2026-08-15T00:00:01Z",
+                "duration_ms": 1000,
+                "model": "gpt-5.6-sol",
+                "requested_model": "gpt-5.6-sol",
+                "provider": "openai",
+                "agent_id": "builtin:task",
+                "agent_name": "task",
+                "is_subagent": true,
+                "cache_reporting": "reported",
+                "token_accounting_convention": "inclusive",
+                "usage": {
+                    "raw_input_tokens": 6,
+                    "effective_input_tokens": 4,
+                    "output_tokens": 2,
+                    "total_tokens": 8,
+                    "reasoning_output_tokens": 1,
+                    "cache_read_input_tokens": 2,
+                    "cache_write_input_tokens": 1,
+                    "other_input_tokens": 1,
+                    "fresh_input_tokens": 3,
+                    "cache_reuse_percent": 33.3,
+                    "nano_aiu": 4,
+                    "opaque_cost": 0.25
+                }
+            },
+            "last_interaction": {
+                "raw_input_tokens": 10,
+                "effective_input_tokens": 8,
+                "output_tokens": 3,
+                "total_tokens": 13,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 5,
+                "fresh_input_tokens": 6,
+                "cache_reuse_percent": 20.0,
+                "nano_aiu": 6,
+                "opaque_cost": 0.4
+            },
+            "context": {
+                "tokens": 111,
+                "limit": 222,
+                "message_count": 3,
+                "observed_at": "2026-08-15T00:00:00Z"
+            },
+            "counts": {
+                "interactions": 1,
+                "model_calls": 2,
+                "tool_calls": 3,
+                "subagent_invocations": 4,
+                "subagent_model_calls": 5,
+                "errors": 6
+            },
+            "subagents": {
+                "invocations": 1,
+                "model_calls": 2,
+                "effective_input_tokens": 3,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 5,
+                "cache_write_input_tokens": 6,
+                "duration_ms": 7
+            },
+            "cache_signal": {
+                "state": "cache_reset_suspected",
+                "confidence": "medium",
+                "reason": "context_discontinuity"
+            },
+            "reporting": {
+                "model_calls": 2,
+                "cache_reported_calls": 1,
+                "convention_resolved_calls": 2,
+                "effective_input_covered_calls": 2,
+                "context_reported": true
+            },
+            "warnings": {
+                "total": 2,
+                "items": [
+                    {
+                        "code": "malformed_record",
+                        "count": 2
+                    }
+                ]
+            }
+        })))
     }
 
     async fn create_skill(
@@ -2484,6 +2640,7 @@ mod tests {
         client.list_sessions(true).await?;
         client.container_logs("session-1", None).await?;
         client.container_logs("session-1", Some(25)).await?;
+        let telemetry = client.telemetry("session-1").await?;
 
         assert_eq!(
             server.recorded()?,
@@ -2512,7 +2669,25 @@ mod tests {
                     query: Some("tail=25".to_owned()),
                     body: None,
                 },
+                RecordedRequest {
+                    method: Method::GET,
+                    path: "/sessions/session-1/telemetry".to_owned(),
+                    query: None,
+                    body: None,
+                },
             ]
+        );
+        assert_eq!(telemetry.state, crate::models::TelemetryState::Live);
+        assert_eq!(
+            telemetry.content_mode,
+            crate::models::TelemetryContentMode::Metadata
+        );
+        assert_eq!(
+            telemetry
+                .latest_call
+                .as_ref()
+                .and_then(|call| call.model.as_deref()),
+            Some("gpt-5.6-sol")
         );
 
         Ok(())
