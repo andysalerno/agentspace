@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re
 import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from copilot_launch import (
+    CopilotLaunchConfig,
+    build_chat_argv,
+    build_chat_launch,
+    build_copilot_environment,
+)
 from kernel.events import (
     KernelEvent,
     KernelStatus,
@@ -79,7 +83,11 @@ class CopilotKernel:
 
     async def start(self, config: KernelConfig) -> None:
         self._config = config
-        self._session_id = config.session_id or uuid.uuid4().hex[:12]
+        self._session_id = (
+            config.session_id
+            or config.env.get("COPILOT_SESSION_ID")
+            or str(uuid.uuid4())
+        )
         self._status = KernelStatus.IDLE
         self._raw_lines = []
         await self._queue.put(session_start(self._session_id, self.name))
@@ -94,26 +102,33 @@ class CopilotKernel:
         self._status = KernelStatus.BUSY
         await self._queue.put(status_event(KernelStatus.BUSY))
 
-        cmd = self._build_command(message)
-        env = self._build_env()
         cwd = self._workspace_dir
 
         try:
             await asyncio.to_thread(_ensure_directory, cwd)
-        except OSError as exc:
+            launch = await asyncio.to_thread(
+                build_chat_launch,
+                self._launch_config(),
+                message,
+            )
+        except (OSError, ValueError) as exc:
             await self._queue.put(error(f"failed to start copilot CLI: {exc}"))
             await self._finish(KernelStatus.ERROR)
             return
 
-        logger.info("spawning copilot subprocess: cmd=%s cwd=%s", cmd, cwd)
+        logger.info(
+            "spawning copilot subprocess: cmd=%s cwd=%s",
+            list(launch.redacted_argv),
+            launch.cwd,
+        )
 
         try:
             self._process = await asyncio.create_subprocess_exec(
-                *cmd,
+                *launch.argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=env,
-                cwd=cwd,
+                env=launch.environment,
+                cwd=launch.cwd,
                 limit=_STREAM_BUFFER_LIMIT,
             )
         except FileNotFoundError:
@@ -147,78 +162,20 @@ class CopilotKernel:
         self._status = KernelStatus.DONE
 
     def _build_command(self, message: str) -> list[str]:
-        cmd = [
-            "copilot",
-            "-p",
-            message,
-            "--output-format",
-            "json",
-            "--allow-all",
-            "--no-ask-user",
-            "--no-auto-update",
-            "--no-color",
-            "-s",
-        ]
-
-        model = self._config.env.get("COPILOT_MODEL")
-        if model:
-            cmd.extend(["--model", model])
-
-        reasoning_effort = self._config.env.get("COPILOT_REASONING_EFFORT")
-        if reasoning_effort:
-            cmd.extend(["--effort", reasoning_effort])
-
-        config_dir = self._config.env.get("COPILOT_CONFIG_DIR")
-        if config_dir:
-            cmd.extend(["--config-dir", config_dir])
-
-        resume_session = self._config.session_id or self._config.env.get(
-            "COPILOT_SESSION_ID",
-        )
-        if resume_session:
-            cmd.append(f"--resume={resume_session}")
-
-        extra_paths = list(self._config.additional_paths)
-        extra_paths.extend(self._split_paths_env())
-        for path in extra_paths:
-            cmd.extend(["--add-dir", path])
-
-        cmd.extend(self._iter_extra_arg_tokens())
-
-        return cmd
+        return list(build_chat_argv(self._launch_config(), message))
 
     def _build_env(self) -> dict[str, str]:
-        env = {**os.environ}
-        for key in (
-            "GH_TOKEN",
-            "GITHUB_TOKEN",
-            "COPILOT_ALLOW_ALL",
-            "COPILOT_CONFIG_DIR",
-        ):
-            value = self._config.env.get(key)
-            if value:
-                env[key] = value
-        return env
+        return build_copilot_environment(self._config.env)
 
-    def _split_paths_env(self) -> list[str]:
-        raw = self._config.env.get("COPILOT_ADDITIONAL_PATHS", "")
-        if not raw:
-            return []
-        return self._split_paths(raw)
-
-    def _iter_extra_arg_tokens(self) -> list[str]:
-        raw = self._config.env.get("COPILOT_EXTRA_ARGS", "")
-        return [arg for arg in raw.splitlines() if arg]
-
-    def _split_paths(self, raw: str) -> list[str]:
-        parts = [segment for segment in re.split(r"[\n;]+", raw) if segment]
-        if len(parts) != 1 or ":" not in raw:
-            return parts
-
-        colon_parts = [segment for segment in raw.split(":") if segment]
-        if all(segment.startswith("/") for segment in colon_parts):
-            return colon_parts
-        return parts
+    def _launch_config(self) -> CopilotLaunchConfig:
+        return CopilotLaunchConfig(
+            session_id=self._session_id
+            or self._config.session_id
+            or self._config.env.get("COPILOT_SESSION_ID", ""),
+            env=self._config.env,
+            additional_paths=self._config.additional_paths,
+            workspace_dir=self._workspace_dir,
+        )
 
     async def _read_output(self) -> None:
         if self._process is None:

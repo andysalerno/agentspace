@@ -442,10 +442,28 @@ stack-rebuild-rootless-podman *services:
 stack-down:
   #!/usr/bin/env bash
   set -euo pipefail
+  cleanup_url="http://127.0.0.1:${CONTAINER_CLIENT_SERVICE_PORT:-8002}/management/runtime-cleanup"
+  if ! curl --fail --silent --show-error \
+    --header "content-type: application/json" \
+    --data '{"dry_run":false}' \
+    "$cleanup_url" >/dev/null; then
+    echo "Warning: runtime orphan cleanup was unavailable; managed session volumes were retained." >&2
+  fi
   just --justfile "{{justfile_directory()}}/justfile" _stack-compose down --remove-orphans
   runtime="$(just --justfile "{{justfile_directory()}}/justfile" _stack-runtime)"
-  "$runtime" rm -f $("$runtime" ps -q --filter "label=agentspace.role=kernel") 2>/dev/null || true
-  "$runtime" rm -f $("$runtime" ps -q --filter "label=agentspace.role=gateway") 2>/dev/null || true
+  mapfile -t spawned_containers < <(
+    {
+      "$runtime" ps -aq \
+        --filter "label=agentspace.managed=true" \
+        --filter "label=agentspace.role=kernel"
+      "$runtime" ps -aq \
+        --filter "label=agentspace.managed=true" \
+        --filter "label=agentspace.role=gateway"
+    } | sort -u
+  )
+  if (( ${#spawned_containers[@]} > 0 )); then
+    "$runtime" rm -f "${spawned_containers[@]}" >/dev/null
+  fi
 
 # Tail logs for the full Compose stack.
 [group('run')]
@@ -461,3 +479,8 @@ stack-status:
 [group('check')]
 memory-e2e:
   CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}" bash scripts/memory-e2e.sh
+
+# Run the opt-in kernel/tmux/PTY container integration suite.
+[group('check')]
+terminal-container-integration:
+  python3 scripts/terminal-container-integration.py

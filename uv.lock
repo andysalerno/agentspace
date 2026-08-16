@@ -7,6 +7,7 @@ members = [
     "agentspace",
     "cli-channel",
     "cli-ui",
+    "copilot-launch",
     "gateway",
     "gateway-discord",
     "gateway-echo",
@@ -303,6 +304,11 @@ wheels = [
 ]
 
 [[package]]
+name = "copilot-launch"
+version = "0.1.0"
+source = { editable = "kernels/copilot_launch" }
+
+[[package]]
 name = "discord-py"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -584,6 +590,7 @@ name = "kernel-host"
 version = "0.1.0"
 source = { editable = "kernels/kernel_host" }
 dependencies = [
+    { name = "copilot-launch" },
     { name = "fastapi" },
     { name = "kernel" },
     { name = "kernel-acp" },
@@ -592,6 +599,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "copilot-launch", editable = "kernels/copilot_launch" },
     { name = "fastapi" },
     { name = "kernel", editable = "kernels/kernel" },
     { name = "kernel-acp", editable = "kernels/kernel_acp" },

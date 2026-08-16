@@ -3,7 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from fastapi.routing import APIRoute
 from kernel_host import app as app_module
+from kernel_host.terminal import (
+    AttachKind,
+    TerminalClient,
+    TerminalState,
+    TerminalStatus,
+)
 
 
 def _set_code_server_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -95,3 +102,100 @@ async def test_vscode_server_uses_configured_command(
     await _start_vscode_server()
 
     assert captured["command"] == "custom-code-server"
+
+
+class StubTerminalController:
+    def __init__(self) -> None:
+        self.detach_client_ids: list[str] = []
+        self.raise_client_error = False
+
+    async def ensure(self) -> TerminalStatus:
+        return _terminal_status(attach_kind=AttachKind.STARTED)
+
+    async def status(self) -> TerminalStatus:
+        return _terminal_status()
+
+    async def stop(self) -> TerminalStatus:
+        return _terminal_status(state=TerminalState.MISSING)
+
+    async def resume(self) -> TerminalStatus:
+        return _terminal_status(attach_kind=AttachKind.RESUMED)
+
+    async def detach_client(self, tmux_client_id: str) -> TerminalStatus:
+        self.detach_client_ids.append(tmux_client_id)
+        return _terminal_status()
+
+
+def _terminal_status(
+    *,
+    state: TerminalState = TerminalState.RUNNING,
+    attach_kind: AttachKind | None = None,
+) -> TerminalStatus:
+    clients = (
+        TerminalClient(
+            id="/dev/pts/7",
+            tty="/dev/pts/7",
+            pid=77,
+            width=120,
+            height=40,
+            session_name="agentspace-test",
+            pane_id="%0",
+        ),
+    )
+    return TerminalStatus(
+        state=state,
+        session_name="agentspace-test",
+        target_session="=agentspace-test",
+        socket_path="/run/agentspace-tmux.sock",
+        attach_argv=("tmux", "attach-session", "-t", "=agentspace-test"),
+        pane_id=None if state == TerminalState.MISSING else "%0",
+        pane_pid=None if state == TerminalState.MISSING else 88,
+        attach_kind=attach_kind,
+        clients=() if state == TerminalState.MISSING else clients,
+    )
+
+
+def test_current_and_terminal_routes_are_registered() -> None:
+    routes = {
+        (method, route.path)
+        for route in app_module.app.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods or set()
+    }
+
+    assert {
+        ("GET", "/healthz"),
+        ("GET", "/session"),
+        ("POST", "/messages"),
+        ("POST", "/messages/stream"),
+        ("GET", "/history"),
+        ("GET", "/logs"),
+        ("POST", "/reset"),
+        ("DELETE", "/session"),
+        ("POST", "/terminal/ensure"),
+        ("GET", "/terminal"),
+        ("POST", "/terminal/stop"),
+        ("POST", "/terminal/resume"),
+        ("POST", "/terminal/detach-client"),
+    } <= routes
+
+
+@pytest.mark.asyncio
+async def test_terminal_routes_return_structured_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    controller = StubTerminalController()
+    monkeypatch.setattr(app_module, "terminal_controller", controller)
+
+    ensured = await app_module.terminal_ensure()
+    observed = await app_module.terminal_status()
+    detached = await app_module.terminal_detach_client(
+        app_module.DetachClientRequest(tmux_client_id="/dev/pts/7"),
+    )
+
+    assert ensured["state"] == TerminalState.RUNNING
+    assert ensured["attach_kind"] == AttachKind.STARTED
+    assert observed["attachment_count"] == 1
+    assert observed["clients"][0]["id"] == "/dev/pts/7"
+    assert detached["pane_id"] == "%0"
+    assert controller.detach_client_ids == ["/dev/pts/7"]

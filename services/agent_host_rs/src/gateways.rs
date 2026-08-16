@@ -447,6 +447,7 @@ where
 
         let labels = BTreeMap::from([
             ("agentspace.role".to_owned(), "gateway".to_owned()),
+            ("agentspace.managed".to_owned(), "true".to_owned()),
             (
                 "agentspace.gateway_id".to_owned(),
                 request.gateway_id.clone(),
@@ -1239,6 +1240,7 @@ mod tests {
         );
         assert_eq!(spec.environment["FOO"], "bar");
         assert_eq!(spec.labels["agentspace.role"], "gateway");
+        assert_eq!(spec.labels["agentspace.managed"], "true");
         assert_eq!(spec.labels["agentspace.gateway_id"], "echo-one");
         assert_eq!(spec.labels["agentspace.gateway_type"], "echo");
     }

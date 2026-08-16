@@ -9,9 +9,12 @@ import { sessionTone } from "./status";
 
 type SessionsViewProps = {
     onNavigateToChat: (sessionId: string) => void;
+    onNavigateToCli: (sessionId: string) => void;
 };
 
-export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
+export default function SessionsView(
+    { onNavigateToChat, onNavigateToCli }: SessionsViewProps,
+) {
     const { data: sessions = [] } = useSessions();
     const { data: agents = [] } = useAgents();
     const queryClient = useQueryClient();
@@ -82,6 +85,7 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                                             <th>Agent</th>
                                             <th>Session</th>
                                             <th>Status</th>
+                                            <th>Mode</th>
                                             <th className="num">Messages</th>
                                             <th>Channel</th>
                                             <th>Created</th>
@@ -108,6 +112,7 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                                                         tone={sessionTone(s.status)}
                                                     />
                                                 </td>
+                                                <td>{s.interaction_mode === "cli" ? "CLI" : "Chat"}</td>
                                                 <td className="num">{s.message_count}</td>
                                                 <td>{s.channel_name ?? "—"}</td>
                                                 <td className="nowrap muted">
@@ -129,7 +134,13 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                                                             key: "open",
                                                             label: "Open",
                                                             icon: <Open20Regular />,
-                                                            onClick: () => onNavigateToChat(s.session_id),
+                                                            onClick: () => {
+                                                                if (s.interaction_mode === "cli") {
+                                                                    onNavigateToCli(s.session_id);
+                                                                } else {
+                                                                    onNavigateToChat(s.session_id);
+                                                                }
+                                                            },
                                                         }}
                                                     />
                                                 </td>

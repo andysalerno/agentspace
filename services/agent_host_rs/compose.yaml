@@ -16,8 +16,6 @@ services:
       - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
       - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
       - KERNEL_WORKDIR=${KERNEL_WORKDIR}
-    ports:
-      - "8001:8001"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - skills:/skills

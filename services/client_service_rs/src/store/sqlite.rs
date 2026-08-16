@@ -12,8 +12,8 @@ use rusqlite::{Connection, Error as RusqliteError, ErrorCode, OptionalExtension,
 use crate::{
     errors::{StoreError, ValidationError},
     models::{
-        ClientType, MessageRecord, MessageRole, SessionRecord, ToolCallRecord, WorkspaceRecord,
-        WorkspaceStatus,
+        CliHarnessName, CliLaunchSnapshot, ClientType, MessageRecord, MessageRole, RuntimeStatus,
+        SessionRecord, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus,
     },
 };
 use tracing::{debug, info, warn};
@@ -36,6 +36,17 @@ CREATE TABLE IF NOT EXISTS client_sessions (
     status TEXT NOT NULL,
     channel_name TEXT,
     client_type TEXT,
+    interaction_mode TEXT NOT NULL DEFAULT 'chat',
+    cli_harness TEXT,
+    cli_connection_id TEXT,
+    harness_session_id TEXT,
+    runtime_generation INTEGER,
+    runtime_status TEXT,
+    workspace_volume_identity TEXT,
+    workspace_mounts TEXT,
+    launch_snapshot TEXT,
+    vscode_url TEXT,
+    free_port_url TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -427,6 +438,17 @@ impl SqliteSessionStore {
                        status = ?,
                        channel_name = ?,
                        client_type = ?,
+                       interaction_mode = ?,
+                       cli_harness = ?,
+                       cli_connection_id = ?,
+                       harness_session_id = ?,
+                       runtime_generation = ?,
+                       runtime_status = ?,
+                       workspace_volume_identity = ?,
+                       workspace_mounts = ?,
+                       launch_snapshot = ?,
+                       vscode_url = ?,
+                       free_port_url = ?,
                        updated_at = ?
                  WHERE session_id = ?
                 ",
@@ -436,6 +458,17 @@ impl SqliteSessionStore {
                     session.status,
                     session.channel_name,
                     session.client_type.map(ClientType::as_str),
+                    session.interaction_mode.as_str(),
+                    session.cli_harness.map(CliHarnessName::as_str),
+                    session.cli_connection_id,
+                    session.harness_session_id,
+                    optional_u64_to_i64(session.runtime_generation)?,
+                    session.runtime_status.map(RuntimeStatus::as_str),
+                    session.workspace_volume_identity,
+                    serialize_workspace_mounts(&session.workspace_mounts)?,
+                    serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
+                    session.vscode_url,
+                    session.free_port_url,
                     session.updated_at,
                     session.session_id,
                 ],
@@ -465,14 +498,28 @@ impl SqliteSessionStore {
                 "
                 INSERT INTO client_sessions (
                     session_id, agent_id, agent_host_session_id, status,
-                    channel_name, client_type, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    channel_name, client_type, interaction_mode, cli_harness,
+                    cli_connection_id, harness_session_id, runtime_generation,
+                    runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
+                    vscode_url, free_port_url, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     agent_host_session_id = excluded.agent_host_session_id,
                     status = excluded.status,
                     channel_name = excluded.channel_name,
                     client_type = excluded.client_type,
+                    interaction_mode = excluded.interaction_mode,
+                    cli_harness = excluded.cli_harness,
+                    cli_connection_id = excluded.cli_connection_id,
+                    harness_session_id = excluded.harness_session_id,
+                    runtime_generation = excluded.runtime_generation,
+                    runtime_status = excluded.runtime_status,
+                    workspace_volume_identity = excluded.workspace_volume_identity,
+                    workspace_mounts = excluded.workspace_mounts,
+                    launch_snapshot = excluded.launch_snapshot,
+                    vscode_url = excluded.vscode_url,
+                    free_port_url = excluded.free_port_url,
                     updated_at = excluded.updated_at
                 ",
                 params![
@@ -482,6 +529,17 @@ impl SqliteSessionStore {
                     session.status,
                     session.channel_name,
                     session.client_type.map(ClientType::as_str),
+                    session.interaction_mode.as_str(),
+                    session.cli_harness.map(CliHarnessName::as_str),
+                    session.cli_connection_id,
+                    session.harness_session_id,
+                    optional_u64_to_i64(session.runtime_generation)?,
+                    session.runtime_status.map(RuntimeStatus::as_str),
+                    session.workspace_volume_identity,
+                    serialize_workspace_mounts(&session.workspace_mounts)?,
+                    serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
+                    session.vscode_url,
+                    session.free_port_url,
                     session.created_at,
                     session.updated_at,
                 ],
@@ -642,6 +700,27 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
             "status",
             "status TEXT NOT NULL DEFAULT 'ready'",
         )?;
+        for (column, definition) in [
+            (
+                "interaction_mode",
+                "interaction_mode TEXT NOT NULL DEFAULT 'chat'",
+            ),
+            ("cli_harness", "cli_harness TEXT"),
+            ("cli_connection_id", "cli_connection_id TEXT"),
+            ("harness_session_id", "harness_session_id TEXT"),
+            ("runtime_generation", "runtime_generation INTEGER"),
+            ("runtime_status", "runtime_status TEXT"),
+            (
+                "workspace_volume_identity",
+                "workspace_volume_identity TEXT",
+            ),
+            ("workspace_mounts", "workspace_mounts TEXT"),
+            ("launch_snapshot", "launch_snapshot TEXT"),
+            ("vscode_url", "vscode_url TEXT"),
+            ("free_port_url", "free_port_url TEXT"),
+        ] {
+            ensure_column(connection, "client_sessions", column, definition)?;
+        }
         info!("initialized sqlite store schema");
         Ok(())
     })
@@ -707,6 +786,12 @@ fn row_to_workspace(row: &Row<'_>) -> Result<WorkspaceRecord, StoreError> {
 
 fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, StoreError> {
     let client_type_raw: Option<String> = row.get("client_type")?;
+    let interaction_mode_raw: Option<String> = row.get("interaction_mode")?;
+    let cli_harness_raw: Option<String> = row.get("cli_harness")?;
+    let runtime_generation_raw: Option<i64> = row.get("runtime_generation")?;
+    let runtime_status_raw: Option<String> = row.get("runtime_status")?;
+    let workspace_mounts_raw: Option<String> = row.get("workspace_mounts")?;
+    let launch_snapshot_raw: Option<String> = row.get("launch_snapshot")?;
     Ok(SessionRecord {
         session_id: row.get("session_id")?,
         agent_id: row.get("agent_id")?,
@@ -717,6 +802,29 @@ fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, Store
             .as_deref()
             .map(parse_client_type)
             .transpose()?,
+        interaction_mode: interaction_mode_raw
+            .as_deref()
+            .unwrap_or("chat")
+            .parse()
+            .map_err(validation_error("sessions"))?,
+        cli_harness: cli_harness_raw
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(validation_error("sessions"))?,
+        cli_connection_id: row.get("cli_connection_id")?,
+        harness_session_id: row.get("harness_session_id")?,
+        runtime_generation: runtime_generation_raw.map(i64_to_u64).transpose()?,
+        runtime_status: runtime_status_raw
+            .as_deref()
+            .map(str::parse)
+            .transpose()
+            .map_err(validation_error("sessions"))?,
+        workspace_volume_identity: row.get("workspace_volume_identity")?,
+        workspace_mounts: deserialize_workspace_mounts(workspace_mounts_raw.as_deref())?,
+        launch_snapshot: deserialize_launch_snapshot(launch_snapshot_raw.as_deref())?,
+        vscode_url: row.get("vscode_url")?,
+        free_port_url: row.get("free_port_url")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         messages: Vec::new(),
@@ -826,8 +934,11 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
         "
         INSERT INTO client_sessions (
             session_id, agent_id, agent_host_session_id, status,
-            channel_name, client_type, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            channel_name, client_type, interaction_mode, cli_harness,
+            cli_connection_id, harness_session_id, runtime_generation,
+            runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
+            vscode_url, free_port_url, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             session.session_id,
@@ -836,6 +947,18 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
             session.status,
             session.channel_name,
             session.client_type.map(ClientType::as_str),
+            session.interaction_mode.as_str(),
+            session.cli_harness.map(CliHarnessName::as_str),
+            session.cli_connection_id,
+            session.harness_session_id,
+            optional_u64_to_i64(session.runtime_generation).map_err(store_error_to_sqlite)?,
+            session.runtime_status.map(RuntimeStatus::as_str),
+            session.workspace_volume_identity,
+            serialize_workspace_mounts(&session.workspace_mounts).map_err(store_error_to_sqlite)?,
+            serialize_launch_snapshot(session.launch_snapshot.as_ref())
+                .map_err(store_error_to_sqlite)?,
+            session.vscode_url,
+            session.free_port_url,
             session.created_at,
             session.updated_at,
         ],
@@ -916,6 +1039,79 @@ fn i64_to_usize(value: i64) -> Result<usize, StoreError> {
         store: "sessions",
         detail: format!("content_offset is invalid: {error}"),
     })
+}
+
+fn optional_u64_to_i64(value: Option<u64>) -> Result<Option<i64>, StoreError> {
+    value
+        .map(|value| {
+            i64::try_from(value).map_err(|error| StoreError::Persistence {
+                store: "sessions",
+                detail: format!("runtime_generation is too large: {error}"),
+            })
+        })
+        .transpose()
+}
+
+fn i64_to_u64(value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|error| StoreError::Persistence {
+        store: "sessions",
+        detail: format!("runtime_generation is invalid: {error}"),
+    })
+}
+
+fn serialize_workspace_mounts(
+    mounts: &[WorkspaceMountRecord],
+) -> Result<Option<String>, StoreError> {
+    if mounts.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(mounts)
+        .map(Some)
+        .map_err(|error| StoreError::Persistence {
+            store: "sessions",
+            detail: format!("failed to serialize workspace_mounts: {error}"),
+        })
+}
+
+fn deserialize_workspace_mounts(
+    raw: Option<&str>,
+) -> Result<Vec<WorkspaceMountRecord>, StoreError> {
+    raw.map_or_else(
+        || Ok(Vec::new()),
+        |raw| {
+            serde_json::from_str(raw).map_err(|error| StoreError::Persistence {
+                store: "sessions",
+                detail: format!("failed to deserialize workspace_mounts: {error}"),
+            })
+        },
+    )
+}
+
+fn serialize_launch_snapshot(
+    snapshot: Option<&CliLaunchSnapshot>,
+) -> Result<Option<String>, StoreError> {
+    snapshot
+        .map(|snapshot| {
+            serde_json::to_string(snapshot).map_err(|error| StoreError::Persistence {
+                store: "sessions",
+                detail: format!("failed to serialize launch_snapshot: {error}"),
+            })
+        })
+        .transpose()
+}
+
+fn deserialize_launch_snapshot(raw: Option<&str>) -> Result<Option<CliLaunchSnapshot>, StoreError> {
+    raw.map(|raw| {
+        serde_json::from_str(raw).map_err(|error| StoreError::Persistence {
+            store: "sessions",
+            detail: format!("failed to deserialize launch_snapshot: {error}"),
+        })
+    })
+    .transpose()
+}
+
+fn store_error_to_sqlite(error: StoreError) -> RusqliteError {
+    RusqliteError::ToSqlConversionFailure(Box::new(error))
 }
 
 fn is_constraint(error: &RusqliteError) -> bool {

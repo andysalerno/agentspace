@@ -77,6 +77,218 @@ pub enum HarnessName {
     Echo,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CliHarnessName {
+    CopilotCli,
+}
+
+impl CliHarnessName {
+    const ALL: [Self; 1] = [Self::CopilotCli];
+
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CopilotCli => "copilot-cli",
+        }
+    }
+}
+
+impl Display for CliHarnessName {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CliHarnessName {
+    type Err = ValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "copilot-cli" => Ok(Self::CopilotCli),
+            _ => Err(ValidationError::InvalidCliHarnessName {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentCliRecord {
+    pub harness: CliHarnessName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InteractionMode {
+    #[default]
+    Chat,
+    Cli,
+}
+
+impl InteractionMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Cli => "cli",
+        }
+    }
+}
+
+impl Display for InteractionMode {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for InteractionMode {
+    type Err = ValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "chat" => Ok(Self::Chat),
+            "cli" => Ok(Self::Cli),
+            _ => Err(ValidationError::InvalidInteractionMode {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RuntimeStatus {
+    Starting,
+    Live,
+    Exited,
+    Disconnected,
+    Resuming,
+    Error,
+}
+
+impl RuntimeStatus {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Live => "live",
+            Self::Exited => "exited",
+            Self::Disconnected => "disconnected",
+            Self::Resuming => "resuming",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl FromStr for RuntimeStatus {
+    type Err = ValidationError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "starting" => Ok(Self::Starting),
+            "live" => Ok(Self::Live),
+            "exited" => Ok(Self::Exited),
+            "disconnected" => Ok(Self::Disconnected),
+            "resuming" => Ok(Self::Resuming),
+            "error" => Ok(Self::Error),
+            _ => Err(ValidationError::InvalidRuntimeStatus {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryState {
+    Recoverable,
+    LegacyUnrecoverable,
+}
+
+impl RecoveryState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Recoverable => "recoverable",
+            Self::LegacyUnrecoverable => "legacy-unrecoverable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LaunchValueSource {
+    Literal { value: String },
+    ConfigReference { field: String },
+    SecretReference { field: String, name: SecretName },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CliProviderLaunchSnapshot {
+    pub provider_type: String,
+    pub wire_api: String,
+    pub connection_id: String,
+    pub base_url: LaunchValueSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<LaunchValueSource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AdditionalPathIdentity {
+    SessionWorkspace {
+        path: String,
+    },
+    MountedWorkspace {
+        workspace_id: String,
+        mode: WorkspaceMountMode,
+        path: String,
+    },
+    Configured {
+        source: LaunchValueSource,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AgentProfileLaunchSnapshot {
+    pub identity: String,
+    pub system_prompt: LaunchValueSource,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CliLaunchOptionsSnapshot {
+    pub no_auto_update: bool,
+    pub mouse: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_dir: Option<LaunchValueSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_args: Option<LaunchValueSource>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CliLaunchSnapshot {
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<CliProviderLaunchSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<LaunchValueSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<LaunchValueSource>,
+    pub options: CliLaunchOptionsSnapshot,
+    pub additional_paths: Vec<AdditionalPathIdentity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_profile: Option<AgentProfileLaunchSnapshot>,
+}
+
 impl HarnessName {
     const ALL: [Self; 6] = [
         Self::ClaudeCode,
@@ -429,6 +641,8 @@ pub struct AgentRecord {
     pub env_vars: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<AgentCliRecord>,
     #[serde(default)]
     pub workspace_mounts: Vec<WorkspaceMountRecord>,
     pub created_at: String,
@@ -452,6 +666,7 @@ impl AgentRecord {
             skills: Vec::new(),
             env_vars: String::new(),
             connection_id: None,
+            cli: None,
             workspace_mounts: Vec::new(),
             created_at: now.clone(),
             updated_at: now,
@@ -468,6 +683,10 @@ impl AgentRecord {
             "skills": self.skills,
             "env_vars": self.env_vars,
             "connection_id": self.connection_id,
+            "cli": self.cli.as_ref().map(|cli| json!({
+                "harness": cli.harness.as_str(),
+                "connection_id": cli.connection_id,
+            })),
             "workspace_mounts": self.workspace_mounts.iter().map(WorkspaceMountRecord::summary).collect::<Vec<_>>(),
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -566,6 +785,28 @@ pub struct SessionRecord {
     pub status: String,
     pub channel_name: Option<String>,
     pub client_type: Option<ClientType>,
+    #[serde(default)]
+    pub interaction_mode: InteractionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_harness: Option<CliHarnessName>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_connection_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_status: Option<RuntimeStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_volume_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_mounts: Vec<WorkspaceMountRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_snapshot: Option<CliLaunchSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vscode_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_port_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -590,6 +831,17 @@ impl SessionRecord {
             status: status.into(),
             channel_name,
             client_type,
+            interaction_mode: InteractionMode::Chat,
+            cli_harness: None,
+            cli_connection_id: None,
+            harness_session_id: None,
+            runtime_generation: None,
+            runtime_status: None,
+            workspace_volume_identity: None,
+            workspace_mounts: Vec::new(),
+            launch_snapshot: None,
+            vscode_url: None,
+            free_port_url: None,
             created_at: now.clone(),
             updated_at: now,
             messages: Vec::new(),
@@ -597,19 +849,18 @@ impl SessionRecord {
     }
 
     #[must_use]
+    pub const fn recovery_state(&self) -> RecoveryState {
+        if self.workspace_volume_identity.is_some() {
+            RecoveryState::Recoverable
+        } else {
+            RecoveryState::LegacyUnrecoverable
+        }
+    }
+
+    #[must_use]
     pub fn summary(&self) -> Value {
-        let client_type = self.client_type.map(ClientType::as_str);
-        json!({
-            "session_id": self.session_id,
-            "agent_id": self.agent_id,
-            "agent_host_session_id": self.agent_host_session_id,
-            "status": self.status,
-            "channel_name": self.channel_name,
-            "client_type": client_type,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "message_count": self.messages.len(),
-        })
+        serde_json::to_value(PublicSessionSummary::from(self))
+            .unwrap_or_else(|_| Value::Object(Map::new()))
     }
 
     #[must_use]
@@ -626,6 +877,59 @@ impl SessionRecord {
         data.insert("messages".to_owned(), json!(messages));
         Value::Object(data)
     }
+}
+
+#[derive(Serialize)]
+pub struct PublicSessionSummary<'a> {
+    pub session_id: &'a str,
+    pub agent_id: &'a str,
+    pub status: &'a str,
+    pub channel_name: Option<&'a str>,
+    pub client_type: Option<&'static str>,
+    pub interaction_mode: &'static str,
+    pub cli_harness: Option<&'static str>,
+    pub cli_connection_id: Option<&'a str>,
+    pub harness_session_id: Option<&'a str>,
+    pub runtime_generation: Option<u64>,
+    pub runtime_status: Option<&'static str>,
+    pub recovery_state: &'static str,
+    pub vscode_url: Option<&'a str>,
+    pub free_port_url: Option<&'a str>,
+    pub created_at: &'a str,
+    pub updated_at: &'a str,
+    pub message_count: usize,
+}
+
+impl<'a> From<&'a SessionRecord> for PublicSessionSummary<'a> {
+    fn from(session: &'a SessionRecord) -> Self {
+        Self {
+            session_id: &session.session_id,
+            agent_id: &session.agent_id,
+            status: &session.status,
+            channel_name: session.channel_name.as_deref(),
+            client_type: session.client_type.map(ClientType::as_str),
+            interaction_mode: session.interaction_mode.as_str(),
+            cli_harness: session.cli_harness.map(CliHarnessName::as_str),
+            cli_connection_id: session.cli_connection_id.as_deref(),
+            harness_session_id: session.harness_session_id.as_deref(),
+            runtime_generation: session.runtime_generation,
+            runtime_status: session.runtime_status.map(RuntimeStatus::as_str),
+            recovery_state: session.recovery_state().as_str(),
+            vscode_url: session.vscode_url.as_deref(),
+            free_port_url: session.free_port_url.as_deref(),
+            created_at: &session.created_at,
+            updated_at: &session.updated_at,
+            message_count: session.messages.len(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PublicTerminalStatus {
+    pub state: String,
+    pub exit_status: Option<i64>,
+    pub attach_kind: Option<String>,
+    pub attachment_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -881,10 +1185,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord, GatewayType,
-        HarnessName, KernelConfigRecord, MessageRecord, MessageRole, SecretName, ToolCallRecord,
-        parse_env_vars, validate_agent_id, validate_connection_id, validate_gateway_id,
-        validate_skill_id, validate_workspace_id,
+        AgentCliRecord, AgentRecord, CliHarnessName, ClientType, ConnectionApiFlavor,
+        ConnectionRecord, GatewayRecord, GatewayType, HarnessName, InteractionMode,
+        KernelConfigRecord, MessageRecord, MessageRole, SecretName, ToolCallRecord, parse_env_vars,
+        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        validate_workspace_id,
     };
 
     #[test]
@@ -949,6 +1254,10 @@ mod tests {
         agent.skills = vec!["skill".to_owned()];
         agent.env_vars = "A=B".to_owned();
         agent.connection_id = Some("conn".to_owned());
+        agent.cli = Some(AgentCliRecord {
+            harness: CliHarnessName::CopilotCli,
+            connection_id: Some("cli-conn".to_owned()),
+        });
         assert_eq!(
             agent.summary(),
             json!({
@@ -959,6 +1268,10 @@ mod tests {
                 "skills": ["skill"],
                 "env_vars": "A=B",
                 "connection_id": "conn",
+                "cli": {
+                    "harness": "copilot-cli",
+                    "connection_id": "cli-conn",
+                },
                 "workspace_mounts": [],
                 "created_at": "c",
                 "updated_at": "u",
@@ -990,15 +1303,35 @@ mod tests {
             json!({
                 "session_id": "sess",
                 "agent_id": "agent",
-                "agent_host_session_id": "host-sess",
                 "status": "running",
                 "channel_name": "cli",
                 "client_type": "cli",
+                "interaction_mode": "chat",
+                "cli_harness": null,
+                "cli_connection_id": null,
+                "harness_session_id": null,
+                "runtime_generation": null,
+                "runtime_status": null,
+                "recovery_state": "legacy-unrecoverable",
+                "vscode_url": null,
+                "free_port_url": null,
                 "created_at": "c",
                 "updated_at": "u",
                 "message_count": 1,
             })
         );
+    }
+
+    #[test]
+    fn cli_harness_and_interaction_mode_are_strict() {
+        assert_eq!(
+            CliHarnessName::from_str("copilot-cli"),
+            Ok(CliHarnessName::CopilotCli)
+        );
+        assert!(CliHarnessName::from_str("acp").is_err());
+        assert_eq!(InteractionMode::from_str("chat"), Ok(InteractionMode::Chat));
+        assert_eq!(InteractionMode::from_str("cli"), Ok(InteractionMode::Cli));
+        assert!(InteractionMode::from_str("terminal").is_err());
     }
 
     #[test]

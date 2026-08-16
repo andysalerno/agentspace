@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{Arc, Mutex, OnceLock, PoisonError},
     time::Duration,
 };
@@ -10,57 +10,47 @@ use bollard::{
     Docker,
     container::LogOutput,
     errors::Error as BollardError,
+    exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults},
     models::{
         ContainerCreateBody, HostConfig, PortBinding as DockerPortBinding, PortMap,
         VolumeCreateRequest,
     },
     query_parameters::{
-        CreateContainerOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-        RemoveVolumeOptionsBuilder, StatsOptionsBuilder, WaitContainerOptionsBuilder,
+        CreateContainerOptionsBuilder, ListContainersOptionsBuilder, ListVolumesOptionsBuilder,
+        LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveVolumeOptionsBuilder,
+        StatsOptionsBuilder, WaitContainerOptionsBuilder,
     },
 };
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{sync::Mutex as AsyncMutex, time};
+use uuid::Uuid;
 
 use crate::{
     errors::AgentHostError,
     models::{
-        DockerKernelSession, DockerStatsSummary, HarnessName, KernelEvent, KernelRuntimeSession,
-        RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
+        CleanupAction, CleanupReport, CleanupResource, CleanupResourceIdentity,
+        CleanupResourceKind, DockerKernelSession, DockerStatsSummary, HarnessName, InteractionMode,
+        KernelEvent, KernelRuntimeSession, RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
     },
     sessions::{EventStream, KernelRuntime, RuntimeCreateSession},
+    terminal::{ATTACHMENT_ID_ENV, TerminalExec, TerminalStatus},
 };
 
 const SESSION_WORKSPACE_MOUNT_PATH: &str = "/workspace";
+const LABEL_INTERACTION_MODE: &str = "agentspace.interaction_mode";
+const LABEL_MANAGED: &str = "agentspace.managed";
+const LABEL_RESOURCE_ID: &str = "agentspace.resource_id";
+const LABEL_ROLE: &str = "agentspace.role";
+const LABEL_SESSION_ID: &str = "agentspace.session_id";
+const RUNTIME_RECOVERY_ENV: &str = "AGENTSPACE_RUNTIME_RECOVERY";
+const TERMINAL_RESUME_ENV: &str = "KERNEL_TERMINAL_RESUME";
 const CONTAINER_NAME_PLACEHOLDER: &str = concat!("{", "container_name", "}");
 const HOST_IP_PLACEHOLDER: &str = concat!("{", "host_ip", "}");
 const HOST_PORT_PLACEHOLDER: &str = concat!("{", "host_port", "}");
 const CONTAINER_PORT_PLACEHOLDER: &str = concat!("{", "container_port", "}");
-const WORKSPACE_SNAPSHOT_SCRIPT: &str = r#"
-from __future__ import annotations
-
-import os
-import pathlib
-import shutil
-
-source = pathlib.Path("/workspace-src")
-dest = pathlib.Path("/workspace-dest")
-exclude_env = os.environ.get("AGENTSPACE_WORKSPACE_EXCLUDES", "")
-exclude = {item for item in exclude_env.split(",") if item}
-dest.mkdir(parents=True, exist_ok=True)
-for entry in source.iterdir():
-    if entry.name in exclude:
-        continue
-    target = dest / entry.name
-    if entry.is_symlink():
-        target.symlink_to(os.readlink(entry))
-    elif entry.is_dir():
-        shutil.copytree(entry, target, symlinks=True, dirs_exist_ok=True)
-    else:
-        shutil.copy2(entry, target)
-"#;
+const WORKSPACE_SNAPSHOT_SCRIPT: &str = include_str!("../scripts/snapshot_workspace.py");
 
 pub type DockerRuntime = DockerKernelRuntime;
 
@@ -105,11 +95,14 @@ impl DockerKernelRuntime {
     async fn run_kernel_container(
         &self,
         container_name: &str,
+        session_workspace_volume: &str,
         request: &RuntimeCreateSession,
     ) -> Result<(), AgentHostError> {
         let environment = self.kernel_environment(request);
         let ports = self.kernel_ports(&environment);
-        let volumes = self.kernel_volumes(container_name, request).await?;
+        let volumes = self
+            .kernel_volumes(session_workspace_volume, request)
+            .await?;
 
         self.backend
             .run_container(ContainerRunSpec {
@@ -118,7 +111,7 @@ impl DockerKernelRuntime {
                 detach: true,
                 entrypoint: kernel_entrypoint(),
                 environment,
-                labels: btree_map([("agentspace.role", "kernel")]),
+                labels: kernel_labels(request),
                 name: Some(container_name.to_owned()),
                 network: Some(self.config.kernel_network.clone()),
                 network_disabled: false,
@@ -130,7 +123,20 @@ impl DockerKernelRuntime {
 
     fn kernel_environment(&self, request: &RuntimeCreateSession) -> BTreeMap<String, String> {
         let mut environment = request.env.clone();
+        let recovery_expected = environment.remove(RUNTIME_RECOVERY_ENV).is_some();
         environment.insert("KERNEL_HARNESS".to_owned(), request.harness.to_string());
+        environment.insert(
+            "AGENTSPACE_SESSION_ID".to_owned(),
+            request.session_id.clone(),
+        );
+        if request.harness == HarnessName::CopilotCli {
+            environment
+                .entry("KERNEL_SESSION_ID".to_owned())
+                .or_insert_with(|| request.session_id.clone());
+            if recovery_expected {
+                environment.insert(TERMINAL_RESUME_ENV.to_owned(), "1".to_owned());
+            }
+        }
         if !request.additional_paths.is_empty() {
             environment.insert(
                 "KERNEL_ADDITIONAL_PATHS".to_owned(),
@@ -145,6 +151,12 @@ impl DockerKernelRuntime {
             "KERNEL_SKILLS_STAGING_DIR".to_owned(),
             "/mnt/all-skills".to_owned(),
         );
+        if request.harness == HarnessName::CopilotCli {
+            environment.insert(
+                "KERNEL_LEGACY_COPILOT_SKILLS_DIR".to_owned(),
+                "/root/.copilot/skills".to_owned(),
+            );
+        }
         environment.insert("KERNEL_ENABLED_SKILLS".to_owned(), request.skills.join(","));
         environment
             .entry("KERNEL_VSCODE_ENABLED".to_owned())
@@ -172,25 +184,12 @@ impl DockerKernelRuntime {
 
     async fn kernel_volumes(
         &self,
-        container_name: &str,
+        session_workspace_volume: &str,
         request: &RuntimeCreateSession,
     ) -> Result<Vec<VolumeMount>, AgentHostError> {
-        let session_workspace_volume =
-            session_workspace_volume_name_from_container(container_name)?;
-        self.backend
-            .ensure_volume(
-                &session_workspace_volume,
-                btree_map([
-                    ("agentspace.role", "session-workspace"),
-                    ("agentspace.managed", "true"),
-                    ("agentspace.container_name", container_name),
-                ]),
-            )
-            .await?;
-
         let mut volumes = vec![
             VolumeMount {
-                volume_name: session_workspace_volume,
+                volume_name: session_workspace_volume.to_owned(),
                 bind: SESSION_WORKSPACE_MOUNT_PATH.to_owned(),
                 mode: "rw".to_owned(),
             },
@@ -212,6 +211,161 @@ impl DockerKernelRuntime {
             volumes.push(self.skill_volume_mount(resource).await?);
         }
         Ok(volumes)
+    }
+
+    async fn ensure_session_workspace_volume(
+        &self,
+        request: &RuntimeCreateSession,
+    ) -> Result<String, AgentHostError> {
+        let expected_name = session_workspace_volume_name(&request.session_id);
+        if let Some(volume) = self.backend.inspect_volume(&expected_name).await?
+            && volume.labels.get(LABEL_SESSION_ID) != Some(&request.session_id)
+        {
+            return Err(identity_collision(
+                "volume name",
+                &expected_name,
+                &request.session_id,
+            ));
+        }
+
+        let mut matching = self
+            .backend
+            .list_volumes()
+            .await?
+            .into_iter()
+            .filter(|volume| volume.labels.get(LABEL_SESSION_ID) == Some(&request.session_id))
+            .collect::<Vec<_>>();
+        if matching.len() > 1 {
+            return Err(AgentHostError::conflict(format!(
+                "multiple Docker volumes claim session identity {:?}",
+                request.session_id
+            )));
+        }
+        if let Some(volume) = matching.pop() {
+            validate_session_resource_labels(
+                "Docker volume",
+                &volume.name,
+                &volume.labels,
+                "session-workspace",
+                request.interaction_mode,
+            )?;
+            return Ok(volume.name);
+        }
+        if recovery_expected(request) {
+            return Err(AgentHostError::conflict(format!(
+                "durable session workspace volume for session {:?} is missing",
+                request.session_id
+            )));
+        }
+
+        let mut labels = session_workspace_labels(request);
+        labels.insert(LABEL_RESOURCE_ID.to_owned(), Uuid::now_v7().to_string());
+        self.backend.ensure_volume(&expected_name, labels).await?;
+        let created = self
+            .backend
+            .inspect_volume(&expected_name)
+            .await?
+            .ok_or_else(|| {
+                AgentHostError::runtime(format!(
+                    "Docker volume {expected_name:?} disappeared during creation"
+                ))
+            })?;
+        if created.labels.get(LABEL_SESSION_ID) != Some(&request.session_id) {
+            return Err(identity_collision(
+                "volume name",
+                &expected_name,
+                &request.session_id,
+            ));
+        }
+        validate_session_resource_labels(
+            "Docker volume",
+            &created.name,
+            &created.labels,
+            "session-workspace",
+            request.interaction_mode,
+        )?;
+        Ok(expected_name)
+    }
+
+    async fn ensure_copilot_state_volume(
+        &self,
+        request: &RuntimeCreateSession,
+    ) -> Result<(), AgentHostError> {
+        if request.harness != HarnessName::CopilotCli {
+            return Ok(());
+        }
+        if self
+            .backend
+            .inspect_volume(&self.config.copilot_volume)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if recovery_expected(request) {
+            return Err(AgentHostError::conflict(format!(
+                "durable Copilot state volume {:?} is missing",
+                self.config.copilot_volume
+            )));
+        }
+        self.backend
+            .ensure_volume(
+                &self.config.copilot_volume,
+                btree_map([(LABEL_ROLE, "copilot-state"), (LABEL_MANAGED, "true")]),
+            )
+            .await
+    }
+
+    async fn matching_kernel_container(
+        &self,
+        request: &RuntimeCreateSession,
+    ) -> Result<Option<DockerContainerResource>, AgentHostError> {
+        let expected_name = kernel_container_name(&request.session_id);
+        if let Some(container) = self.backend.inspect_container(&expected_name).await?
+            && container.labels.get(LABEL_SESSION_ID) != Some(&request.session_id)
+        {
+            return Err(identity_collision(
+                "container name",
+                &expected_name,
+                &request.session_id,
+            ));
+        }
+
+        let mut matching = self
+            .backend
+            .list_containers()
+            .await?
+            .into_iter()
+            .filter(|container| container.labels.get(LABEL_SESSION_ID) == Some(&request.session_id))
+            .collect::<Vec<_>>();
+        if matching.len() > 1 {
+            return Err(AgentHostError::conflict(format!(
+                "multiple Docker containers claim session identity {:?}",
+                request.session_id
+            )));
+        }
+        let Some(container) = matching.pop() else {
+            return Ok(None);
+        };
+        validate_session_resource_labels(
+            "Docker container",
+            &container.name,
+            &container.labels,
+            "kernel",
+            request.interaction_mode,
+        )?;
+        if container
+            .labels
+            .get("agentspace.harness")
+            .map(String::as_str)
+            != Some(request.harness.as_str())
+        {
+            return Err(AgentHostError::conflict(format!(
+                "Docker container {:?} has an incompatible AgentSpace harness label",
+                container.name
+            )));
+        }
+        Ok(Some(container))
     }
 
     async fn skill_volume_mount(
@@ -321,8 +475,13 @@ impl DockerKernelRuntime {
         source_volume_name: &str,
         target_workspace_id: &str,
         target_volume_name: &str,
-        exclude_names: &[String],
+        exclude_paths: &[String],
     ) -> Result<(), AgentHostError> {
+        if source_volume_name == target_volume_name {
+            return Err(AgentHostError::validation(
+                "workspace snapshot source and destination volumes must be different",
+            ));
+        }
         self.backend.require_volume(source_volume_name).await?;
         self.backend
             .ensure_volume(
@@ -345,7 +504,10 @@ impl DockerKernelRuntime {
                 ],
                 environment: btree_map([
                     ("AGENTSPACE_WORKSPACE_ID", target_workspace_id),
-                    ("AGENTSPACE_WORKSPACE_EXCLUDES", &exclude_names.join(",")),
+                    (
+                        "AGENTSPACE_WORKSPACE_EXCLUDE_PATHS_JSON",
+                        &serde_json::to_string(exclude_paths)?,
+                    ),
                 ]),
                 labels: btree_map([("agentspace.role", "workspace-snapshot")]),
                 name: None,
@@ -366,6 +528,100 @@ impl DockerKernelRuntime {
                 ],
             })
             .await
+    }
+
+    async fn delete_reviewed_orphans(
+        &self,
+        owned_session_ids: &BTreeSet<String>,
+        reviewed_resources: &[CleanupResourceIdentity],
+    ) -> Result<CleanupReport, AgentHostError> {
+        let unique = reviewed_resources.iter().cloned().collect::<BTreeSet<_>>();
+        if unique.len() != reviewed_resources.len() {
+            return Err(AgentHostError::validation(
+                "reviewed_resources must not contain duplicates",
+            ));
+        }
+
+        let mut resources = Vec::with_capacity(unique.len());
+        for reviewed in unique {
+            if reviewed
+                .session_id
+                .as_ref()
+                .is_some_and(|session_id| owned_session_ids.contains(session_id))
+            {
+                resources.push(cleanup_resource(
+                    reviewed.kind,
+                    reviewed.name,
+                    reviewed.resource_id,
+                    &BTreeMap::new(),
+                    None,
+                    false,
+                    Err(AgentHostError::conflict(
+                        "reviewed runtime resource is now owned by a durable session",
+                    )),
+                ));
+                continue;
+            }
+            let resource = match reviewed.kind {
+                CleanupResourceKind::KernelContainer => {
+                    let current = self.backend.inspect_container(&reviewed.name).await?;
+                    let labels = current
+                        .as_ref()
+                        .map(|resource| resource.labels.clone())
+                        .unwrap_or_default();
+                    let status = current.as_ref().map(|resource| resource.status.clone());
+                    let result = match validate_reviewed_container(current.as_ref(), &reviewed) {
+                        Ok(()) => self.backend.remove_container(&reviewed.name).await,
+                        Err(error) => Err(error),
+                    };
+                    cleanup_resource(
+                        reviewed.kind,
+                        reviewed.name,
+                        reviewed.resource_id,
+                        &labels,
+                        status,
+                        false,
+                        result,
+                    )
+                }
+                CleanupResourceKind::SessionWorkspaceVolume => {
+                    let current = self.backend.inspect_volume(&reviewed.name).await?;
+                    let labels = current
+                        .as_ref()
+                        .map(|resource| resource.labels.clone())
+                        .unwrap_or_default();
+                    let result = match validate_reviewed_volume(current.as_ref(), &reviewed) {
+                        Ok(()) => self.backend.remove_volume(&reviewed.name).await,
+                        Err(error) => Err(error),
+                    };
+                    cleanup_resource(
+                        reviewed.kind,
+                        reviewed.name,
+                        reviewed.resource_id,
+                        &labels,
+                        None,
+                        false,
+                        result,
+                    )
+                }
+            };
+            resources.push(resource);
+        }
+        let deleted_count = resources
+            .iter()
+            .filter(|resource| resource.action == CleanupAction::Deleted)
+            .count();
+        let error_count = resources
+            .iter()
+            .filter(|resource| resource.action == CleanupAction::DeleteFailed)
+            .count();
+        Ok(CleanupReport {
+            dry_run: false,
+            owned_session_count: owned_session_ids.len(),
+            resources,
+            deleted_count,
+            error_count,
+        })
     }
 
     async fn open_workspace_vscode_locked(
@@ -421,6 +677,53 @@ impl DockerKernelRuntime {
             .await?;
         Ok((container_name, vscode_url))
     }
+
+    async fn terminal_request(
+        &self,
+        session: &KernelRuntimeSession,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        missing_attachment_id: Option<&str>,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        let mut request = self
+            .client
+            .request(method, format!("{}{path}", handle.base_url));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.map_err(|error| {
+            AgentHostError::upstream_unavailable(format!(
+                "kernel terminal controller is unavailable: {error}"
+            ))
+        })?;
+        if response.status().is_success() {
+            return response.json::<TerminalStatus>().await.map_err(|error| {
+                AgentHostError::upstream_unavailable(format!(
+                    "kernel terminal controller returned an invalid response: {error}"
+                ))
+            });
+        }
+
+        let status = response.status();
+        let detail = response
+            .json::<KernelErrorResponse>()
+            .await
+            .ok()
+            .map_or_else(
+                || format!("kernel terminal controller returned HTTP {status}"),
+                |payload| payload.detail,
+            );
+        match status.as_u16() {
+            404 => missing_attachment_id.map_or_else(
+                || Err(AgentHostError::upstream_unavailable(detail)),
+                |attachment_id| Err(AgentHostError::terminal_attachment_not_found(attachment_id)),
+            ),
+            409 => Err(AgentHostError::conflict(detail)),
+            _ => Err(AgentHostError::upstream_unavailable(detail)),
+        }
+    }
 }
 
 #[async_trait]
@@ -429,12 +732,47 @@ impl KernelRuntime for DockerKernelRuntime {
         &self,
         request: RuntimeCreateSession,
     ) -> Result<KernelRuntimeSession, AgentHostError> {
-        let container_name = kernel_container_name(&request.session_id);
+        self.ensure_copilot_state_volume(&request).await?;
+        let workspace_volume_name = self.ensure_session_workspace_volume(&request).await?;
+        let matching_container = self.matching_kernel_container(&request).await?;
+        let container_name = if let Some(container) = matching_container {
+            if container.running {
+                let mounted_workspace = container
+                    .mounts
+                    .get(SESSION_WORKSPACE_MOUNT_PATH)
+                    .ok_or_else(|| {
+                        AgentHostError::conflict(format!(
+                            "Docker container {:?} for session {:?} has no session workspace mount",
+                            container.name, request.session_id
+                        ))
+                    })?;
+                if mounted_workspace != &workspace_volume_name {
+                    return Err(AgentHostError::conflict(format!(
+                        "Docker container {:?} for session {:?} mounts workspace volume {:?}, expected {:?}",
+                        container.name,
+                        request.session_id,
+                        mounted_workspace,
+                        workspace_volume_name
+                    )));
+                }
+                container.name
+            } else {
+                self.backend.remove_container(&container.name).await?;
+                let expected_name = kernel_container_name(&request.session_id);
+                self.run_kernel_container(&expected_name, &workspace_volume_name, &request)
+                    .await?;
+                expected_name
+            }
+        } else {
+            let expected_name = kernel_container_name(&request.session_id);
+            self.run_kernel_container(&expected_name, &workspace_volume_name, &request)
+                .await?;
+            expected_name
+        };
         let base_url = self
             .config
             .base_url_template
             .replace(CONTAINER_NAME_PLACEHOLDER, &container_name);
-        self.run_kernel_container(&container_name, &request).await?;
         let vscode_url = self
             .url_for_container_port(
                 &container_name,
@@ -453,8 +791,9 @@ impl KernelRuntime for DockerKernelRuntime {
             .await?;
         self.wait_until_ready(&base_url).await?;
         Ok(KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: request.session_id,
             container_name,
-            session_workspace_volume_name: session_workspace_volume_name(&request.session_id),
+            session_workspace_volume_name: workspace_volume_name,
             base_url,
             vscode_url,
             free_port_url,
@@ -580,6 +919,32 @@ impl KernelRuntime for DockerKernelRuntime {
 
     async fn destroy_session(&self, session: KernelRuntimeSession) -> Result<(), AgentHostError> {
         let handle = Self::docker_session(&session)?;
+        if let Some(container) = self
+            .backend
+            .inspect_container(&handle.container_name)
+            .await?
+            && (!is_managed_role(&container.labels, "kernel")
+                || container.labels.get(LABEL_SESSION_ID) != Some(&handle.session_id))
+        {
+            return Err(identity_collision(
+                "container name",
+                &handle.container_name,
+                &handle.session_id,
+            ));
+        }
+        if let Some(volume) = self
+            .backend
+            .inspect_volume(&handle.session_workspace_volume_name)
+            .await?
+            && (!is_managed_role(&volume.labels, "session-workspace")
+                || volume.labels.get(LABEL_SESSION_ID) != Some(&handle.session_id))
+        {
+            return Err(identity_collision(
+                "volume name",
+                &handle.session_workspace_volume_name,
+                &handle.session_id,
+            ));
+        }
         self.backend
             .remove_container(&handle.container_name)
             .await?;
@@ -588,19 +953,137 @@ impl KernelRuntime for DockerKernelRuntime {
             .await
     }
 
+    async fn destroy_session_by_id(&self, session_id: &str) -> Result<(), AgentHostError> {
+        let mut containers = self
+            .backend
+            .list_containers()
+            .await?
+            .into_iter()
+            .filter(|container| {
+                is_managed_role(&container.labels, "kernel")
+                    && container.labels.get(LABEL_SESSION_ID).map(String::as_str)
+                        == Some(session_id)
+            })
+            .collect::<Vec<_>>();
+        let mut volumes = self
+            .backend
+            .list_volumes()
+            .await?
+            .into_iter()
+            .filter(|volume| {
+                is_managed_role(&volume.labels, "session-workspace")
+                    && volume.labels.get(LABEL_SESSION_ID).map(String::as_str) == Some(session_id)
+            })
+            .collect::<Vec<_>>();
+        if containers.len() > 1 || volumes.len() > 1 {
+            return Err(AgentHostError::conflict(format!(
+                "multiple managed Docker resources claim session identity {session_id:?}"
+            )));
+        }
+        if containers.is_empty() && volumes.is_empty() {
+            return Err(AgentHostError::session_not_found(session_id));
+        }
+        if let Some(container) = containers.pop() {
+            self.backend.remove_container(&container.name).await?;
+        }
+        if let Some(volume) = volumes.pop() {
+            self.backend.remove_volume(&volume.name).await?;
+        }
+        Ok(())
+    }
+
+    async fn cleanup_orphans(
+        &self,
+        owned_session_ids: &BTreeSet<String>,
+        dry_run: bool,
+        reviewed_resources: Option<&[CleanupResourceIdentity]>,
+    ) -> Result<CleanupReport, AgentHostError> {
+        if !dry_run {
+            let reviewed_resources = reviewed_resources.ok_or_else(|| {
+                AgentHostError::validation(
+                    "destructive runtime cleanup requires reviewed_resources from a dry-run report",
+                )
+            })?;
+            return self
+                .delete_reviewed_orphans(owned_session_ids, reviewed_resources)
+                .await;
+        }
+        let mut containers = self
+            .backend
+            .list_containers()
+            .await?
+            .into_iter()
+            .filter(|container| {
+                is_managed_role(&container.labels, "kernel")
+                    && !resource_is_owned(&container.labels, owned_session_ids)
+            })
+            .collect::<Vec<_>>();
+        containers.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut volumes = self
+            .backend
+            .list_volumes()
+            .await?
+            .into_iter()
+            .filter(|volume| {
+                is_managed_role(&volume.labels, "session-workspace")
+                    && !resource_is_owned(&volume.labels, owned_session_ids)
+            })
+            .collect::<Vec<_>>();
+        volumes.sort_by(|left, right| left.name.cmp(&right.name));
+
+        let mut resources = Vec::with_capacity(containers.len() + volumes.len());
+        for container in containers {
+            resources.push(cleanup_resource(
+                CleanupResourceKind::KernelContainer,
+                container.name,
+                container.resource_id,
+                &container.labels,
+                Some(container.status),
+                true,
+                Ok(()),
+            ));
+        }
+        for volume in volumes {
+            resources.push(cleanup_resource(
+                CleanupResourceKind::SessionWorkspaceVolume,
+                volume.name,
+                volume.resource_id,
+                &volume.labels,
+                None,
+                true,
+                Ok(()),
+            ));
+        }
+        let deleted_count = resources
+            .iter()
+            .filter(|resource| resource.action == CleanupAction::Deleted)
+            .count();
+        let error_count = resources
+            .iter()
+            .filter(|resource| resource.action == CleanupAction::DeleteFailed)
+            .count();
+        Ok(CleanupReport {
+            dry_run,
+            owned_session_count: owned_session_ids.len(),
+            resources,
+            deleted_count,
+            error_count,
+        })
+    }
+
     async fn snapshot_session_workspace(
         &self,
         session: &KernelRuntimeSession,
         workspace_id: String,
         volume_name: String,
-        exclude_names: Vec<String>,
+        exclude_paths: Vec<String>,
     ) -> Result<Value, AgentHostError> {
         let handle = Self::docker_session(session)?;
         self.copy_workspace_volume(
             &handle.session_workspace_volume_name,
             &workspace_id,
             &volume_name,
-            &exclude_names,
+            &exclude_paths,
         )
         .await?;
         Ok(json!({ "workspace_id": workspace_id, "volume_name": volume_name }))
@@ -650,6 +1133,88 @@ impl KernelRuntime for DockerKernelRuntime {
             "container_name": container_name,
             "vscode_url": vscode_url,
         }))
+    }
+
+    async fn terminal_status(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(session, reqwest::Method::GET, "/terminal", None, None)
+            .await
+    }
+
+    async fn terminal_ensure(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(
+            session,
+            reqwest::Method::POST,
+            "/terminal/ensure",
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn terminal_stop(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(session, reqwest::Method::POST, "/terminal/stop", None, None)
+            .await
+    }
+
+    async fn terminal_resume(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(
+            session,
+            reqwest::Method::POST,
+            "/terminal/resume",
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn terminal_detach_client(
+        &self,
+        session: &KernelRuntimeSession,
+        tmux_client_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(
+            session,
+            reqwest::Method::POST,
+            "/terminal/detach-client",
+            Some(json!({ "tmux_client_id": tmux_client_id })),
+            Some(tmux_client_id),
+        )
+        .await
+    }
+
+    async fn terminal_attach(
+        &self,
+        session: &KernelRuntimeSession,
+        attachment_id: &str,
+        attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        self.backend
+            .open_terminal_exec(&handle.container_name, attachment_id, attach_argv)
+            .await
+    }
+
+    async fn terminal_resize(
+        &self,
+        session: &KernelRuntimeSession,
+        exec_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), AgentHostError> {
+        Self::docker_session(session)?;
+        self.backend.resize_terminal_exec(exec_id, cols, rows).await
     }
 }
 
@@ -766,6 +1331,20 @@ pub trait DockerBackend: Send + Sync {
 
     async fn run_container(&self, spec: ContainerRunSpec) -> Result<(), AgentHostError>;
 
+    async fn inspect_container(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<DockerContainerResource>, AgentHostError>;
+
+    async fn list_containers(&self) -> Result<Vec<DockerContainerResource>, AgentHostError>;
+
+    async fn inspect_volume(
+        &self,
+        volume_name: &str,
+    ) -> Result<Option<DockerVolumeResource>, AgentHostError>;
+
+    async fn list_volumes(&self) -> Result<Vec<DockerVolumeResource>, AgentHostError>;
+
     async fn container_host_port(
         &self,
         container_name: &str,
@@ -788,6 +1367,45 @@ pub trait DockerBackend: Send + Sync {
         &self,
         container_name: &str,
     ) -> Result<Option<DockerStats>, AgentHostError>;
+
+    async fn open_terminal_exec(
+        &self,
+        _container_name: &str,
+        _attachment_id: &str,
+        _attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal exec is not supported by this Docker backend",
+        ))
+    }
+
+    async fn resize_terminal_exec(
+        &self,
+        _exec_id: &str,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<(), AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal exec resize is not supported by this Docker backend",
+        ))
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DockerContainerResource {
+    pub name: String,
+    pub resource_id: String,
+    pub labels: BTreeMap<String, String>,
+    pub running: bool,
+    pub status: String,
+    pub mounts: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DockerVolumeResource {
+    pub name: String,
+    pub resource_id: String,
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -828,6 +1446,11 @@ struct KernelHistoryResponse {
 struct KernelLogsResponse {
     #[serde(default)]
     lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct KernelErrorResponse {
+    detail: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -953,8 +1576,22 @@ impl DockerBackend for BollardDockerBackend {
                 .build();
             let mut stream = docker.wait_container(container_name, Some(options));
             stream.next().await.map_or_else(
-                || Ok(()),
-                |result| result.map(|_| ()).map_err(AgentHostError::from),
+                || {
+                    Err(AgentHostError::runtime(format!(
+                        "Docker container {container_name:?} ended without an exit status"
+                    )))
+                },
+                |result| {
+                    let response = result.map_err(AgentHostError::from)?;
+                    if response.status_code == 0 {
+                        Ok(())
+                    } else {
+                        Err(AgentHostError::runtime(format!(
+                            "Docker container {container_name:?} exited with status {}",
+                            response.status_code
+                        )))
+                    }
+                },
             )
         };
         let remove_result = if !spec.detach && spec.auto_remove {
@@ -968,6 +1605,70 @@ impl DockerBackend for BollardDockerBackend {
             Ok(())
         };
         wait_result.and(remove_result)
+    }
+
+    async fn inspect_container(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<DockerContainerResource>, AgentHostError> {
+        let docker = self.docker()?;
+        match docker
+            .inspect_container(
+                container_name,
+                None::<bollard::query_parameters::InspectContainerOptions>,
+            )
+            .await
+        {
+            Ok(inspect) => Ok(Some(container_resource(inspect, container_name))),
+            Err(error) if is_bollard_not_found(&error) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn list_containers(&self) -> Result<Vec<DockerContainerResource>, AgentHostError> {
+        let docker = self.docker()?;
+        let options = ListContainersOptionsBuilder::default().all(true).build();
+        let summaries = docker.list_containers(Some(options)).await?;
+        let mut resources = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            let identity = summary.id.or_else(|| {
+                summary
+                    .names
+                    .and_then(|names| names.into_iter().next())
+                    .map(|name| name.trim_start_matches('/').to_owned())
+            });
+            let Some(identity) = identity else {
+                continue;
+            };
+            if let Some(resource) = self.inspect_container(&identity).await? {
+                resources.push(resource);
+            }
+        }
+        Ok(resources)
+    }
+
+    async fn inspect_volume(
+        &self,
+        volume_name: &str,
+    ) -> Result<Option<DockerVolumeResource>, AgentHostError> {
+        let docker = self.docker()?;
+        match docker.inspect_volume(volume_name).await {
+            Ok(volume) => Ok(Some(volume_resource(volume))),
+            Err(error) if is_bollard_not_found(&error) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn list_volumes(&self) -> Result<Vec<DockerVolumeResource>, AgentHostError> {
+        let docker = self.docker()?;
+        let options = ListVolumesOptionsBuilder::default().build();
+        let response = docker.list_volumes(Some(options)).await?;
+        Ok(response
+            .volumes
+            .unwrap_or_default()
+            .into_iter()
+            .map(volume_resource)
+            .collect())
     }
 
     async fn container_host_port(
@@ -991,21 +1692,10 @@ impl DockerBackend for BollardDockerBackend {
     }
 
     async fn container_is_running(&self, container_name: &str) -> Result<bool, AgentHostError> {
-        let docker = self.docker()?;
-        match docker
-            .inspect_container(
-                container_name,
-                None::<bollard::query_parameters::InspectContainerOptions>,
-            )
-            .await
-        {
-            Ok(inspect) => Ok(inspect
-                .state
-                .and_then(|state| state.running)
-                .unwrap_or(false)),
-            Err(error) if is_bollard_not_found(&error) => Ok(false),
-            Err(error) => Err(error.into()),
-        }
+        Ok(self
+            .inspect_container(container_name)
+            .await?
+            .is_some_and(|container| container.running))
     }
 
     async fn remove_container(&self, container_name: &str) -> Result<(), AgentHostError> {
@@ -1071,6 +1761,61 @@ impl DockerBackend for BollardDockerBackend {
             Err(error) if is_bollard_not_found(&error) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn open_terminal_exec(
+        &self,
+        container_name: &str,
+        attachment_id: &str,
+        attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        let docker = self.docker()?;
+        let created = docker
+            .create_exec(
+                container_name,
+                terminal_exec_options(attachment_id, attach_argv),
+            )
+            .await?;
+        let started = docker
+            .start_exec(
+                &created.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: true,
+                    output_capacity: Some(1024 * 1024),
+                }),
+            )
+            .await?;
+        let StartExecResults::Attached { output, input } = started else {
+            return Err(AgentHostError::runtime(
+                "Docker unexpectedly detached terminal exec",
+            ));
+        };
+
+        let output = output.map(|item| item.map(log_output_bytes).map_err(AgentHostError::from));
+        Ok(TerminalExec {
+            exec_id: created.id,
+            input,
+            output: Box::pin(output),
+        })
+    }
+
+    async fn resize_terminal_exec(
+        &self,
+        exec_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), AgentHostError> {
+        self.docker()?
+            .resize_exec(
+                exec_id,
+                ResizeExecOptions {
+                    height: rows,
+                    width: cols,
+                },
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -1270,6 +2015,218 @@ fn environment_entries(environment: &BTreeMap<String, String>) -> Vec<String> {
         .collect()
 }
 
+fn container_resource(
+    inspect: bollard::models::ContainerInspectResponse,
+    fallback_name: &str,
+) -> DockerContainerResource {
+    let resource_id = inspect.id.clone().unwrap_or_default();
+    let name = inspect
+        .name
+        .unwrap_or_else(|| fallback_name.to_owned())
+        .trim_start_matches('/')
+        .to_owned();
+    let labels = inspect
+        .config
+        .and_then(|config| config.labels)
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let (running, status) = inspect.state.map_or_else(
+        || (false, "unknown".to_owned()),
+        |state| {
+            let running = state.running.unwrap_or(false);
+            let status = state
+                .status
+                .and_then(|status| serde_json::to_value(status).ok())
+                .and_then(|value| value.as_str().map(ToOwned::to_owned))
+                .unwrap_or_else(|| {
+                    if running {
+                        "running".to_owned()
+                    } else {
+                        "unknown".to_owned()
+                    }
+                });
+            (running, status)
+        },
+    );
+    let mounts = inspect
+        .mounts
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|mount| Some((mount.destination?, mount.name?)))
+        .collect();
+    DockerContainerResource {
+        name,
+        resource_id,
+        labels,
+        running,
+        status,
+        mounts,
+    }
+}
+
+fn volume_resource(volume: bollard::models::Volume) -> DockerVolumeResource {
+    let resource_id = volume
+        .labels
+        .get(LABEL_RESOURCE_ID)
+        .cloned()
+        .or(volume.created_at)
+        .unwrap_or_default();
+    DockerVolumeResource {
+        name: volume.name,
+        resource_id,
+        labels: volume.labels.into_iter().collect(),
+    }
+}
+
+fn kernel_labels(request: &RuntimeCreateSession) -> BTreeMap<String, String> {
+    btree_map([
+        (LABEL_ROLE, "kernel"),
+        (LABEL_MANAGED, "true"),
+        (LABEL_SESSION_ID, request.session_id.as_str()),
+        (LABEL_INTERACTION_MODE, request.interaction_mode.as_str()),
+        ("agentspace.harness", request.harness.as_str()),
+    ])
+}
+
+fn session_workspace_labels(request: &RuntimeCreateSession) -> BTreeMap<String, String> {
+    btree_map([
+        (LABEL_ROLE, "session-workspace"),
+        (LABEL_MANAGED, "true"),
+        (LABEL_SESSION_ID, request.session_id.as_str()),
+        (LABEL_INTERACTION_MODE, request.interaction_mode.as_str()),
+    ])
+}
+
+fn recovery_expected(request: &RuntimeCreateSession) -> bool {
+    request.env.get(RUNTIME_RECOVERY_ENV).map(String::as_str) == Some("1")
+}
+
+fn validate_session_resource_labels(
+    resource_kind: &str,
+    resource_name: &str,
+    labels: &BTreeMap<String, String>,
+    expected_role: &str,
+    interaction_mode: InteractionMode,
+) -> Result<(), AgentHostError> {
+    if !is_managed_role(labels, expected_role)
+        || labels.get(LABEL_INTERACTION_MODE).map(String::as_str) != Some(interaction_mode.as_str())
+    {
+        return Err(AgentHostError::conflict(format!(
+            "{resource_kind} {resource_name:?} has incompatible AgentSpace ownership labels"
+        )));
+    }
+    Ok(())
+}
+
+fn is_managed_role(labels: &BTreeMap<String, String>, role: &str) -> bool {
+    labels.get(LABEL_MANAGED).map(String::as_str) == Some("true")
+        && labels.get(LABEL_ROLE).map(String::as_str) == Some(role)
+}
+
+fn resource_is_owned(
+    labels: &BTreeMap<String, String>,
+    owned_session_ids: &BTreeSet<String>,
+) -> bool {
+    labels
+        .get(LABEL_SESSION_ID)
+        .is_some_and(|session_id| owned_session_ids.contains(session_id))
+}
+
+fn identity_collision(
+    resource_kind: &str,
+    resource_name: &str,
+    session_id: &str,
+) -> AgentHostError {
+    AgentHostError::conflict(format!(
+        "Docker {resource_kind} {resource_name:?} is not owned by session {session_id:?}"
+    ))
+}
+
+fn validate_reviewed_container(
+    current: Option<&DockerContainerResource>,
+    reviewed: &CleanupResourceIdentity,
+) -> Result<(), AgentHostError> {
+    let current = current.ok_or_else(|| {
+        AgentHostError::conflict(format!(
+            "reviewed Docker container {:?} no longer exists",
+            reviewed.name
+        ))
+    })?;
+    validate_reviewed_resource(
+        "container",
+        &current.resource_id,
+        &current.labels,
+        reviewed,
+        "kernel",
+    )
+}
+
+fn validate_reviewed_volume(
+    current: Option<&DockerVolumeResource>,
+    reviewed: &CleanupResourceIdentity,
+) -> Result<(), AgentHostError> {
+    let current = current.ok_or_else(|| {
+        AgentHostError::conflict(format!(
+            "reviewed Docker volume {:?} no longer exists",
+            reviewed.name
+        ))
+    })?;
+    validate_reviewed_resource(
+        "volume",
+        &current.resource_id,
+        &current.labels,
+        reviewed,
+        "session-workspace",
+    )
+}
+
+fn validate_reviewed_resource(
+    resource_kind: &str,
+    current_resource_id: &str,
+    labels: &BTreeMap<String, String>,
+    reviewed: &CleanupResourceIdentity,
+    expected_role: &str,
+) -> Result<(), AgentHostError> {
+    if reviewed.resource_id.is_empty()
+        || current_resource_id != reviewed.resource_id
+        || !is_managed_role(labels, expected_role)
+        || labels.get(LABEL_SESSION_ID) != reviewed.session_id.as_ref()
+    {
+        return Err(AgentHostError::conflict(format!(
+            "reviewed Docker {resource_kind} {:?} changed identity or ownership after review",
+            reviewed.name
+        )));
+    }
+    Ok(())
+}
+
+fn cleanup_resource(
+    kind: CleanupResourceKind,
+    name: String,
+    resource_id: String,
+    labels: &BTreeMap<String, String>,
+    status: Option<String>,
+    dry_run: bool,
+    result: Result<(), AgentHostError>,
+) -> CleanupResource {
+    let (action, error) = match result {
+        Ok(()) if dry_run => (CleanupAction::WouldDelete, None),
+        Ok(()) => (CleanupAction::Deleted, None),
+        Err(error) => (CleanupAction::DeleteFailed, Some(error.to_string())),
+    };
+    CleanupResource {
+        kind,
+        name,
+        resource_id,
+        session_id: labels.get(LABEL_SESSION_ID).cloned(),
+        interaction_mode: labels.get(LABEL_INTERACTION_MODE).cloned(),
+        status,
+        action,
+        error,
+    }
+}
+
 fn hash_map_from_btree(map: &BTreeMap<String, String>) -> HashMap<String, String> {
     map.iter()
         .map(|(key, value)| (key.clone(), value.clone()))
@@ -1278,6 +2235,27 @@ fn hash_map_from_btree(map: &BTreeMap<String, String>) -> HashMap<String, String
 
 fn append_log_output(buffer: &mut Vec<u8>, output: &LogOutput) {
     buffer.extend_from_slice(output.as_ref());
+}
+
+fn log_output_bytes(output: LogOutput) -> axum::body::Bytes {
+    match output {
+        LogOutput::StdErr { message }
+        | LogOutput::StdOut { message }
+        | LogOutput::StdIn { message }
+        | LogOutput::Console { message } => message,
+    }
+}
+
+fn terminal_exec_options(attachment_id: &str, attach_argv: &[String]) -> CreateExecOptions<String> {
+    CreateExecOptions {
+        attach_stdin: Some(true),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        tty: Some(true),
+        env: Some(vec![format!("{ATTACHMENT_ID_ENV}={attachment_id}")]),
+        cmd: Some(attach_argv.to_vec()),
+        ..CreateExecOptions::default()
+    }
 }
 
 const fn is_bollard_not_found(error: &BollardError) -> bool {
@@ -1327,7 +2305,7 @@ const fn skills_mount_path(harness: HarnessName) -> &'static str {
     match harness {
         HarnessName::Acp => "/workspace/.agents/skills",
         HarnessName::ClaudeCode | HarnessName::Codex | HarnessName::Echo => "/skills",
-        HarnessName::CopilotCli => "/root/.copilot/skills",
+        HarnessName::CopilotCli => "/workspace/.github/skills",
         HarnessName::Opencode => "/root/.config/opencode/skills",
     }
 }
@@ -1364,6 +2342,7 @@ fn session_workspace_volume_name(session_id: &str) -> String {
     format!("agentspace-session-workspace-{}", first_n(session_id, 12))
 }
 
+#[cfg(test)]
 fn session_workspace_volume_name_from_container(
     container_name: &str,
 ) -> Result<String, AgentHostError> {
@@ -1402,26 +2381,42 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         sync::{Arc, Mutex, MutexGuard, PoisonError},
+        time::Duration,
     };
 
     use async_trait::async_trait;
-    use serde_json::json;
+    use axum::{
+        Json, Router,
+        body::to_bytes,
+        extract::State,
+        http::{Request, StatusCode},
+        routing::{get, post},
+    };
+    use futures_util::stream;
+    use serde_json::{Value as JsonValue, json};
+    use tokio::{net::TcpListener, task::JoinHandle};
 
     use super::{
-        ContainerRunSpec, DockerBackend, DockerKernelRuntime, DockerRuntimeConfig, DockerStats,
-        PortBinding, VolumeMount, btree_map, container_create_body,
+        ContainerRunSpec, DockerBackend, DockerContainerResource, DockerKernelRuntime,
+        DockerRuntimeConfig, DockerStats, DockerVolumeResource, PortBinding, RUNTIME_RECOVERY_ENV,
+        SESSION_WORKSPACE_MOUNT_PATH, TERMINAL_RESUME_ENV, VolumeMount, btree_map,
+        container_create_body, session_workspace_labels,
         session_workspace_volume_name_from_container, summarize_docker_stats,
+        terminal_exec_options,
     };
     use crate::{
         docker_runtime::skills_mount_path,
         errors::AgentHostError,
         models::{
-            DockerKernelSession, HarnessName, KernelRuntimeSession, WorkspaceMount,
-            WorkspaceMountMode,
+            CleanupAction, CleanupResourceIdentity, DockerKernelSession, HarnessName,
+            InteractionMode, KernelRuntimeSession, WorkspaceMount, WorkspaceMountMode,
         },
         sessions::{KernelRuntime, RuntimeCreateSession},
         skills::{SkillVolumeMode, SkillVolumeResource},
+        terminal::{TerminalAttachKind, TerminalExec, TerminalState},
     };
+
+    type TerminalHttpCalls = Arc<Mutex<Vec<(String, JsonValue)>>>;
 
     #[derive(Clone, Default)]
     struct FakeDockerBackend {
@@ -1431,17 +2426,88 @@ mod tests {
     #[derive(Default)]
     struct FakeDockerState {
         volumes: BTreeSet<String>,
+        volume_labels: BTreeMap<String, BTreeMap<String, String>>,
         created_volumes: Vec<(String, BTreeMap<String, String>)>,
+        containers: BTreeMap<String, DockerContainerResource>,
         run_specs: Vec<ContainerRunSpec>,
         removed_containers: Vec<String>,
         removed_volumes: Vec<String>,
         running: BTreeSet<String>,
         ports: BTreeMap<(String, u16), u16>,
+        terminal_attach_argvs: Vec<(String, Vec<String>)>,
+        terminal_resizes: Vec<(String, u16, u16)>,
+        fail_next_run: bool,
     }
 
     impl FakeDockerBackend {
         fn state(&self) -> MutexGuard<'_, FakeDockerState> {
             self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        }
+    }
+
+    async fn runtime_with_health(
+        backend: &FakeDockerBackend,
+    ) -> (DockerKernelRuntime, JoinHandle<Result<(), std::io::Error>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("failed to bind health server: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("failed to read health address: {error}"));
+        let app = Router::new().route("/healthz", get(|| async { StatusCode::OK }));
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await });
+        let config = DockerRuntimeConfig {
+            base_url_template: format!("http://{address}"),
+            startup_timeout: Duration::from_secs(2),
+            ..DockerRuntimeConfig::default()
+        };
+        (
+            DockerKernelRuntime::new(config, Arc::new(backend.clone())),
+            handle,
+        )
+    }
+
+    fn runtime_request(session_id: &str) -> RuntimeCreateSession {
+        RuntimeCreateSession {
+            session_id: session_id.to_owned(),
+            harness: HarnessName::Echo,
+            interaction_mode: InteractionMode::Chat,
+            env: BTreeMap::new(),
+            additional_paths: Vec::new(),
+            skills: Vec::new(),
+            skill_volumes: Vec::new(),
+            workspace_mounts: Vec::new(),
+        }
+    }
+
+    fn seed_volume(state: &mut FakeDockerState, name: &str, labels: BTreeMap<String, String>) {
+        state.volumes.insert(name.to_owned());
+        state.volume_labels.insert(name.to_owned(), labels);
+    }
+
+    fn seed_container(
+        state: &mut FakeDockerState,
+        name: &str,
+        labels: BTreeMap<String, String>,
+        running: bool,
+        status: &str,
+        workspace_volume: Option<&str>,
+    ) {
+        state.containers.insert(
+            name.to_owned(),
+            DockerContainerResource {
+                name: name.to_owned(),
+                resource_id: format!("container:{name}"),
+                labels,
+                running,
+                status: status.to_owned(),
+                mounts: workspace_volume.map_or_else(BTreeMap::new, |volume| {
+                    BTreeMap::from([(SESSION_WORKSPACE_MOUNT_PATH.to_owned(), volume.to_owned())])
+                }),
+            },
+        );
+        if running {
+            state.running.insert(name.to_owned());
         }
     }
 
@@ -1455,6 +2521,9 @@ mod tests {
             {
                 let mut state = self.state();
                 if state.volumes.insert(volume_name.to_owned()) {
+                    state
+                        .volume_labels
+                        .insert(volume_name.to_owned(), labels.clone());
                     state.created_volumes.push((volume_name.to_owned(), labels));
                 }
             }
@@ -1472,14 +2541,74 @@ mod tests {
         async fn run_container(&self, spec: ContainerRunSpec) -> Result<(), AgentHostError> {
             {
                 let mut state = self.state();
+                if state.fail_next_run {
+                    state.fail_next_run = false;
+                    return Err(AgentHostError::runtime(
+                        "Docker helper container exited with status 1",
+                    ));
+                }
                 if let Some(name) = &spec.name {
                     state.running.insert(name.clone());
                     state.ports.insert((name.clone(), 8080), 45_678);
                     state.ports.insert((name.clone(), 8081), 45_679);
+                    state.containers.insert(
+                        name.clone(),
+                        DockerContainerResource {
+                            name: name.clone(),
+                            resource_id: format!("container:{name}"),
+                            labels: spec.labels.clone(),
+                            running: true,
+                            status: "running".to_owned(),
+                            mounts: spec
+                                .volumes
+                                .iter()
+                                .map(|volume| (volume.bind.clone(), volume.volume_name.clone()))
+                                .collect(),
+                        },
+                    );
                 }
                 state.run_specs.push(spec);
             }
             Ok(())
+        }
+
+        async fn inspect_container(
+            &self,
+            container_name: &str,
+        ) -> Result<Option<DockerContainerResource>, AgentHostError> {
+            Ok(self.state().containers.get(container_name).cloned())
+        }
+
+        async fn list_containers(&self) -> Result<Vec<DockerContainerResource>, AgentHostError> {
+            Ok(self.state().containers.values().cloned().collect())
+        }
+
+        async fn inspect_volume(
+            &self,
+            volume_name: &str,
+        ) -> Result<Option<DockerVolumeResource>, AgentHostError> {
+            Ok(self
+                .state()
+                .volume_labels
+                .get(volume_name)
+                .map(|labels| DockerVolumeResource {
+                    name: volume_name.to_owned(),
+                    resource_id: format!("volume:{volume_name}"),
+                    labels: labels.clone(),
+                }))
+        }
+
+        async fn list_volumes(&self) -> Result<Vec<DockerVolumeResource>, AgentHostError> {
+            Ok(self
+                .state()
+                .volume_labels
+                .iter()
+                .map(|(name, labels)| DockerVolumeResource {
+                    name: name.clone(),
+                    resource_id: format!("volume:{name}"),
+                    labels: labels.clone(),
+                })
+                .collect())
         }
 
         async fn container_host_port(
@@ -1499,14 +2628,20 @@ mod tests {
         }
 
         async fn remove_container(&self, container_name: &str) -> Result<(), AgentHostError> {
-            self.state()
-                .removed_containers
-                .push(container_name.to_owned());
+            let mut state = self.state();
+            state.removed_containers.push(container_name.to_owned());
+            state.running.remove(container_name);
+            state.containers.remove(container_name);
+            drop(state);
             Ok(())
         }
 
         async fn remove_volume(&self, volume_name: &str) -> Result<(), AgentHostError> {
-            self.state().removed_volumes.push(volume_name.to_owned());
+            let mut state = self.state();
+            state.removed_volumes.push(volume_name.to_owned());
+            state.volumes.remove(volume_name);
+            state.volume_labels.remove(volume_name);
+            drop(state);
             Ok(())
         }
 
@@ -1524,6 +2659,213 @@ mod tests {
         ) -> Result<Option<DockerStats>, AgentHostError> {
             Ok(None)
         }
+
+        async fn open_terminal_exec(
+            &self,
+            _container_name: &str,
+            attachment_id: &str,
+            attach_argv: &[String],
+        ) -> Result<TerminalExec, AgentHostError> {
+            self.state()
+                .terminal_attach_argvs
+                .push((attachment_id.to_owned(), attach_argv.to_vec()));
+            Ok(TerminalExec {
+                exec_id: "exec-test".to_owned(),
+                input: Box::pin(tokio::io::sink()),
+                output: Box::pin(stream::empty()),
+            })
+        }
+
+        async fn resize_terminal_exec(
+            &self,
+            exec_id: &str,
+            cols: u16,
+            rows: u16,
+        ) -> Result<(), AgentHostError> {
+            self.state()
+                .terminal_resizes
+                .push((exec_id.to_owned(), cols, rows));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_runtime_delegates_fixed_terminal_exec_and_resize() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "kernel".to_owned(),
+            session_workspace_volume_name: "workspace".to_owned(),
+            base_url: "http://kernel".to_owned(),
+            vscode_url: None,
+            free_port_url: None,
+        });
+        let argv = vec![
+            "tmux".to_owned(),
+            "attach-session".to_owned(),
+            "-t".to_owned(),
+            "=agentspace-test".to_owned(),
+        ];
+
+        let exec = runtime
+            .terminal_attach(&session, "22222222-2222-4222-8222-222222222222", &argv)
+            .await
+            .unwrap_or_else(|error| panic!("terminal attach failed: {error}"));
+        runtime
+            .terminal_resize(&session, &exec.exec_id, 120, 40)
+            .await
+            .unwrap_or_else(|error| panic!("terminal resize failed: {error}"));
+        drop(exec);
+
+        {
+            let state = backend.state();
+            assert_eq!(
+                state.terminal_attach_argvs,
+                vec![("22222222-2222-4222-8222-222222222222".to_owned(), argv)]
+            );
+            assert_eq!(
+                state.terminal_resizes,
+                vec![("exec-test".to_owned(), 120, 40)]
+            );
+            drop(state);
+        }
+    }
+
+    #[test]
+    fn terminal_exec_options_use_tty_and_attachment_marker() {
+        let argv = vec![
+            "tmux".to_owned(),
+            "attach-session".to_owned(),
+            "-t".to_owned(),
+            "=agentspace-test".to_owned(),
+        ];
+
+        let options = terminal_exec_options("22222222-2222-4222-8222-222222222222", &argv);
+
+        assert_eq!(options.attach_stdin, Some(true));
+        assert_eq!(options.attach_stdout, Some(true));
+        assert_eq!(options.attach_stderr, Some(true));
+        assert_eq!(options.tty, Some(true));
+        assert_eq!(options.cmd, Some(argv));
+        assert_eq!(
+            options.env,
+            Some(vec![
+                "AGENTSPACE_TERMINAL_ATTACHMENT_ID=22222222-2222-4222-8222-222222222222".to_owned()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn docker_runtime_proxies_structured_terminal_controls() {
+        let calls: TerminalHttpCalls = Arc::new(Mutex::new(Vec::new()));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("failed to bind terminal server: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("failed to read terminal address: {error}"));
+        let app = Router::new()
+            .route("/terminal", get(terminal_proxy_stub))
+            .route("/terminal/ensure", post(terminal_proxy_stub))
+            .route("/terminal/stop", post(terminal_proxy_stub))
+            .route("/terminal/resume", post(terminal_proxy_stub))
+            .route("/terminal/detach-client", post(terminal_proxy_stub))
+            .with_state(calls.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let runtime = DockerKernelRuntime::new(
+            DockerRuntimeConfig::default(),
+            Arc::new(FakeDockerBackend::default()),
+        );
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "kernel".to_owned(),
+            session_workspace_volume_name: "workspace".to_owned(),
+            base_url: format!("http://{address}"),
+            vscode_url: None,
+            free_port_url: None,
+        });
+
+        assert_eq!(
+            runtime
+                .terminal_status(&session)
+                .await
+                .unwrap_or_else(|error| panic!("status failed: {error}"))
+                .state,
+            TerminalState::Running
+        );
+        assert_eq!(
+            runtime
+                .terminal_ensure(&session)
+                .await
+                .unwrap_or_else(|error| panic!("ensure failed: {error}"))
+                .attach_kind,
+            Some(TerminalAttachKind::Attached)
+        );
+        runtime
+            .terminal_stop(&session)
+            .await
+            .unwrap_or_else(|error| panic!("stop failed: {error}"));
+        runtime
+            .terminal_resume(&session)
+            .await
+            .unwrap_or_else(|error| panic!("resume failed: {error}"));
+        runtime
+            .terminal_detach_client(&session, "/dev/pts/7")
+            .await
+            .unwrap_or_else(|error| panic!("detach failed: {error}"));
+
+        let calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(path, _body)| path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/terminal",
+                "/terminal/ensure",
+                "/terminal/stop",
+                "/terminal/resume",
+                "/terminal/detach-client",
+            ]
+        );
+        assert_eq!(calls[4].1, json!({ "tmux_client_id": "/dev/pts/7" }));
+        drop(calls);
+        server.abort();
+    }
+
+    async fn terminal_proxy_stub(
+        State(calls): State<TerminalHttpCalls>,
+        request: Request<axum::body::Body>,
+    ) -> Json<JsonValue> {
+        let path = request.uri().path().to_owned();
+        let bytes = to_bytes(request.into_body(), 16 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("failed to read terminal request: {error}"));
+        let body = if bytes.is_empty() {
+            JsonValue::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("failed to parse terminal request: {error}"))
+        };
+        calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((path, body));
+        Json(json!({
+            "state": "running",
+            "exit_status": null,
+            "attach_kind": "attached",
+            "session_name": "agentspace-test",
+            "target_session": "=agentspace-test",
+            "socket_path": "/run/agentspace-tmux.sock",
+            "attach_argv": ["tmux", "attach-session", "-t", "=agentspace-test"],
+            "pane_id": "%0",
+            "pane_pid": 42,
+            "attachment_count": 0,
+            "clients": [],
+        }))
     }
 
     #[tokio::test]
@@ -1534,6 +2876,7 @@ mod tests {
         let request = RuntimeCreateSession {
             session_id: "test".to_owned(),
             harness: HarnessName::Echo,
+            interaction_mode: InteractionMode::Chat,
             env: BTreeMap::new(),
             additional_paths: Vec::new(),
             skills: Vec::new(),
@@ -1545,7 +2888,11 @@ mod tests {
         };
 
         runtime
-            .run_kernel_container("agentspace-kernel-test", &request)
+            .run_kernel_container(
+                "agentspace-kernel-test",
+                "agentspace-session-workspace-test",
+                &request,
+            )
             .await
             .unwrap_or_else(|error| panic!("run failed: {error}"));
 
@@ -1557,6 +2904,8 @@ mod tests {
             assert!(spec.detach);
             assert_eq!(spec.name.as_deref(), Some("agentspace-kernel-test"));
             assert_eq!(spec.environment["KERNEL_HARNESS"], "echo");
+            assert_eq!(spec.environment["AGENTSPACE_SESSION_ID"], "test");
+            assert!(!spec.environment.contains_key("KERNEL_SESSION_ID"));
             assert_eq!(spec.environment["KERNEL_FREE_PORT"], "8081");
             assert_eq!(
                 spec.ports,
@@ -1568,7 +2917,7 @@ mod tests {
                     PortBinding {
                         container_port: 8080,
                         host_ip: "0.0.0.0".to_owned()
-                    }
+                    },
                 ]
             );
             assert!(spec.volumes.contains(&VolumeMount {
@@ -1602,6 +2951,630 @@ mod tests {
         }
     }
 
+    #[test]
+    fn copilot_kernel_environment_uses_durable_session_workspace_paths() {
+        let runtime = DockerKernelRuntime::new(
+            DockerRuntimeConfig::default(),
+            Arc::new(FakeDockerBackend::default()),
+        );
+        let mut env = BTreeMap::new();
+        env.insert(
+            "KERNEL_SESSION_ID".to_owned(),
+            "8e0c8f12-d32f-4e40-b25c-5bb6ee4f6967".to_owned(),
+        );
+        let request = RuntimeCreateSession {
+            session_id: "durable-session".to_owned(),
+            harness: HarnessName::CopilotCli,
+            interaction_mode: InteractionMode::Chat,
+            env,
+            additional_paths: Vec::new(),
+            skills: vec!["alpha".to_owned()],
+            skill_volumes: Vec::new(),
+            workspace_mounts: Vec::new(),
+        };
+
+        let environment = runtime.kernel_environment(&request);
+
+        assert_eq!(
+            environment["KERNEL_SESSION_ID"],
+            "8e0c8f12-d32f-4e40-b25c-5bb6ee4f6967"
+        );
+        assert_eq!(environment["AGENTSPACE_SESSION_ID"], "durable-session");
+        assert_eq!(
+            environment["KERNEL_SKILLS_DIR"],
+            "/workspace/.github/skills"
+        );
+        assert_eq!(environment["KERNEL_SKILLS_STAGING_DIR"], "/mnt/all-skills");
+        assert_eq!(
+            environment["KERNEL_LEGACY_COPILOT_SKILLS_DIR"],
+            "/root/.copilot/skills"
+        );
+        assert_eq!(environment["KERNEL_ENABLED_SKILLS"], "alpha");
+    }
+
+    #[tokio::test]
+    async fn create_adopts_running_container_and_reuses_volume_on_recreate() {
+        let backend = FakeDockerBackend::default();
+        let (runtime, health_server) = runtime_with_health(&backend).await;
+        let request = runtime_request("1234567890ab-full-session");
+
+        let first = runtime
+            .create_session(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("initial create failed: {error}"));
+        let second = runtime
+            .create_session(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("adoption failed: {error}"));
+
+        assert_eq!(first, second);
+        {
+            let state = backend.state();
+            assert_eq!(state.run_specs.len(), 1);
+            let spec = &state.run_specs[0];
+            assert_eq!(
+                spec.labels.get("agentspace.session_id").map(String::as_str),
+                Some("1234567890ab-full-session")
+            );
+            assert_eq!(
+                spec.labels.get("agentspace.role").map(String::as_str),
+                Some("kernel")
+            );
+            assert_eq!(
+                spec.labels.get("agentspace.managed").map(String::as_str),
+                Some("true")
+            );
+            assert_eq!(
+                spec.labels
+                    .get("agentspace.interaction_mode")
+                    .map(String::as_str),
+                Some("chat")
+            );
+            let volume_labels = state
+                .volume_labels
+                .get("agentspace-session-workspace-1234567890ab")
+                .unwrap_or_else(|| panic!("session workspace volume was not created"));
+            assert_eq!(
+                volume_labels
+                    .get("agentspace.session_id")
+                    .map(String::as_str),
+                Some("1234567890ab-full-session")
+            );
+            assert_eq!(
+                volume_labels.get("agentspace.role").map(String::as_str),
+                Some("session-workspace")
+            );
+            assert_eq!(
+                volume_labels.get("agentspace.managed").map(String::as_str),
+                Some("true")
+            );
+            assert_eq!(
+                volume_labels
+                    .get("agentspace.interaction_mode")
+                    .map(String::as_str),
+                Some("chat")
+            );
+            drop(state);
+        }
+
+        {
+            let mut state = backend.state();
+            let container = state
+                .containers
+                .get_mut("agentspace-kernel-1234567890ab")
+                .unwrap_or_else(|| panic!("kernel container was not created"));
+            container.running = false;
+            "exited".clone_into(&mut container.status);
+            state.running.remove("agentspace-kernel-1234567890ab");
+        }
+        runtime
+            .create_session(request)
+            .await
+            .unwrap_or_else(|error| panic!("recreate failed: {error}"));
+
+        let state = backend.state();
+        assert_eq!(state.run_specs.len(), 2);
+        assert_eq!(
+            state
+                .created_volumes
+                .iter()
+                .filter(|(name, _labels)| { name == "agentspace-session-workspace-1234567890ab" })
+                .count(),
+            1
+        );
+        assert_eq!(
+            state.removed_containers,
+            vec!["agentspace-kernel-1234567890ab"]
+        );
+        drop(state);
+        health_server.abort();
+    }
+
+    #[tokio::test]
+    async fn cli_recovery_recreates_missing_container_with_durable_state() {
+        let backend = FakeDockerBackend::default();
+        let (runtime, health_server) = runtime_with_health(&backend).await;
+        let session_id = "12345678-1234-5678-9234-567812345678";
+        let mut request = runtime_request(session_id);
+        request.harness = HarnessName::CopilotCli;
+        request.interaction_mode = InteractionMode::Cli;
+
+        runtime
+            .create_session(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("initial CLI create failed: {error}"));
+        {
+            let mut state = backend.state();
+            state.containers.clear();
+            state.running.clear();
+        }
+        request
+            .env
+            .insert(RUNTIME_RECOVERY_ENV.to_owned(), "1".to_owned());
+
+        runtime
+            .create_session(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("CLI recovery failed: {error}"));
+
+        {
+            let state = backend.state();
+            assert_eq!(state.run_specs.len(), 2);
+            assert_eq!(
+                state.run_specs[1]
+                    .environment
+                    .get(TERMINAL_RESUME_ENV)
+                    .map(String::as_str),
+                Some("1")
+            );
+            assert!(
+                !state.run_specs[1]
+                    .environment
+                    .contains_key(RUNTIME_RECOVERY_ENV)
+            );
+            assert_eq!(
+                state
+                    .created_volumes
+                    .iter()
+                    .filter(|(name, _labels)| {
+                        name == "agentspace-session-workspace-12345678-123"
+                    })
+                    .count(),
+                1
+            );
+            assert!(state.volumes.contains("agentspace-kernel_copilot-config"));
+            drop(state);
+        }
+
+        {
+            let mut state = backend.state();
+            state.containers.clear();
+            state.running.clear();
+            state
+                .volumes
+                .remove("agentspace-session-workspace-12345678-123");
+            state
+                .volume_labels
+                .remove("agentspace-session-workspace-12345678-123");
+        }
+        let result = runtime.create_session(request.clone()).await;
+        let Err(error) = result else {
+            panic!("missing durable workspace must fail");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("durable session workspace volume")
+        );
+
+        {
+            let mut state = backend.state();
+            seed_volume(
+                &mut state,
+                "agentspace-session-workspace-12345678-123",
+                session_workspace_labels(&request),
+            );
+            state.volumes.remove("agentspace-kernel_copilot-config");
+            state
+                .volume_labels
+                .remove("agentspace-kernel_copilot-config");
+        }
+        let result = runtime.create_session(request).await;
+        let Err(error) = result else {
+            panic!("missing durable Copilot state must fail");
+        };
+        assert!(error.to_string().contains("durable Copilot state volume"));
+        health_server.abort();
+    }
+
+    #[tokio::test]
+    async fn adoption_uses_full_labels_instead_of_cosmetic_names() {
+        let backend = FakeDockerBackend::default();
+        let (runtime, health_server) = runtime_with_health(&backend).await;
+        {
+            let mut state = backend.state();
+            seed_volume(
+                &mut state,
+                "renamed-workspace-volume",
+                btree_map([
+                    ("agentspace.role", "session-workspace"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "full-label-identity"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+            );
+            seed_container(
+                &mut state,
+                "renamed-kernel-container",
+                btree_map([
+                    ("agentspace.role", "kernel"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "full-label-identity"),
+                    ("agentspace.interaction_mode", "chat"),
+                    ("agentspace.harness", "echo"),
+                ]),
+                true,
+                "running",
+                Some("renamed-workspace-volume"),
+            );
+        }
+
+        let session = runtime
+            .create_session(runtime_request("full-label-identity"))
+            .await
+            .unwrap_or_else(|error| panic!("label-based adoption failed: {error}"));
+
+        let KernelRuntimeSession::Docker(session) = session else {
+            panic!("expected Docker session");
+        };
+        assert_eq!(session.container_name, "renamed-kernel-container");
+        assert_eq!(
+            session.session_workspace_volume_name,
+            "renamed-workspace-volume"
+        );
+        assert!(backend.state().run_specs.is_empty());
+        health_server.abort();
+    }
+
+    #[tokio::test]
+    async fn create_rejects_name_and_label_collisions() {
+        let backend = FakeDockerBackend::default();
+        let (runtime, health_server) = runtime_with_health(&backend).await;
+        {
+            let mut state = backend.state();
+            seed_container(
+                &mut state,
+                "agentspace-kernel-collision-se",
+                btree_map([
+                    ("agentspace.role", "kernel"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "different-session"),
+                    ("agentspace.interaction_mode", "chat"),
+                    ("agentspace.harness", "echo"),
+                ]),
+                true,
+                "running",
+                None,
+            );
+        }
+
+        let result = runtime
+            .create_session(runtime_request("collision-session"))
+            .await;
+        let Err(error) = result else {
+            panic!("container name collision should fail");
+        };
+        assert!(matches!(error, AgentHostError::Conflict { .. }));
+
+        let volume_backend = FakeDockerBackend::default();
+        let (volume_runtime, volume_health_server) = runtime_with_health(&volume_backend).await;
+        {
+            let mut state = volume_backend.state();
+            seed_volume(
+                &mut state,
+                "agentspace-session-workspace-volume-colli",
+                btree_map([
+                    ("agentspace.role", "session-workspace"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "different-session"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+            );
+        }
+        let result = volume_runtime
+            .create_session(runtime_request("volume-collision"))
+            .await;
+        let Err(error) = result else {
+            panic!("volume name collision should fail");
+        };
+        assert!(matches!(error, AgentHostError::Conflict { .. }));
+
+        let harness_backend = FakeDockerBackend::default();
+        let (harness_runtime, harness_health_server) = runtime_with_health(&harness_backend).await;
+        {
+            let mut state = harness_backend.state();
+            seed_volume(
+                &mut state,
+                "harness-workspace",
+                btree_map([
+                    ("agentspace.role", "session-workspace"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "harness-collision"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+            );
+            seed_container(
+                &mut state,
+                "harness-container",
+                btree_map([
+                    ("agentspace.role", "kernel"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "harness-collision"),
+                    ("agentspace.interaction_mode", "chat"),
+                    ("agentspace.harness", "copilot-cli"),
+                ]),
+                true,
+                "running",
+                Some("harness-workspace"),
+            );
+        }
+        let result = harness_runtime
+            .create_session(runtime_request("harness-collision"))
+            .await;
+        let Err(error) = result else {
+            panic!("stale harness label should fail");
+        };
+        assert!(matches!(error, AgentHostError::Conflict { .. }));
+
+        health_server.abort();
+        volume_health_server.abort();
+        harness_health_server.abort();
+    }
+
+    #[tokio::test]
+    async fn cleanup_reports_and_deletes_only_unowned_managed_resources() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        {
+            let mut state = backend.state();
+            for (name, session_id, running, status) in [
+                ("owned-kernel", "owned", true, "running"),
+                ("orphan-running", "orphan-running", true, "running"),
+                ("orphan-exited", "orphan-exited", false, "exited"),
+            ] {
+                seed_container(
+                    &mut state,
+                    name,
+                    btree_map([
+                        ("agentspace.role", "kernel"),
+                        ("agentspace.managed", "true"),
+                        ("agentspace.session_id", session_id),
+                        ("agentspace.interaction_mode", "chat"),
+                    ]),
+                    running,
+                    status,
+                    None,
+                );
+            }
+            seed_container(
+                &mut state,
+                "legacy-kernel",
+                btree_map([("agentspace.role", "kernel")]),
+                true,
+                "running",
+                None,
+            );
+            for (name, session_id) in [
+                ("owned-volume", Some("owned")),
+                ("orphan-volume", Some("orphan-volume")),
+                ("unclaimed-volume", None),
+            ] {
+                let mut labels = btree_map([
+                    ("agentspace.role", "session-workspace"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]);
+                if let Some(session_id) = session_id {
+                    labels.insert("agentspace.session_id".to_owned(), session_id.to_owned());
+                }
+                seed_volume(&mut state, name, labels);
+            }
+        }
+        let owned = BTreeSet::from(["owned".to_owned()]);
+
+        let report = runtime
+            .cleanup_orphans(&owned, true, None)
+            .await
+            .unwrap_or_else(|error| panic!("dry-run cleanup failed: {error}"));
+        assert_eq!(report.resources.len(), 4);
+        assert!(
+            report
+                .resources
+                .iter()
+                .all(|resource| resource.action == CleanupAction::WouldDelete)
+        );
+        assert!(report.resources.iter().any(|resource| {
+            resource.name == "orphan-running" && resource.status.as_deref() == Some("running")
+        }));
+        assert!(report.resources.iter().any(|resource| {
+            resource.name == "orphan-exited" && resource.status.as_deref() == Some("exited")
+        }));
+        assert!(backend.state().removed_containers.is_empty());
+
+        let reviewed = report
+            .resources
+            .iter()
+            .map(|resource| CleanupResourceIdentity {
+                kind: resource.kind,
+                name: resource.name.clone(),
+                resource_id: resource.resource_id.clone(),
+                session_id: resource.session_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        let report = runtime
+            .cleanup_orphans(&owned, false, Some(&reviewed))
+            .await
+            .unwrap_or_else(|error| panic!("cleanup failed: {error}"));
+        assert_eq!(report.deleted_count, 4);
+        assert_eq!(report.error_count, 0);
+        let state = backend.state();
+        assert!(state.containers.contains_key("owned-kernel"));
+        assert!(state.containers.contains_key("legacy-kernel"));
+        assert!(state.volume_labels.contains_key("owned-volume"));
+        assert!(!state.containers.contains_key("orphan-running"));
+        assert!(!state.containers.contains_key("orphan-exited"));
+        assert!(!state.volume_labels.contains_key("orphan-volume"));
+        assert!(!state.volume_labels.contains_key("unclaimed-volume"));
+        drop(state);
+    }
+
+    #[tokio::test]
+    async fn cleanup_apply_refuses_resources_changed_after_review() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        {
+            let mut state = backend.state();
+            seed_container(
+                &mut state,
+                "orphan",
+                btree_map([
+                    ("agentspace.role", "kernel"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "orphan"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+                true,
+                "running",
+                None,
+            );
+        }
+        let report = runtime
+            .cleanup_orphans(&BTreeSet::new(), true, None)
+            .await
+            .unwrap_or_else(|error| panic!("review failed: {error}"));
+        let reviewed = report
+            .resources
+            .iter()
+            .map(|resource| CleanupResourceIdentity {
+                kind: resource.kind,
+                name: resource.name.clone(),
+                resource_id: resource.resource_id.clone(),
+                session_id: resource.session_id.clone(),
+            })
+            .collect::<Vec<_>>();
+        backend
+            .state()
+            .containers
+            .get_mut("orphan")
+            .unwrap_or_else(|| panic!("missing seeded orphan"))
+            .resource_id = "replacement-container".to_owned();
+
+        let applied = runtime
+            .cleanup_orphans(&BTreeSet::new(), false, Some(&reviewed))
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert_eq!(applied.deleted_count, 0);
+        assert_eq!(applied.error_count, 1);
+        assert!(backend.state().containers.contains_key("orphan"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_apply_refuses_resource_that_became_durably_owned() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        {
+            let mut state = backend.state();
+            seed_container(
+                &mut state,
+                "orphan",
+                btree_map([
+                    ("agentspace.role", "kernel"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "adopted"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+                true,
+                "running",
+                None,
+            );
+        }
+        let report = runtime
+            .cleanup_orphans(&BTreeSet::new(), true, None)
+            .await
+            .unwrap_or_else(|error| panic!("review failed: {error}"));
+        let reviewed = report
+            .resources
+            .iter()
+            .map(|resource| CleanupResourceIdentity {
+                kind: resource.kind,
+                name: resource.name.clone(),
+                resource_id: resource.resource_id.clone(),
+                session_id: resource.session_id.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let applied = runtime
+            .cleanup_orphans(
+                &BTreeSet::from(["adopted".to_owned()]),
+                false,
+                Some(&reviewed),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("apply failed: {error}"));
+
+        assert_eq!(applied.deleted_count, 0);
+        assert_eq!(applied.error_count, 1);
+        assert!(backend.state().containers.contains_key("orphan"));
+    }
+
+    #[tokio::test]
+    async fn delete_by_stable_identity_removes_container_and_workspace() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        {
+            let mut state = backend.state();
+            let labels = btree_map([
+                ("agentspace.role", "kernel"),
+                ("agentspace.managed", "true"),
+                ("agentspace.session_id", "stable-delete"),
+                ("agentspace.interaction_mode", "chat"),
+            ]);
+            seed_container(
+                &mut state,
+                "cosmetic-container-name",
+                labels,
+                true,
+                "running",
+                Some("cosmetic-volume-name"),
+            );
+            seed_volume(
+                &mut state,
+                "cosmetic-volume-name",
+                btree_map([
+                    ("agentspace.role", "session-workspace"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "stable-delete"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+            );
+        }
+
+        runtime
+            .destroy_session_by_id("stable-delete")
+            .await
+            .unwrap_or_else(|error| panic!("delete by identity failed: {error}"));
+
+        let state = backend.state();
+        assert_eq!(state.removed_containers, vec!["cosmetic-container-name"]);
+        assert_eq!(state.removed_volumes, vec!["cosmetic-volume-name"]);
+        drop(state);
+    }
+
     #[tokio::test]
     async fn skill_volume_is_shared_and_retained_when_sessions_are_destroyed() {
         let backend = FakeDockerBackend::default();
@@ -1614,6 +3587,7 @@ mod tests {
         let request = RuntimeCreateSession {
             session_id: "memory-enabled".to_owned(),
             harness: HarnessName::Echo,
+            interaction_mode: InteractionMode::Chat,
             env: BTreeMap::new(),
             additional_paths: Vec::new(),
             skills: vec!["memory".to_owned()],
@@ -1628,15 +3602,24 @@ mod tests {
         };
 
         runtime
-            .run_kernel_container("agentspace-kernel-one", &request)
+            .run_kernel_container(
+                "agentspace-kernel-one",
+                "agentspace-session-workspace-one",
+                &request,
+            )
             .await
             .unwrap_or_else(|error| panic!("first run failed: {error}"));
         runtime
-            .run_kernel_container("agentspace-kernel-two", &request)
+            .run_kernel_container(
+                "agentspace-kernel-two",
+                "agentspace-session-workspace-two",
+                &request,
+            )
             .await
             .unwrap_or_else(|error| panic!("second run failed: {error}"));
         runtime
             .destroy_session(KernelRuntimeSession::Docker(DockerKernelSession {
+                session_id: "memory-enabled".to_owned(),
                 container_name: "agentspace-kernel-one".to_owned(),
                 session_workspace_volume_name: "agentspace-session-workspace-one".to_owned(),
                 base_url: "http://agentspace-kernel-one:8000".to_owned(),
@@ -1759,6 +3742,7 @@ mod tests {
         let request = RuntimeCreateSession {
             session_id: "test".to_owned(),
             harness: HarnessName::Echo,
+            interaction_mode: InteractionMode::Chat,
             env,
             additional_paths: Vec::new(),
             skills: Vec::new(),
@@ -1767,7 +3751,11 @@ mod tests {
         };
 
         runtime
-            .run_kernel_container("agentspace-kernel-test", &request)
+            .run_kernel_container(
+                "agentspace-kernel-test",
+                "agentspace-session-workspace-test",
+                &request,
+            )
             .await
             .unwrap_or_else(|error| panic!("run failed: {error}"));
 
@@ -1830,6 +3818,119 @@ mod tests {
             );
             drop(state);
         }
+    }
+
+    #[tokio::test]
+    async fn docker_runtime_snapshots_with_nested_relative_exclusions() {
+        let backend = FakeDockerBackend::default();
+        backend
+            .state()
+            .volumes
+            .insert("agentspace-session-workspace-session".to_owned());
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "agentspace-kernel-session".to_owned(),
+            session_workspace_volume_name: "agentspace-session-workspace-session".to_owned(),
+            base_url: "http://kernel".to_owned(),
+            vscode_url: None,
+            free_port_url: None,
+        });
+        let exclude_paths = vec![
+            ".github/agents/agentspace-session.agent.md".to_owned(),
+            ".github/skills/alpha".to_owned(),
+        ];
+
+        runtime
+            .snapshot_session_workspace(
+                &session,
+                "target".to_owned(),
+                "agentspace-workspace-target".to_owned(),
+                exclude_paths.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("snapshot failed: {error}"));
+
+        let state = backend.state();
+        let exclude_paths_json =
+            state.run_specs[0].environment["AGENTSPACE_WORKSPACE_EXCLUDE_PATHS_JSON"].clone();
+        let snapshot_script = state.run_specs[0].entrypoint[2].clone();
+        drop(state);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&exclude_paths_json)
+                .unwrap_or_else(|error| panic!("exclude paths were not JSON: {error}")),
+            exclude_paths
+        );
+        assert!(snapshot_script.contains("agentspace-owned-profile"));
+        assert!(snapshot_script.contains("PurePosixPath"));
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_rejects_identical_source_and_destination_volumes() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "agentspace-kernel-session".to_owned(),
+            session_workspace_volume_name: "agentspace-session-workspace-session".to_owned(),
+            base_url: "http://kernel".to_owned(),
+            vscode_url: None,
+            free_port_url: None,
+        });
+        let source = match &session {
+            KernelRuntimeSession::Docker(handle) => handle.session_workspace_volume_name.clone(),
+            KernelRuntimeSession::Opaque(_) => panic!("expected Docker session"),
+        };
+
+        let Err(error) = runtime
+            .snapshot_session_workspace(&session, "same".to_owned(), source, Vec::new())
+            .await
+        else {
+            panic!("identical snapshot volumes must be rejected");
+        };
+
+        assert!(matches!(error, AgentHostError::Validation { .. }));
+        assert!(backend.state().run_specs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_propagates_helper_container_failure() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "agentspace-kernel-session".to_owned(),
+            session_workspace_volume_name: "agentspace-session-workspace-session".to_owned(),
+            base_url: "http://kernel".to_owned(),
+            vscode_url: None,
+            free_port_url: None,
+        });
+        let source = match &session {
+            KernelRuntimeSession::Docker(handle) => handle.session_workspace_volume_name.clone(),
+            KernelRuntimeSession::Opaque(_) => panic!("expected Docker session"),
+        };
+        {
+            let mut state = backend.state();
+            state.volumes.insert(source);
+            state.fail_next_run = true;
+        }
+
+        let Err(error) = runtime
+            .snapshot_session_workspace(
+                &session,
+                "target".to_owned(),
+                "agentspace-workspace-target".to_owned(),
+                Vec::new(),
+            )
+            .await
+        else {
+            panic!("helper failure must fail the snapshot");
+        };
+
+        assert!(error.to_string().contains("status 1"));
     }
 
     #[tokio::test]
@@ -1945,7 +4046,7 @@ mod tests {
         );
         assert_eq!(
             skills_mount_path(HarnessName::CopilotCli),
-            "/root/.copilot/skills"
+            "/workspace/.github/skills"
         );
         assert_eq!(
             skills_mount_path(HarnessName::Opencode),

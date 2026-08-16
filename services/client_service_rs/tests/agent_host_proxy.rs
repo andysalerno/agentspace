@@ -34,6 +34,7 @@ struct RecordedRequest {
 #[derive(Clone, Default)]
 struct StubState {
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
+    fail_session_creation: Arc<Mutex<bool>>,
 }
 
 impl StubState {
@@ -70,6 +71,42 @@ impl StubState {
             .map_err(|_error| "stub request mutex poisoned")?
             .clear();
         Ok(())
+    }
+
+    fn set_fail_session_creation(&self, fail: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
+        *self
+            .fail_session_creation
+            .lock()
+            .map_err(|_error| "stub failure mutex poisoned")? = fail;
+        Ok(())
+    }
+
+    fn should_fail_session_creation(&self) -> Result<bool, StatusCode> {
+        self.fail_session_creation
+            .lock()
+            .map(|fail| *fail)
+            .map_err(|_error| StatusCode::INTERNAL_SERVER_ERROR)
+    }
+
+    fn last_session_id(&self) -> Result<Option<String>, StatusCode> {
+        Ok(self
+            .requests
+            .lock()
+            .map_err(|_error| StatusCode::INTERNAL_SERVER_ERROR)?
+            .iter()
+            .rev()
+            .find_map(|request| {
+                (request.method == Method::POST && request.path == "/sessions")
+                    .then(|| {
+                        request
+                            .body
+                            .as_ref()?
+                            .get("session_id")?
+                            .as_str()
+                            .map(ToOwned::to_owned)
+                    })
+                    .flatten()
+            }))
     }
 }
 
@@ -110,6 +147,10 @@ impl TestServer {
     fn clear_recorded(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         self.state.clear_recorded()
     }
+
+    fn set_fail_session_creation(&self, fail: bool) -> Result<(), Box<dyn Error + Send + Sync>> {
+        self.state.set_fail_session_creation(fail)
+    }
 }
 
 impl Drop for TestServer {
@@ -138,6 +179,7 @@ fn stub_router(state: StubState) -> Router {
             "/sessions/{session_id}/container-logs",
             get(host_container_logs),
         )
+        .route("/management/runtime-cleanup", post(cleanup_host_runtime))
         .route("/skills", post(create_host_skill).get(list_host_skills))
         .route("/skills/{skill_id}/versions", get(list_host_skill_versions))
         .route(
@@ -156,15 +198,31 @@ fn stub_router(state: StubState) -> Router {
         .with_state(state)
 }
 
-async fn create_host_session(
-    State(state): State<StubState>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    state.record(Method::POST, "/sessions", None, Some(body))?;
-    Ok(Json(json!({
-        "session_id": "host-session",
+async fn create_host_session(State(state): State<StubState>, Json(body): Json<Value>) -> Response {
+    let session_id = body
+        .get("session_id")
+        .and_then(Value::as_str)
+        .unwrap_or("host-session")
+        .to_owned();
+    if let Err(status) = state.record(Method::POST, "/sessions", None, Some(body)) {
+        return status.into_response();
+    }
+    match state.should_fail_session_creation() {
+        Ok(true) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "detail": "session launch failed" })),
+            )
+                .into_response();
+        }
+        Err(status) => return status.into_response(),
+        Ok(false) => {}
+    }
+    Json(json!({
+        "session_id": session_id,
         "status": "running"
-    })))
+    }))
+    .into_response()
 }
 
 async fn list_host_sessions(
@@ -172,9 +230,12 @@ async fn list_host_sessions(
     Query(query): Query<BTreeMap<String, String>>,
 ) -> Result<Json<Value>, StatusCode> {
     state.record(Method::GET, "/sessions", query_string(query), None)?;
+    let session_id = state
+        .last_session_id()?
+        .unwrap_or_else(|| "host-session".to_owned());
     Ok(Json(json!([
         {
-            "session_id": "host-session",
+            "session_id": session_id,
             "status": "running",
             "stats": { "turns": 1 }
         },
@@ -249,6 +310,25 @@ async fn host_container_logs(
         None,
     )?;
     Ok(Json(json!({ "lines": ["container line"] })))
+}
+
+async fn cleanup_host_runtime(
+    State(state): State<StubState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, StatusCode> {
+    state.record(
+        Method::POST,
+        "/management/runtime-cleanup",
+        None,
+        Some(body.clone()),
+    )?;
+    Ok(Json(json!({
+        "dry_run": body["dry_run"],
+        "owned_session_count": body["owned_session_ids"].as_array().map_or(0, Vec::len),
+        "resources": [],
+        "deleted_count": 0,
+        "error_count": 0
+    })))
 }
 
 async fn create_host_skill(
@@ -601,7 +681,7 @@ async fn create_session_merges_environment_for_agent_host()
     .await?;
     assert_eq!(status, StatusCode::OK);
 
-    let (status, _session) = post_json(
+    let (status, session) = post_json(
         &app,
         "/sessions",
         json!({
@@ -612,6 +692,7 @@ async fn create_session_merges_environment_for_agent_host()
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    let session_id = value_string(&session, "session_id")?;
 
     assert_eq!(
         server.recorded()?,
@@ -627,6 +708,8 @@ async fn create_session_merges_environment_for_agent_host()
                 path: "/sessions".to_owned(),
                 query: None,
                 body: Some(json!({
+                    "session_id": session_id,
+                    "interaction_mode": "chat",
                     "harness": "acp",
                     "skills": ["skill-a"],
                     "env": {
@@ -646,6 +729,63 @@ async fn create_session_merges_environment_for_agent_host()
         ]
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_upstream_creation_leaves_recoverable_error_session()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    create_basic_agent(&app).await?;
+    server.set_fail_session_creation(true)?;
+
+    let (status, _error) = post_json(
+        &app,
+        "/sessions",
+        json!({
+            "agent_id": "stub-agent",
+            "channel_name": "webui",
+            "client_type": "webui"
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+
+    let (status, sessions) = get_json(&app, "/sessions").await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(sessions.as_array().map(Vec::len), Some(1));
+    assert_eq!(sessions[0]["status"], "error");
+    assert_eq!(sessions[0]["runtime_status"], "error");
+    assert_eq!(sessions[0]["recovery_state"], "recoverable");
+    assert!(sessions[0].get("agent_host_session_id").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_chat_recovery_requires_existing_durable_runtime_state()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    create_basic_agent(&app).await?;
+    let (session_id, _session) = create_basic_session(&app).await?;
+    server.clear_recorded()?;
+
+    let (status, _session) = get_json(&app, &format!("/sessions/{session_id}")).await?;
+
+    assert_eq!(status, StatusCode::OK);
+    let recovery_create = server
+        .recorded()?
+        .into_iter()
+        .find(|request| request.method == Method::POST && request.path == "/sessions")
+        .ok_or("missing recovery create")?;
+    assert_eq!(
+        recovery_create
+            .body
+            .as_ref()
+            .ok_or("missing recovery body")?["env"]["AGENTSPACE_RUNTIME_RECOVERY"],
+        "1"
+    );
     Ok(())
 }
 
@@ -776,6 +916,8 @@ async fn send_message_proxies_to_stream_and_persists_messages()
                 path: "/sessions".to_owned(),
                 query: None,
                 body: Some(json!({
+                    "session_id": session_id,
+                    "interaction_mode": "chat",
                     "harness": "acp",
                     "env": {
                         "AGENTSPACE_AGENT_ID": "stub-agent",
@@ -787,13 +929,30 @@ async fn send_message_proxies_to_stream_and_persists_messages()
             },
             RecordedRequest {
                 method: Method::POST,
-                path: "/sessions/host-session/messages/stream".to_owned(),
+                path: "/sessions".to_owned(),
+                query: None,
+                body: Some(json!({
+                    "session_id": session_id,
+                    "interaction_mode": "chat",
+                    "harness": "acp",
+                    "env": {
+                        "AGENTSPACE_AGENT_ID": "stub-agent",
+                        "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                        "AGENTSPACE_RUNTIME_RECOVERY": "1",
+                        "KERNEL_SYSTEM_PROMPT": "Be helpful"
+                    },
+                    "skills": []
+                })),
+            },
+            RecordedRequest {
+                method: Method::POST,
+                path: format!("/sessions/{session_id}/messages/stream"),
                 query: None,
                 body: Some(json!({ "message": "Hello?" })),
             },
             RecordedRequest {
                 method: Method::GET,
-                path: "/sessions/host-session".to_owned(),
+                path: format!("/sessions/{session_id}"),
                 query: None,
                 body: None,
             },
@@ -867,7 +1026,7 @@ async fn kernels_include_client_session_metadata() -> Result<(), Box<dyn Error +
     let (status, kernels) = get_json(&app, "/kernels").await?;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(kernels[0]["session_id"], "host-session");
+    assert_eq!(kernels[0]["session_id"], session_id);
     assert_eq!(kernels[0]["client_session_ids"], json!([session_id]));
     assert_eq!(kernels[0]["channel_names"], json!(["cli"]));
     assert_eq!(kernels[0]["agent_ids"], json!(["stub-agent"]));
@@ -876,6 +1035,83 @@ async fn kernels_include_client_session_metadata() -> Result<(), Box<dyn Error +
     assert_eq!(kernels[1]["channel_names"], json!([]));
     assert_eq!(kernels[1]["agent_ids"], json!([]));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_cleanup_uses_durable_sessions_as_authority()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    create_basic_agent(&app).await?;
+    let (session_id, _session) = create_basic_session(&app).await?;
+    server.clear_recorded()?;
+
+    let (status, report) = post_json(
+        &app,
+        "/management/runtime-cleanup",
+        json!({ "dry_run": true }),
+    )
+    .await?;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["dry_run"], true);
+    assert_eq!(report["owned_session_count"], 1);
+    assert_eq!(
+        server.recorded()?,
+        vec![RecordedRequest {
+            method: Method::POST,
+            path: "/management/runtime-cleanup".to_owned(),
+            query: None,
+            body: Some(json!({
+                "owned_session_ids": [session_id],
+                "dry_run": true
+            })),
+        }]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_cleanup_apply_requires_and_forwards_exact_reviewed_resources()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    let (status, _error) = post_json(
+        &app,
+        "/management/runtime-cleanup",
+        json!({ "dry_run": false }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(server.recorded()?.is_empty());
+
+    let reviewed = json!([{
+        "kind": "kernel_container",
+        "name": "orphan",
+        "resource_id": "container-id",
+        "session_id": "orphan-session"
+    }]);
+    let (status, _report) = post_json(
+        &app,
+        "/management/runtime-cleanup",
+        json!({ "dry_run": false, "reviewed_resources": reviewed }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        server.recorded()?,
+        vec![RecordedRequest {
+            method: Method::POST,
+            path: "/management/runtime-cleanup".to_owned(),
+            query: None,
+            body: Some(json!({
+                "owned_session_ids": [],
+                "dry_run": false,
+                "reviewed_resources": reviewed,
+            })),
+        }]
+    );
     Ok(())
 }
 

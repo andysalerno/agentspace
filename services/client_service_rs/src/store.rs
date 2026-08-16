@@ -595,8 +595,11 @@ mod tests {
     use crate::{
         errors::StoreError,
         models::{
-            AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord, GatewayRecord,
-            GatewayType, HarnessName, MessageRecord, MessageRole, SessionRecord, ToolCallRecord,
+            AdditionalPathIdentity, AgentCliRecord, AgentRecord, CliHarnessName,
+            CliLaunchOptionsSnapshot, CliLaunchSnapshot, ClientType, ConnectionApiFlavor,
+            ConnectionRecord, GatewayRecord, GatewayType, HarnessName, InteractionMode,
+            MessageRecord, MessageRole, RecoveryState, RuntimeStatus, SessionRecord,
+            ToolCallRecord, WorkspaceMountMode, WorkspaceMountRecord,
         },
     };
 
@@ -848,6 +851,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn sqlite_stores_persist_records_across_reopen() -> Result<(), Box<dyn Error + Send + Sync>> {
         let path = sqlite_test_path()?;
         {
@@ -862,6 +866,10 @@ mod tests {
             agent.skills = vec!["skill-a".to_owned(), "skill-b".to_owned()];
             agent.env_vars = "A=B".to_owned();
             agent.connection_id = Some("conn".to_owned());
+            agent.cli = Some(AgentCliRecord {
+                harness: CliHarnessName::CopilotCli,
+                connection_id: Some("conn".to_owned()),
+            });
             stores.agents.insert(&agent)?;
 
             stores.kernel_configs.upsert(HarnessName::Acp, "K=V")?;
@@ -879,6 +887,33 @@ mod tests {
             let mut session = session("session", "2024-01-04");
             session.channel_name = Some("cli".to_owned());
             session.client_type = Some(ClientType::Cli);
+            session.interaction_mode = InteractionMode::Cli;
+            session.cli_harness = Some(CliHarnessName::CopilotCli);
+            session.cli_connection_id = Some("conn".to_owned());
+            session.harness_session_id = Some("73d5eb10-cac7-44ca-8aa8-d41da5a24f13".to_owned());
+            session.runtime_generation = Some(2);
+            session.runtime_status = Some(RuntimeStatus::Starting);
+            session.workspace_volume_identity = Some("workspace-identity".to_owned());
+            session.workspace_mounts = vec![WorkspaceMountRecord::new(
+                "workspace",
+                WorkspaceMountMode::ReadOnly,
+            )];
+            session.launch_snapshot = Some(CliLaunchSnapshot {
+                schema_version: 1,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                options: CliLaunchOptionsSnapshot {
+                    no_auto_update: true,
+                    mouse: true,
+                    config_dir: None,
+                    extra_args: None,
+                },
+                additional_paths: vec![AdditionalPathIdentity::SessionWorkspace {
+                    path: "/workspace".to_owned(),
+                }],
+                agent_profile: None,
+            });
             stores.sessions.insert(session)?;
 
             let mut message =
@@ -920,6 +955,13 @@ mod tests {
                 vec!["skill-a".to_owned(), "skill-b".to_owned()]
             );
             assert_eq!(agent.connection_id.as_deref(), Some("conn"));
+            assert_eq!(
+                agent.cli,
+                Some(AgentCliRecord {
+                    harness: CliHarnessName::CopilotCli,
+                    connection_id: Some("conn".to_owned()),
+                })
+            );
 
             let config = stores
                 .kernel_configs
@@ -952,6 +994,29 @@ mod tests {
                         session_id: "session".to_owned(),
                     })?;
             assert_eq!(session.client_type, Some(ClientType::Cli));
+            assert_eq!(session.interaction_mode, InteractionMode::Cli);
+            assert_eq!(session.cli_harness, Some(CliHarnessName::CopilotCli));
+            assert_eq!(session.cli_connection_id.as_deref(), Some("conn"));
+            assert_eq!(session.runtime_generation, Some(2));
+            assert_eq!(session.runtime_status, Some(RuntimeStatus::Starting));
+            assert_eq!(
+                session.workspace_volume_identity.as_deref(),
+                Some("workspace-identity")
+            );
+            assert_eq!(
+                session.workspace_mounts,
+                vec![WorkspaceMountRecord::new(
+                    "workspace",
+                    WorkspaceMountMode::ReadOnly
+                )]
+            );
+            assert_eq!(
+                session
+                    .launch_snapshot
+                    .as_ref()
+                    .map(|snapshot| snapshot.schema_version),
+                Some(1)
+            );
             assert_eq!(session.messages.len(), 1);
             let message = &session.messages[0];
             assert_eq!(message.reasoning, "because");
@@ -959,6 +1024,53 @@ mod tests {
             assert_eq!(message.tool_calls[0].tool, "shell");
             assert_eq!(message.tool_calls[0].content_offset, Some(3));
         }
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_migrates_legacy_sessions_to_chat() -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = sqlite_test_path()?;
+        {
+            let connection = rusqlite::Connection::open(&path)?;
+            connection.execute_batch(
+                "
+                CREATE TABLE client_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    agent_host_session_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    channel_name TEXT,
+                    client_type TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO client_sessions (
+                    session_id, agent_id, agent_host_session_id, status,
+                    channel_name, client_type, created_at, updated_at
+                ) VALUES (
+                    'legacy', 'agent', 'host-session', 'idle',
+                    NULL, 'webui', '2024-01-01', '2024-01-01'
+                );
+                ",
+            )?;
+        }
+
+        let stores = StoreSet::sqlite(&path)?;
+        let session =
+            stores
+                .sessions
+                .get("legacy")?
+                .ok_or_else(|| StoreError::SessionNotFound {
+                    session_id: "legacy".to_owned(),
+                })?;
+        assert_eq!(session.interaction_mode, InteractionMode::Chat);
+        assert_eq!(session.cli_harness, None);
+        assert_eq!(session.launch_snapshot, None);
+        assert!(session.workspace_mounts.is_empty());
+        assert_eq!(session.recovery_state(), RecoveryState::LegacyUnrecoverable);
+        assert_eq!(session.summary()["recovery_state"], "legacy-unrecoverable");
 
         cleanup_sqlite_path(&path);
         Ok(())

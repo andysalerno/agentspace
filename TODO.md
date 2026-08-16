@@ -2,31 +2,7 @@
 
 *These are large feature-work changes that are scheduled.*
 
-A shared todo list for multiple agents to read and select tasks from:
-
-- [x] Use Monaco editor in the webui everywhere (skills editor, etc)
-- [x] Add dark mode to the webui
-- [x] navbar on the left in the webui should allow collapsing/minimizing
-- [x] add a kernel for codex cli (codex is already installed on this machine)
-- [x] add a rich-text cli client that has all the same abilities as the web UI, using a modern tui library
-
-- [x] FEAT: streaming support end to end. Currently, the kernel implementations (copilot cli, codex, etc) receive streaming output, in the form of delta messages. But, at some point in the response chain (I think early on, maybe even in the kernel itself) it stops streaming, and starts blocking until the stream is fully accumulated and ready to return. This means clients (like the webui or terminal ui) do not benefit from: 1. seeing tool calls immediately when they trigger, 2. seeing the message stream in token by token. The goal is to fix that. To verify streaming works as intended, I recommend crafting http requests, standing up the service, and executing the requests against the service, then verifying the response appears streaming as expected. Note: alternate endpoints should be provided that provide non-streaming, accumulated responses, similar to the current behavior. Tip: read the content in docs/ to understand the system design first.
-
-- [ ] FEAT: streaming kernel logs to the webui. The "Running Kernels" page currently polls `/kernels/{id}/logs` once per second and re-renders the full buffer in a read-only Monaco editor. Replace polling with a true streaming endpoint so that new log lines appear immediately without re-fetching the entire buffer. Proposed approach:
-    - Add a streaming endpoint on `kernel_host` (e.g. `GET /logs/stream`) that returns newline-delimited JSON or SSE: emit the existing buffered lines first, then yield new lines as they are appended (use an `asyncio.Queue` or `asyncio.Event` notifier inside the in-process log buffer).
-    - Add `GET /sessions/{id}/logs/stream` on `agent_host` that proxies the kernel container's stream (httpx streaming response, forwarded chunk-for-chunk).
-    - Add `GET /kernels/{id}/logs/stream` on `client_service` that proxies `agent_host`. Keep the existing non-streaming `/logs` endpoint for one-shot fetches.
-    - Update `KernelsView.tsx` to consume the stream via `fetch` + `ReadableStream` (same pattern already used by `api.streamMessage`), append new lines to local state, and update the Monaco model incrementally (use `editor.getModel().applyEdits([...])` or just set the value — measure first). Remove the 1s polling interval.
-    - Tests: unit-test the kernel_host buffer notifier (multiple subscribers, late join sees backlog), and add an integration test that asserts chunks arrive incrementally rather than in one blob.
-
-- [ ] FEAT: Improved "typing" indicator experience in the Discord gateway. When a Discord gateway receives a message, it should immediately trigger the "typing" indicator (however that is done via the Discord Bot API) such that the user in discord can see that the agent has received the message and is handling it.
-- [ ] FEAT: In addition to the above "typing" indicator improvement: we can be clever about the typing indicator, to make it feel more "natural". That is, the typing indicator can appear after a delay of 2sec, instead of immediately, since no human would immediately begin typing. It can have some random jitter applied so it's not always the same delay. It can start, stop, start again, if the bot's message is long. Plus, we can artificially split the bot's final output into multiple messages, perhaps at paragraph boundaries, and have a slight "typing" delay between them, to make it seem more natural.
-
-## Correctness and Quality
-
-*These are code quality, bugfixes, and correctness improvements that we plan to do.*
-
-- [ ] BUG: webui `queries.ts` uses `__none__` sentinel query keys for disabled queries (`useSession`, `useGatewaySchema`, `useKernelConfig`). Replace with TanStack Query v5's `skipToken` so the disabled state is type-safe and cannot collide with a real id of the same name. See https://tanstack.com/query/v5/docs/framework/react/guides/disabling-queries#typesafe-disabling-of-queries-using-skiptoken.
-- [ ] CLEANUP: in `KernelsView.tsx`, `loadingLogs = logsQuery.isFetching && logsQuery.isLoading` is redundant — `isLoading` already implies `isFetching` in TanStack Query v5. Simplify to `loadingLogs = logsQuery.isLoading`.
-- [ ] CLEANUP: `ErrorContext` exposes `setError` in the public context value but no caller uses it (everyone goes through `reportError` for `unknown → string` normalization). Remove `setError` from `ErrorContextValue` to tighten the API surface.
-- [ ] BUG: when an agent is deleted from `AgentsView`, the agent's sessions are not invalidated. The currently-selected chat session can then become stale and 404 on its next refetch. Fix: in `AgentsView.deleteMutation.onSuccess`, also invalidate `queryKeys.sessions`; if the deleted agent owns the currently-selected session, clear `selectedSessionId` (raise via callback prop or move the cleanup to `App`, which owns that state).
+- [ ] FEAT: VS Code service should not actually spawn in the container until a user requests it explicitly by clicking "open in VS Code" (or similar). This should reduce idle memory usage for the common case where VS Code is never launched.
+- [ ] FEAT: CLI View. Similar to "Agents" view but launches directly to a terminal instance (in-browser) instead of our custom chat UI.
+- [ ] FEAT: 'inspect' mode for the conversation: a sidebar on the right (well, UX can be determined) that exposes as much information as we can about the session; anything that can be captured either from the json stream (if enabled) or from the OTEL, or whatever is the most fine-grained source of info. We should be able to visually drill down into every message and see tool calls, cache usage, token usage, etc. Progressive disclosure - we can keep drilling further and further and exposing more and more info via the UI. Ideally this would be handled by the same mechanism in both CLI View and Chat view, though perhaps the details of those modes (ACP for chat view, and direct CLI invocation for CLI view) will result in different capturing requirements (but hopefully at least the same display logic).
+- [ ] FEAT: give the agent its own cli that interacts with the agentspace environment; e.x. "agentspace list-envs", "agentspace search-memory", etc etc. (Those names are terrible, but give you the gist).

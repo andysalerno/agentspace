@@ -5,8 +5,8 @@ use serde::Deserialize;
 use crate::{
     config::{
         document::{
-            API_VERSION, Agent, AggregateManifest, ConfigDocument, ConfigSpec, Connection, Gateway,
-            KIND_AGGREGATE, KernelConfig, Metadata, SecretDeclaration, Skill,
+            API_VERSION, Agent, AgentCliConfig, AggregateManifest, ConfigDocument, ConfigSpec,
+            Connection, Gateway, KIND_AGGREGATE, KernelConfig, Metadata, SecretDeclaration, Skill,
         },
         error::ConfigError,
         value::{ConfigValue, SecretName},
@@ -168,6 +168,7 @@ fn merge_document(
                 name: manifest.spec.name,
                 harness: manifest.spec.harness,
                 connection: manifest.spec.connection,
+                cli: manifest.spec.cli,
                 system_prompt: manifest.spec.system_prompt,
                 skills: manifest.spec.skills,
                 env: manifest.spec.env,
@@ -374,6 +375,8 @@ struct AgentSpec {
     harness: HarnessName,
     #[serde(default)]
     connection: Option<String>,
+    #[serde(default)]
+    cli: Option<AgentCliConfig>,
     system_prompt: ConfigValue<String>,
     #[serde(default)]
     skills: Vec<String>,

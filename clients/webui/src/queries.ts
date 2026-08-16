@@ -11,6 +11,7 @@ export const queryKeys = {
   agents: ["agents"] as const,
   sessions: ["sessions"] as const,
   session: (sessionId: string) => ["sessions", sessionId] as const,
+  terminal: (sessionId: string) => ["sessions", sessionId, "terminal"] as const,
   kernels: ["kernels"] as const,
   kernelLogs: (sessionId: string) => ["kernels", sessionId, "logs"] as const,
   kernelContainerLogs: (sessionId: string) =>
@@ -81,6 +82,17 @@ export const useSession = (
     // for the duration of a streaming turn.
     refetchInterval: options?.poll === false ? false : POLL_MS,
     refetchOnWindowFocus: options?.poll !== false,
+  });
+
+export const useTerminalStatus = (sessionId: string | null, enabled: boolean) =>
+  useQuery({
+    queryKey: sessionId
+      ? queryKeys.terminal(sessionId)
+      : (["sessions", "__none__", "terminal"] as const),
+    queryFn: () => api.getTerminalStatus(sessionId as string),
+    enabled: sessionId !== null && enabled,
+    refetchInterval: POLL_MS,
+    retry: false,
   });
 
 export const useKernels = () =>

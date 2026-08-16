@@ -11,10 +11,11 @@ use axum::{
     Router,
     body::Body,
     extract::MatchedPath,
-    http::{Request, Response},
+    http::{Request, Response, StatusCode, header},
+    middleware::{self, Next},
 };
 use chrono::{DateTime, Utc};
-use tower_http::{classify::ServerErrorsFailureClass, cors::CorsLayer, trace::TraceLayer};
+use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::Span;
 use uuid::Uuid;
 
@@ -25,6 +26,7 @@ pub mod gateways;
 pub mod models;
 pub mod sessions;
 pub mod skills;
+pub mod terminal;
 
 pub const ENV_PREFIX: &str = "AGENT_HOST_";
 const DEFAULT_BIND_HOST: &str = "0.0.0.0";
@@ -151,7 +153,7 @@ impl AppState {
     }
 
     pub async fn shutdown(&self) {
-        self.sessions.destroy_all_sessions().await;
+        self.sessions.forget_all_sessions().await;
         self.gateways.destroy_all_gateways().await;
     }
 }
@@ -159,7 +161,7 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     api::router()
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(middleware::from_fn(reject_browser_origin))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &Request<Body>| {
@@ -209,6 +211,16 @@ pub fn build_router(state: AppState) -> Router {
         )
 }
 
+async fn reject_browser_origin(
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response<Body>, StatusCode> {
+    if request.headers().contains_key(header::ORIGIN) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(next.run(request).await)
+}
+
 fn matched_route<B>(request: &Request<B>) -> &str {
     request
         .extensions()
@@ -230,7 +242,13 @@ fn parse_port() -> Result<u16, ConfigError> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{AppConfig, AppState};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use tower::ServiceExt;
+
+    use super::{AppConfig, AppState, build_router};
 
     #[test]
     fn app_state_uses_configured_agent_host_environment() {
@@ -241,5 +259,26 @@ mod tests {
         let state = AppState::new(config);
 
         assert_eq!(state.config.agent_host_env, env);
+    }
+
+    #[tokio::test]
+    async fn browser_origin_requests_are_rejected() {
+        let app = build_router(AppState::new(AppConfig::new(
+            "127.0.0.1",
+            0,
+            BTreeMap::new(),
+        )));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .header(header::ORIGIN, "http://evil.example")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("request failed: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("router failed: {error}"));
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

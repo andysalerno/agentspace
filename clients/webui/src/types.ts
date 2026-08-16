@@ -1,6 +1,26 @@
-export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "memory" | "skills" | "connections" | "gateways" | "info" | "config-kernels" | "config" | "config-secrets";
+export type ViewId =
+  | "chat"
+  | "cli"
+  | "agents"
+  | "workspaces"
+  | "sessions"
+  | "kernels"
+  | "memory"
+  | "skills"
+  | "connections"
+  | "gateways"
+  | "info"
+  | "config-kernels"
+  | "config"
+  | "config-secrets";
 
 type Harness = string;
+type CliHarnessName = "copilot-cli";
+
+export type AgentCliConfig = {
+  harness: CliHarnessName;
+  connection_id: string | null;
+};
 
 export type WorkspaceMountMode = "rw" | "ro";
 
@@ -19,6 +39,7 @@ export type Agent = {
   skills: string[];
   env_vars: string;
   connection_id: string | null;
+  cli: AgentCliConfig | null;
   workspace_mounts: WorkspaceMount[];
   created_at: string;
   updated_at: string;
@@ -138,10 +159,18 @@ export type SkillVersion = {
 export type SessionSummary = {
   session_id: string;
   agent_id: string;
-  agent_host_session_id: string;
   status: string;
   channel_name: string | null;
   client_type: string | null;
+  interaction_mode: "chat" | "cli";
+  cli_harness: CliHarnessName | null;
+  cli_connection_id: string | null;
+  harness_session_id: string | null;
+  runtime_generation: number | null;
+  runtime_status: "starting" | "live" | "exited" | "disconnected" | "resuming" | "error" | null;
+  recovery_state: "recoverable" | "legacy-unrecoverable";
+  vscode_url: string | null;
+  free_port_url: string | null;
   created_at: string;
   updated_at: string;
   message_count: number;
@@ -191,6 +220,42 @@ export type ChatMessage = {
 export type SessionDetail = SessionSummary & {
   messages: ChatMessage[];
 };
+
+type TerminalState = "missing" | "running" | "exited";
+export type TerminalAttachKind = "started" | "attached" | "resumed";
+
+export type TerminalStatus = {
+  state: TerminalState;
+  exit_status: number | null;
+  attach_kind: TerminalAttachKind | null;
+  attachment_count: number;
+};
+
+export type TerminalReadyFrame = {
+  type: "ready";
+  attachment_id: string;
+  cols: number;
+  rows: number;
+  terminal: TerminalStatus;
+};
+
+type TerminalExitedFrame = {
+  type: "exited";
+  state: "exited";
+  exit_status: number | null;
+  terminal: TerminalStatus;
+};
+
+type TerminalErrorFrame = {
+  type: "error";
+  code: number;
+  message: string;
+};
+
+export type TerminalServerFrame =
+  | TerminalReadyFrame
+  | TerminalExitedFrame
+  | TerminalErrorFrame;
 
 export type KernelStats = {
   cpu_percent: number | null;

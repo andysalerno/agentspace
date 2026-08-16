@@ -9,6 +9,11 @@ use std::{
 
 use reqwest::{Method, StatusCode, Url, header};
 use serde_json::{Map, Value, json};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{Error as WebSocketError, protocol::WebSocketConfig},
+};
 
 use crate::models::WorkspaceMountRecord;
 
@@ -21,6 +26,19 @@ pub type JsonObject = Map<String, Value>;
 pub type JsonArray = Vec<JsonObject>;
 pub type KernelEvent = JsonObject;
 pub type AgentHostResult<T> = Result<T, AgentHostError>;
+pub type AgentHostWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+const MAX_TERMINAL_WEBSOCKET_MESSAGE_SIZE: usize = 1024 * 1024;
+const MAX_TERMINAL_WEBSOCKET_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
+
+pub struct AgentHostSessionCreate<'a> {
+    pub session_id: &'a str,
+    pub interaction_mode: &'a str,
+    pub harness: &'a str,
+    pub skills: Option<&'a [String]>,
+    pub env: Option<&'a BTreeMap<String, String>>,
+    pub additional_paths: Option<&'a [String]>,
+    pub workspace_mounts: Option<&'a [WorkspaceMountRecord]>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentHostDownload {
@@ -86,25 +104,127 @@ impl AgentHostClient {
 
     pub async fn create_session(
         &self,
-        harness: &str,
-        skills: Option<&[String]>,
-        env: Option<&BTreeMap<String, String>>,
-        workspace_mounts: Option<&[WorkspaceMountRecord]>,
+        request: AgentHostSessionCreate<'_>,
     ) -> AgentHostResult<JsonObject> {
         let mut payload = JsonObject::new();
-        payload.insert("harness".to_owned(), json!(harness));
-        if let Some(skills) = skills {
+        payload.insert("session_id".to_owned(), json!(request.session_id));
+        payload.insert(
+            "interaction_mode".to_owned(),
+            json!(request.interaction_mode),
+        );
+        payload.insert("harness".to_owned(), json!(request.harness));
+        if let Some(skills) = request.skills {
             payload.insert("skills".to_owned(), json!(skills));
         }
-        if let Some(env) = env.filter(|env| !env.is_empty()) {
+        if let Some(env) = request.env.filter(|env| !env.is_empty()) {
             payload.insert("env".to_owned(), json!(env));
         }
-        if let Some(workspace_mounts) = workspace_mounts.filter(|mounts| !mounts.is_empty()) {
+        if let Some(additional_paths) = request.additional_paths.filter(|paths| !paths.is_empty()) {
+            payload.insert("additional_paths".to_owned(), json!(additional_paths));
+        }
+        if let Some(workspace_mounts) = request.workspace_mounts.filter(|mounts| !mounts.is_empty())
+        {
             payload.insert("workspace_mounts".to_owned(), json!(workspace_mounts));
         }
 
         self.request_object(Method::POST, self.endpoint(&["sessions"])?, Some(payload))
             .await
+    }
+
+    pub async fn terminal_status(&self, session_id: &str) -> AgentHostResult<JsonObject> {
+        self.request_object(
+            Method::GET,
+            self.endpoint(&["sessions", session_id, "terminal"])?,
+            None,
+        )
+        .await
+    }
+
+    pub async fn terminal_ensure(&self, session_id: &str) -> AgentHostResult<JsonObject> {
+        self.terminal_control(session_id, "ensure", None).await
+    }
+
+    pub async fn terminal_stop(&self, session_id: &str) -> AgentHostResult<JsonObject> {
+        self.terminal_control(session_id, "stop", None).await
+    }
+
+    pub async fn terminal_resume(&self, session_id: &str) -> AgentHostResult<JsonObject> {
+        self.terminal_control(session_id, "resume", None).await
+    }
+
+    pub fn terminal_websocket_url(&self, session_id: &str) -> AgentHostResult<Url> {
+        let mut url = self.endpoint(&["sessions", session_id, "terminal", "ws"])?;
+        let websocket_scheme = match url.scheme() {
+            "http" => "ws",
+            "https" => "wss",
+            scheme => {
+                return Err(AgentHostError::InvalidWebSocketScheme {
+                    scheme: scheme.to_owned(),
+                });
+            }
+        };
+        url.set_scheme(websocket_scheme)
+            .map_err(|()| AgentHostError::InvalidWebSocketScheme {
+                scheme: websocket_scheme.to_owned(),
+            })?;
+        Ok(url)
+    }
+
+    pub async fn connect_terminal_websocket(
+        &self,
+        session_id: &str,
+    ) -> AgentHostResult<AgentHostWebSocket> {
+        let url = self.terminal_websocket_url(session_id)?;
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(MAX_TERMINAL_WEBSOCKET_MESSAGE_SIZE);
+        config.max_frame_size = Some(MAX_TERMINAL_WEBSOCKET_MESSAGE_SIZE);
+        config.max_write_buffer_size = MAX_TERMINAL_WEBSOCKET_WRITE_BUFFER_SIZE;
+        match tokio::time::timeout(
+            self.timeout,
+            connect_async_with_config(url.as_str(), Some(config), true),
+        )
+        .await
+        {
+            Ok(Ok((websocket, _response))) => Ok(websocket),
+            Ok(Err(source)) => Err(AgentHostError::WebSocket { source }),
+            Err(_elapsed) => Err(AgentHostError::WebSocketTimeout {
+                timeout: self.timeout,
+            }),
+        }
+    }
+
+    async fn terminal_control(
+        &self,
+        session_id: &str,
+        action: &str,
+        payload: Option<JsonObject>,
+    ) -> AgentHostResult<JsonObject> {
+        self.request_object(
+            Method::POST,
+            self.endpoint(&["sessions", session_id, "terminal", action])?,
+            payload,
+        )
+        .await
+    }
+
+    pub async fn cleanup_runtime(
+        &self,
+        owned_session_ids: &[String],
+        dry_run: bool,
+        reviewed_resources: Option<&[Value]>,
+    ) -> AgentHostResult<JsonObject> {
+        let mut payload = JsonObject::new();
+        payload.insert("owned_session_ids".to_owned(), json!(owned_session_ids));
+        payload.insert("dry_run".to_owned(), json!(dry_run));
+        if let Some(reviewed_resources) = reviewed_resources {
+            payload.insert("reviewed_resources".to_owned(), json!(reviewed_resources));
+        }
+        self.request_object(
+            Method::POST,
+            self.endpoint(&["management", "runtime-cleanup"])?,
+            Some(payload),
+        )
+        .await
     }
 
     pub async fn get_session(&self, session_id: &str) -> AgentHostResult<JsonObject> {
@@ -266,12 +386,12 @@ impl AgentHostClient {
         session_id: &str,
         workspace_id: &str,
         volume_name: &str,
-        exclude_names: &[String],
+        exclude_paths: &[String],
     ) -> AgentHostResult<JsonObject> {
         let mut payload = JsonObject::new();
         payload.insert("workspace_id".to_owned(), json!(workspace_id));
         payload.insert("volume_name".to_owned(), json!(volume_name));
-        payload.insert("exclude_names".to_owned(), json!(exclude_names));
+        payload.insert("exclude_paths".to_owned(), json!(exclude_paths));
         self.request_object(
             Method::POST,
             self.endpoint(&["sessions", session_id, "workspace", "snapshot"])?,
@@ -1176,10 +1296,13 @@ fn agent_host_error_kind(error: &AgentHostError) -> &'static str {
     match error {
         AgentHostError::InvalidBaseUrl { .. } => "invalid_base_url",
         AgentHostError::InvalidTimeout { .. } => "invalid_timeout",
+        AgentHostError::InvalidWebSocketScheme { .. } => "invalid_websocket_scheme",
         AgentHostError::InitialResponseTimeout { .. } => "initial_response_timeout",
+        AgentHostError::WebSocketTimeout { .. } => "websocket_timeout",
         AgentHostError::UrlCannotBeBase { .. } => "url_cannot_be_base",
         AgentHostError::BuildClient { .. } => "build_client",
         AgentHostError::Http { source } => reqwest_error_kind(source),
+        AgentHostError::WebSocket { .. } => "websocket",
         AgentHostError::HttpStatus { .. } => "http_status",
         AgentHostError::Json { .. } => "json",
         AgentHostError::Header { .. } => "header",
@@ -1194,10 +1317,16 @@ fn agent_host_error_kind(error: &AgentHostError) -> &'static str {
 fn agent_host_error_status(error: &AgentHostError) -> u16 {
     match error {
         AgentHostError::Http { source } => reqwest_error_status(source),
+        AgentHostError::WebSocket {
+            source: WebSocketError::Http(response),
+        } => response.status().as_u16(),
         AgentHostError::HttpStatus { status, .. } => status.as_u16(),
-        AgentHostError::InvalidBaseUrl { .. }
+        AgentHostError::WebSocket { .. }
+        | AgentHostError::InvalidBaseUrl { .. }
         | AgentHostError::InvalidTimeout { .. }
+        | AgentHostError::InvalidWebSocketScheme { .. }
         | AgentHostError::InitialResponseTimeout { .. }
+        | AgentHostError::WebSocketTimeout { .. }
         | AgentHostError::UrlCannotBeBase { .. }
         | AgentHostError::BuildClient { .. }
         | AgentHostError::Json { .. }
@@ -1220,7 +1349,13 @@ pub enum AgentHostError {
         raw: String,
         message: String,
     },
+    InvalidWebSocketScheme {
+        scheme: String,
+    },
     InitialResponseTimeout {
+        timeout: Duration,
+    },
+    WebSocketTimeout {
         timeout: Duration,
     },
     UrlCannotBeBase {
@@ -1231,6 +1366,9 @@ pub enum AgentHostError {
     },
     Http {
         source: reqwest::Error,
+    },
+    WebSocket {
+        source: WebSocketError,
     },
     HttpStatus {
         status: StatusCode,
@@ -1274,10 +1412,22 @@ impl Display for AgentHostError {
                     "invalid {TIMEOUT_ENV} timeout value {raw:?}: {message}"
                 )
             }
+            Self::InvalidWebSocketScheme { scheme } => {
+                write!(
+                    formatter,
+                    "agent_host WebSocket requires an HTTP(S) base URL, got scheme {scheme:?}"
+                )
+            }
             Self::InitialResponseTimeout { timeout } => {
                 write!(
                     formatter,
                     "agent_host stream did not start within {timeout:?}"
+                )
+            }
+            Self::WebSocketTimeout { timeout } => {
+                write!(
+                    formatter,
+                    "agent_host terminal WebSocket did not connect within {timeout:?}"
                 )
             }
             Self::UrlCannotBeBase { base_url } => {
@@ -1293,6 +1443,9 @@ impl Display for AgentHostError {
                 )
             }
             Self::Http { source } => write!(formatter, "agent_host HTTP error: {source}"),
+            Self::WebSocket { source } => {
+                write!(formatter, "agent_host WebSocket error: {source}")
+            }
             Self::HttpStatus { status, .. } => {
                 write!(formatter, "agent_host returned HTTP {status}")
             }
@@ -1331,12 +1484,15 @@ impl Error for AgentHostError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::BuildClient { source } | Self::Http { source } => Some(source),
+            Self::WebSocket { source } => Some(source),
             Self::Json { source } => Some(source),
             Self::Header { source, .. } => Some(source),
             Self::Utf8 { source } => Some(source),
             Self::InvalidBaseUrl { .. }
             | Self::InvalidTimeout { .. }
+            | Self::InvalidWebSocketScheme { .. }
             | Self::InitialResponseTimeout { .. }
+            | Self::WebSocketTimeout { .. }
             | Self::UrlCannotBeBase { .. }
             | Self::HttpStatus { .. }
             | Self::UnexpectedJson { .. }
@@ -1764,7 +1920,7 @@ mod tests {
     use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
     use tokio_stream::wrappers::ReceiverStream;
 
-    use super::{AgentHostClient, AgentHostError, JsonObject};
+    use super::{AgentHostClient, AgentHostError, AgentHostSessionCreate, JsonObject};
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedRequest {
@@ -2238,9 +2394,18 @@ mod tests {
         let client = server.client()?;
         let skills = vec!["skill-a".to_owned(), "skill-b".to_owned()];
         let env = BTreeMap::from([("KEY".to_owned(), "value".to_owned())]);
+        let additional_paths = vec!["/workspace/extra".to_owned()];
 
         let response = client
-            .create_session("copilot", Some(&skills), Some(&env), None)
+            .create_session(AgentHostSessionCreate {
+                session_id: "stable-session",
+                interaction_mode: "chat",
+                harness: "copilot",
+                skills: Some(&skills),
+                env: Some(&env),
+                additional_paths: Some(&additional_paths),
+                workspace_mounts: None,
+            })
             .await?;
 
         assert_eq!(response["session_id"], "session-1");
@@ -2251,9 +2416,12 @@ mod tests {
                 path: "/sessions".to_owned(),
                 query: None,
                 body: Some(json!({
+                    "session_id": "stable-session",
+                    "interaction_mode": "chat",
                     "harness": "copilot",
                     "skills": ["skill-a", "skill-b"],
-                    "env": { "KEY": "value" }
+                    "env": { "KEY": "value" },
+                    "additional_paths": ["/workspace/extra"]
                 })),
             }]
         );
@@ -2268,7 +2436,15 @@ mod tests {
         let env = BTreeMap::new();
 
         client
-            .create_session("copilot", None, Some(&env), None)
+            .create_session(AgentHostSessionCreate {
+                session_id: "stable-session",
+                interaction_mode: "chat",
+                harness: "copilot",
+                skills: None,
+                env: Some(&env),
+                additional_paths: None,
+                workspace_mounts: None,
+            })
             .await?;
 
         assert_eq!(
@@ -2277,7 +2453,11 @@ mod tests {
                 method: Method::POST,
                 path: "/sessions".to_owned(),
                 query: None,
-                body: Some(json!({ "harness": "copilot" })),
+                body: Some(json!({
+                    "session_id": "stable-session",
+                    "interaction_mode": "chat",
+                    "harness": "copilot"
+                })),
             }]
         );
 

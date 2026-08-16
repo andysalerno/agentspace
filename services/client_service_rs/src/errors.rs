@@ -13,6 +13,9 @@ pub enum ValidationError {
     InvalidWorkspaceStatus { value: String },
     InvalidConnectionApiFlavor { value: String },
     InvalidHarnessName { value: String },
+    InvalidCliHarnessName { value: String },
+    InvalidInteractionMode { value: String },
+    InvalidRuntimeStatus { value: String },
     InvalidGatewayType { value: String },
 }
 
@@ -51,6 +54,18 @@ impl Display for ValidationError {
             ),
             Self::InvalidHarnessName { value } => {
                 write!(formatter, "unsupported harness name {value:?}")
+            }
+            Self::InvalidCliHarnessName { value } => {
+                write!(formatter, "unsupported CLI harness name {value:?}")
+            }
+            Self::InvalidInteractionMode { value } => {
+                write!(
+                    formatter,
+                    "interaction_mode must be chat or cli, got {value:?}"
+                )
+            }
+            Self::InvalidRuntimeStatus { value } => {
+                write!(formatter, "unsupported runtime status {value:?}")
             }
             Self::InvalidGatewayType { value } => {
                 write!(formatter, "unsupported gateway type {value:?}")

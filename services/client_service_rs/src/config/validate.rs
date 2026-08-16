@@ -280,6 +280,21 @@ fn validate_agents(
                 .with_field(format!("agents/{}/connection", agent.id)),
             );
         }
+        if let Some(connection) = agent.cli.as_ref().and_then(|cli| cli.connection.as_ref())
+            && !connection_ids.contains(connection.as_str())
+        {
+            issues.push(
+                ValidationIssue::new(
+                    "unresolved_connection_reference",
+                    format!(
+                        "agent {:?} CLI references unknown connection {connection:?}",
+                        agent.id
+                    ),
+                )
+                .with_resource(format!("agent/{}", agent.id))
+                .with_field(format!("agents/{}/cli/connection", agent.id)),
+            );
+        }
         for skill in &agent.skills {
             if check_skill_refs
                 && !skill_ids.contains(skill.as_str())

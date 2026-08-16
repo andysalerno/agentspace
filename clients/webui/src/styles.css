@@ -68,8 +68,8 @@
   --shadow-popover: var(--shadow8, 0 4px 8px rgba(0, 0, 0, 0.14), 0 0 2px rgba(0, 0, 0, 0.12));
   --shadow-overlay: var(--shadow64, 0 32px 64px rgba(0, 0, 0, 0.24), 0 0 8px rgba(0, 0, 0, 0.2));
 
-  --terminal-bg: #1b1b1b;
-  --terminal-fg: #d4d4d4;
+  --terminal-bg: #ffffff;
+  --terminal-fg: #242424;
 
   font-family: var(--font-sans);
   font-size: var(--text-md);

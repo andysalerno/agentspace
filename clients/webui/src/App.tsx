@@ -4,6 +4,7 @@ import { Dismiss20Regular } from "@fluentui/react-icons";
 import type { ViewId } from "./types";
 import Sidebar from "./Sidebar";
 import ChatView from "./ChatView";
+import CliView from "./CliView";
 import AgentsView from "./AgentsView";
 import WorkspacesView from "./WorkspacesView";
 import SessionsView from "./SessionsView";
@@ -37,7 +38,8 @@ function storedSidebarPreference(): boolean {
 
 export default function App() {
   const [viewId, setViewId] = useState<ViewId>("chat");
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedChatSessionId, setSelectedChatSessionId] = useState<string | null>(null);
+  const [selectedCliSessionId, setSelectedCliSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     window.matchMedia(narrowViewport).matches || storedSidebarPreference()
   );
@@ -90,8 +92,13 @@ export default function App() {
   }
 
   function handleNavigateToChat(sessionId: string) {
-    setSelectedSessionId(sessionId);
+    setSelectedChatSessionId(sessionId);
     setViewId("chat");
+  }
+
+  function handleNavigateToCli(sessionId: string) {
+    setSelectedCliSessionId(sessionId);
+    setViewId("cli");
   }
 
   function handleRefresh() {
@@ -103,8 +110,16 @@ export default function App() {
       case "chat":
         return (
           <ChatView
-            selectedSessionId={selectedSessionId}
-            onSelectSession={setSelectedSessionId}
+            selectedSessionId={selectedChatSessionId}
+            onSelectSession={setSelectedChatSessionId}
+          />
+        );
+      case "cli":
+        return (
+          <CliView
+            darkMode={darkMode}
+            selectedSessionId={selectedCliSessionId}
+            onSelectSession={setSelectedCliSessionId}
           />
         );
       case "agents":
@@ -112,7 +127,12 @@ export default function App() {
       case "workspaces":
         return <WorkspacesView />;
       case "sessions":
-        return <SessionsView onNavigateToChat={handleNavigateToChat} />;
+        return (
+          <SessionsView
+            onNavigateToChat={handleNavigateToChat}
+            onNavigateToCli={handleNavigateToCli}
+          />
+        );
       case "kernels":
         return <KernelsView />;
       case "memory":

@@ -22,6 +22,7 @@ dev = [
 members = [
     "kernels/kernel",
     "kernels/kernel_acp",
+    "kernels/copilot_launch",
     "kernels/kernel_host",
     "gateways/*",
     "channels/*",
@@ -31,6 +32,7 @@ members = [
 [tool.uv.sources]
 kernel = { workspace = true }
 kernel-acp = { workspace = true }
+copilot-launch = { workspace = true }
 kernel-host = { workspace = true }
 gateway = { workspace = true }
 gateway-echo = { workspace = true }
@@ -50,6 +52,7 @@ testpaths = [
     "gateways/gateway_host/tests",
     "kernels/kernel/tests",
     "kernels/kernel_acp/tests",
+    "kernels/copilot_launch/tests",
     "kernels/kernel_host/tests",
 ]
 norecursedirs = [
@@ -98,6 +101,7 @@ venv = ".venv"
 extraPaths = [
     "kernels/kernel/src",
     "kernels/kernel_acp/src",
+    "kernels/copilot_launch/src",
     "kernels/kernel_host/src",
     "gateways/gateway/src",
     "gateways/gateway_echo/src",

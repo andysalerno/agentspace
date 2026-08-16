@@ -9,6 +9,7 @@ pub fn router() -> Router<AppState> {
         .route("/healthz", get(healthz))
         .route("/info", get(info))
         .merge(crate::sessions::router())
+        .merge(crate::terminal::router())
         .merge(crate::skills::router())
         .merge(crate::gateways::router())
 }

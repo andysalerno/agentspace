@@ -45,6 +45,10 @@ async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send +
             "/sessions/{session_id}/workspace/snapshot",
             post(stub_snapshot_workspace),
         )
+        .route(
+            "/sessions/{session_id}/terminal/ensure",
+            post(stub_terminal_ensure),
+        )
         .route("/workspaces/clone", post(stub_clone_workspace))
         .route("/workspaces/vscode", post(stub_workspace_vscode));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -61,8 +65,8 @@ async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send +
     })
 }
 
-async fn stub_create_session(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({ "session_id": "host-session", "status": "idle" }))
+async fn stub_create_session(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({ "session_id": payload["session_id"], "status": "idle" }))
 }
 
 async fn stub_get_session(Path(session_id): Path<String>) -> Json<Value> {
@@ -73,6 +77,16 @@ async fn stub_delete_session(Path(_session_id): Path<String>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+async fn stub_terminal_ensure(Path(_session_id): Path<String>) -> Json<Value> {
+    Json(json!({
+        "state": "running",
+        "exit_status": null,
+        "attach_kind": "started",
+        "attachment_count": 0,
+        "clients": [],
+    }))
+}
+
 async fn stub_snapshot_workspace(
     Path(session_id): Path<String>,
     Json(payload): Json<Value>,
@@ -81,7 +95,7 @@ async fn stub_snapshot_workspace(
         "session_id": session_id,
         "workspace_id": payload["workspace_id"],
         "volume_name": payload["volume_name"],
-        "exclude_names": payload["exclude_names"],
+        "exclude_paths": payload["exclude_paths"],
     }))
 }
 
@@ -120,7 +134,8 @@ async fn request_json(
     let value = if body.is_empty() {
         Value::Null
     } else {
-        serde_json::from_slice(&body)?
+        serde_json::from_slice(&body)
+            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()))
     };
     Ok((status, value))
 }
@@ -251,6 +266,56 @@ async fn save_session_workspace_marks_workspace_ready() -> Result<(), Box<dyn Er
     let (status, workspaces) = get_json(app, "/workspaces").await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(workspaces[0]["status"], "ready");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn save_cli_session_workspace_marks_workspace_ready()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let stub = spawn_stub_agent_host().await?;
+    let app = test_router(&stub.base_url)?;
+
+    let (status, _agent) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "name": "CLI Agent",
+            "cli": { "harness": "copilot-cli" },
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, session) = request_json(
+        app.clone(),
+        Method::POST,
+        "/sessions",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "client_type": "webui",
+            "interaction_mode": "cli",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = string_field(&session, "session_id")?;
+
+    let (status, workspace) = request_json(
+        app,
+        Method::POST,
+        &format!("/sessions/{session_id}/workspace/save"),
+        Some(json!({
+            "workspace_id": "saved-cli-workspace",
+            "name": "Saved CLI Workspace",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workspace["workspace_id"], "saved-cli-workspace");
+    assert_eq!(workspace["status"], "ready");
 
     Ok(())
 }
@@ -431,12 +496,18 @@ async fn agent_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync
             "skills": ["skill-a"],
             "env_vars": "A=B",
             "connection_id": "main",
+            "cli": {
+                "harness": "copilot-cli",
+                "connection_id": "main",
+            },
         })),
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(value["harness"], "acp");
     assert_eq!(value["connection_id"], "main");
+    assert_eq!(value["cli"]["harness"], "copilot-cli");
+    assert_eq!(value["cli"]["connection_id"], "main");
 
     let (status, value) = request_json(
         app.clone(),
@@ -492,6 +563,7 @@ async fn agent_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync
     assert_eq!(value["skills"], json!(["skill-a"]));
     assert_eq!(value["env_vars"], "A=B");
     assert_eq!(value["connection_id"], "main");
+    assert_eq!(value["cli"]["connection_id"], "main");
 
     let (status, value) = request_json(
         app.clone(),
@@ -502,6 +574,17 @@ async fn agent_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert!(value["connection_id"].is_null());
+    assert_eq!(value["cli"]["connection_id"], "main");
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::PATCH,
+        "/agents/agent-one",
+        Some(json!({ "cli": null })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(value["cli"].is_null());
 
     let (status, value) = request_json(
         app.clone(),
@@ -512,6 +595,31 @@ async fn agent_routes_match_contract() -> Result<(), Box<dyn Error + Send + Sync
     .await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_error_detail(&value);
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::PATCH,
+        "/agents/agent-one",
+        Some(json!({
+            "cli": {
+                "harness": "copilot-cli",
+                "connection_id": "missing",
+            },
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_error_detail(&value);
+
+    let (status, value) = request_json(
+        app.clone(),
+        Method::PATCH,
+        "/agents/agent-one",
+        Some(json!({ "cli": { "harness": "acp" } })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(value.is_string() || value.get("detail").is_some());
 
     let (status, value) = get_json(app.clone(), "/agents/missing").await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -804,12 +912,16 @@ async fn created_session_message_listing_shape_matches_contract()
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    let session_id = string_field(&session, "session_id")?;
     assert_eq!(session["agent_id"], "agent-one");
-    assert_eq!(session["agent_host_session_id"], "host-session");
+    assert!(session.get("agent_host_session_id").is_none());
     assert_eq!(session["status"], "idle");
+    assert_eq!(session["interaction_mode"], "chat");
+    assert_eq!(session["recovery_state"], "recoverable");
+    assert!(session.get("workspace_volume_identity").is_none());
+    assert!(session["cli_harness"].is_null());
     assert_eq!(session["message_count"], json!(0));
 
-    let session_id = string_field(&session, "session_id")?;
     let (status, value) =
         get_json(app.clone(), &format!("/sessions/{session_id}/messages")).await?;
     assert_eq!(status, StatusCode::OK);
@@ -841,5 +953,129 @@ async fn created_session_message_listing_shape_matches_contract()
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_error_detail(&value);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_sessions_create_durable_upstream_terminal_runtime()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let stub = spawn_stub_agent_host().await?;
+    let app = test_router(&stub.base_url)?;
+    let (status, _connection) = request_json(
+        app.clone(),
+        Method::POST,
+        "/connections",
+        Some(json!({
+            "connection_id": "openrouter",
+            "name": "OpenRouter",
+            "url": "https://openrouter.ai/api/v1",
+            "api_flavor": "responses",
+            "api_key": "must-not-be-snapshotted",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _agent) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "name": "CLI Agent",
+            "system_prompt": "Review this workspace.",
+            "env_vars": "COPILOT_MODEL=gpt-5.4\nCOPILOT_REASONING_EFFORT=high",
+            "cli": {
+                "harness": "copilot-cli",
+                "connection_id": "openrouter",
+            },
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, session) = request_json(
+        app.clone(),
+        Method::POST,
+        "/sessions",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "channel_name": "webui",
+            "client_type": "webui",
+            "interaction_mode": "cli",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(session["interaction_mode"], "cli");
+    assert_eq!(session["status"], "running");
+    assert_eq!(session["runtime_status"], "live");
+    assert_eq!(session["runtime_generation"], 0);
+    assert_eq!(session["cli_harness"], "copilot-cli");
+    assert_eq!(session["cli_connection_id"], "openrouter");
+    assert!(session.get("agent_host_session_id").is_none());
+    assert_eq!(session["recovery_state"], "recoverable");
+    assert!(session.get("launch_snapshot").is_none());
+    let harness_session_id = string_field(&session, "harness_session_id")?;
+    uuid::Uuid::parse_str(&harness_session_id)?;
+    assert!(
+        !serde_json::to_string(&session)?.contains("must-not-be-snapshotted"),
+        "CLI launch snapshot persisted a credential"
+    );
+
+    let session_id = string_field(&session, "session_id")?;
+    let (status, detail) = get_json(app.clone(), &format!("/sessions/{session_id}")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["interaction_mode"], "cli");
+    assert_eq!(detail["messages"], json!([]));
+
+    for (method, path, body) in [
+        (
+            Method::GET,
+            format!("/sessions/{session_id}/messages"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/sessions/{session_id}/messages"),
+            Some(json!({ "message": "hello" })),
+        ),
+        (Method::POST, format!("/sessions/{session_id}/reset"), None),
+    ] {
+        let (status, value) = request_json(app.clone(), method, &path, body).await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_error_detail(&value);
+    }
+
+    let (status, _plain_agent) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({ "agent_id": "chat-only", "name": "Chat Only" })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, value) = request_json(
+        app.clone(),
+        Method::POST,
+        "/sessions",
+        Some(json!({
+            "agent_id": "chat-only",
+            "interaction_mode": "cli",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_error_detail(&value);
+
+    let (status, value) = request_json(
+        app,
+        Method::DELETE,
+        &format!("/sessions/{session_id}"),
+        None,
+    )
+    .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(value, Value::Null);
     Ok(())
 }

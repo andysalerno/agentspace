@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentCliConfig,
   ConfigOperationResult,
   Connection,
   ConnectionModels,
@@ -27,6 +28,7 @@ import type {
   Skill,
   SkillVersion,
   SystemInfo,
+  TerminalStatus,
   Workspace,
   WorkspaceMount,
   WorkspaceVscode,
@@ -275,6 +277,7 @@ export const api = {
     skills?: string[];
     env_vars?: string;
     connection_id?: string | null;
+    cli?: AgentCliConfig | null;
     workspace_mounts?: Array<Pick<WorkspaceMount, "workspace_id" | "mode">>;
   }) =>
     requestJson<Agent>("/agents", {
@@ -288,6 +291,7 @@ export const api = {
     skills?: string[];
     env_vars?: string;
     connection_id?: string | null;
+    cli?: AgentCliConfig | null;
     workspace_mounts?: Array<Pick<WorkspaceMount, "workspace_id" | "mode">>;
   }) =>
     requestJson<Agent>(`/agents/${agentId}`, {
@@ -309,6 +313,7 @@ export const api = {
     agent_id: string;
     channel_name: string | null;
     client_type: "webui";
+    interaction_mode?: "chat" | "cli";
   }) =>
     requestJson<SessionSummary>("/sessions", {
       method: "POST",
@@ -371,6 +376,20 @@ export const api = {
   },
   resetSession: (sessionId: string) =>
     requestJson<SessionSummary>(`/sessions/${sessionId}/reset`, { method: "POST" }),
+  getTerminalStatus: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal`),
+  ensureTerminal: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/ensure`, {
+      method: "POST",
+    }),
+  stopTerminal: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/stop`, {
+      method: "POST",
+    }),
+  resumeTerminal: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/resume`, {
+      method: "POST",
+    }),
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),
   killKernel: (sessionId: string) =>
     requestJson<void>(`/kernels/${sessionId}`, { method: "DELETE" }),

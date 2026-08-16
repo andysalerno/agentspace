@@ -2,6 +2,7 @@ import http from "node:http";
 import fs from "node:fs";
 import nodePath from "node:path";
 import { fileURLToPath } from "node:url";
+import { WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT ?? 8010);
 const DIST = process.env.WEBUI_DIST
@@ -18,17 +19,25 @@ const workspaces = [
 ];
 
 const agents = [
-  { agent_id: "ag-reviewer", name: "code-reviewer", harness: "copilot-cli", system_prompt: "You are a meticulous code reviewer. Focus on correctness and security.", skills: ["git-operations", "pr-followup"], env_vars: "LOG_LEVEL=debug\nMAX_TURNS=40", connection_id: "cn-openai", workspace_mounts: [{ workspace_id: "ws-agentspace", mode: "rw", mount_path: "/workspace", volume_name: "agentspace_ws_agentspace" }], created_at: then, updated_at: now },
-  { agent_id: "ag-docs", name: "docs-writer", harness: "copilot-cli", system_prompt: "Write clear technical documentation.", skills: ["memory"], env_vars: "", connection_id: null, workspace_mounts: [{ workspace_id: "ws-docs", mode: "ro", mount_path: "/docs", volume_name: null }], created_at: then, updated_at: now },
-  { agent_id: "ag-triage", name: "issue-triage", harness: "claude-code", system_prompt: "Triage incoming GitHub issues and label them.", skills: [], env_vars: "GH_TOKEN=${secret:gh_token}", connection_id: "cn-azure", workspace_mounts: [], created_at: then, updated_at: now },
+  { agent_id: "ag-reviewer", name: "code-reviewer", harness: "copilot-cli", system_prompt: "You are a meticulous code reviewer. Focus on correctness and security.", skills: ["git-operations", "pr-followup"], env_vars: "LOG_LEVEL=debug\nMAX_TURNS=40", connection_id: "cn-openai", cli: { harness: "copilot-cli", connection_id: "cn-openai" }, workspace_mounts: [{ workspace_id: "ws-agentspace", mode: "rw", mount_path: "/workspace", volume_name: "agentspace_ws_agentspace" }], created_at: then, updated_at: now },
+  { agent_id: "ag-docs", name: "docs-writer", harness: "copilot-cli", system_prompt: "Write clear technical documentation.", skills: ["memory"], env_vars: "", connection_id: null, cli: { harness: "copilot-cli", connection_id: null }, workspace_mounts: [{ workspace_id: "ws-docs", mode: "ro", mount_path: "/docs", volume_name: null }], created_at: then, updated_at: now },
+  { agent_id: "ag-triage", name: "issue-triage", harness: "claude-code", system_prompt: "Triage incoming GitHub issues and label them.", skills: [], env_vars: "GH_TOKEN=${secret:gh_token}", connection_id: "cn-azure", cli: null, workspace_mounts: [], created_at: then, updated_at: now },
 ];
 
 const sessions = [
-  { session_id: "se-1a2b3c4d", agent_id: "ag-reviewer", agent_host_session_id: "ah-9f81", status: "active", channel_name: "webui", client_type: "webui", created_at: then, updated_at: now, message_count: 12 },
-  { session_id: "se-5e6f7a8b", agent_id: "ag-docs", agent_host_session_id: "ah-2c40", status: "idle", channel_name: "slack", client_type: "gateway", created_at: then, updated_at: now, message_count: 4 },
-  { session_id: "se-9c0d1e2f", agent_id: "ag-triage", agent_host_session_id: "ah-77ba", status: "error", channel_name: null, client_type: "cli", created_at: then, updated_at: now, message_count: 31 },
-  { session_id: "se-3a4b5c6d", agent_id: "ag-reviewer", agent_host_session_id: "ah-11e2", status: "closed", channel_name: "webui", client_type: "webui", created_at: then, updated_at: now, message_count: 2 },
+  { session_id: "se-1a2b3c4d", agent_id: "ag-reviewer", status: "active", channel_name: "webui", client_type: "webui", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "live", recovery_state: "recoverable", vscode_url: "http://127.0.0.1:8100", free_port_url: "http://127.0.0.1:8101", created_at: then, updated_at: now, message_count: 12 },
+  { session_id: "cli-6f4e93c1-52aa-4d91", agent_id: "ag-reviewer", status: "running", channel_name: null, client_type: "webui", interaction_mode: "cli", cli_harness: "copilot-cli", cli_connection_id: "cn-openai", harness_session_id: "f13ac6f8-90d7-4aa6-a985-bff43123d7e2", runtime_generation: 2, runtime_status: "live", recovery_state: "recoverable", vscode_url: "http://127.0.0.1:8120", free_port_url: null, created_at: now, updated_at: now, message_count: 0 },
+  { session_id: "se-5e6f7a8b", agent_id: "ag-docs", status: "idle", channel_name: "slack", client_type: "gateway", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "live", recovery_state: "recoverable", vscode_url: null, free_port_url: null, created_at: then, updated_at: now, message_count: 4 },
+  { session_id: "se-9c0d1e2f", agent_id: "ag-triage", status: "error", channel_name: null, client_type: "cli", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "error", recovery_state: "recoverable", vscode_url: null, free_port_url: null, created_at: then, updated_at: now, message_count: 31 },
+  { session_id: "se-3a4b5c6d", agent_id: "ag-reviewer", status: "closed", channel_name: "webui", client_type: "webui", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "exited", recovery_state: "recoverable", vscode_url: null, free_port_url: null, created_at: then, updated_at: now, message_count: 2 },
 ];
+
+const terminalStatus = {
+  state: "running",
+  exit_status: null,
+  attach_kind: "attached",
+  attachment_count: 1,
+};
 
 const longAnswer = `Here's what I found in \`services/client_service_rs\`.
 
@@ -68,6 +77,7 @@ const messages = [
 
 const kernels = [
   { session_id: "se-1a2b3c4d", harness: "copilot-cli", status: "running", turns: 6, resume_token: "rt-88fa21", additional_paths: ["/workspace", "/scratch"], client_session_ids: ["se-1a2b3c4d"], channel_names: ["webui"], agent_ids: ["ag-reviewer"], container_name: "agentspace-kernel-1a2b3c4d", vscode_url: "http://127.0.0.1:8100", free_port_url: "http://127.0.0.1:8101", stats: { cpu_percent: 12.4, memory_usage_bytes: 412 * 1024 * 1024, memory_limit_bytes: 2048 * 1024 * 1024, memory_percent: 20.1 } },
+  { session_id: "cli-6f4e93c1-52aa-4d91", harness: "copilot-cli", status: "running", turns: 0, resume_token: "f13ac6f8-90d7-4aa6-a985-bff43123d7e2", additional_paths: ["/workspace"], client_session_ids: ["cli-6f4e93c1-52aa-4d91"], channel_names: [], agent_ids: ["ag-reviewer"], container_name: "agentspace-kernel-cli-6f4e93c1", vscode_url: "http://127.0.0.1:8120", free_port_url: null, stats: { cpu_percent: 4.2, memory_usage_bytes: 286 * 1024 * 1024, memory_limit_bytes: 2048 * 1024 * 1024, memory_percent: 14.0 } },
   { session_id: "se-9c0d1e2f", harness: "claude-code", status: "starting", turns: 0, resume_token: null, additional_paths: [], client_session_ids: ["se-9c0d1e2f"], channel_names: [], agent_ids: ["ag-triage"], container_name: "agentspace-kernel-9c0d1e2f", vscode_url: null, free_port_url: null, stats: { cpu_percent: 0.8, memory_usage_bytes: 96 * 1024 * 1024, memory_limit_bytes: 2048 * 1024 * 1024, memory_percent: 4.7 } },
 ];
 
@@ -190,6 +200,11 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/config/export") return sendText(canonicalConfig, "text/yaml");
     if (path.startsWith("/api/config/export/")) return sendText(canonicalConfig, "text/yaml");
     if (path === "/api/config/validate" || path === "/api/config/plan") return send({ valid: true, generation: 12, active_generation: 11, source_sha256: "a1b2c3d4e5f6a7b8", semantic_sha256: "f0e1d2c3b4a59687", creates: ["agent/docs-writer"], updates: ["connection/openai-prod"], deletes: [], unchanged: ["workspace/agentspace", "workspace/scratch"] });
+    if (/^\/api\/sessions\/[^/]+\/terminal$/.test(path)) return send(terminalStatus);
+    if (/^\/api\/sessions\/[^/]+\/terminal\/(ensure|resume|copy-mode)$/.test(path)) return send(terminalStatus);
+    if (/^\/api\/sessions\/[^/]+\/terminal\/stop$/.test(path)) {
+      return send({ ...terminalStatus, state: "exited", exit_status: 0, attach_kind: null, attachment_count: 0 });
+    }
     const sessionMatch = /^\/api\/sessions\/([^/]+)$/.exec(path);
     if (sessionMatch) {
       const s = sessions.find((x) => x.session_id === sessionMatch[1]) ?? sessions[0];
@@ -226,6 +241,44 @@ const server = http.createServer(async (req, res) => {
   const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".json": "application/json", ".map": "application/json" };
   res.writeHead(200, { "content-type": types[ext] ?? "application/octet-stream", "cache-control": "no-store" });
   fs.createReadStream(full).pipe(res);
+});
+
+const terminalServer = new WebSocketServer({ noServer: true });
+terminalServer.on("connection", (socket) => {
+  socket.send(JSON.stringify({
+    type: "ready",
+    attachment_id: "fixture-attachment",
+    cols: 112,
+    rows: 34,
+    terminal: terminalStatus,
+  }));
+  socket.send(Buffer.from(
+    "\u001b[2J\u001b[H"
+    + "\u001b[1;36mAgentSpace Copilot CLI\u001b[0m  \u001b[2m/workspace\u001b[0m\r\n"
+    + "\u001b[2mSession f13ac6f8 · OpenAI responses · mouse enabled\u001b[0m\r\n"
+    + "\r\n"
+    + "\u001b[32m✓\u001b[0m Connected to code-reviewer\r\n"
+    + "\u001b[34m╭──────────────────────────────────────────────────────────────╮\u001b[0m\r\n"
+    + "\u001b[34m│\u001b[0m Review the Phase 7 CLI View implementation and run web checks. \u001b[34m│\u001b[0m\r\n"
+    + "\u001b[34m╰──────────────────────────────────────────────────────────────╯\u001b[0m\r\n"
+    + "\r\n"
+    + "\u001b[1mCopilot\u001b[0m  I’ll inspect the terminal lifecycle, reconnect policy, and tests.\r\n"
+    + "\u001b[2m         Unicode: ASCII · box ├─┤ · combining e\u0301 · CJK 界 · emoji 🚀 · family 👩‍💻\u001b[0m\r\n"
+    + "\r\n"
+    + "\u001b[33m❯\u001b[0m \u001b[7m \u001b[0m",
+    "utf8",
+  ));
+});
+
+server.on("upgrade", (request, socket, head) => {
+  const url = new URL(request.url ?? "/", "http://x");
+  if (!/^\/api\/sessions\/[^/]+\/terminal\/ws$/.test(url.pathname)) {
+    socket.destroy();
+    return;
+  }
+  terminalServer.handleUpgrade(request, socket, head, (websocket) => {
+    terminalServer.emit("connection", websocket, request);
+  });
 });
 
 server.listen(PORT, () => {

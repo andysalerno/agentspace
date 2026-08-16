@@ -20,6 +20,7 @@ import {
     Settings20Regular,
     WeatherMoon20Regular,
     WeatherSunny20Regular,
+    WindowConsole20Regular,
 } from "@fluentui/react-icons";
 import type { ViewId } from "./types";
 import { Button, Tooltip } from "./fluent";
@@ -43,6 +44,7 @@ type NavGroup = { id: string; label: string; icon: ReactElement; items: NavItem[
 
 const navItems: NavItem[] = [
     { id: "chat", label: "Chat", icon: <Chat20Regular /> },
+    { id: "cli", label: "CLI", icon: <WindowConsole20Regular /> },
     { id: "agents", label: "Agents", icon: <Bot20Regular /> },
     { id: "workspaces", label: "Workspaces", icon: <Folder20Regular /> },
     { id: "sessions", label: "Sessions", icon: <ChatMultiple20Regular /> },

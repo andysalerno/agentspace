@@ -29,11 +29,13 @@ class KernelSessionService:
         harness: HarnessName,
         env: dict[str, str],
         additional_paths: tuple[str, ...],
+        session_id: str | None = None,
     ) -> None:
         self._harness = harness
         self._base_env = dict(env)
         self._additional_paths = additional_paths
-        self._session_id: str | None = None
+        self._initial_session_id = session_id
+        self._session_id = session_id
         self._history: list[list[KernelEvent]] = []
         self._log_path = Path(tempfile.mkdtemp()) / "kernel.log"
         self._log_path.touch()
@@ -181,7 +183,7 @@ class KernelSessionService:
 
     async def reset(self) -> dict[str, Any]:
         await self._stop_kernel()
-        self._session_id = None
+        self._session_id = self._initial_session_id
         self._history.clear()
         self._log_path.write_text("", encoding="utf-8")
         self._status = KernelStatus.IDLE
@@ -203,6 +205,7 @@ class KernelSessionService:
 
 
 def service_from_env() -> KernelSessionService:
+    harness = HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ACP))
     additional_paths = tuple(
         path
         for path in os.environ.get("KERNEL_ADDITIONAL_PATHS", "").split(os.pathsep)
@@ -218,15 +221,20 @@ def service_from_env() -> KernelSessionService:
         else None
     )
 
-    if staging_dir and skills_dir:
+    if harness != HarnessName.COPILOT_CLI and staging_dir and skills_dir:
         link_enabled_skills(staging_dir, skills_dir, enabled_skills)
 
-    skill_paths = discover_skill_dirs(skills_dir, enabled_skills) if skills_dir else ()
+    skill_paths = (
+        discover_skill_dirs(skills_dir, enabled_skills)
+        if skills_dir and harness != HarnessName.COPILOT_CLI
+        else ()
+    )
 
     return KernelSessionService(
-        harness=HarnessName(os.environ.get("KERNEL_HARNESS", HarnessName.ACP)),
+        harness=harness,
         env=dict(os.environ),
         additional_paths=additional_paths + skill_paths,
+        session_id=os.environ.get("KERNEL_SESSION_ID") or None,
     )
 
 

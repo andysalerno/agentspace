@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
+    path::{Component, Path as FsPath},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -18,7 +19,7 @@ use axum::{
 use futures_util::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
@@ -26,11 +27,12 @@ use crate::{
     docker_runtime::DockerKernelRuntime,
     errors::AgentHostError,
     models::{
-        DockerStatsSummary, HarnessName, KernelEvent, KernelEventType, KernelRuntimeSession,
-        KernelStatus, RuntimeSessionSummary, ServiceSummary, SessionSummary, WorkspaceMount,
-        WorkspaceMountMode,
+        CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName, InteractionMode,
+        KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus, RuntimeSessionSummary,
+        ServiceSummary, SessionSummary, WorkspaceMount, WorkspaceMountMode,
     },
     skills::{SkillRegistry, SkillVolumeResource},
+    terminal::{TerminalConnection, TerminalExec, TerminalService, TerminalStatus},
 };
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostError>> + Send>>;
@@ -39,6 +41,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostEr
 pub struct RuntimeCreateSession {
     pub session_id: String,
     pub harness: HarnessName,
+    pub interaction_mode: InteractionMode,
     pub env: BTreeMap<String, String>,
     pub additional_paths: Vec<String>,
     pub skills: Vec<String>,
@@ -103,12 +106,21 @@ pub trait KernelRuntime: Send + Sync {
 
     async fn destroy_session(&self, session: KernelRuntimeSession) -> Result<(), AgentHostError>;
 
+    async fn destroy_session_by_id(&self, session_id: &str) -> Result<(), AgentHostError>;
+
+    async fn cleanup_orphans(
+        &self,
+        owned_session_ids: &BTreeSet<String>,
+        dry_run: bool,
+        reviewed_resources: Option<&[CleanupResourceIdentity]>,
+    ) -> Result<CleanupReport, AgentHostError>;
+
     async fn snapshot_session_workspace(
         &self,
         session: &KernelRuntimeSession,
         workspace_id: String,
         volume_name: String,
-        exclude_names: Vec<String>,
+        exclude_paths: Vec<String>,
     ) -> Result<serde_json::Value, AgentHostError>;
 
     async fn clone_workspace(
@@ -123,6 +135,75 @@ pub trait KernelRuntime: Send + Sync {
         workspace_id: String,
         volume_name: String,
     ) -> Result<serde_json::Value, AgentHostError>;
+
+    async fn terminal_status(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal status is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_ensure(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal ensure is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_stop(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal stop is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_resume(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal resume is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_detach_client(
+        &self,
+        _session: &KernelRuntimeSession,
+        tmux_client_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::terminal_attachment_not_found(
+            tmux_client_id,
+        ))
+    }
+
+    async fn terminal_attach(
+        &self,
+        _session: &KernelRuntimeSession,
+        _attachment_id: &str,
+        _attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal attachment is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_resize(
+        &self,
+        _session: &KernelRuntimeSession,
+        _exec_id: &str,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<(), AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal resize is not supported by this runtime",
+        ))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -134,14 +215,19 @@ struct SessionRegistryInner {
     runtime: Arc<dyn KernelRuntime>,
     skills: Option<SkillRegistry>,
     sessions: Arc<RwLock<BTreeMap<String, SessionRecord>>>,
+    create_lock: Arc<Mutex<()>>,
+    terminal: TerminalService,
 }
 
 impl Default for SessionRegistryInner {
     fn default() -> Self {
+        let runtime: Arc<dyn KernelRuntime> = Arc::new(DockerKernelRuntime::from_env());
         Self {
-            runtime: Arc::new(DockerKernelRuntime::from_env()),
+            terminal: TerminalService::new(runtime.clone()),
+            runtime,
             skills: None,
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
+            create_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -151,9 +237,11 @@ impl SessionRegistry {
     pub fn with_runtime(runtime: Arc<dyn KernelRuntime>) -> Self {
         Self {
             inner: Arc::new(SessionRegistryInner {
+                terminal: TerminalService::new(runtime.clone()),
                 runtime,
                 skills: None,
                 sessions: Arc::new(RwLock::new(BTreeMap::new())),
+                create_lock: Arc::new(Mutex::new(())),
             }),
         }
     }
@@ -167,9 +255,11 @@ impl SessionRegistry {
     pub fn with_runtime_and_skills(runtime: Arc<dyn KernelRuntime>, skills: SkillRegistry) -> Self {
         Self {
             inner: Arc::new(SessionRegistryInner {
+                terminal: TerminalService::new(runtime.clone()),
                 runtime,
                 skills: Some(skills),
                 sessions: Arc::new(RwLock::new(BTreeMap::new())),
+                create_lock: Arc::new(Mutex::new(())),
             }),
         }
     }
@@ -183,9 +273,31 @@ impl SessionRegistry {
         &self,
         request: CreateSessionRequest,
     ) -> Result<SessionSummary, AgentHostError> {
-        let session_id = Uuid::new_v4().simple().to_string();
+        let _create_guard = self.inner.create_lock.lock().await;
+        let session_id = request
+            .session_id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+        validate_session_id_or_error(&session_id)?;
+        let existing = self.inner.sessions.read().await.get(&session_id).cloned();
+        if let Some(record) = &existing {
+            validate_existing_session_identity(record, &request)?;
+        }
+        if request.harness == HarnessName::CopilotCli && Uuid::parse_str(&session_id).is_err() {
+            return Err(AgentHostError::validation(
+                "Copilot session_id must be a UUID",
+            ));
+        }
+
         let caller_env = request.env;
         let mut merged_env: BTreeMap<String, String> = std::env::vars().collect();
+        for key in [
+            "CONNECTION_URL",
+            "CONNECTION_API_KEY",
+            "CONNECTION_API_FLAVOR",
+        ] {
+            merged_env.remove(key);
+        }
         merged_env.extend(caller_env);
         let workspace_mounts = validate_workspace_mount_requests(request.workspace_mounts)?;
         let skill_volumes = match &self.inner.skills {
@@ -211,6 +323,7 @@ impl SessionRegistry {
         let runtime_request = RuntimeCreateSession {
             session_id: session_id.clone(),
             harness: request.harness,
+            interaction_mode: request.interaction_mode,
             env: merged_env.clone(),
             additional_paths: additional_paths.clone(),
             skills: request.skills.clone(),
@@ -218,23 +331,38 @@ impl SessionRegistry {
             workspace_mounts: workspace_mounts.clone(),
         };
         let runtime_session = self.inner.runtime.create_session(runtime_request).await?;
+        if request.interaction_mode == InteractionMode::Cli {
+            self.inner
+                .terminal
+                .reconcile_adoption(&session_id, &runtime_session)
+                .await?;
+        }
         let runtime_summary = self.inner.runtime.summary(&runtime_session).await?;
-        let mut record = SessionRecord {
+        let mut record = existing.unwrap_or_else(|| SessionRecord {
             session_id: session_id.clone(),
             harness: request.harness,
+            interaction_mode: request.interaction_mode,
             runtime_session: runtime_session.clone(),
-            env: merged_env,
-            additional_paths,
-            skills: request.skills,
-            workspace_mounts,
+            env: BTreeMap::new(),
+            additional_paths: Vec::new(),
+            skills: Vec::new(),
+            workspace_mounts: Vec::new(),
             history: Vec::new(),
             status: KernelStatus::Idle,
             resume_token: None,
-            container_name: self.inner.runtime.container_name(&runtime_session),
-            vscode_url: self.inner.runtime.vscode_url(&runtime_session),
-            free_port_url: self.inner.runtime.free_port_url(&runtime_session),
+            container_name: None,
+            vscode_url: None,
+            free_port_url: None,
             stats: None,
-        };
+        });
+        record.runtime_session = runtime_session.clone();
+        record.env = merged_env;
+        record.additional_paths = additional_paths;
+        record.skills = request.skills;
+        record.workspace_mounts = workspace_mounts;
+        record.container_name = self.inner.runtime.container_name(&runtime_session);
+        record.vscode_url = self.inner.runtime.vscode_url(&runtime_session);
+        record.free_port_url = self.inner.runtime.free_port_url(&runtime_session);
         record.apply_runtime_summary(runtime_summary);
         let summary = record.summary();
         self.inner.sessions.write().await.insert(session_id, record);
@@ -274,17 +402,18 @@ impl SessionRegistry {
     }
 
     pub async fn destroy_session(&self, session_id: &str) -> Result<(), AgentHostError> {
-        let record = self
-            .inner
-            .sessions
-            .write()
-            .await
-            .remove(session_id)
-            .ok_or_else(|| AgentHostError::session_not_found(session_id))?;
-        self.inner
-            .runtime
-            .destroy_session(record.runtime_session)
-            .await
+        let record = self.inner.sessions.read().await.get(session_id).cloned();
+        if let Some(record) = record {
+            self.inner.terminal.forget_session(session_id).await;
+            self.inner
+                .runtime
+                .destroy_session(record.runtime_session)
+                .await?;
+            self.inner.sessions.write().await.remove(session_id);
+            Ok(())
+        } else {
+            self.inner.runtime.destroy_session_by_id(session_id).await
+        }
     }
 
     pub async fn destroy_all_sessions(&self) {
@@ -304,11 +433,28 @@ impl SessionRegistry {
         }
     }
 
+    pub async fn forget_all_sessions(&self) {
+        let session_ids = self
+            .inner
+            .sessions
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.inner.terminal.forget_session(&session_id).await;
+        }
+        self.inner.sessions.write().await.clear();
+    }
+
     pub async fn reset_session(&self, session_id: &str) -> Result<SessionSummary, AgentHostError> {
         let record = self.get_record(session_id).await?;
         self.destroy_session(session_id).await?;
         self.create_session(CreateSessionRequest {
+            session_id: Some(record.session_id),
             harness: record.harness,
+            interaction_mode: record.interaction_mode,
             env: record.env,
             additional_paths: record.additional_paths,
             skills: record.skills,
@@ -319,6 +465,23 @@ impl SessionRegistry {
                 .collect(),
         })
         .await
+    }
+
+    pub async fn cleanup_orphans(
+        &self,
+        owned_session_ids: &BTreeSet<String>,
+        dry_run: bool,
+        reviewed_resources: Option<&[CleanupResourceIdentity]>,
+    ) -> Result<CleanupReport, AgentHostError> {
+        if !dry_run && reviewed_resources.is_none() {
+            return Err(AgentHostError::validation(
+                "destructive runtime cleanup requires reviewed_resources from a dry-run report",
+            ));
+        }
+        self.inner
+            .runtime
+            .cleanup_orphans(owned_session_ids, dry_run, reviewed_resources)
+            .await
     }
 
     pub async fn get_session(
@@ -410,6 +573,7 @@ impl SessionRegistry {
     ) -> Result<serde_json::Value, AgentHostError> {
         validate_workspace_id_or_error(&request.workspace_id)?;
         validate_volume_name_or_error(&request.volume_name)?;
+        let exclude_paths = validate_relative_exclude_paths(request.exclude_paths)?;
         let record = self.get_record(session_id).await?;
         self.inner
             .runtime
@@ -417,7 +581,7 @@ impl SessionRegistry {
                 &record.runtime_session,
                 request.workspace_id,
                 request.volume_name,
-                request.exclude_names,
+                exclude_paths,
             )
             .await
     }
@@ -451,6 +615,90 @@ impl SessionRegistry {
             .await
     }
 
+    pub async fn terminal_status(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .status(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_ensure(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .ensure(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_stop(&self, session_id: &str) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .stop(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_resume(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .resume(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_attach(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalConnection, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .attach(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_resize(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .resize(
+                session_id,
+                &record.runtime_session,
+                attachment_id,
+                cols,
+                rows,
+            )
+            .await
+    }
+
+    pub async fn terminal_detach(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+    ) -> Result<(), AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .detach(session_id, &record.runtime_session, attachment_id)
+            .await
+    }
+
     async fn get_record(&self, session_id: &str) -> Result<SessionRecord, AgentHostError> {
         self.inner
             .sessions
@@ -460,12 +708,26 @@ impl SessionRegistry {
             .cloned()
             .ok_or_else(|| AgentHostError::session_not_found(session_id))
     }
+
+    async fn get_terminal_record(&self, session_id: &str) -> Result<SessionRecord, AgentHostError> {
+        let record = self.get_record(session_id).await?;
+        if record.interaction_mode != InteractionMode::Cli {
+            return Err(AgentHostError::conflict(
+                "terminal routes require a CLI interaction-mode session",
+            ));
+        }
+        Ok(record)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateSessionRequest {
     #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
     pub harness: HarnessName,
+    #[serde(default)]
+    pub interaction_mode: InteractionMode,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -519,8 +781,8 @@ struct SendMessageRequest {
 pub struct SnapshotWorkspaceRequest {
     pub workspace_id: String,
     pub volume_name: String,
-    #[serde(default)]
-    pub exclude_names: Vec<String>,
+    #[serde(default, alias = "exclude_names")]
+    pub exclude_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -549,10 +811,20 @@ struct ContainerLogsQuery {
     all_logs: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct CleanupRequest {
+    #[serde(default)]
+    owned_session_ids: BTreeSet<String>,
+    #[serde(default = "default_true")]
+    dry_run: bool,
+    reviewed_resources: Option<Vec<CleanupResourceIdentity>>,
+}
+
 #[derive(Clone)]
 struct SessionRecord {
     session_id: String,
     harness: HarnessName,
+    interaction_mode: InteractionMode,
     runtime_session: KernelRuntimeSession,
     env: BTreeMap<String, String>,
     additional_paths: Vec<String>,
@@ -572,6 +844,7 @@ impl SessionRecord {
         SessionSummary {
             session_id: self.session_id.clone(),
             harness: self.harness,
+            interaction_mode: self.interaction_mode,
             status: self.status,
             turns: self.history.len(),
             resume_token: self.resume_token.clone(),
@@ -719,6 +992,19 @@ impl Drop for AgentEventStream {
     }
 }
 
+fn validate_existing_session_identity(
+    record: &SessionRecord,
+    request: &CreateSessionRequest,
+) -> Result<(), AgentHostError> {
+    if record.harness == request.harness && record.interaction_mode == request.interaction_mode {
+        return Ok(());
+    }
+    Err(AgentHostError::conflict(format!(
+        "session {:?} is already registered as harness {:?} in {:?} mode",
+        record.session_id, record.harness, record.interaction_mode
+    )))
+}
+
 async fn finalize_stream(
     runtime: Arc<dyn KernelRuntime>,
     sessions: Arc<RwLock<BTreeMap<String, SessionRecord>>>,
@@ -818,6 +1104,31 @@ fn validate_volume_name_or_error(volume_name: &str) -> Result<(), AgentHostError
     }
 }
 
+fn validate_relative_exclude_paths(paths: Vec<String>) -> Result<Vec<String>, AgentHostError> {
+    let mut validated = Vec::with_capacity(paths.len());
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        let parsed = FsPath::new(&path);
+        let valid = !path.is_empty()
+            && !path.contains('\\')
+            && !path.contains('\0')
+            && !parsed.is_absolute()
+            && parsed
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            && path.split('/').all(|component| !component.is_empty());
+        if !valid {
+            return Err(AgentHostError::validation(format!(
+                "exclude_paths entries must be normalized relative paths without traversal: {path:?}"
+            )));
+        }
+        if seen.insert(path.clone()) {
+            validated.push(path);
+        }
+    }
+    Ok(validated)
+}
+
 fn valid_workspace_id(workspace_id: &str) -> bool {
     !workspace_id.is_empty()
         && workspace_id.split('-').all(|part| {
@@ -839,6 +1150,24 @@ fn valid_volume_name(volume_name: &str) -> bool {
 
 fn non_empty(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty())
+}
+
+fn validate_session_id_or_error(session_id: &str) -> Result<(), AgentHostError> {
+    if session_id.is_empty()
+        || session_id.len() > 128
+        || !session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(AgentHostError::validation(
+            "session_id must be 1-128 ASCII letters, digits, hyphens, or underscores",
+        ));
+    }
+    Ok(())
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 pub fn router() -> Router<AppState> {
@@ -866,6 +1195,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/workspaces/clone", post(clone_workspace))
         .route("/workspaces/vscode", post(open_workspace_vscode))
+        .route("/management/runtime-cleanup", post(cleanup_orphans))
 }
 
 async fn create_session(
@@ -1035,6 +1365,22 @@ async fn open_workspace_vscode(
         .map_err(ApiError::from)
 }
 
+async fn cleanup_orphans(
+    State(state): State<AppState>,
+    Json(payload): Json<CleanupRequest>,
+) -> Result<Json<CleanupReport>, ApiError> {
+    state
+        .sessions
+        .cleanup_orphans(
+            &payload.owned_session_ids,
+            payload.dry_run,
+            payload.reviewed_resources.as_deref(),
+        )
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
+}
+
 async fn destroy_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -1043,7 +1389,7 @@ async fn destroy_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-struct ApiError(AgentHostError);
+pub(crate) struct ApiError(pub(crate) AgentHostError);
 
 impl From<AgentHostError> for ApiError {
     fn from(error: AgentHostError) -> Self {
@@ -1054,8 +1400,11 @@ impl From<AgentHostError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
-            AgentHostError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
+            AgentHostError::SessionNotFound { .. }
+            | AgentHostError::TerminalAttachmentNotFound { .. } => StatusCode::NOT_FOUND,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            AgentHostError::Conflict { .. } => StatusCode::CONFLICT,
+            AgentHostError::UpstreamUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             AgentHostError::Runtime { .. }
             | AgentHostError::Docker { .. }
             | AgentHostError::Http { .. }
@@ -1070,7 +1419,7 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, BTreeSet},
         fs,
         path::{Path, PathBuf},
         sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -1094,8 +1443,9 @@ mod tests {
         AppConfig, AppState, build_router,
         errors::AgentHostError,
         models::{
-            DockerStatsSummary, HarnessName, KernelEvent, KernelEventType, KernelRuntimeSession,
-            KernelStatus, RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
+            CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName,
+            InteractionMode, KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus,
+            RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
         },
         skills::{SkillRegistry, SkillVolumeMode, SkillVolumeResource, SkillsService},
     };
@@ -1266,18 +1616,38 @@ mod tests {
             Ok(())
         }
 
+        async fn destroy_session_by_id(&self, session_id: &str) -> Result<(), AgentHostError> {
+            self.state().destroyed.push(session_id.to_owned());
+            Ok(())
+        }
+
+        async fn cleanup_orphans(
+            &self,
+            owned_session_ids: &BTreeSet<String>,
+            dry_run: bool,
+            _reviewed_resources: Option<&[CleanupResourceIdentity]>,
+        ) -> Result<CleanupReport, AgentHostError> {
+            Ok(CleanupReport {
+                dry_run,
+                owned_session_count: owned_session_ids.len(),
+                resources: Vec::new(),
+                deleted_count: 0,
+                error_count: 0,
+            })
+        }
+
         async fn snapshot_session_workspace(
             &self,
             session: &KernelRuntimeSession,
             workspace_id: String,
             volume_name: String,
-            exclude_names: Vec<String>,
+            exclude_paths: Vec<String>,
         ) -> Result<serde_json::Value, AgentHostError> {
             Ok(json!({
                 "session": session_key(session),
                 "workspace_id": workspace_id,
                 "volume_name": volume_name,
-                "exclude_names": exclude_names,
+                "exclude_paths": exclude_paths,
             }))
         }
 
@@ -1317,7 +1687,9 @@ mod tests {
 
         let session = registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::CopilotCli,
+                interaction_mode: InteractionMode::Chat,
                 env,
                 additional_paths: vec!["/srv/agent".to_owned()],
                 skills: Vec::new(),
@@ -1371,13 +1743,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn requested_session_identity_is_validated_reensured_and_immutable() {
+        let runtime = FakeRuntime::default();
+        let registry = SessionRegistry::with_runtime(Arc::new(runtime.clone()));
+        let request = CreateSessionRequest {
+            session_id: Some("stable-session-123".to_owned()),
+            harness: HarnessName::Echo,
+            interaction_mode: InteractionMode::Chat,
+            env: BTreeMap::new(),
+            additional_paths: Vec::new(),
+            skills: Vec::new(),
+            workspace_mounts: Vec::new(),
+        };
+
+        let first = registry
+            .create_session(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("first create failed: {error}"));
+        let second = registry
+            .create_session(request)
+            .await
+            .unwrap_or_else(|error| panic!("idempotent create failed: {error}"));
+
+        assert_eq!(first.session_id, "stable-session-123");
+        assert_eq!(second.session_id, first.session_id);
+        assert_eq!(first.interaction_mode, InteractionMode::Chat);
+        assert_eq!(runtime.state().created.len(), 2);
+
+        let result = registry
+            .create_session(CreateSessionRequest {
+                session_id: Some(first.session_id),
+                harness: HarnessName::CopilotCli,
+                interaction_mode: InteractionMode::Cli,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await;
+        let Err(conflict) = result else {
+            panic!("registered session identity must not change mode or harness");
+        };
+        assert!(matches!(conflict, AgentHostError::Conflict { .. }));
+        assert_eq!(runtime.state().created.len(), 2);
+
+        let result = registry
+            .create_session(CreateSessionRequest {
+                session_id: Some("not valid!".to_owned()),
+                harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await;
+        let Err(invalid) = result else {
+            panic!("invalid identity should fail");
+        };
+        assert!(matches!(invalid, AgentHostError::Validation { .. }));
+
+        let result = registry
+            .create_session(CreateSessionRequest {
+                session_id: Some("valid-but-not-uuid".to_owned()),
+                harness: HarnessName::CopilotCli,
+                interaction_mode: InteractionMode::Chat,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await;
+        let Err(invalid) = result else {
+            panic!("non-UUID Copilot identity should fail");
+        };
+        assert!(matches!(invalid, AgentHostError::Validation { .. }));
+    }
+
+    #[tokio::test]
+    async fn forgetting_sessions_for_shutdown_is_non_destructive() {
+        let runtime = FakeRuntime::default();
+        let registry = SessionRegistry::with_runtime(Arc::new(runtime.clone()));
+        registry
+            .create_session(CreateSessionRequest {
+                session_id: Some("stable-session".to_owned()),
+                harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("create failed: {error}"));
+
+        registry.forget_all_sessions().await;
+
+        assert!(
+            registry
+                .list_sessions(false)
+                .await
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert!(runtime.state().destroyed.is_empty());
+    }
+
+    #[tokio::test]
     async fn create_session_records_workspace_mounts() {
         let runtime = FakeRuntime::default();
         let registry = SessionRegistry::with_runtime(Arc::new(runtime.clone()));
 
         let session = registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::CopilotCli,
+                interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1427,7 +1908,9 @@ mod tests {
 
         let enabled = registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::CopilotCli,
+                interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
                 additional_paths: vec!["/srv/original".to_owned()],
                 skills: vec!["memory".to_owned(), "published".to_owned()],
@@ -1437,7 +1920,9 @@ mod tests {
             .unwrap_or_else(|error| panic!("failed to create enabled session: {error}"));
         registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::CopilotCli,
+                interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1555,7 +2040,9 @@ mod tests {
         let registry = SessionRegistry::with_runtime(Arc::new(FakeRuntime::default()));
         let session = registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1585,7 +2072,9 @@ mod tests {
         let registry = SessionRegistry::with_runtime(Arc::new(FakeRuntime::default()));
         let session = registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1621,7 +2110,9 @@ mod tests {
         let registry = SessionRegistry::with_runtime(Arc::new(runtime.clone()));
         let session = registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1645,7 +2136,9 @@ mod tests {
         let registry = SessionRegistry::with_runtime(Arc::new(FakeRuntime::default()));
         let session = registry
             .create_session(CreateSessionRequest {
+                session_id: None,
                 harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
                 additional_paths: Vec::new(),
                 skills: Vec::new(),
@@ -1724,6 +2217,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_route_reports_owned_session_authority() {
+        let app = router_with_runtime(FakeRuntime::default());
+        let (status, report) = json_request(
+            &app,
+            Method::POST,
+            "/management/runtime-cleanup",
+            json!({
+                "owned_session_ids": ["one", "two"],
+                "dry_run": false,
+                "reviewed_resources": []
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(report["dry_run"], false);
+        assert_eq!(report["owned_session_count"], 2);
+        assert_eq!(report["resources"], json!([]));
+    }
+
+    #[tokio::test]
     async fn workspace_and_reset_routes_match_python_contract() {
         let app = router_with_runtime(FakeRuntime::default());
         let (_created_status, _created, session_id) = create_mounted_session(&app).await;
@@ -1735,7 +2249,10 @@ mod tests {
             json!({
                 "workspace_id": "saved-workspace",
                 "volume_name": "agentspace-workspace-saved-workspace",
-                "exclude_names": ["mounted-workspace"]
+                "exclude_paths": [
+                    "mounted-workspace",
+                    ".github/agents/agentspace-session.agent.md"
+                ]
             }),
         )
         .await;
@@ -1766,13 +2283,52 @@ mod tests {
 
         assert_eq!(snapshot_status, StatusCode::OK);
         assert_eq!(snapshot["workspace_id"], "saved-workspace");
-        assert_eq!(snapshot["exclude_names"], json!(["mounted-workspace"]));
+        assert_eq!(
+            snapshot["exclude_paths"],
+            json!([
+                "mounted-workspace",
+                ".github/agents/agentspace-session.agent.md"
+            ])
+        );
         assert_eq!(clone_status, StatusCode::OK);
         assert_eq!(cloned["workspace_id"], "cloned-workspace");
         assert_eq!(vscode_status, StatusCode::OK);
         assert_eq!(vscode["container_name"], "editor-todo-list-code");
         assert_eq!(reset_status, StatusCode::OK);
-        assert_ne!(reset_session_id, session_id);
+        assert_eq!(reset_session_id, session_id);
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_rejects_unsafe_exclude_paths() {
+        let app = router_with_runtime(FakeRuntime::default());
+        let (_created_status, _created, session_id) = create_mounted_session(&app).await;
+
+        for invalid in [
+            "../secret",
+            "/absolute",
+            ".github/../secret",
+            r".github\agents\profile",
+            "",
+        ] {
+            let (status, payload) = json_request(
+                &app,
+                Method::POST,
+                &format!("/sessions/{session_id}/workspace/snapshot"),
+                json!({
+                    "workspace_id": "saved-workspace",
+                    "volume_name": "agentspace-workspace-saved-workspace",
+                    "exclude_paths": [invalid]
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                payload["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("exclude_paths"))
+            );
+        }
     }
 
     #[tokio::test]
