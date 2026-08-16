@@ -1971,7 +1971,7 @@ def _status_is_error(value: object) -> bool:
     if isinstance(code, str):
         return code.upper() == "ERROR"
     if isinstance(code, int):
-        return code != 0
+        return code == 2
     return False
 
 

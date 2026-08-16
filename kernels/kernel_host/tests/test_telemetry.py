@@ -63,7 +63,7 @@ def _span_record(  # noqa: PLR0913
     parent_span_id: str | None = None,
     attributes: Mapping[str, object] | None = None,
     events: Sequence[Mapping[str, object]] | None = None,
-    status: str = "OK",
+    status: str | int = "OK",
 ) -> dict[str, object]:
     record: dict[str, object] = {
         "type": "span",
@@ -189,6 +189,32 @@ def _provider(
         default_token_accounting_convention=default_convention,
         limits=limits,
     )
+
+
+@pytest.mark.asyncio
+async def test_numeric_otel_status_counts_only_error_code(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    records = [
+        _span_record(
+            trace_id=TRACE_ID,
+            span_id=f"tool-{status}",
+            name="execute_tool bash",
+            start_seconds=status + 1,
+            end_seconds=status + 2,
+            attributes=_tool_attributes("bash"),
+            status=status,
+        )
+        for status in (0, 1, 2)
+    ]
+    _write_jsonl(managed, records)
+
+    snapshot = await _provider(telemetry_dir, RuntimeInfoStub()).snapshot()
+
+    assert snapshot.counts.tool_calls == 3
+    assert snapshot.counts.errors == 1
 
 
 @pytest.mark.asyncio
