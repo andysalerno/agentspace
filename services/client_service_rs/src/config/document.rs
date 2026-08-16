@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::value::{ConfigValue, SecretName},
-    models::{ConnectionApiFlavor, GatewayType, HarnessName},
+    models::{CliHarnessName, ConnectionApiFlavor, GatewayType, HarnessName},
 };
 
 /// The only supported API version in this schema generation.
@@ -66,12 +66,23 @@ pub struct Skill {
 /// An agent definition. Workspace mounts are runtime state and excluded.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentCliConfig {
+    pub harness: CliHarnessName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
+}
+
+/// An agent definition. Workspace mounts are runtime state and excluded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Agent {
     pub id: String,
     pub name: String,
     pub harness: HarnessName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli: Option<AgentCliConfig>,
     pub system_prompt: ConfigValue<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<String>,

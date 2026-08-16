@@ -1,5 +1,6 @@
 import type {
   Agent,
+  AgentCliConfig,
   ConfigOperationResult,
   Connection,
   ConnectionModels,
@@ -275,6 +276,7 @@ export const api = {
     skills?: string[];
     env_vars?: string;
     connection_id?: string | null;
+    cli?: AgentCliConfig | null;
     workspace_mounts?: Array<Pick<WorkspaceMount, "workspace_id" | "mode">>;
   }) =>
     requestJson<Agent>("/agents", {
@@ -288,6 +290,7 @@ export const api = {
     skills?: string[];
     env_vars?: string;
     connection_id?: string | null;
+    cli?: AgentCliConfig | null;
     workspace_mounts?: Array<Pick<WorkspaceMount, "workspace_id" | "mode">>;
   }) =>
     requestJson<Agent>(`/agents/${agentId}`, {
@@ -309,6 +312,7 @@ export const api = {
     agent_id: string;
     channel_name: string | null;
     client_type: "webui";
+    interaction_mode?: "chat" | "cli";
   }) =>
     requestJson<SessionSummary>("/sessions", {
       method: "POST",

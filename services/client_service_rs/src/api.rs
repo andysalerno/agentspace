@@ -25,23 +25,25 @@ use crate::{
     errors::{StoreError, ValidationError},
     memory::{MEMORY_JSON_CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE, MemoryProxyError},
     models::{
-        AgentRecord, ClientType, ConnectionApiFlavor, ConnectionRecord,
-        DEFAULT_AGENT_SYSTEM_PROMPT, GatewayRecord, GatewayType, HarnessName, MessageRecord,
-        MessageRole, SessionRecord, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord,
-        WorkspaceStatus, utc_now, validate_agent_id, validate_connection_id, validate_gateway_id,
-        validate_skill_id, validate_workspace_id,
+        AdditionalPathIdentity, AgentCliRecord, AgentProfileLaunchSnapshot, AgentRecord,
+        CliHarnessName, CliLaunchOptionsSnapshot, CliLaunchSnapshot, CliProviderLaunchSnapshot,
+        ClientType, ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
+        GatewayRecord, GatewayType, HarnessName, InteractionMode, LaunchValueSource, MessageRecord,
+        MessageRole, RuntimeStatus, SessionRecord, ToolCallRecord, WorkspaceMountRecord,
+        WorkspaceRecord, WorkspaceStatus, utc_now, validate_agent_id, validate_connection_id,
+        validate_gateway_id, validate_skill_id, validate_workspace_id,
     },
 };
 
 use crate::config::{
     self,
     canonical::to_canonical_yaml,
-    document::SecretDeclaration,
+    document::{Agent as ConfigAgent, SecretDeclaration},
     error::{ConfigError, ValidationIssue},
     resolver::ResolveError,
     secrets::SecretStoreError,
     snapshot::SourceKind,
-    value::SecretName,
+    value::{ConfigValue, SecretName},
 };
 
 const DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL: &str = "http://client-service:8002";
@@ -703,6 +705,11 @@ async fn create_agent(
     if let Some(connection_id) = payload.connection_id.as_deref() {
         require_connection(&state, connection_id)?;
     }
+    if let Some(cli) = &payload.cli
+        && let Some(connection_id) = cli.connection_id.as_deref()
+    {
+        require_connection(&state, connection_id)?;
+    }
     let mut agent = AgentRecord::new(
         payload.agent_id,
         payload.name,
@@ -712,6 +719,7 @@ async fn create_agent(
     agent.skills = payload.skills;
     agent.env_vars = payload.env_vars;
     agent.connection_id = payload.connection_id;
+    agent.cli = payload.cli.map(AgentCliRequest::into_record);
     validate_workspace_mounts(&state, &payload.workspace_mounts)?;
     agent.workspace_mounts = payload.workspace_mounts;
     let value = agent.summary();
@@ -797,6 +805,18 @@ async fn update_agent(
             agent.connection_id = Some(connection_id);
         }
     }
+    match payload.cli {
+        NullableCliField::Missing => {}
+        NullableCliField::Null => {
+            agent.cli = None;
+        }
+        NullableCliField::Value(cli) => {
+            if let Some(connection_id) = cli.connection_id.as_deref() {
+                require_connection(&state, connection_id)?;
+            }
+            agent.cli = Some(cli.into_record());
+        }
+    }
     agent.updated_at = utc_now();
     let value = agent.summary();
     state.agents.update(&agent)?;
@@ -833,10 +853,12 @@ async fn delete_agent(
             "destroying session for deleted agent"
         );
         let _removed = state.sessions.delete(&session.session_id)?;
-        state
-            .agent_host
-            .destroy_session(&session.agent_host_session_id)
-            .await?;
+        if session.interaction_mode == InteractionMode::Chat {
+            state
+                .agent_host
+                .destroy_session(&session.agent_host_session_id)
+                .await?;
+        }
     }
     tracing::info!(
         route = "/agents/:agent_id",
@@ -1010,6 +1032,9 @@ async fn create_session(
     let session_mounts =
         session_workspace_mounts(&agent.workspace_mounts, &payload.workspace_mounts);
     validate_workspace_mounts(&state, &session_mounts)?;
+    if payload.interaction_mode == InteractionMode::Cli {
+        return create_cli_session(&state, payload, &agent, &session_mounts);
+    }
     let env = session_env(&state, &agent)?;
     tracing::info!(
         route = "/sessions",
@@ -1056,6 +1081,219 @@ async fn create_session(
     Ok(Json(value))
 }
 
+fn create_cli_session(
+    state: &AppState,
+    payload: CreateSessionRequest,
+    agent: &AgentRecord,
+    session_mounts: &[WorkspaceMountRecord],
+) -> Result<Json<Value>, ApiError> {
+    let cli = agent.cli.as_ref().ok_or_else(|| {
+        ApiError::unprocessable(format!(
+            "agent {:?} is not configured for CLI sessions",
+            agent.agent_id
+        ))
+    })?;
+    if let Some(connection_id) = cli.connection_id.as_deref() {
+        require_connection(state, connection_id)?;
+    }
+
+    let session_id = Uuid::now_v7().simple().to_string();
+    let launch_snapshot = cli_launch_snapshot(state, agent, cli, &session_id, session_mounts)?;
+    let mut session = SessionRecord::new(
+        session_id.clone(),
+        payload.agent_id,
+        "",
+        "starting",
+        payload.channel_name,
+        payload.client_type,
+    );
+    session.interaction_mode = InteractionMode::Cli;
+    session.cli_harness = Some(cli.harness);
+    session.cli_connection_id.clone_from(&cli.connection_id);
+    session.harness_session_id = Some(Uuid::new_v4().to_string());
+    session.runtime_generation = Some(0);
+    session.runtime_status = Some(RuntimeStatus::Starting);
+    session.workspace_volume_identity = Some(session_id);
+    session.launch_snapshot = Some(launch_snapshot);
+
+    state.sessions.insert(session.clone())?;
+    let value = session_summary(state, &session)?;
+    tracing::info!(
+        route = "/sessions",
+        action = "create_session",
+        interaction_mode = InteractionMode::Cli.as_str(),
+        session_id = %session.session_id,
+        agent_id = %session.agent_id,
+        cli_harness = cli.harness.as_str(),
+        has_cli_connection = cli.connection_id.is_some(),
+        runtime_status = RuntimeStatus::Starting.as_str(),
+        "durable CLI session created without launching a runtime"
+    );
+    Ok(Json(value))
+}
+
+fn cli_launch_snapshot(
+    state: &AppState,
+    agent: &AgentRecord,
+    cli: &AgentCliRecord,
+    session_id: &str,
+    session_mounts: &[WorkspaceMountRecord],
+) -> Result<CliLaunchSnapshot, ApiError> {
+    let document = state.config_state.active();
+    let config_agent = document
+        .spec
+        .agents
+        .iter()
+        .find(|item| item.id == agent.agent_id)
+        .ok_or_else(|| {
+            ApiError::internal(format!(
+                "agent {:?} has no authoritative config document entry",
+                agent.agent_id
+            ))
+        })?;
+    let mut env_sources = BTreeMap::new();
+    if let Some(kernel) = document
+        .spec
+        .kernel_configs
+        .iter()
+        .find(|item| item.harness == HarnessName::CopilotCli)
+    {
+        env_sources.extend(config_env_sources(
+            kernel.env.as_ref(),
+            kernel.env_text.as_deref(),
+            "kernelConfigs/copilot-cli",
+        ));
+    }
+    env_sources.extend(config_env_sources(
+        config_agent.env.as_ref(),
+        config_agent.env_text.as_deref(),
+        &format!("agents/{}", agent.agent_id),
+    ));
+
+    let provider = cli
+        .connection_id
+        .as_deref()
+        .map(|connection_id| {
+            let connection = document.connection(connection_id).ok_or_else(|| {
+                ApiError::unprocessable(format!(
+                    "agent {:?} CLI references unknown connection {connection_id:?}",
+                    agent.agent_id
+                ))
+            })?;
+            Ok::<CliProviderLaunchSnapshot, ApiError>(CliProviderLaunchSnapshot {
+                provider_type: "openai".to_owned(),
+                wire_api: match connection.api_flavor {
+                    ConnectionApiFlavor::ChatCompletions => "completions",
+                    ConnectionApiFlavor::Responses => "responses",
+                }
+                .to_owned(),
+                connection_id: connection_id.to_owned(),
+                base_url: launch_value_source(
+                    &connection.url,
+                    &format!("connections/{connection_id}/url"),
+                    true,
+                ),
+                api_key: connection.api_key.as_ref().map(|value| {
+                    launch_value_source(
+                        value,
+                        &format!("connections/{connection_id}/apiKey"),
+                        false,
+                    )
+                }),
+            })
+        })
+        .transpose()?;
+
+    let mut additional_paths = vec![AdditionalPathIdentity::SessionWorkspace {
+        path: "/workspace".to_owned(),
+    }];
+    additional_paths.extend(session_mounts.iter().map(|mount| {
+        AdditionalPathIdentity::MountedWorkspace {
+            workspace_id: mount.workspace_id.clone(),
+            mode: mount.mode,
+            path: mount.mount_path(),
+        }
+    }));
+    if let Some(source) = env_sources.get("COPILOT_ADDITIONAL_PATHS") {
+        additional_paths.push(AdditionalPathIdentity::Configured {
+            source: source.clone(),
+        });
+    }
+
+    Ok(CliLaunchSnapshot {
+        schema_version: 1,
+        provider,
+        model: env_sources.get("COPILOT_MODEL").cloned(),
+        reasoning_effort: env_sources.get("COPILOT_REASONING_EFFORT").cloned(),
+        options: CliLaunchOptionsSnapshot {
+            no_auto_update: true,
+            mouse: true,
+            config_dir: env_sources.get("COPILOT_CONFIG_DIR").cloned(),
+            extra_args: env_sources.get("COPILOT_EXTRA_ARGS").cloned(),
+        },
+        additional_paths,
+        agent_profile: agent_profile_snapshot(config_agent, session_id),
+    })
+}
+
+fn config_env_sources(
+    env: Option<&BTreeMap<String, ConfigValue<String>>>,
+    env_text: Option<&str>,
+    resource_path: &str,
+) -> BTreeMap<String, LaunchValueSource> {
+    let mut sources = BTreeMap::new();
+    if let Some(env_text) = env_text {
+        for (key, value) in crate::models::parse_env_vars(env_text) {
+            sources.insert(key, LaunchValueSource::Literal { value });
+        }
+    }
+    if let Some(env) = env {
+        for (key, value) in env {
+            sources.insert(
+                key.clone(),
+                launch_value_source(value, &format!("{resource_path}/env/{key}"), true),
+            );
+        }
+    }
+    sources
+}
+
+fn launch_value_source(
+    value: &ConfigValue<String>,
+    field: &str,
+    allow_literal: bool,
+) -> LaunchValueSource {
+    match value {
+        ConfigValue::Literal(value) if allow_literal => LaunchValueSource::Literal {
+            value: value.clone(),
+        },
+        ConfigValue::Literal(_) => LaunchValueSource::ConfigReference {
+            field: field.to_owned(),
+        },
+        ConfigValue::Secret(name) => LaunchValueSource::SecretReference {
+            field: field.to_owned(),
+            name: name.clone(),
+        },
+    }
+}
+
+fn agent_profile_snapshot(
+    agent: &ConfigAgent,
+    session_id: &str,
+) -> Option<AgentProfileLaunchSnapshot> {
+    if matches!(&agent.system_prompt, ConfigValue::Literal(prompt) if prompt.is_empty()) {
+        return None;
+    }
+    Some(AgentProfileLaunchSnapshot {
+        identity: format!("agentspace-{session_id}"),
+        system_prompt: launch_value_source(
+            &agent.system_prompt,
+            &format!("agents/{}/systemPrompt", agent.id),
+            true,
+        ),
+    })
+}
+
 async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
     let sessions = state
         .sessions
@@ -1077,6 +1315,9 @@ async fn get_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut session = require_session(&state, &session_id)?;
+    if session.interaction_mode == InteractionMode::Cli {
+        return Ok(Json(session_detail(&state, &session)?));
+    }
     let upstream = state
         .agent_host
         .get_session(&session.agent_host_session_id)
@@ -1103,7 +1344,7 @@ async fn list_messages(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let session = require_session(&state, &session_id)?;
+    let session = require_chat_session(&state, &session_id)?;
     let messages = session
         .messages
         .iter()
@@ -1157,7 +1398,7 @@ async fn stream_turn(
     State(state): State<AppState>,
     Path((session_id, turn_id)): Path<(String, String)>,
 ) -> Result<Response, ApiError> {
-    let session = require_session(&state, &session_id)?;
+    let session = require_chat_session(&state, &session_id)?;
     let receiver = subscribe_active_turn(&state, &session_id, &turn_id)?;
     tracing::info!(
         route = "/sessions/:session_id/turns/:turn_id/stream",
@@ -1174,7 +1415,7 @@ async fn reset_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
-    let mut session = require_session(&state, &session_id)?;
+    let mut session = require_chat_session(&state, &session_id)?;
     let upstream = state
         .agent_host
         .reset_session(&session.agent_host_session_id)
@@ -1202,7 +1443,7 @@ async fn save_session_workspace(
     Json(payload): Json<SaveSessionWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_workspace_id(&payload.workspace_id)?;
-    let session = require_session(&state, &session_id)?;
+    let session = require_chat_session(&state, &session_id)?;
     let mut workspace = WorkspaceRecord::new_with_status(
         payload.workspace_id,
         payload.name,
@@ -1264,10 +1505,12 @@ async fn delete_session(
             "session {session_id:?} not found"
         )));
     }
-    state
-        .agent_host
-        .destroy_session(&session.agent_host_session_id)
-        .await?;
+    if session.interaction_mode == InteractionMode::Chat {
+        state
+            .agent_host
+            .destroy_session(&session.agent_host_session_id)
+            .await?;
+    }
     tracing::info!(
         route = "/sessions/:session_id",
         action = "delete_session",
@@ -2650,7 +2893,7 @@ fn start_streaming_turn(
     session_id: &str,
     message: String,
 ) -> Result<(StreamingTurn, NdjsonReceiver), ApiError> {
-    let mut session = require_session(state, session_id)?;
+    let mut session = require_chat_session(state, session_id)?;
     let turn_id = Uuid::now_v7().simple().to_string();
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
@@ -3061,7 +3304,7 @@ fn send_stream_item(
 }
 
 async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<Value, ApiError> {
-    let mut session = require_session(state, session_id)?;
+    let mut session = require_chat_session(state, session_id)?;
     let turn_id = Uuid::now_v7().simple().to_string();
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
@@ -3531,6 +3774,16 @@ fn require_session(state: &AppState, session_id: &str) -> Result<SessionRecord, 
         .ok_or_else(|| ApiError::not_found(format!("session {session_id:?} not found")))
 }
 
+fn require_chat_session(state: &AppState, session_id: &str) -> Result<SessionRecord, ApiError> {
+    let session = require_session(state, session_id)?;
+    if session.interaction_mode == InteractionMode::Cli {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} uses CLI interaction mode"
+        )));
+    }
+    Ok(session)
+}
+
 fn validate_workspace_mounts(
     state: &AppState,
     mounts: &[WorkspaceMountRecord],
@@ -3625,6 +3878,8 @@ struct CreateAgentRequest {
     env_vars: String,
     connection_id: Option<String>,
     #[serde(default)]
+    cli: Option<AgentCliRequest>,
+    #[serde(default)]
     workspace_mounts: Vec<WorkspaceMountRecord>,
 }
 
@@ -3637,7 +3892,26 @@ struct UpdateAgentRequest {
     env_vars: Option<String>,
     #[serde(default, deserialize_with = "deserialize_nullable_string_field")]
     connection_id: NullableStringField,
+    #[serde(default, deserialize_with = "deserialize_nullable_cli_field")]
+    cli: NullableCliField,
     workspace_mounts: Option<Vec<WorkspaceMountRecord>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentCliRequest {
+    harness: CliHarnessName,
+    #[serde(default)]
+    connection_id: Option<String>,
+}
+
+impl AgentCliRequest {
+    fn into_record(self) -> AgentCliRecord {
+        AgentCliRecord {
+            harness: self.harness,
+            connection_id: self.connection_id,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -3668,6 +3942,8 @@ struct CreateSessionRequest {
     agent_id: String,
     channel_name: Option<String>,
     client_type: Option<ClientType>,
+    #[serde(default)]
+    interaction_mode: InteractionMode,
     #[serde(default)]
     workspace_mounts: Vec<WorkspaceMountRecord>,
 }
@@ -3743,6 +4019,22 @@ where
 {
     Option::<String>::deserialize(deserializer)
         .map(|value| value.map_or(NullableStringField::Null, NullableStringField::Value))
+}
+
+#[derive(Debug, Default)]
+enum NullableCliField {
+    #[default]
+    Missing,
+    Null,
+    Value(AgentCliRequest),
+}
+
+fn deserialize_nullable_cli_field<'de, D>(deserializer: D) -> Result<NullableCliField, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<AgentCliRequest>::deserialize(deserializer)
+        .map(|value| value.map_or(NullableCliField::Null, NullableCliField::Value))
 }
 
 const CONFIG_YAML_CONTENT_TYPE: &str = "application/yaml";

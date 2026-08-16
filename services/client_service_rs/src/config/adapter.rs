@@ -8,12 +8,15 @@
 
 use crate::{
     config::{
-        document::{Agent, Connection, Gateway, KernelConfig, Skill, env_to_text},
+        document::{Agent, AgentCliConfig, Connection, Gateway, KernelConfig, Skill, env_to_text},
         state::{ConfigState, GatewayRuntime},
         value::ConfigValue,
     },
     errors::StoreError,
-    models::{AgentRecord, ConnectionRecord, GatewayRecord, HarnessName, KernelConfigRecord},
+    models::{
+        AgentCliRecord, AgentRecord, ConnectionRecord, GatewayRecord, HarnessName,
+        KernelConfigRecord,
+    },
 };
 
 fn literal_or_empty(value: &ConfigValue<String>) -> String {
@@ -116,6 +119,10 @@ fn record_to_agent(record: &AgentRecord) -> Agent {
         name: record.name.clone(),
         harness: record.harness,
         connection: record.connection_id.clone(),
+        cli: record.cli.as_ref().map(|cli| AgentCliConfig {
+            harness: cli.harness,
+            connection: cli.connection_id.clone(),
+        }),
         system_prompt: ConfigValue::Literal(record.system_prompt.clone()),
         skills: record.skills.clone(),
         env: None,
@@ -133,6 +140,10 @@ fn agent_to_record(config: &ConfigState, agent: &Agent) -> AgentRecord {
         skills: agent.skills.clone(),
         env_vars: env_to_text(agent.env.as_ref(), agent.env_text.as_deref()),
         connection_id: agent.connection.clone(),
+        cli: agent.cli.as_ref().map(|cli| AgentCliRecord {
+            harness: cli.harness,
+            connection_id: cli.connection.clone(),
+        }),
         workspace_mounts: config.agent_mounts(&agent.id),
         created_at,
         updated_at,
@@ -236,6 +247,10 @@ fn patch_agent(slot: &mut Agent, record: &AgentRecord) {
     slot.system_prompt = merge_required_value(&slot.system_prompt, &record.system_prompt);
     slot.skills.clone_from(&record.skills);
     slot.connection.clone_from(&record.connection_id);
+    slot.cli = record.cli.as_ref().map(|cli| AgentCliConfig {
+        harness: cli.harness,
+        connection: cli.connection_id.clone(),
+    });
     let (env, env_text) = merge_env(
         slot.env.as_ref(),
         slot.env_text.as_deref(),

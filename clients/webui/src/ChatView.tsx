@@ -315,7 +315,8 @@ function MessageMarkdown({
 
 export default function ChatView({ selectedSessionId, onSelectSession }: ChatViewProps) {
     const { data: agents = [] } = useAgents();
-    const { data: sessions = [] } = useSessions();
+    const { data: allSessions = [] } = useSessions();
+    const sessions = allSessions.filter((session) => session.interaction_mode === "chat");
     const { data: kernels = [] } = useKernels();
     const queryClient = useQueryClient();
     const { reportError } = useErrorContext();
@@ -344,6 +345,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
                 agent_id: payload.agent_id,
                 channel_name: payload.channel_name,
                 client_type: "webui",
+                interaction_mode: "chat",
             }),
         onSuccess: (session) => {
             void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });

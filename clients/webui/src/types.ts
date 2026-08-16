@@ -1,6 +1,12 @@
 export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "memory" | "skills" | "connections" | "gateways" | "info" | "config-kernels" | "config" | "config-secrets";
 
 type Harness = string;
+type CliHarnessName = "copilot-cli";
+
+export type AgentCliConfig = {
+  harness: CliHarnessName;
+  connection_id: string | null;
+};
 
 export type WorkspaceMountMode = "rw" | "ro";
 
@@ -19,6 +25,7 @@ export type Agent = {
   skills: string[];
   env_vars: string;
   connection_id: string | null;
+  cli: AgentCliConfig | null;
   workspace_mounts: WorkspaceMount[];
   created_at: string;
   updated_at: string;
@@ -138,14 +145,52 @@ export type SkillVersion = {
 export type SessionSummary = {
   session_id: string;
   agent_id: string;
-  agent_host_session_id: string;
+  agent_host_session_id: string | null;
   status: string;
   channel_name: string | null;
   client_type: string | null;
+  interaction_mode: "chat" | "cli";
+  cli_harness: CliHarnessName | null;
+  cli_connection_id: string | null;
+  harness_session_id: string | null;
+  runtime_generation: number | null;
+  runtime_status: "starting" | "live" | "exited" | "disconnected" | "resuming" | "error" | null;
+  workspace_volume_identity: string | null;
+  launch_snapshot: CliLaunchSnapshot | null;
+  recovery_state: "recoverable" | "legacy-unrecoverable";
   created_at: string;
   updated_at: string;
   message_count: number;
   active_turn?: ActiveTurnSummary;
+};
+
+type LaunchValueSource =
+  | { kind: "literal"; value: string }
+  | { kind: "config_reference"; field: string }
+  | { kind: "secret_reference"; field: string; name: string };
+
+type CliLaunchSnapshot = {
+  schema_version: number;
+  provider?: {
+    provider_type: string;
+    wire_api: string;
+    connection_id: string;
+    base_url: LaunchValueSource;
+    api_key?: LaunchValueSource;
+  };
+  model?: LaunchValueSource;
+  reasoning_effort?: LaunchValueSource;
+  options: {
+    no_auto_update: boolean;
+    mouse: boolean;
+    config_dir?: LaunchValueSource;
+    extra_args?: LaunchValueSource;
+  };
+  additional_paths: Array<Record<string, unknown>>;
+  agent_profile?: {
+    identity: string;
+    system_prompt: LaunchValueSource;
+  };
 };
 
 type ActiveTurnSummary = {

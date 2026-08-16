@@ -10,7 +10,12 @@ import {
     Edit20Regular,
     Play20Regular,
 } from "@fluentui/react-icons";
-import type { Agent, ConnectionModels, WorkspaceMountMode } from "./types";
+import type {
+    Agent,
+    AgentCliConfig,
+    ConnectionModels,
+    WorkspaceMountMode,
+} from "./types";
 import { api } from "./api";
 import CodeEditor from "./CodeEditor";
 import {
@@ -65,6 +70,7 @@ type AgentFormState = {
     skills: string[];
     env_vars: string;
     connection_id: string | null;
+    cli: AgentCliConfig | null;
     workspace_mounts: WorkspaceMountFormState[];
 };
 
@@ -77,6 +83,7 @@ function emptyAgentForm(harnesses: string[]): AgentFormState {
         skills: [],
         env_vars: "",
         connection_id: null,
+        cli: null,
         workspace_mounts: [],
     };
 }
@@ -90,6 +97,7 @@ function agentToForm(agent: Agent): AgentFormState {
         skills: [...agent.skills],
         env_vars: agent.env_vars,
         connection_id: agent.connection_id,
+        cli: agent.cli === null ? null : { ...agent.cli },
         workspace_mounts: agent.workspace_mounts.map((mount) => ({
             workspace_id: mount.workspace_id,
             mode: mount.mode,
@@ -283,6 +291,51 @@ function AgentFormFields(
                         ))}
                     </Select>
                 </Field>
+                <Field label="CLI capability">
+                    <Checkbox
+                        checked={form.cli !== null}
+                        label="Enable CLI sessions"
+                        onChange={(_, data) =>
+                            onChange({
+                                ...form,
+                                cli: data.checked
+                                    ? {
+                                        harness: "copilot-cli",
+                                        connection_id: form.connection_id,
+                                    }
+                                    : null,
+                            })}
+                    />
+                </Field>
+                {form.cli !== null && (
+                    <>
+                        <Field label="CLI harness">
+                            <Select disabled value={form.cli.harness}>
+                                <option value="copilot-cli">Copilot CLI</option>
+                            </Select>
+                        </Field>
+                        <Field label="CLI connection">
+                            <Select
+                                onChange={(e) =>
+                                    onChange({
+                                        ...form,
+                                        cli: {
+                                            harness: "copilot-cli",
+                                            connection_id: e.target.value || null,
+                                        },
+                                    })}
+                                value={form.cli.connection_id ?? ""}
+                            >
+                                <option value="">GitHub authentication</option>
+                                {connections.map((conn) => (
+                                    <option key={conn.connection_id} value={conn.connection_id}>
+                                        {conn.name} ({conn.connection_id})
+                                    </option>
+                                ))}
+                            </Select>
+                        </Field>
+                    </>
+                )}
                 <ModelNameField
                     connectionId={form.connection_id}
                     envVars={form.env_vars}
@@ -404,6 +457,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 skills?: string[];
                 env_vars?: string;
                 connection_id?: string | null;
+                cli?: AgentCliConfig | null;
                 workspace_mounts?: WorkspaceMountFormState[];
             };
         }) => api.updateAgent(agentId, patch),
@@ -419,7 +473,12 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
 
     const startSessionMutation = useMutation({
         mutationFn: (agentId: string) =>
-            api.createSession({ agent_id: agentId, channel_name: null, client_type: "webui" }),
+            api.createSession({
+                agent_id: agentId,
+                channel_name: null,
+                client_type: "webui",
+                interaction_mode: "chat",
+            }),
         onSuccess: (session) => {
             void queryClient.invalidateQueries({ queryKey: queryKeys.sessions });
             onSessionCreated(session.session_id);
@@ -494,6 +553,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                 skills: editForm.skills,
                 env_vars: editForm.env_vars,
                 connection_id: editForm.connection_id,
+                cli: editForm.cli,
                 workspace_mounts: editForm.workspace_mounts,
             },
         });
@@ -505,6 +565,13 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
         if (agent.connection_id === null) return null;
         return connections.find((c) => c.connection_id === agent.connection_id)?.name
             ?? agent.connection_id;
+    }
+
+    function cliConnectionLabel(agent: Agent) {
+        if (agent.cli === null) return null;
+        if (agent.cli.connection_id === null) return "GitHub authentication";
+        return connections.find((c) => c.connection_id === agent.cli?.connection_id)?.name
+            ?? agent.cli.connection_id;
     }
 
     return (
@@ -552,6 +619,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                             <th>Agent</th>
                                             <th>Kernel</th>
                                             <th>Connection</th>
+                                            <th>CLI</th>
                                             <th className="num">Skills</th>
                                             <th className="num">Workspaces</th>
                                             <th className="num">Sessions</th>
@@ -562,6 +630,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                         {agents.map((agent) => {
                                             const expanded = expandedAgentId === agent.agent_id;
                                             const connection = connectionLabel(agent);
+                                            const cliConnection = cliConnectionLabel(agent);
                                             return (
                                                 <Fragment key={agent.agent_id}>
                                                     <tr
@@ -595,6 +664,15 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                                     {agent.agent_id}
                                                                 </span>
                                                             </div>
+                                                        </td>
+                                                        <td>
+                                                            {agent.cli === null
+                                                                ? <span className="muted">Disabled</span>
+                                                                : (
+                                                                    <span title={cliConnection ?? undefined}>
+                                                                        Copilot CLI
+                                                                    </span>
+                                                                )}
                                                         </td>
                                                         <td className="nowrap">
                                                             {formatHarnessLabel(agent.harness)}
@@ -673,7 +751,7 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                     </tr>
                                                     {expanded && (
                                                         <tr className="detail-row">
-                                                            <td colSpan={8}>
+                                                            <td colSpan={9}>
                                                                 <div className="detail-block">
                                                                     <dl className="detail-list stacked">
                                                                         <dt>Skills</dt>
@@ -728,6 +806,21 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                                                                 </span>
                                                                                             ))}
                                                                                     </span>
+                                                                                )}
+                                                                        </dd>
+                                                                        <dt>CLI</dt>
+                                                                        <dd>
+                                                                            {agent.cli === null
+                                                                                ? (
+                                                                                    <span className="muted">
+                                                                                        Disabled
+                                                                                    </span>
+                                                                                )
+                                                                                : (
+                                                                                    <>
+                                                                                        Copilot CLI ·{" "}
+                                                                                        {cliConnection}
+                                                                                    </>
                                                                                 )}
                                                                         </dd>
                                                                         <dt>Created</dt>

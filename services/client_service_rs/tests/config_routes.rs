@@ -34,6 +34,9 @@ spec:
       name: Helper
       harness: acp
       connection: openai
+      cli:
+        harness: copilot-cli
+        connection: openai
       systemPrompt: be helpful
   gateways:
     - id: echo-gw
@@ -209,6 +212,10 @@ async fn per_resource_export_returns_standalone_manifest()
     let text = String::from_utf8(body)?;
     assert!(text.contains("kind: Agent"), "unexpected manifest: {text}");
     assert!(text.contains("name: helper"), "unexpected manifest: {text}");
+    assert!(
+        text.contains("harness: copilot-cli"),
+        "unexpected manifest: {text}"
+    );
     assert_eq!(
         headers
             .get(header::CONTENT_DISPOSITION.as_str())
@@ -332,6 +339,68 @@ spec:
             .any(|issue| issue["code"] == "unresolved_agent_reference"),
         "expected unresolved_agent_reference, got: {value}"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_config_validation_reports_exact_connection_field()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let app = router()?;
+    let invalid = r"apiVersion: agentspace.dev/v1alpha1
+kind: AgentSpaceConfig
+metadata:
+  name: local
+spec:
+  agents:
+    - id: helper
+      name: Helper
+      harness: acp
+      systemPrompt: help
+      cli:
+        harness: copilot-cli
+        connection: missing
+";
+    let (status, _headers, body) = send(&app, apply_request(invalid)?).await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let value: Value = serde_json::from_slice(&body)?;
+    let issues = value["issues"].as_array().cloned().unwrap_or_default();
+    assert!(
+        issues.iter().any(|issue| {
+            issue["code"] == "unresolved_connection_reference"
+                && issue["field"] == "agents/helper/cli/connection"
+        }),
+        "expected exact CLI connection field, got: {value}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cli_config_rejects_unknown_fields_and_unsupported_harnesses()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let app = router()?;
+    for cli in ["harness: copilot-cli\n    command: copilot", "harness: acp"] {
+        let source = format!(
+            r"apiVersion: agentspace.dev/v1alpha1
+kind: Agent
+metadata:
+  name: helper
+spec:
+  name: Helper
+  harness: acp
+  systemPrompt: help
+  cli:
+    {cli}
+"
+        );
+        let (status, _headers, _body) = send(
+            &app,
+            Request::post("/config/validate")
+                .header(header::CONTENT_TYPE, "application/yaml")
+                .body(Body::from(source))?,
+        )
+        .await?;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
     Ok(())
 }
 

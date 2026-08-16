@@ -571,6 +571,8 @@ spec:
   name: Helper
   harness: acp
   systemPrompt: be helpful
+  cli:
+    harness: copilot-cli
 ";
         let bytes = build_zip(&[
             ("skill.yaml", MANIFEST),
@@ -581,6 +583,13 @@ spec:
         assert_eq!(document.spec.skills.len(), 1, "expected the skill document");
         assert_eq!(document.spec.agents.len(), 1, "expected the agent document");
         assert_eq!(document.spec.agents[0].id, "helper");
+        assert_eq!(
+            document.spec.agents[0]
+                .cli
+                .as_ref()
+                .map(|cli| cli.harness.as_str()),
+            Some("copilot-cli")
+        );
         Ok(())
     }
 
