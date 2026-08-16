@@ -271,6 +271,56 @@ async fn save_session_workspace_marks_workspace_ready() -> Result<(), Box<dyn Er
 }
 
 #[tokio::test]
+async fn save_cli_session_workspace_marks_workspace_ready()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let stub = spawn_stub_agent_host().await?;
+    let app = test_router(&stub.base_url)?;
+
+    let (status, _agent) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "name": "CLI Agent",
+            "cli": { "harness": "copilot-cli" },
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, session) = request_json(
+        app.clone(),
+        Method::POST,
+        "/sessions",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "client_type": "webui",
+            "interaction_mode": "cli",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = string_field(&session, "session_id")?;
+
+    let (status, workspace) = request_json(
+        app,
+        Method::POST,
+        &format!("/sessions/{session_id}/workspace/save"),
+        Some(json!({
+            "workspace_id": "saved-cli-workspace",
+            "name": "Saved CLI Workspace",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workspace["workspace_id"], "saved-cli-workspace");
+    assert_eq!(workspace["status"], "ready");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspace_clone_and_vscode_routes_match_contract()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let stub = spawn_stub_agent_host().await?;

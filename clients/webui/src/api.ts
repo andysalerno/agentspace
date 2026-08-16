@@ -28,6 +28,7 @@ import type {
   Skill,
   SkillVersion,
   SystemInfo,
+  TerminalStatus,
   Workspace,
   WorkspaceMount,
   WorkspaceVscode,
@@ -375,6 +376,25 @@ export const api = {
   },
   resetSession: (sessionId: string) =>
     requestJson<SessionSummary>(`/sessions/${sessionId}/reset`, { method: "POST" }),
+  getTerminalStatus: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal`),
+  ensureTerminal: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/ensure`, {
+      method: "POST",
+    }),
+  stopTerminal: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/stop`, {
+      method: "POST",
+    }),
+  resumeTerminal: (sessionId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/resume`, {
+      method: "POST",
+    }),
+  enterTerminalCopyMode: (sessionId: string, attachmentId: string) =>
+    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/copy-mode`, {
+      method: "POST",
+      body: JSON.stringify({ attachment_id: attachmentId }),
+    }),
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),
   killKernel: (sessionId: string) =>
     requestJson<void>(`/kernels/${sessionId}`, { method: "DELETE" }),

@@ -2257,8 +2257,13 @@ async fn save_session_workspace(
     Json(payload): Json<SaveSessionWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_workspace_id(&payload.workspace_id)?;
-    let mut session = require_chat_session(&state, &session_id)?;
-    ensure_chat_runtime(&state, &mut session).await?;
+    let mut session = require_session(&state, &session_id)?;
+    match session.interaction_mode {
+        InteractionMode::Chat => ensure_chat_runtime(&state, &mut session).await?,
+        InteractionMode::Cli => {
+            (session, _) = require_cli_runtime(&state, &session_id)?;
+        }
+    }
     require_available_runtime(&session)?;
     let mut workspace = WorkspaceRecord::new_with_status(
         payload.workspace_id,

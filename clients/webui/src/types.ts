@@ -1,4 +1,18 @@
-export type ViewId = "chat" | "agents" | "workspaces" | "sessions" | "kernels" | "memory" | "skills" | "connections" | "gateways" | "info" | "config-kernels" | "config" | "config-secrets";
+export type ViewId =
+  | "chat"
+  | "cli"
+  | "agents"
+  | "workspaces"
+  | "sessions"
+  | "kernels"
+  | "memory"
+  | "skills"
+  | "connections"
+  | "gateways"
+  | "info"
+  | "config-kernels"
+  | "config"
+  | "config-secrets";
 
 type Harness = string;
 type CliHarnessName = "copilot-cli";
@@ -236,6 +250,60 @@ export type ChatMessage = {
 export type SessionDetail = SessionSummary & {
   messages: ChatMessage[];
 };
+
+type TerminalState = "missing" | "running" | "exited";
+export type TerminalAttachKind = "started" | "attached" | "resumed";
+
+type TerminalClient = {
+  id: string;
+  tty: string;
+  pid: number;
+  width: number;
+  height: number;
+  session_name: string;
+  pane_id: string;
+  attachment_id?: string | null;
+};
+
+export type TerminalStatus = {
+  state: TerminalState;
+  exit_status: number | null;
+  attach_kind: TerminalAttachKind | null;
+  session_name?: string;
+  target_session?: string;
+  socket_path?: string;
+  attach_argv?: string[];
+  pane_id?: string | null;
+  pane_pid?: number | null;
+  attachment_count: number;
+  clients: TerminalClient[];
+};
+
+export type TerminalReadyFrame = {
+  type: "ready";
+  attachment_id: string;
+  cols: number;
+  rows: number;
+  terminal: TerminalStatus;
+};
+
+type TerminalExitedFrame = {
+  type: "exited";
+  state: "exited";
+  exit_status: number | null;
+  terminal: TerminalStatus;
+};
+
+type TerminalErrorFrame = {
+  type: "error";
+  code: number;
+  message: string;
+};
+
+export type TerminalServerFrame =
+  | TerminalReadyFrame
+  | TerminalExitedFrame
+  | TerminalErrorFrame;
 
 export type KernelStats = {
   cpu_percent: number | null;

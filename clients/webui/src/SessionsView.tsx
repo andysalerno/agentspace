@@ -9,9 +9,12 @@ import { sessionTone } from "./status";
 
 type SessionsViewProps = {
     onNavigateToChat: (sessionId: string) => void;
+    onNavigateToCli: (sessionId: string) => void;
 };
 
-export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
+export default function SessionsView(
+    { onNavigateToChat, onNavigateToCli }: SessionsViewProps,
+) {
     const { data: sessions = [] } = useSessions();
     const { data: agents = [] } = useAgents();
     const queryClient = useQueryClient();
@@ -129,12 +132,15 @@ export default function SessionsView({ onNavigateToChat }: SessionsViewProps) {
                                                         }]}
                                                         primary={{
                                                             key: "open",
-                                                            label: s.interaction_mode === "cli"
-                                                                ? "CLI runtime unavailable"
-                                                                : "Open",
+                                                            label: "Open",
                                                             icon: <Open20Regular />,
-                                                            disabled: s.interaction_mode === "cli",
-                                                            onClick: () => onNavigateToChat(s.session_id),
+                                                            onClick: () => {
+                                                                if (s.interaction_mode === "cli") {
+                                                                    onNavigateToCli(s.session_id);
+                                                                } else {
+                                                                    onNavigateToChat(s.session_id);
+                                                                }
+                                                            },
                                                         }}
                                                     />
                                                 </td>
