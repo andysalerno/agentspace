@@ -515,11 +515,13 @@ export default function Terminal({
 
     return (
         <div className="terminal-shell">
-            <div
-                aria-label="Interactive CLI terminal"
-                className="terminal-canvas"
-                ref={containerRef}
-            />
+            <div className="terminal-canvas">
+                <div
+                    aria-label="Interactive CLI terminal"
+                    className="terminal-viewport"
+                    ref={containerRef}
+                />
+            </div>
             <div aria-atomic="true" aria-live="polite" className="terminal-status" role="status">
                 {statusText}
             </div>
