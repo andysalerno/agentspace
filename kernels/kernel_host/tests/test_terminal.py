@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 from kernel_host.terminal import (
+    TERMINAL_ATTACHMENT_ID_ENV,
     TERMINAL_LAUNCH_ARGV_ENV,
     TERMINAL_LAUNCH_CWD_ENV,
     AttachKind,
@@ -58,6 +59,7 @@ class FakeTmuxRunner:
         self.fail_new = False
         self.fail_has_session = False
         self.copy_mode_panes: list[str] = []
+        self.detached_clients: list[str] = []
 
     async def run(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -127,6 +129,11 @@ class FakeTmuxRunner:
         if command == "copy-mode":
             self.copy_mode_panes.append(argv[-1])
             return CommandResult(0)
+        if command == "detach-client":
+            client_id = argv[-1]
+            self.detached_clients.append(client_id)
+            self.clients = [client for client in self.clients if client[0] != client_id]
+            return CommandResult(0)
         raise AssertionError(argv)
 
     def command_calls(self, command: str) -> list[CommandCall]:
@@ -154,6 +161,7 @@ def _controller(
             session_name=session_name,
             tmux_config_path=str(TMUX_CONFIG),
             tmux_socket_path="/run/agentspace-test-tmux.sock",
+            proc_root=str(workspace / "proc"),
             resume_on_create=resume_on_create,
         ),
         runner=runner,
@@ -462,6 +470,42 @@ async def test_copy_mode_uses_validated_observed_client_mapping(
         await controller.copy_mode("-bad")
     with pytest.raises(TerminalClientError, match=r"clients\[\]\.id"):
         await controller.copy_mode("/dev/pts/8")
+
+
+@pytest.mark.asyncio
+async def test_detach_client_removes_only_the_observed_client(tmp_path: Path) -> None:
+    runner = FakeTmuxRunner(exists=True)
+    runner.clients = [
+        ("/dev/pts/7", "/dev/pts/7", 700, 120, 40, "agentspace-session", "%0"),
+        ("/dev/pts/8", "/dev/pts/8", 800, 90, 30, "agentspace-session", "%0"),
+    ]
+    controller = _controller(tmp_path, runner)
+
+    status = await controller.detach_client("/dev/pts/7")
+
+    assert runner.detached_clients == ["/dev/pts/7"]
+    assert [client.id for client in status.clients] == ["/dev/pts/8"]
+
+
+@pytest.mark.asyncio
+async def test_status_maps_exec_environment_marker_to_tmux_client(
+    tmp_path: Path,
+) -> None:
+    runner = FakeTmuxRunner(exists=True)
+    runner.clients = [
+        ("/dev/pts/7", "/dev/pts/7", 700, 120, 40, "agentspace-session", "%0"),
+    ]
+    environ = tmp_path / "proc" / "700" / "environ"
+    environ.parent.mkdir(parents=True)
+    attachment_id = "22222222-2222-4222-8222-222222222222"
+    environ.write_bytes(
+        b"TERM=xterm-256color\0"
+        + f"{TERMINAL_ATTACHMENT_ID_ENV}={attachment_id}\0".encode()
+    )
+
+    status = await _controller(tmp_path, runner).status()
+
+    assert status.clients[0].attachment_id == attachment_id
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ use bollard::{
     Docker,
     container::LogOutput,
     errors::Error as BollardError,
+    exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults},
     models::{
         ContainerCreateBody, HostConfig, PortBinding as DockerPortBinding, PortMap,
         VolumeCreateRequest,
@@ -33,6 +34,7 @@ use crate::{
         RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
     },
     sessions::{EventStream, KernelRuntime, RuntimeCreateSession},
+    terminal::{ATTACHMENT_ID_ENV, TerminalExec, TerminalStatus},
 };
 
 const SESSION_WORKSPACE_MOUNT_PATH: &str = "/workspace";
@@ -520,6 +522,53 @@ impl DockerKernelRuntime {
             .await?;
         Ok((container_name, vscode_url))
     }
+
+    async fn terminal_request(
+        &self,
+        session: &KernelRuntimeSession,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+        missing_attachment_id: Option<&str>,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        let mut request = self
+            .client
+            .request(method, format!("{}{path}", handle.base_url));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await.map_err(|error| {
+            AgentHostError::upstream_unavailable(format!(
+                "kernel terminal controller is unavailable: {error}"
+            ))
+        })?;
+        if response.status().is_success() {
+            return response.json::<TerminalStatus>().await.map_err(|error| {
+                AgentHostError::upstream_unavailable(format!(
+                    "kernel terminal controller returned an invalid response: {error}"
+                ))
+            });
+        }
+
+        let status = response.status();
+        let detail = response
+            .json::<KernelErrorResponse>()
+            .await
+            .ok()
+            .map_or_else(
+                || format!("kernel terminal controller returned HTTP {status}"),
+                |payload| payload.detail,
+            );
+        match status.as_u16() {
+            404 => missing_attachment_id.map_or_else(
+                || Err(AgentHostError::upstream_unavailable(detail)),
+                |attachment_id| Err(AgentHostError::terminal_attachment_not_found(attachment_id)),
+            ),
+            409 => Err(AgentHostError::conflict(detail)),
+            _ => Err(AgentHostError::upstream_unavailable(detail)),
+        }
+    }
 }
 
 #[async_trait]
@@ -926,6 +975,103 @@ impl KernelRuntime for DockerKernelRuntime {
             "vscode_url": vscode_url,
         }))
     }
+
+    async fn terminal_status(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(session, reqwest::Method::GET, "/terminal", None, None)
+            .await
+    }
+
+    async fn terminal_ensure(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(
+            session,
+            reqwest::Method::POST,
+            "/terminal/ensure",
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn terminal_stop(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(session, reqwest::Method::POST, "/terminal/stop", None, None)
+            .await
+    }
+
+    async fn terminal_resume(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(
+            session,
+            reqwest::Method::POST,
+            "/terminal/resume",
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn terminal_copy_mode(
+        &self,
+        session: &KernelRuntimeSession,
+        tmux_client_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(
+            session,
+            reqwest::Method::POST,
+            "/terminal/copy-mode",
+            Some(json!({ "tmux_client_id": tmux_client_id })),
+            Some(tmux_client_id),
+        )
+        .await
+    }
+
+    async fn terminal_detach_client(
+        &self,
+        session: &KernelRuntimeSession,
+        tmux_client_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        self.terminal_request(
+            session,
+            reqwest::Method::POST,
+            "/terminal/detach-client",
+            Some(json!({ "tmux_client_id": tmux_client_id })),
+            Some(tmux_client_id),
+        )
+        .await
+    }
+
+    async fn terminal_attach(
+        &self,
+        session: &KernelRuntimeSession,
+        attachment_id: &str,
+        attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        self.backend
+            .open_terminal_exec(&handle.container_name, attachment_id, attach_argv)
+            .await
+    }
+
+    async fn terminal_resize(
+        &self,
+        session: &KernelRuntimeSession,
+        exec_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), AgentHostError> {
+        Self::docker_session(session)?;
+        self.backend.resize_terminal_exec(exec_id, cols, rows).await
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1077,6 +1223,28 @@ pub trait DockerBackend: Send + Sync {
         &self,
         container_name: &str,
     ) -> Result<Option<DockerStats>, AgentHostError>;
+
+    async fn open_terminal_exec(
+        &self,
+        _container_name: &str,
+        _attachment_id: &str,
+        _attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal exec is not supported by this Docker backend",
+        ))
+    }
+
+    async fn resize_terminal_exec(
+        &self,
+        _exec_id: &str,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<(), AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal exec resize is not supported by this Docker backend",
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1132,6 +1300,11 @@ struct KernelHistoryResponse {
 struct KernelLogsResponse {
     #[serde(default)]
     lines: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+struct KernelErrorResponse {
+    detail: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -1428,6 +1601,61 @@ impl DockerBackend for BollardDockerBackend {
             Err(error) if is_bollard_not_found(&error) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn open_terminal_exec(
+        &self,
+        container_name: &str,
+        attachment_id: &str,
+        attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        let docker = self.docker()?;
+        let created = docker
+            .create_exec(
+                container_name,
+                terminal_exec_options(attachment_id, attach_argv),
+            )
+            .await?;
+        let started = docker
+            .start_exec(
+                &created.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: true,
+                    output_capacity: Some(1024 * 1024),
+                }),
+            )
+            .await?;
+        let StartExecResults::Attached { output, input } = started else {
+            return Err(AgentHostError::runtime(
+                "Docker unexpectedly detached terminal exec",
+            ));
+        };
+
+        let output = output.map(|item| item.map(log_output_bytes).map_err(AgentHostError::from));
+        Ok(TerminalExec {
+            exec_id: created.id,
+            input,
+            output: Box::pin(output),
+        })
+    }
+
+    async fn resize_terminal_exec(
+        &self,
+        exec_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), AgentHostError> {
+        self.docker()?
+            .resize_exec(
+                exec_id,
+                ResizeExecOptions {
+                    height: rows,
+                    width: cols,
+                },
+            )
+            .await?;
+        Ok(())
     }
 }
 
@@ -1776,6 +2004,27 @@ fn append_log_output(buffer: &mut Vec<u8>, output: &LogOutput) {
     buffer.extend_from_slice(output.as_ref());
 }
 
+fn log_output_bytes(output: LogOutput) -> axum::body::Bytes {
+    match output {
+        LogOutput::StdErr { message }
+        | LogOutput::StdOut { message }
+        | LogOutput::StdIn { message }
+        | LogOutput::Console { message } => message,
+    }
+}
+
+fn terminal_exec_options(attachment_id: &str, attach_argv: &[String]) -> CreateExecOptions<String> {
+    CreateExecOptions {
+        attach_stdin: Some(true),
+        attach_stdout: Some(true),
+        attach_stderr: Some(true),
+        tty: Some(true),
+        env: Some(vec![format!("{ATTACHMENT_ID_ENV}={attachment_id}")]),
+        cmd: Some(attach_argv.to_vec()),
+        ..CreateExecOptions::default()
+    }
+}
+
 const fn is_bollard_not_found(error: &BollardError) -> bool {
     matches!(
         error,
@@ -1903,8 +2152,15 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use axum::{Router, http::StatusCode, routing::get};
-    use serde_json::json;
+    use axum::{
+        Json, Router,
+        body::to_bytes,
+        extract::State,
+        http::{Request, StatusCode},
+        routing::{get, post},
+    };
+    use futures_util::stream;
+    use serde_json::{Value as JsonValue, json};
     use tokio::{net::TcpListener, task::JoinHandle};
 
     use super::{
@@ -1912,6 +2168,7 @@ mod tests {
         DockerRuntimeConfig, DockerStats, DockerVolumeResource, PortBinding,
         SESSION_WORKSPACE_MOUNT_PATH, VolumeMount, btree_map, container_create_body,
         session_workspace_volume_name_from_container, summarize_docker_stats,
+        terminal_exec_options,
     };
     use crate::{
         docker_runtime::skills_mount_path,
@@ -1922,7 +2179,10 @@ mod tests {
         },
         sessions::{KernelRuntime, RuntimeCreateSession},
         skills::{SkillVolumeMode, SkillVolumeResource},
+        terminal::{TerminalAttachKind, TerminalExec, TerminalState},
     };
+
+    type TerminalHttpCalls = Arc<Mutex<Vec<(String, JsonValue)>>>;
 
     #[derive(Clone, Default)]
     struct FakeDockerBackend {
@@ -1940,6 +2200,8 @@ mod tests {
         removed_volumes: Vec<String>,
         running: BTreeSet<String>,
         ports: BTreeMap<(String, u16), u16>,
+        terminal_attach_argvs: Vec<(String, Vec<String>)>,
+        terminal_resizes: Vec<(String, u16, u16)>,
     }
 
     impl FakeDockerBackend {
@@ -2152,6 +2414,220 @@ mod tests {
         ) -> Result<Option<DockerStats>, AgentHostError> {
             Ok(None)
         }
+
+        async fn open_terminal_exec(
+            &self,
+            _container_name: &str,
+            attachment_id: &str,
+            attach_argv: &[String],
+        ) -> Result<TerminalExec, AgentHostError> {
+            self.state()
+                .terminal_attach_argvs
+                .push((attachment_id.to_owned(), attach_argv.to_vec()));
+            Ok(TerminalExec {
+                exec_id: "exec-test".to_owned(),
+                input: Box::pin(tokio::io::sink()),
+                output: Box::pin(stream::empty()),
+            })
+        }
+
+        async fn resize_terminal_exec(
+            &self,
+            exec_id: &str,
+            cols: u16,
+            rows: u16,
+        ) -> Result<(), AgentHostError> {
+            self.state()
+                .terminal_resizes
+                .push((exec_id.to_owned(), cols, rows));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn docker_runtime_delegates_fixed_terminal_exec_and_resize() {
+        let backend = FakeDockerBackend::default();
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "kernel".to_owned(),
+            session_workspace_volume_name: "workspace".to_owned(),
+            base_url: "http://kernel".to_owned(),
+            vscode_url: None,
+            free_port_url: None,
+        });
+        let argv = vec![
+            "tmux".to_owned(),
+            "attach-session".to_owned(),
+            "-t".to_owned(),
+            "=agentspace-test".to_owned(),
+        ];
+
+        let exec = runtime
+            .terminal_attach(&session, "22222222-2222-4222-8222-222222222222", &argv)
+            .await
+            .unwrap_or_else(|error| panic!("terminal attach failed: {error}"));
+        runtime
+            .terminal_resize(&session, &exec.exec_id, 120, 40)
+            .await
+            .unwrap_or_else(|error| panic!("terminal resize failed: {error}"));
+        drop(exec);
+
+        {
+            let state = backend.state();
+            assert_eq!(
+                state.terminal_attach_argvs,
+                vec![("22222222-2222-4222-8222-222222222222".to_owned(), argv)]
+            );
+            assert_eq!(
+                state.terminal_resizes,
+                vec![("exec-test".to_owned(), 120, 40)]
+            );
+            drop(state);
+        }
+    }
+
+    #[test]
+    fn terminal_exec_options_use_tty_and_attachment_marker() {
+        let argv = vec![
+            "tmux".to_owned(),
+            "attach-session".to_owned(),
+            "-t".to_owned(),
+            "=agentspace-test".to_owned(),
+        ];
+
+        let options = terminal_exec_options("22222222-2222-4222-8222-222222222222", &argv);
+
+        assert_eq!(options.attach_stdin, Some(true));
+        assert_eq!(options.attach_stdout, Some(true));
+        assert_eq!(options.attach_stderr, Some(true));
+        assert_eq!(options.tty, Some(true));
+        assert_eq!(options.cmd, Some(argv));
+        assert_eq!(
+            options.env,
+            Some(vec![
+                "AGENTSPACE_TERMINAL_ATTACHMENT_ID=22222222-2222-4222-8222-222222222222".to_owned()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn docker_runtime_proxies_structured_terminal_controls() {
+        let calls: TerminalHttpCalls = Arc::new(Mutex::new(Vec::new()));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("failed to bind terminal server: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("failed to read terminal address: {error}"));
+        let app = Router::new()
+            .route("/terminal", get(terminal_proxy_stub))
+            .route("/terminal/ensure", post(terminal_proxy_stub))
+            .route("/terminal/stop", post(terminal_proxy_stub))
+            .route("/terminal/resume", post(terminal_proxy_stub))
+            .route("/terminal/copy-mode", post(terminal_proxy_stub))
+            .route("/terminal/detach-client", post(terminal_proxy_stub))
+            .with_state(calls.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let runtime = DockerKernelRuntime::new(
+            DockerRuntimeConfig::default(),
+            Arc::new(FakeDockerBackend::default()),
+        );
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "kernel".to_owned(),
+            session_workspace_volume_name: "workspace".to_owned(),
+            base_url: format!("http://{address}"),
+            vscode_url: None,
+            free_port_url: None,
+        });
+
+        assert_eq!(
+            runtime
+                .terminal_status(&session)
+                .await
+                .unwrap_or_else(|error| panic!("status failed: {error}"))
+                .state,
+            TerminalState::Running
+        );
+        assert_eq!(
+            runtime
+                .terminal_ensure(&session)
+                .await
+                .unwrap_or_else(|error| panic!("ensure failed: {error}"))
+                .attach_kind,
+            Some(TerminalAttachKind::Attached)
+        );
+        runtime
+            .terminal_stop(&session)
+            .await
+            .unwrap_or_else(|error| panic!("stop failed: {error}"));
+        runtime
+            .terminal_resume(&session)
+            .await
+            .unwrap_or_else(|error| panic!("resume failed: {error}"));
+        runtime
+            .terminal_copy_mode(&session, "/dev/pts/7")
+            .await
+            .unwrap_or_else(|error| panic!("copy mode failed: {error}"));
+        runtime
+            .terminal_detach_client(&session, "/dev/pts/7")
+            .await
+            .unwrap_or_else(|error| panic!("detach failed: {error}"));
+
+        let calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(path, _body)| path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/terminal",
+                "/terminal/ensure",
+                "/terminal/stop",
+                "/terminal/resume",
+                "/terminal/copy-mode",
+                "/terminal/detach-client",
+            ]
+        );
+        assert_eq!(calls[4].1, json!({ "tmux_client_id": "/dev/pts/7" }));
+        assert_eq!(calls[5].1, json!({ "tmux_client_id": "/dev/pts/7" }));
+        drop(calls);
+        server.abort();
+    }
+
+    async fn terminal_proxy_stub(
+        State(calls): State<TerminalHttpCalls>,
+        request: Request<axum::body::Body>,
+    ) -> Json<JsonValue> {
+        let path = request.uri().path().to_owned();
+        let bytes = to_bytes(request.into_body(), 16 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("failed to read terminal request: {error}"));
+        let body = if bytes.is_empty() {
+            JsonValue::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("failed to parse terminal request: {error}"))
+        };
+        calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((path, body));
+        Json(json!({
+            "state": "running",
+            "exit_status": null,
+            "attach_kind": "attached",
+            "session_name": "agentspace-test",
+            "target_session": "=agentspace-test",
+            "socket_path": "/run/agentspace-tmux.sock",
+            "attach_argv": ["tmux", "attach-session", "-t", "=agentspace-test"],
+            "pane_id": "%0",
+            "pane_pid": 42,
+            "attachment_count": 0,
+            "clients": [],
+        }))
     }
 
     #[tokio::test]

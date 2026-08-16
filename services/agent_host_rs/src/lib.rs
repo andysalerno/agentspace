@@ -25,6 +25,7 @@ pub mod gateways;
 pub mod models;
 pub mod sessions;
 pub mod skills;
+pub mod terminal;
 
 pub const ENV_PREFIX: &str = "AGENT_HOST_";
 const DEFAULT_BIND_HOST: &str = "0.0.0.0";

@@ -69,6 +69,10 @@ class CopyModeRequest(BaseModel):
     )
 
 
+class DetachClientRequest(BaseModel):
+    tmux_client_id: str = Field(min_length=1, max_length=256)
+
+
 def _serialize_events(events: list[KernelEvent]) -> list[dict[str, Any]]:
     return [asdict(event) for event in events]
 
@@ -225,6 +229,16 @@ async def terminal_copy_mode(payload: CopyModeRequest) -> dict[str, Any]:
         return await controller.copy_mode(payload.tmux_client_id)
 
     return await _terminal_call("copy-mode", enter_copy_mode)
+
+
+@app.post("/terminal/detach-client")
+async def terminal_detach_client(payload: DetachClientRequest) -> dict[str, Any]:
+    controller = _terminal_controller_for_request()
+
+    async def detach_client() -> TerminalStatus:
+        return await controller.detach_client(payload.tmux_client_id)
+
+    return await _terminal_call("detach-client", detach_client)
 
 
 @app.delete("/session", status_code=204)

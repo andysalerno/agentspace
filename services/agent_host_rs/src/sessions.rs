@@ -32,6 +32,7 @@ use crate::{
         SessionSummary, WorkspaceMount, WorkspaceMountMode,
     },
     skills::{SkillRegistry, SkillVolumeResource},
+    terminal::{TerminalConnection, TerminalExec, TerminalService, TerminalStatus},
 };
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostError>> + Send>>;
@@ -133,6 +134,85 @@ pub trait KernelRuntime: Send + Sync {
         workspace_id: String,
         volume_name: String,
     ) -> Result<serde_json::Value, AgentHostError>;
+
+    async fn terminal_status(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal status is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_ensure(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal ensure is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_stop(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal stop is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_resume(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal resume is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_copy_mode(
+        &self,
+        _session: &KernelRuntimeSession,
+        _tmux_client_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal copy mode is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_detach_client(
+        &self,
+        _session: &KernelRuntimeSession,
+        tmux_client_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        Err(AgentHostError::terminal_attachment_not_found(
+            tmux_client_id,
+        ))
+    }
+
+    async fn terminal_attach(
+        &self,
+        _session: &KernelRuntimeSession,
+        _attachment_id: &str,
+        _attach_argv: &[String],
+    ) -> Result<TerminalExec, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal attachment is not supported by this runtime",
+        ))
+    }
+
+    async fn terminal_resize(
+        &self,
+        _session: &KernelRuntimeSession,
+        _exec_id: &str,
+        _cols: u16,
+        _rows: u16,
+    ) -> Result<(), AgentHostError> {
+        Err(AgentHostError::runtime(
+            "terminal resize is not supported by this runtime",
+        ))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -145,12 +225,15 @@ struct SessionRegistryInner {
     skills: Option<SkillRegistry>,
     sessions: Arc<RwLock<BTreeMap<String, SessionRecord>>>,
     create_lock: Arc<Mutex<()>>,
+    terminal: TerminalService,
 }
 
 impl Default for SessionRegistryInner {
     fn default() -> Self {
+        let runtime: Arc<dyn KernelRuntime> = Arc::new(DockerKernelRuntime::from_env());
         Self {
-            runtime: Arc::new(DockerKernelRuntime::from_env()),
+            terminal: TerminalService::new(runtime.clone()),
+            runtime,
             skills: None,
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
             create_lock: Arc::new(Mutex::new(())),
@@ -163,6 +246,7 @@ impl SessionRegistry {
     pub fn with_runtime(runtime: Arc<dyn KernelRuntime>) -> Self {
         Self {
             inner: Arc::new(SessionRegistryInner {
+                terminal: TerminalService::new(runtime.clone()),
                 runtime,
                 skills: None,
                 sessions: Arc::new(RwLock::new(BTreeMap::new())),
@@ -180,6 +264,7 @@ impl SessionRegistry {
     pub fn with_runtime_and_skills(runtime: Arc<dyn KernelRuntime>, skills: SkillRegistry) -> Self {
         Self {
             inner: Arc::new(SessionRegistryInner {
+                terminal: TerminalService::new(runtime.clone()),
                 runtime,
                 skills: Some(skills),
                 sessions: Arc::new(RwLock::new(BTreeMap::new())),
@@ -253,6 +338,12 @@ impl SessionRegistry {
             workspace_mounts: workspace_mounts.clone(),
         };
         let runtime_session = self.inner.runtime.create_session(runtime_request).await?;
+        if request.interaction_mode == InteractionMode::Cli {
+            self.inner
+                .terminal
+                .reconcile_adoption(&session_id, &runtime_session)
+                .await?;
+        }
         let runtime_summary = self.inner.runtime.summary(&runtime_session).await?;
         let mut record = SessionRecord {
             session_id: session_id.clone(),
@@ -312,6 +403,7 @@ impl SessionRegistry {
     pub async fn destroy_session(&self, session_id: &str) -> Result<(), AgentHostError> {
         let record = self.inner.sessions.read().await.get(session_id).cloned();
         if let Some(record) = record {
+            self.inner.terminal.forget_session(session_id).await;
             self.inner
                 .runtime
                 .destroy_session(record.runtime_session)
@@ -341,6 +433,17 @@ impl SessionRegistry {
     }
 
     pub async fn forget_all_sessions(&self) {
+        let session_ids = self
+            .inner
+            .sessions
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            self.inner.terminal.forget_session(&session_id).await;
+        }
         self.inner.sessions.write().await.clear();
     }
 
@@ -505,6 +608,102 @@ impl SessionRegistry {
             .await
     }
 
+    pub async fn terminal_status(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .status(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_ensure(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .ensure(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_stop(&self, session_id: &str) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .stop(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_resume(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .resume(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_copy_mode(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+    ) -> Result<TerminalStatus, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .copy_mode(session_id, &record.runtime_session, attachment_id)
+            .await
+    }
+
+    pub async fn terminal_attach(
+        &self,
+        session_id: &str,
+    ) -> Result<TerminalConnection, AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .attach(session_id, &record.runtime_session)
+            .await
+    }
+
+    pub async fn terminal_resize(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .resize(
+                session_id,
+                &record.runtime_session,
+                attachment_id,
+                cols,
+                rows,
+            )
+            .await
+    }
+
+    pub async fn terminal_detach(
+        &self,
+        session_id: &str,
+        attachment_id: &str,
+    ) -> Result<(), AgentHostError> {
+        let record = self.get_terminal_record(session_id).await?;
+        self.inner
+            .terminal
+            .detach(session_id, &record.runtime_session, attachment_id)
+            .await
+    }
+
     async fn get_record(&self, session_id: &str) -> Result<SessionRecord, AgentHostError> {
         self.inner
             .sessions
@@ -513,6 +712,16 @@ impl SessionRegistry {
             .get(session_id)
             .cloned()
             .ok_or_else(|| AgentHostError::session_not_found(session_id))
+    }
+
+    async fn get_terminal_record(&self, session_id: &str) -> Result<SessionRecord, AgentHostError> {
+        let record = self.get_record(session_id).await?;
+        if record.interaction_mode != InteractionMode::Cli {
+            return Err(AgentHostError::conflict(
+                "terminal routes require a CLI interaction-mode session",
+            ));
+        }
+        Ok(record)
     }
 }
 
@@ -1167,7 +1376,7 @@ async fn destroy_session(
     Ok(StatusCode::NO_CONTENT)
 }
 
-struct ApiError(AgentHostError);
+pub(crate) struct ApiError(pub(crate) AgentHostError);
 
 impl From<AgentHostError> for ApiError {
     fn from(error: AgentHostError) -> Self {
@@ -1178,9 +1387,11 @@ impl From<AgentHostError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match self.0 {
-            AgentHostError::SessionNotFound { .. } => StatusCode::NOT_FOUND,
+            AgentHostError::SessionNotFound { .. }
+            | AgentHostError::TerminalAttachmentNotFound { .. } => StatusCode::NOT_FOUND,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             AgentHostError::Conflict { .. } => StatusCode::CONFLICT,
+            AgentHostError::UpstreamUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             AgentHostError::Runtime { .. }
             | AgentHostError::Docker { .. }
             | AgentHostError::Http { .. }

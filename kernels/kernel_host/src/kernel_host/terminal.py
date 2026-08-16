@@ -25,6 +25,7 @@ TMUX_CONFIG_PATH = "/etc/agentspace/tmux.conf"
 TMUX_SOCKET_PATH = "/run/agentspace-tmux.sock"
 TERMINAL_LAUNCH_ARGV_ENV = "AGENTSPACE_TERMINAL_LAUNCH_ARGV"
 TERMINAL_LAUNCH_CWD_ENV = "AGENTSPACE_TERMINAL_LAUNCH_CWD"
+TERMINAL_ATTACHMENT_ID_ENV = "AGENTSPACE_TERMINAL_ATTACHMENT_ID"
 _TMUX_PANE_FORMAT = "#{pane_dead}\t#{pane_dead_status}\t#{pane_pid}\t#{pane_id}"
 _TMUX_CLIENT_FORMAT = (
     "#{client_name}\t#{client_tty}\t#{client_pid}\t"
@@ -117,6 +118,7 @@ class TerminalClient:
     height: int
     session_name: str
     pane_id: str
+    attachment_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +150,7 @@ class TerminalControllerConfig:
     tmux_executable: str = "tmux"
     tmux_config_path: str = TMUX_CONFIG_PATH
     tmux_socket_path: str = TMUX_SOCKET_PATH
+    proc_root: str = "/proc"
     resume_on_create: bool = False
 
     def resolved_session_name(self) -> str:
@@ -269,27 +272,13 @@ class TerminalController:
         return await asyncio.shield(task)
 
     async def copy_mode(self, tmux_client_id: str) -> TerminalStatus:
-        _validate_client_id(tmux_client_id)
         status = await self._status()
         if status.state != TerminalState.RUNNING:
             msg = (
                 f"copy mode requires a running terminal; observed {status.state.value}"
             )
             raise TerminalStateError(msg)
-        client = next(
-            (
-                candidate
-                for candidate in status.clients
-                if candidate.id == tmux_client_id
-            ),
-            None,
-        )
-        if client is None:
-            msg = (
-                "tmux_client_id must be an observed clients[].id value from "
-                "GET /terminal"
-            )
-            raise TerminalClientError(msg)
+        client = self._observed_client(status, tmux_client_id)
         result = await self._run(
             (*self._tmux_argv(), "copy-mode", "-t", client.pane_id),
         )
@@ -297,6 +286,22 @@ class TerminalController:
             error = self._command_error("enter tmux copy mode", result)
             raise error
         return await self._status()
+
+    async def detach_client(self, tmux_client_id: str) -> TerminalStatus:
+        status = await self._status()
+        if status.state == TerminalState.MISSING:
+            return status
+        client = self._observed_client(status, tmux_client_id)
+        result = await self._run(
+            (*self._tmux_argv(), "detach-client", "-t", client.id),
+        )
+        observed = await self._status()
+        if result.returncode != 0 and any(
+            candidate.id == client.id for candidate in observed.clients
+        ):
+            error = self._command_error("detach tmux client", result)
+            raise error
+        return observed
 
     async def _resume_once(self) -> TerminalStatus:
         status = await self._status()
@@ -388,7 +393,13 @@ class TerminalController:
                 clients_result,
             )
         clients = tuple(
-            _parse_client(line) for line in clients_result.stdout.splitlines() if line
+            replace(
+                client,
+                attachment_id=self._attachment_id_for_pid(client.pid),
+            )
+            for line in clients_result.stdout.splitlines()
+            if line
+            for client in (_parse_client(line),)
         )
         state = TerminalState.EXITED if pane_dead else TerminalState.RUNNING
         return TerminalStatus(
@@ -487,6 +498,50 @@ class TerminalController:
             attach_argv=self._attach_argv(),
         )
 
+    def _attachment_id_for_pid(self, pid: int) -> str | None:
+        try:
+            environment = (
+                Path(self._config.proc_root) / str(pid) / "environ"
+            ).read_bytes()
+        except OSError:
+            return None
+        prefix = f"{TERMINAL_ATTACHMENT_ID_ENV}=".encode()
+        values = [
+            entry.removeprefix(prefix)
+            for entry in environment.split(b"\0")
+            if entry.startswith(prefix)
+        ]
+        if len(values) != 1:
+            return None
+        try:
+            attachment_id = values[0].decode("ascii")
+            parsed = uuid.UUID(attachment_id)
+        except (UnicodeDecodeError, ValueError):
+            return None
+        return attachment_id if str(parsed) == attachment_id else None
+
+    @staticmethod
+    def _observed_client(
+        status: TerminalStatus,
+        tmux_client_id: str,
+    ) -> TerminalClient:
+        _validate_client_id(tmux_client_id)
+        client = next(
+            (
+                candidate
+                for candidate in status.clients
+                if candidate.id == tmux_client_id
+            ),
+            None,
+        )
+        if client is None:
+            msg = (
+                "tmux_client_id must be an observed clients[].id value from "
+                "GET /terminal"
+            )
+            raise TerminalClientError(msg)
+        return client
+
     def _validate_config(self) -> None:
         try:
             uuid.UUID(self._config.copilot_session_id)
@@ -509,6 +564,9 @@ class TerminalController:
             msg = (
                 "tmux socket path must be an absolute Unix socket path under 101 bytes"
             )
+            raise TerminalConfigurationError(msg)
+        if not Path(self._config.proc_root).is_absolute():
+            msg = "proc root must be an absolute path"
             raise TerminalConfigurationError(msg)
 
     @staticmethod
