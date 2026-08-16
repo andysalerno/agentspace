@@ -8,20 +8,30 @@ use std::{
 use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
-    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State},
+    extract::{
+        DefaultBodyLimit, OriginalUri, Path, Query, State,
+        ws::{CloseFrame, Message as WebSocketMessage, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{sync::mpsc, time::sleep};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_tungstenite::tungstenite::{
+    Error as WebSocketClientError, Message as UpstreamWebSocketMessage,
+    protocol::{CloseFrame as UpstreamCloseFrame, frame::coding::CloseCode},
+};
 use uuid::Uuid;
 
 use crate::{
     ActiveTurnRecord, ActiveTurnStreamState, AppState, ENV_PREFIX, StreamItem,
-    agent_host::{AgentHostError, JsonObject, KernelEvent},
+    agent_host::{
+        AgentHostError, AgentHostSessionCreate, AgentHostWebSocket, JsonObject, KernelEvent,
+    },
     errors::{StoreError, ValidationError},
     memory::{MEMORY_JSON_CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE, MemoryProxyError},
     models::{
@@ -52,6 +62,11 @@ const GATEWAY_AUTOSTART_ATTEMPTS: usize = 5;
 const GATEWAY_AUTOSTART_RETRY_DELAY: Duration = Duration::from_secs(2);
 const MEMORY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MEMORY_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const TERMINAL_WEBSOCKET_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const TERMINAL_WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const TERMINAL_CLOSE_NORMAL: u16 = 1000;
+const TERMINAL_CLOSE_BACKPRESSURE: u16 = 4429;
+const TERMINAL_CLOSE_UPSTREAM_UNAVAILABLE: u16 = 4503;
 /// Request body limit for the config endpoints that accept uploaded bundles.
 ///
 /// A config bundle is a ZIP whose decompressed contents may total up to 32 MiB
@@ -115,6 +130,7 @@ pub fn router() -> Router<AppState> {
             "/sessions/{session_id}/messages/stream",
             post(stream_message),
         )
+        .merge(terminal_router())
         .route(
             "/sessions/{session_id}/workspace/save",
             post(save_session_workspace),
@@ -159,6 +175,28 @@ pub fn router() -> Router<AppState> {
         .route("/gateways/{gateway_id}/stop", post(stop_gateway))
         .route("/gateways/{gateway_id}/logs", get(gateway_logs))
         .merge(config_router())
+}
+
+fn terminal_router() -> Router<AppState> {
+    Router::new()
+        .route("/sessions/{session_id}/terminal", get(terminal_status))
+        .route(
+            "/sessions/{session_id}/terminal/ensure",
+            post(terminal_ensure),
+        )
+        .route("/sessions/{session_id}/terminal/stop", post(terminal_stop))
+        .route(
+            "/sessions/{session_id}/terminal/resume",
+            post(terminal_resume),
+        )
+        .route(
+            "/sessions/{session_id}/terminal/copy-mode",
+            post(terminal_copy_mode),
+        )
+        .route(
+            "/sessions/{session_id}/terminal/ws",
+            get(terminal_websocket),
+        )
 }
 
 fn config_router() -> Router<AppState> {
@@ -853,7 +891,7 @@ async fn delete_agent(
             kernel_session_id = %session.agent_host_session_id,
             "destroying session for deleted agent"
         );
-        if session.interaction_mode == InteractionMode::Chat {
+        if !session.agent_host_session_id.is_empty() {
             state
                 .agent_host
                 .destroy_session(&session.agent_host_session_id)
@@ -1034,7 +1072,7 @@ async fn create_session(
         session_workspace_mounts(&agent.workspace_mounts, &payload.workspace_mounts);
     validate_workspace_mounts(&state, &session_mounts)?;
     if payload.interaction_mode == InteractionMode::Cli {
-        return create_cli_session(&state, payload, &agent, &session_mounts);
+        return create_cli_session(&state, payload, &agent, &session_mounts).await;
     }
     let env = session_env(&state, &agent)?;
     let session_id = Uuid::now_v7().simple().to_string();
@@ -1076,7 +1114,7 @@ async fn create_session(
     Ok(Json(value))
 }
 
-fn create_cli_session(
+async fn create_cli_session(
     state: &AppState,
     payload: CreateSessionRequest,
     agent: &AgentRecord,
@@ -1097,7 +1135,7 @@ fn create_cli_session(
     let mut session = SessionRecord::new(
         session_id.clone(),
         payload.agent_id,
-        "",
+        session_id.clone(),
         "starting",
         payload.channel_name,
         payload.client_type,
@@ -1113,6 +1151,7 @@ fn create_cli_session(
     session.launch_snapshot = Some(launch_snapshot);
 
     state.sessions.insert(session.clone())?;
+    ensure_cli_runtime(state, &mut session).await?;
     let value = session_summary(state, &session)?;
     tracing::info!(
         route = "/sessions",
@@ -1122,8 +1161,8 @@ fn create_cli_session(
         agent_id = %session.agent_id,
         cli_harness = cli.harness.as_str(),
         has_cli_connection = cli.connection_id.is_some(),
-        runtime_status = RuntimeStatus::Starting.as_str(),
-        "durable CLI session created without launching a runtime"
+        runtime_status = RuntimeStatus::Live.as_str(),
+        "durable CLI session and terminal created"
     );
     Ok(Json(value))
 }
@@ -1290,6 +1329,367 @@ fn agent_profile_snapshot(
     })
 }
 
+fn require_cli_session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(SessionRecord, AgentRecord), ApiError> {
+    let session = require_session(state, session_id)?;
+    if session.interaction_mode != InteractionMode::Cli {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} does not use CLI interaction mode"
+        )));
+    }
+    if session.recovery_state() == RecoveryState::LegacyUnrecoverable {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has recovery state legacy-unrecoverable"
+        ))
+        .with_extra(json!({ "recovery_state": "legacy-unrecoverable" })));
+    }
+    if session.workspace_volume_identity.as_deref() != Some(session.session_id.as_str()) {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has an invalid stable workspace identity"
+        )));
+    }
+    if !session.agent_host_session_id.is_empty()
+        && session.agent_host_session_id != session.session_id
+    {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has an unstable agent_host mapping"
+        )));
+    }
+    if session.cli_harness != Some(CliHarnessName::CopilotCli) {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has no supported CLI harness snapshot"
+        )));
+    }
+    let Some(snapshot) = session.launch_snapshot.as_ref() else {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has no CLI launch snapshot"
+        )));
+    };
+    if snapshot.schema_version != 1 {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} uses unsupported CLI launch snapshot version {}",
+            snapshot.schema_version
+        )));
+    }
+    let harness_session_id = session.harness_session_id.as_deref().ok_or_else(|| {
+        ApiError::conflict(format!(
+            "session {session_id:?} has no durable harness session identity"
+        ))
+    })?;
+    Uuid::parse_str(harness_session_id).map_err(|_error| {
+        ApiError::conflict(format!(
+            "session {session_id:?} has an invalid durable harness session identity"
+        ))
+    })?;
+
+    let agent = require_agent(state, &session.agent_id)?;
+    let cli = agent.cli.as_ref().ok_or_else(|| {
+        ApiError::conflict(format!(
+            "agent {:?} is no longer eligible for CLI sessions",
+            agent.agent_id
+        ))
+    })?;
+    if cli.harness != CliHarnessName::CopilotCli {
+        return Err(ApiError::conflict(format!(
+            "agent {:?} has an unsupported CLI harness",
+            agent.agent_id
+        )));
+    }
+    if let Some(provider) = &snapshot.provider {
+        if provider.connection_id != session.cli_connection_id.as_deref().unwrap_or_default() {
+            return Err(ApiError::conflict(format!(
+                "session {session_id:?} has an inconsistent CLI connection snapshot"
+            )));
+        }
+    } else if session.cli_connection_id.is_some() {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has no provider launch snapshot"
+        )));
+    }
+    if snapshot
+        .agent_profile
+        .as_ref()
+        .is_some_and(|profile| profile.identity != format!("agentspace-{session_id}"))
+    {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has an inconsistent agent profile snapshot"
+        )));
+    }
+    Ok((session, agent))
+}
+
+fn require_cli_runtime(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(SessionRecord, AgentRecord), ApiError> {
+    let (session, agent) = require_cli_session(state, session_id)?;
+    if session.agent_host_session_id != session.session_id {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} has no stable agent_host runtime"
+        )));
+    }
+    if matches!(
+        session.runtime_status,
+        None | Some(RuntimeStatus::Starting | RuntimeStatus::Error)
+    ) {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} terminal runtime is not available; retry terminal ensure"
+        )));
+    }
+    Ok((session, agent))
+}
+
+async fn ensure_cli_runtime(
+    state: &AppState,
+    session: &mut SessionRecord,
+) -> Result<JsonObject, ApiError> {
+    let (_validated, agent) = match require_cli_session(state, &session.session_id) {
+        Ok(validated) => validated,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error);
+        }
+    };
+    let (env, additional_paths) = match cli_runtime_launch(state, session) {
+        Ok(launch) => launch,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error);
+        }
+    };
+    let upstream = match state
+        .agent_host
+        .create_session(AgentHostSessionCreate {
+            session_id: &session.session_id,
+            interaction_mode: InteractionMode::Cli.as_str(),
+            harness: CliHarnessName::CopilotCli.as_str(),
+            skills: Some(&agent.skills),
+            env: Some(&env),
+            additional_paths: Some(&additional_paths),
+            workspace_mounts: Some(&session.workspace_mounts),
+        })
+        .await
+    {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(terminal_upstream_error(error));
+        }
+    };
+    let upstream_session_id = match string_field(&upstream, "session_id") {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error);
+        }
+    };
+    if upstream_session_id != session.session_id {
+        mark_runtime_error(state, session)?;
+        return Err(ApiError::service_unavailable(format!(
+            "agent_host returned unexpected session identity {upstream_session_id:?}"
+        )));
+    }
+    session.agent_host_session_id = upstream_session_id;
+    session.status = string_field(&upstream, "status").unwrap_or_else(|_| "idle".to_owned());
+    session.runtime_status = Some(RuntimeStatus::Live);
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+
+    let terminal = match state
+        .agent_host
+        .terminal_ensure(&session.agent_host_session_id)
+        .await
+    {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(terminal_upstream_error(error));
+        }
+    };
+    apply_terminal_runtime_status(state, session, &terminal)?;
+    Ok(terminal)
+}
+
+fn cli_runtime_launch(
+    state: &AppState,
+    session: &SessionRecord,
+) -> Result<(BTreeMap<String, String>, Vec<String>), ApiError> {
+    let snapshot = session.launch_snapshot.as_ref().ok_or_else(|| {
+        ApiError::conflict(format!(
+            "session {:?} has no CLI launch snapshot",
+            session.session_id
+        ))
+    })?;
+    let mut env = BTreeMap::new();
+    env.insert("AGENTSPACE_AGENT_ID".to_owned(), session.agent_id.clone());
+    env.insert(
+        "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
+        state
+            .config
+            .client_service_env
+            .get(AGENTSPACE_CLIENT_SERVICE_URL_ENV)
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL.to_owned()),
+    );
+    env.insert(
+        "KERNEL_SESSION_ID".to_owned(),
+        session.harness_session_id.clone().ok_or_else(|| {
+            ApiError::conflict(format!(
+                "session {:?} has no durable harness session identity",
+                session.session_id
+            ))
+        })?,
+    );
+
+    if let Some(provider) = &snapshot.provider {
+        if provider.provider_type != "openai" {
+            return Err(ApiError::conflict(format!(
+                "session {:?} has unsupported CLI provider type {:?}",
+                session.session_id, provider.provider_type
+            )));
+        }
+        let flavor = match provider.wire_api.as_str() {
+            "completions" => "chat_completions",
+            "responses" => "responses",
+            unsupported => {
+                return Err(ApiError::conflict(format!(
+                    "session {:?} has unsupported CLI provider wire API {unsupported:?}",
+                    session.session_id
+                )));
+            }
+        };
+        env.insert(
+            "CONNECTION_URL".to_owned(),
+            resolve_launch_value(state, &provider.base_url)?,
+        );
+        env.insert("CONNECTION_API_FLAVOR".to_owned(), flavor.to_owned());
+        if let Some(source) = &provider.api_key {
+            env.insert(
+                "CONNECTION_API_KEY".to_owned(),
+                resolve_launch_value(state, source)?,
+            );
+        }
+    }
+    for (name, source) in [
+        ("COPILOT_MODEL", snapshot.model.as_ref()),
+        (
+            "COPILOT_REASONING_EFFORT",
+            snapshot.reasoning_effort.as_ref(),
+        ),
+        ("COPILOT_CONFIG_DIR", snapshot.options.config_dir.as_ref()),
+        ("COPILOT_EXTRA_ARGS", snapshot.options.extra_args.as_ref()),
+    ] {
+        if let Some(source) = source {
+            env.insert(name.to_owned(), resolve_launch_value(state, source)?);
+        }
+    }
+    if let Some(profile) = &snapshot.agent_profile {
+        env.insert(
+            "KERNEL_SYSTEM_PROMPT".to_owned(),
+            resolve_launch_value(state, &profile.system_prompt)?,
+        );
+    }
+
+    let mut additional_paths = Vec::new();
+    let mut seen_paths = BTreeSet::new();
+    for identity in &snapshot.additional_paths {
+        match identity {
+            AdditionalPathIdentity::SessionWorkspace { path }
+            | AdditionalPathIdentity::MountedWorkspace { path, .. } => {
+                if seen_paths.insert(path.clone()) {
+                    additional_paths.push(path.clone());
+                }
+            }
+            AdditionalPathIdentity::Configured { source } => {
+                let raw = resolve_launch_value(state, source)?;
+                for path in std::env::split_paths(&raw) {
+                    let path = path.to_string_lossy().into_owned();
+                    if !path.is_empty() && seen_paths.insert(path.clone()) {
+                        additional_paths.push(path);
+                    }
+                }
+            }
+        }
+    }
+    Ok((env, additional_paths))
+}
+
+fn resolve_launch_value(state: &AppState, source: &LaunchValueSource) -> Result<String, ApiError> {
+    match source {
+        LaunchValueSource::Literal { value } => Ok(value.clone()),
+        LaunchValueSource::SecretReference { field, name } => state
+            .config_state
+            .secrets()
+            .resolve(name.as_str())?
+            .ok_or_else(|| missing_cli_launch_secret(name, field)),
+        LaunchValueSource::ConfigReference { field } => {
+            let document = state.config_state.active();
+            let segments = field.split('/').collect::<Vec<_>>();
+            let value = match segments.as_slice() {
+                ["connections", connection_id, "url"] => document
+                    .connection(connection_id)
+                    .map(|item| item.url.clone()),
+                ["connections", connection_id, "apiKey"] => document
+                    .connection(connection_id)
+                    .and_then(|item| item.api_key.clone()),
+                ["agents", agent_id, "systemPrompt"] => document
+                    .spec
+                    .agents
+                    .iter()
+                    .find(|item| item.id == *agent_id)
+                    .map(|item| item.system_prompt.clone()),
+                ["agents", agent_id, "env", key] => document
+                    .spec
+                    .agents
+                    .iter()
+                    .find(|item| item.id == *agent_id)
+                    .and_then(|item| item.env.as_ref())
+                    .and_then(|env| env.get(*key))
+                    .cloned(),
+                ["kernelConfigs", harness, "env", key] => HarnessName::from_str(harness)
+                    .ok()
+                    .and_then(|harness| {
+                        document
+                            .spec
+                            .kernel_configs
+                            .iter()
+                            .find(|item| item.harness == harness)
+                    })
+                    .and_then(|item| item.env.as_ref())
+                    .and_then(|env| env.get(*key))
+                    .cloned(),
+                _ => None,
+            }
+            .ok_or_else(|| {
+                ApiError::conflict(format!(
+                    "CLI launch snapshot reference {field:?} is no longer available"
+                ))
+            })?;
+            match value {
+                ConfigValue::Literal(value) => Ok(value),
+                ConfigValue::Secret(name) => state
+                    .config_state
+                    .secrets()
+                    .resolve(name.as_str())?
+                    .ok_or_else(|| missing_cli_launch_secret(&name, field)),
+            }
+        }
+    }
+}
+
+fn missing_cli_launch_secret(name: &SecretName, field: &str) -> ApiError {
+    ApiError::conflict(format!(
+        "cannot launch CLI terminal because secret value {:?} is not set",
+        name.as_str()
+    ))
+    .with_extra(json!({
+        "error": "secret_values_unset",
+        "missing_secrets": [{ "name": name.as_str(), "field": field }],
+    }))
+}
+
 async fn list_sessions(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
     let sessions = state
         .sessions
@@ -1400,6 +1800,400 @@ async fn stream_turn(
         "turn stream attached"
     );
     Ok(ndjson_stream_response(receiver))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalCopyModeRequest {
+    attachment_id: String,
+}
+
+async fn terminal_status(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
+    let terminal = state
+        .agent_host
+        .terminal_status(&session.agent_host_session_id)
+        .await
+        .map_err(terminal_upstream_error)?;
+    apply_terminal_runtime_status(&state, &mut session, &terminal)?;
+    Ok(Json(Value::Object(terminal)))
+}
+
+async fn terminal_ensure(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (mut session, _agent) = require_cli_session(&state, &session_id)?;
+    let terminal = ensure_cli_runtime(&state, &mut session).await?;
+    Ok(Json(Value::Object(terminal)))
+}
+
+async fn terminal_stop(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
+    let terminal = state
+        .agent_host
+        .terminal_stop(&session.agent_host_session_id)
+        .await
+        .map_err(terminal_upstream_error)?;
+    apply_terminal_runtime_status(&state, &mut session, &terminal)?;
+    Ok(Json(Value::Object(terminal)))
+}
+
+async fn terminal_resume(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
+    let terminal = state
+        .agent_host
+        .terminal_resume(&session.agent_host_session_id)
+        .await
+        .map_err(terminal_upstream_error)?;
+    apply_terminal_runtime_status(&state, &mut session, &terminal)?;
+    Ok(Json(Value::Object(terminal)))
+}
+
+async fn terminal_copy_mode(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(payload): Json<TerminalCopyModeRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if payload.attachment_id.is_empty() {
+        return Err(ApiError::unprocessable(
+            "attachment_id must not be empty".to_owned(),
+        ));
+    }
+    let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
+    let terminal = state
+        .agent_host
+        .terminal_copy_mode(&session.agent_host_session_id, &payload.attachment_id)
+        .await
+        .map_err(terminal_upstream_error)?;
+    apply_terminal_runtime_status(&state, &mut session, &terminal)?;
+    Ok(Json(Value::Object(terminal)))
+}
+
+async fn terminal_websocket(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    websocket: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    validate_terminal_origin(&state, &headers)?;
+    let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
+    let terminal = state
+        .agent_host
+        .terminal_status(&session.agent_host_session_id)
+        .await
+        .map_err(terminal_upstream_error)?;
+    apply_terminal_runtime_status(&state, &mut session, &terminal)?;
+    if terminal.get("state").and_then(Value::as_str) != Some("running") {
+        return Err(ApiError::conflict(format!(
+            "session {session_id:?} terminal is not running"
+        )));
+    }
+    let upstream = state
+        .agent_host
+        .connect_terminal_websocket(&session.agent_host_session_id)
+        .await
+        .map_err(terminal_upstream_error)?;
+    Ok(websocket
+        .max_message_size(TERMINAL_WEBSOCKET_MAX_MESSAGE_BYTES)
+        .max_frame_size(TERMINAL_WEBSOCKET_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |browser| proxy_terminal_websocket(browser, upstream)))
+}
+
+fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    let Some(origin) = origins.next() else {
+        return Ok(());
+    };
+    if origins.next().is_some() {
+        return Err(ApiError::forbidden(
+            "terminal WebSocket request has multiple Origin headers".to_owned(),
+        ));
+    }
+    let origin = origin
+        .to_str()
+        .map_err(|_| ApiError::forbidden("terminal WebSocket Origin is invalid".to_owned()))?;
+    if state
+        .config
+        .cors_allowed_origins()
+        .iter()
+        .any(|allowed| allowed == origin)
+    {
+        Ok(())
+    } else {
+        Err(ApiError::forbidden(format!(
+            "terminal WebSocket Origin {origin:?} is not allowed"
+        )))
+    }
+}
+
+fn apply_terminal_runtime_status(
+    state: &AppState,
+    session: &mut SessionRecord,
+    terminal: &JsonObject,
+) -> Result<(), ApiError> {
+    let terminal_state = terminal
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ApiError::service_unavailable(
+                "agent_host terminal response is missing state".to_owned(),
+            )
+        })?;
+    session.runtime_status = Some(match terminal_state {
+        "running" => RuntimeStatus::Live,
+        "exited" => RuntimeStatus::Exited,
+        "missing" => RuntimeStatus::Disconnected,
+        other => {
+            return Err(ApiError::service_unavailable(format!(
+                "agent_host returned unknown terminal state {other:?}"
+            )));
+        }
+    });
+    terminal_state.clone_into(&mut session.status);
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+    Ok(())
+}
+
+fn terminal_upstream_error(error: AgentHostError) -> ApiError {
+    let (detail, upstream_status) = match error {
+        AgentHostError::HttpStatus { status, .. } => {
+            (format!("agent_host returned HTTP {status}"), Some(status))
+        }
+        AgentHostError::WebSocket {
+            source: WebSocketClientError::Http(response),
+        } => (
+            format!("agent_host WebSocket returned HTTP {}", response.status()),
+            Some(response.status()),
+        ),
+        other => (other.to_string(), None),
+    };
+    if upstream_status == Some(StatusCode::CONFLICT)
+        || upstream_status.is_some_and(|status| status == StatusCode::UNPROCESSABLE_ENTITY)
+    {
+        ApiError::conflict(detail)
+    } else {
+        ApiError::service_unavailable(detail)
+    }
+}
+
+async fn proxy_terminal_websocket(browser: WebSocket, upstream: AgentHostWebSocket) {
+    let (mut browser_sender, mut browser_receiver) = browser.split();
+    let (mut upstream_sender, mut upstream_receiver) = upstream.split();
+    loop {
+        let keep_open = tokio::select! {
+            browser_message = browser_receiver.next() => forward_browser_message(
+                browser_message,
+                &mut browser_sender,
+                &mut upstream_sender,
+            ).await,
+            upstream_message = upstream_receiver.next() => forward_upstream_message(
+                upstream_message,
+                &mut browser_sender,
+                &mut upstream_sender,
+            ).await,
+        };
+        if !keep_open {
+            return;
+        }
+    }
+}
+
+type BrowserWebSocketSender = futures_util::stream::SplitSink<WebSocket, WebSocketMessage>;
+type UpstreamWebSocketSender =
+    futures_util::stream::SplitSink<AgentHostWebSocket, UpstreamWebSocketMessage>;
+
+async fn forward_browser_message(
+    message: Option<Result<WebSocketMessage, axum::Error>>,
+    browser_sender: &mut BrowserWebSocketSender,
+    upstream_sender: &mut UpstreamWebSocketSender,
+) -> bool {
+    let Some(message) = message else {
+        let _ =
+            send_upstream_close(upstream_sender, TERMINAL_CLOSE_NORMAL, "terminal detached").await;
+        return false;
+    };
+    let message = match message {
+        Ok(message) => message,
+        Err(error) => {
+            tracing::debug!(%error, "terminal browser WebSocket receive ended");
+            let _ =
+                send_upstream_close(upstream_sender, TERMINAL_CLOSE_NORMAL, "terminal detached")
+                    .await;
+            return false;
+        }
+    };
+    let is_close = matches!(message, WebSocketMessage::Close(_));
+    let message = browser_to_upstream_message(message);
+    match tokio::time::timeout(
+        TERMINAL_WEBSOCKET_SEND_TIMEOUT,
+        upstream_sender.send(message),
+    )
+    .await
+    {
+        Ok(Ok(())) => !is_close,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "terminal upstream WebSocket send failed");
+            send_browser_disconnect(
+                browser_sender,
+                TERMINAL_CLOSE_UPSTREAM_UNAVAILABLE,
+                "terminal upstream connection lost",
+            )
+            .await;
+            false
+        }
+        Err(_elapsed) => {
+            send_browser_disconnect(
+                browser_sender,
+                TERMINAL_CLOSE_BACKPRESSURE,
+                "terminal input forwarding stalled",
+            )
+            .await;
+            false
+        }
+    }
+}
+
+async fn forward_upstream_message(
+    message: Option<Result<UpstreamWebSocketMessage, WebSocketClientError>>,
+    browser_sender: &mut BrowserWebSocketSender,
+    upstream_sender: &mut UpstreamWebSocketSender,
+) -> bool {
+    let Some(message) = message else {
+        send_browser_disconnect(
+            browser_sender,
+            TERMINAL_CLOSE_UPSTREAM_UNAVAILABLE,
+            "terminal upstream connection lost",
+        )
+        .await;
+        return false;
+    };
+    let message = match message {
+        Ok(message) => message,
+        Err(error) => {
+            tracing::warn!(%error, "terminal upstream WebSocket receive failed");
+            send_browser_disconnect(
+                browser_sender,
+                TERMINAL_CLOSE_UPSTREAM_UNAVAILABLE,
+                "terminal upstream connection lost",
+            )
+            .await;
+            return false;
+        }
+    };
+    if matches!(message, UpstreamWebSocketMessage::Frame(_)) {
+        return true;
+    }
+    let is_close = matches!(message, UpstreamWebSocketMessage::Close(_));
+    let message = upstream_to_browser_message(message);
+    match tokio::time::timeout(
+        TERMINAL_WEBSOCKET_SEND_TIMEOUT,
+        browser_sender.send(message),
+    )
+    .await
+    {
+        Ok(Ok(())) => !is_close,
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "terminal browser WebSocket send ended");
+            let _ =
+                send_upstream_close(upstream_sender, TERMINAL_CLOSE_NORMAL, "terminal detached")
+                    .await;
+            false
+        }
+        Err(_elapsed) => {
+            let _ = send_upstream_close(
+                upstream_sender,
+                TERMINAL_CLOSE_BACKPRESSURE,
+                "terminal output forwarding stalled",
+            )
+            .await;
+            false
+        }
+    }
+}
+
+fn browser_to_upstream_message(message: WebSocketMessage) -> UpstreamWebSocketMessage {
+    match message {
+        WebSocketMessage::Text(text) => {
+            UpstreamWebSocketMessage::Text(text.as_str().to_owned().into())
+        }
+        WebSocketMessage::Binary(bytes) => UpstreamWebSocketMessage::Binary(bytes),
+        WebSocketMessage::Ping(bytes) => UpstreamWebSocketMessage::Ping(bytes),
+        WebSocketMessage::Pong(bytes) => UpstreamWebSocketMessage::Pong(bytes),
+        WebSocketMessage::Close(frame) => {
+            UpstreamWebSocketMessage::Close(frame.map(|frame| UpstreamCloseFrame {
+                code: CloseCode::from(frame.code),
+                reason: frame.reason.as_str().to_owned().into(),
+            }))
+        }
+    }
+}
+
+fn upstream_to_browser_message(message: UpstreamWebSocketMessage) -> WebSocketMessage {
+    match message {
+        UpstreamWebSocketMessage::Text(text) => {
+            WebSocketMessage::Text(text.as_str().to_owned().into())
+        }
+        UpstreamWebSocketMessage::Binary(bytes) => WebSocketMessage::Binary(bytes),
+        UpstreamWebSocketMessage::Ping(bytes) => WebSocketMessage::Ping(bytes),
+        UpstreamWebSocketMessage::Pong(bytes) => WebSocketMessage::Pong(bytes),
+        UpstreamWebSocketMessage::Close(frame) => {
+            WebSocketMessage::Close(frame.map(|frame| CloseFrame {
+                code: u16::from(frame.code),
+                reason: frame.reason.as_str().to_owned().into(),
+            }))
+        }
+        UpstreamWebSocketMessage::Frame(_frame) => unreachable!("raw frames are filtered"),
+    }
+}
+
+async fn send_browser_disconnect(sender: &mut BrowserWebSocketSender, code: u16, message: &str) {
+    let lifecycle = json!({
+        "type": "error",
+        "code": code,
+        "message": message,
+    })
+    .to_string();
+    let _ = tokio::time::timeout(
+        TERMINAL_WEBSOCKET_SEND_TIMEOUT,
+        sender.send(WebSocketMessage::Text(lifecycle.into())),
+    )
+    .await;
+    let _ = tokio::time::timeout(
+        TERMINAL_WEBSOCKET_SEND_TIMEOUT,
+        sender.send(WebSocketMessage::Close(Some(CloseFrame {
+            code,
+            reason: message.to_owned().into(),
+        }))),
+    )
+    .await;
+}
+
+async fn send_upstream_close(
+    sender: &mut UpstreamWebSocketSender,
+    code: u16,
+    reason: &str,
+) -> Result<(), ()> {
+    tokio::time::timeout(
+        TERMINAL_WEBSOCKET_SEND_TIMEOUT,
+        sender.send(UpstreamWebSocketMessage::Close(Some(UpstreamCloseFrame {
+            code: CloseCode::from(code),
+            reason: reason.to_owned().into(),
+        }))),
+    )
+    .await
+    .map_err(|_elapsed| ())?
+    .map_err(|_error| ())
 }
 
 async fn reset_session(
@@ -1537,7 +2331,7 @@ async fn delete_session(
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let session = require_session(&state, &session_id)?;
-    if session.interaction_mode == InteractionMode::Chat {
+    if !session.agent_host_session_id.is_empty() {
         state
             .agent_host
             .destroy_session(&session.agent_host_session_id)
@@ -3892,14 +4686,15 @@ async fn ensure_chat_runtime(
     };
     let upstream = match state
         .agent_host
-        .create_session(
-            &session.session_id,
-            InteractionMode::Chat.as_str(),
-            agent.harness.as_str(),
-            Some(&agent.skills),
-            Some(&env),
-            Some(&session.workspace_mounts),
-        )
+        .create_session(AgentHostSessionCreate {
+            session_id: &session.session_id,
+            interaction_mode: InteractionMode::Chat.as_str(),
+            harness: agent.harness.as_str(),
+            skills: Some(&agent.skills),
+            env: Some(&env),
+            additional_paths: None,
+            workspace_mounts: Some(&session.workspace_mounts),
+        })
         .await
     {
         Ok(upstream) => upstream,
@@ -5094,6 +5889,14 @@ struct ApiError {
 }
 
 impl ApiError {
+    const fn forbidden(detail: String) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            detail,
+            extra: None,
+        }
+    }
+
     const fn not_found(detail: String) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -5174,6 +5977,7 @@ impl ApiError {
 
     fn error_kind(&self) -> &'static str {
         match self.status {
+            StatusCode::FORBIDDEN => "forbidden",
             StatusCode::NOT_FOUND => "not_found",
             StatusCode::CONFLICT => "conflict",
             StatusCode::UNPROCESSABLE_ENTITY => "validation",
@@ -5365,7 +6169,10 @@ mod tests {
         ActiveTurnStreamState, AppConfig, AppState,
         agent_host::AgentHostClient,
         build_router,
-        models::{AgentRecord, HarnessName, WorkspaceMountMode, WorkspaceMountRecord},
+        models::{
+            AgentRecord, CliHarnessName, HarnessName, InteractionMode, RuntimeStatus,
+            SessionRecord, WorkspaceMountMode, WorkspaceMountRecord,
+        },
     };
 
     #[test]
@@ -5643,6 +6450,55 @@ mod tests {
         path: &str,
     ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
         request_json(app, Method::GET, path, None).await
+    }
+
+    #[tokio::test]
+    async fn terminal_routes_reject_legacy_and_incomplete_cli_sessions()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", BTreeMap::new());
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let state = AppState::with_agent_host(config, agent_host)?;
+
+        let mut legacy = SessionRecord::new(
+            "legacy-cli",
+            "missing-agent",
+            "legacy-cli",
+            "starting",
+            None,
+            None,
+        );
+        legacy.interaction_mode = InteractionMode::Cli;
+        legacy.cli_harness = Some(CliHarnessName::CopilotCli);
+        legacy.runtime_status = Some(RuntimeStatus::Starting);
+        state.sessions.insert(legacy)?;
+
+        let mut incomplete = SessionRecord::new(
+            "incomplete-cli",
+            "missing-agent",
+            "incomplete-cli",
+            "starting",
+            None,
+            None,
+        );
+        incomplete.interaction_mode = InteractionMode::Cli;
+        incomplete.cli_harness = Some(CliHarnessName::CopilotCli);
+        incomplete.runtime_status = Some(RuntimeStatus::Starting);
+        incomplete.workspace_volume_identity = Some("incomplete-cli".to_owned());
+        state.sessions.insert(incomplete)?;
+
+        let app = build_router(state);
+        let (status, legacy_error) = get_json(app.clone(), "/sessions/legacy-cli/terminal").await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(legacy_error["recovery_state"], "legacy-unrecoverable");
+
+        let (status, incomplete_error) = get_json(app, "/sessions/incomplete-cli/terminal").await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            incomplete_error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("launch snapshot"))
+        );
+        Ok(())
     }
 
     #[tokio::test]

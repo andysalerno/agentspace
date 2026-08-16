@@ -45,6 +45,10 @@ async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send +
             "/sessions/{session_id}/workspace/snapshot",
             post(stub_snapshot_workspace),
         )
+        .route(
+            "/sessions/{session_id}/terminal/ensure",
+            post(stub_terminal_ensure),
+        )
         .route("/workspaces/clone", post(stub_clone_workspace))
         .route("/workspaces/vscode", post(stub_workspace_vscode));
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -71,6 +75,16 @@ async fn stub_get_session(Path(session_id): Path<String>) -> Json<Value> {
 
 async fn stub_delete_session(Path(_session_id): Path<String>) -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+async fn stub_terminal_ensure(Path(_session_id): Path<String>) -> Json<Value> {
+    Json(json!({
+        "state": "running",
+        "exit_status": null,
+        "attach_kind": "started",
+        "attachment_count": 0,
+        "clients": [],
+    }))
 }
 
 async fn stub_snapshot_workspace(
@@ -893,9 +907,10 @@ async fn created_session_message_listing_shape_matches_contract()
 }
 
 #[tokio::test]
-async fn cli_sessions_are_durable_starting_records_without_upstream_runtime()
+async fn cli_sessions_create_durable_upstream_terminal_runtime()
 -> Result<(), Box<dyn Error + Send + Sync>> {
-    let app = test_router("http://127.0.0.1:9")?;
+    let stub = spawn_stub_agent_host().await?;
+    let app = test_router(&stub.base_url)?;
     let (status, _connection) = request_json(
         app.clone(),
         Method::POST,
@@ -943,12 +958,12 @@ async fn cli_sessions_are_durable_starting_records_without_upstream_runtime()
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(session["interaction_mode"], "cli");
-    assert_eq!(session["status"], "starting");
-    assert_eq!(session["runtime_status"], "starting");
+    assert_eq!(session["status"], "running");
+    assert_eq!(session["runtime_status"], "live");
     assert_eq!(session["runtime_generation"], 0);
     assert_eq!(session["cli_harness"], "copilot-cli");
     assert_eq!(session["cli_connection_id"], "openrouter");
-    assert!(session["agent_host_session_id"].is_null());
+    assert_eq!(session["agent_host_session_id"], session["session_id"]);
     assert_eq!(session["recovery_state"], "recoverable");
     assert_eq!(
         session["launch_snapshot"]["provider"]["provider_type"],

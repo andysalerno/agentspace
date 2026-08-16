@@ -125,7 +125,9 @@ impl DockerKernelRuntime {
             request.session_id.clone(),
         );
         if request.harness == HarnessName::CopilotCli {
-            environment.insert("KERNEL_SESSION_ID".to_owned(), request.session_id.clone());
+            environment
+                .entry("KERNEL_SESSION_ID".to_owned())
+                .or_insert_with(|| request.session_id.clone());
         }
         if !request.additional_paths.is_empty() {
             environment.insert(
@@ -2719,11 +2721,16 @@ mod tests {
             DockerRuntimeConfig::default(),
             Arc::new(FakeDockerBackend::default()),
         );
+        let mut env = BTreeMap::new();
+        env.insert(
+            "KERNEL_SESSION_ID".to_owned(),
+            "8e0c8f12-d32f-4e40-b25c-5bb6ee4f6967".to_owned(),
+        );
         let request = RuntimeCreateSession {
             session_id: "durable-session".to_owned(),
             harness: HarnessName::CopilotCli,
             interaction_mode: InteractionMode::Chat,
-            env: BTreeMap::new(),
+            env,
             additional_paths: Vec::new(),
             skills: vec!["alpha".to_owned()],
             skill_volumes: Vec::new(),
@@ -2732,7 +2739,10 @@ mod tests {
 
         let environment = runtime.kernel_environment(&request);
 
-        assert_eq!(environment["KERNEL_SESSION_ID"], "durable-session");
+        assert_eq!(
+            environment["KERNEL_SESSION_ID"],
+            "8e0c8f12-d32f-4e40-b25c-5bb6ee4f6967"
+        );
         assert_eq!(environment["AGENTSPACE_SESSION_ID"], "durable-session");
         assert_eq!(
             environment["KERNEL_SKILLS_DIR"],
