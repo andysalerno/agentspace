@@ -10,16 +10,17 @@ ARG RUST_BUILD_PROFILE=release
 WORKDIR /usr/src/agentspace
 
 COPY Cargo.toml Cargo.lock ./
+COPY clients/agentspace_cli_rs clients/agentspace_cli_rs
 COPY services/agent_host_rs services/agent_host_rs
 COPY services/client_service_rs services/client_service_rs
 COPY --from=memory-rs . services/memory_rs
 RUN --mount=type=cache,id=agentspace-kernel-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=agentspace-kernel-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     case "$RUST_BUILD_PROFILE" in \
-        release) cargo build --locked --release --package memory_rs --bin memory \
-            && cp target/release/memory /usr/local/bin/memory ;; \
-        debug) cargo build --locked --package memory_rs --bin memory \
-            && cp target/debug/memory /usr/local/bin/memory ;; \
+        release) cargo build --locked --release --package agentspace_cli_rs --bin agentspace \
+            && cp target/release/agentspace /usr/local/bin/agentspace ;; \
+        debug) cargo build --locked --package agentspace_cli_rs --bin agentspace \
+            && cp target/debug/agentspace /usr/local/bin/agentspace ;; \
         *) echo "unsupported RUST_BUILD_PROFILE=$RUST_BUILD_PROFILE" >&2; exit 1 ;; \
     esac
 
@@ -27,7 +28,7 @@ FROM docker.io/library/python:3.14-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 COPY --from=ghcr.io/casey/just:latest /just /usr/local/bin/
-COPY --from=memory-builder /usr/local/bin/memory /usr/local/bin/memory
+COPY --from=memory-builder /usr/local/bin/agentspace /usr/local/bin/agentspace
 
 # Install agent CLIs plus generally useful shell, build, and inspection tools.
 RUN apt-get update && \

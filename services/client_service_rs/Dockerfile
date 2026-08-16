@@ -10,6 +10,7 @@ ARG RUST_BUILD_PROFILE=release
 WORKDIR /usr/src/agentspace
 
 COPY Cargo.toml Cargo.lock ./
+COPY clients/agentspace_cli_rs clients/agentspace_cli_rs
 COPY services/agent_host_rs services/agent_host_rs
 COPY services/client_service_rs services/client_service_rs
 COPY --from=memory-rs . services/memory_rs

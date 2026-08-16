@@ -91,9 +91,9 @@ printf '%s\n' 'Written from agent session one.' |
     --network "$network" \
     -e AGENTSPACE_AGENT_ID=agent-session-one \
     -v "$volume:/var/lib/agentspace/memory" \
-    --entrypoint memory \
+    --entrypoint agentspace \
     "$kernel_image" \
-    write "$page_path" --title "Shared release memory" --tag release >/dev/null
+    memory write "$page_path" --title "Shared release memory" --tag release >/dev/null
 
 revision="$(
   kernel_shell \
@@ -106,9 +106,9 @@ printf '%s\n' 'Newer edit from agent session two.' |
     --network "$network" \
     -e AGENTSPACE_AGENT_ID=agent-session-two \
     -v "$volume:/var/lib/agentspace/memory" \
-    --entrypoint memory \
+    --entrypoint agentspace \
     "$kernel_image" \
-    write "$page_path" --if-revision "$revision" >/dev/null
+    memory write "$page_path" --if-revision "$revision" >/dev/null
 
 status="$(
   kernel_shell '
@@ -140,9 +140,9 @@ kernel_shell '
   --network "$network" \
   -e AGENTSPACE_AGENT_ID=agent-session-three \
   -v "$volume:/var/lib/agentspace/memory" \
-  --entrypoint memory \
+  --entrypoint agentspace \
   "$kernel_image" \
-  read "$page_path" |
+  memory read "$page_path" |
   grep -F 'Edited through the Web UI boundary.' >/dev/null
 
 "$runtime" rm -f \

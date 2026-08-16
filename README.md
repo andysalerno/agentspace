@@ -280,7 +280,8 @@ the same stack. Its default home directory is a persistent named volume.
 | `gateways/` | Gateway protocol and integrations |
 | `services/agent_host_rs/` | Session, workspace, gateway, and container lifecycle |
 | `services/client_service_rs/` | Client API, persistence, and configuration control plane |
-| `services/memory_rs/` | Durable Markdown memory CLI and private HTTP service |
+| `services/memory_rs/` | Durable Markdown memory domain and private HTTP service |
+| `clients/agentspace_cli_rs/` | Unified agent-facing CLI for memory and skills |
 | `clients/webui/` | React dashboard |
 | `clients/cli_ui/` | Terminal UI experiments |
 | `channels/cli_channel/` | Minimal command-line session client |

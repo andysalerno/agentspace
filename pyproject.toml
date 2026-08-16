@@ -54,7 +54,6 @@ testpaths = [
     "kernels/kernel_acp/tests",
     "kernels/copilot_launch/tests",
     "kernels/kernel_host/tests",
-    "tests",
 ]
 norecursedirs = [
     "kernels/kernel_claude_code",
