@@ -17,7 +17,7 @@ tool. Screenshots are captured for every view in both light and dark themes.
 
 ## Status
 
-The harness works and has been verified end to end: 14 views x 2 themes = 28
+The harness works and has been verified end to end: 16 views x 2 themes = 32
 screenshots, no page errors, with Monaco and markdown rendering correctly.
 
 `dev.Dockerfile` was updated to install the Chromium runtime libraries and
@@ -247,12 +247,16 @@ node capture.mjs ./out
 | `WIDTH` / `HEIGHT` | `1440` / `900` | Viewport size. |
 | `PW_SYSROOT` | `./.sysroot` | Override the fallback sysroot location. |
 
-View ids: `chat`, `chat-session`, `agents`, `workspaces`, `sessions`,
-`kernels`, `memory`, `gateways`, `skills`, `info`, `config`,
-`config-secrets`, `config-kernels`, `connections`.
+View ids: `chat`, `chat-session`, `cli`, `cli-session`, `agents`,
+`workspaces`, `sessions`, `kernels`, `memory`, `gateways`, `skills`, `info`,
+`config`, `config-secrets`, `config-kernels`, `connections`.
 
 `chat-session` opens the first session so the transcript is captured; `chat`
-leaves the empty state visible.
+leaves the empty state visible. `cli-session` opens the deterministic CLI
+fixture and waits for its mock terminal WebSocket. The mock sends a `ready`
+frame followed by raw binary ANSI/Unicode terminal output, so the screenshot
+exercises xterm rendering without a backend, Copilot login, or container
+daemon. `cli` leaves the CLI session rail visible without selecting a session.
 
 Output files are named `<theme>-<view>.png`.
 

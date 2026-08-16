@@ -67,6 +67,7 @@ const TERMINAL_WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_CLOSE_NORMAL: u16 = 1000;
 const TERMINAL_CLOSE_BACKPRESSURE: u16 = 4429;
 const TERMINAL_CLOSE_UPSTREAM_UNAVAILABLE: u16 = 4503;
+const AGENTSPACE_RUNTIME_RECOVERY_ENV: &str = "AGENTSPACE_RUNTIME_RECOVERY";
 /// Request body limit for the config endpoints that accept uploaded bundles.
 ///
 /// A config bundle is a ZIP whose decompressed contents may total up to 32 MiB
@@ -1144,7 +1145,7 @@ async fn create_cli_session(
     session.cli_harness = Some(cli.harness);
     session.cli_connection_id.clone_from(&cli.connection_id);
     session.harness_session_id = Some(Uuid::new_v4().to_string());
-    session.runtime_generation = Some(0);
+    session.runtime_generation = None;
     session.runtime_status = Some(RuntimeStatus::Starting);
     session.workspace_volume_identity = Some(session_id);
     session.workspace_mounts = session_mounts.to_vec();
@@ -1493,6 +1494,7 @@ async fn ensure_cli_runtime(
     }
     session.agent_host_session_id = upstream_session_id;
     session.status = string_field(&upstream, "status").unwrap_or_else(|_| "idle".to_owned());
+    session.runtime_generation.get_or_insert(0);
     session.runtime_status = Some(RuntimeStatus::Live);
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
@@ -1508,6 +1510,7 @@ async fn ensure_cli_runtime(
             return Err(terminal_upstream_error(error));
         }
     };
+    advance_runtime_generation_if_resumed(session, &terminal);
     apply_terminal_runtime_status(state, session, &terminal)?;
     Ok(terminal)
 }
@@ -1542,6 +1545,9 @@ fn cli_runtime_launch(
             ))
         })?,
     );
+    if session.runtime_generation.is_some() {
+        env.insert(AGENTSPACE_RUNTIME_RECOVERY_ENV.to_owned(), "1".to_owned());
+    }
 
     if let Some(provider) = &snapshot.provider {
         if provider.provider_type != "openai" {
@@ -1855,6 +1861,7 @@ async fn terminal_resume(
         .terminal_resume(&session.agent_host_session_id)
         .await
         .map_err(terminal_upstream_error)?;
+    advance_runtime_generation_if_resumed(&mut session, &terminal);
     apply_terminal_runtime_status(&state, &mut session, &terminal)?;
     Ok(Json(Value::Object(terminal)))
 }
@@ -1963,6 +1970,17 @@ fn apply_terminal_runtime_status(
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
     Ok(())
+}
+
+fn advance_runtime_generation_if_resumed(session: &mut SessionRecord, terminal: &JsonObject) {
+    if terminal.get("attach_kind").and_then(Value::as_str) == Some("resumed") {
+        session.runtime_generation = Some(
+            session
+                .runtime_generation
+                .unwrap_or_default()
+                .saturating_add(1),
+        );
+    }
 }
 
 fn terminal_upstream_error(error: AgentHostError) -> ApiError {
@@ -6175,8 +6193,10 @@ mod tests {
         agent_host::AgentHostClient,
         build_router,
         models::{
-            AgentRecord, CliHarnessName, HarnessName, InteractionMode, RuntimeStatus,
-            SessionRecord, WorkspaceMountMode, WorkspaceMountRecord,
+            AdditionalPathIdentity, AgentCliRecord, AgentRecord, CliHarnessName,
+            CliLaunchOptionsSnapshot, CliLaunchSnapshot, HarnessName, InteractionMode,
+            LaunchValueSource, RuntimeStatus, SessionRecord, WorkspaceMountMode,
+            WorkspaceMountRecord,
         },
     };
 
@@ -6502,6 +6522,70 @@ mod tests {
             incomplete_error["detail"]
                 .as_str()
                 .is_some_and(|detail| detail.contains("launch snapshot"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_ensure_reports_missing_snapshot_configuration()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let config = AppConfig::new("127.0.0.1", 0, "http://127.0.0.1:9", BTreeMap::new());
+        let agent_host = AgentHostClient::new("http://127.0.0.1:9", Duration::from_millis(50))?;
+        let state = AppState::with_agent_host(config, agent_host)?;
+        let mut agent = AgentRecord::new("snapshot-agent", "Snapshot Agent", HarnessName::Echo, "");
+        agent.cli = Some(AgentCliRecord {
+            harness: CliHarnessName::CopilotCli,
+            connection_id: None,
+        });
+        state.agents.insert(&agent)?;
+
+        let session_id = "12345678-1234-5678-9234-567812345678";
+        let mut session = SessionRecord::new(
+            session_id,
+            "snapshot-agent",
+            session_id,
+            "error",
+            None,
+            None,
+        );
+        session.interaction_mode = InteractionMode::Cli;
+        session.cli_harness = Some(CliHarnessName::CopilotCli);
+        session.harness_session_id = Some("87654321-4321-4765-a321-876543210000".to_owned());
+        session.runtime_status = Some(RuntimeStatus::Error);
+        session.workspace_volume_identity = Some(session_id.to_owned());
+        session.launch_snapshot = Some(CliLaunchSnapshot {
+            schema_version: 1,
+            provider: None,
+            model: Some(LaunchValueSource::ConfigReference {
+                field: "agents/snapshot-agent/env/COPILOT_MODEL".to_owned(),
+            }),
+            reasoning_effort: None,
+            options: CliLaunchOptionsSnapshot {
+                no_auto_update: true,
+                mouse: true,
+                config_dir: None,
+                extra_args: None,
+            },
+            additional_paths: vec![AdditionalPathIdentity::SessionWorkspace {
+                path: "/workspace".to_owned(),
+            }],
+            agent_profile: None,
+        });
+        state.sessions.insert(session)?;
+
+        let app = build_router(state);
+        let (status, error) = request_json(
+            app,
+            Method::POST,
+            &format!("/sessions/{session_id}/terminal/ensure"),
+            Some(json!({})),
+        )
+        .await?;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("no longer available"))
         );
         Ok(())
     }

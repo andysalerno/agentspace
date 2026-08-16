@@ -453,8 +453,12 @@ stack-down:
   runtime="$(just --justfile "{{justfile_directory()}}/justfile" _stack-runtime)"
   mapfile -t spawned_containers < <(
     {
-      "$runtime" ps -aq --filter "label=agentspace.role=kernel"
-      "$runtime" ps -aq --filter "label=agentspace.role=gateway"
+      "$runtime" ps -aq \
+        --filter "label=agentspace.managed=true" \
+        --filter "label=agentspace.role=kernel"
+      "$runtime" ps -aq \
+        --filter "label=agentspace.managed=true" \
+        --filter "label=agentspace.role=gateway"
     } | sort -u
   )
   if (( ${#spawned_containers[@]} > 0 )); then
@@ -475,3 +479,8 @@ stack-status:
 [group('check')]
 memory-e2e:
   CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}" bash scripts/memory-e2e.sh
+
+# Run the opt-in kernel/tmux/PTY container integration suite.
+[group('check')]
+terminal-container-integration:
+  python3 scripts/terminal-container-integration.py

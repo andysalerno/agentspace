@@ -42,6 +42,8 @@ const LABEL_INTERACTION_MODE: &str = "agentspace.interaction_mode";
 const LABEL_MANAGED: &str = "agentspace.managed";
 const LABEL_ROLE: &str = "agentspace.role";
 const LABEL_SESSION_ID: &str = "agentspace.session_id";
+const RUNTIME_RECOVERY_ENV: &str = "AGENTSPACE_RUNTIME_RECOVERY";
+const TERMINAL_RESUME_ENV: &str = "KERNEL_TERMINAL_RESUME";
 const CONTAINER_NAME_PLACEHOLDER: &str = concat!("{", "container_name", "}");
 const HOST_IP_PLACEHOLDER: &str = concat!("{", "host_ip", "}");
 const HOST_PORT_PLACEHOLDER: &str = concat!("{", "host_port", "}");
@@ -119,6 +121,7 @@ impl DockerKernelRuntime {
 
     fn kernel_environment(&self, request: &RuntimeCreateSession) -> BTreeMap<String, String> {
         let mut environment = request.env.clone();
+        let recovery_expected = environment.remove(RUNTIME_RECOVERY_ENV).is_some();
         environment.insert("KERNEL_HARNESS".to_owned(), request.harness.to_string());
         environment.insert(
             "AGENTSPACE_SESSION_ID".to_owned(),
@@ -128,6 +131,9 @@ impl DockerKernelRuntime {
             environment
                 .entry("KERNEL_SESSION_ID".to_owned())
                 .or_insert_with(|| request.session_id.clone());
+            if recovery_expected {
+                environment.insert(TERMINAL_RESUME_ENV.to_owned(), "1".to_owned());
+            }
         }
         if !request.additional_paths.is_empty() {
             environment.insert(
@@ -243,6 +249,12 @@ impl DockerKernelRuntime {
             )?;
             return Ok(volume.name);
         }
+        if recovery_expected(request) {
+            return Err(AgentHostError::conflict(format!(
+                "durable session workspace volume for session {:?} is missing",
+                request.session_id
+            )));
+        }
 
         self.backend
             .ensure_volume(&expected_name, session_workspace_labels(request))
@@ -271,6 +283,35 @@ impl DockerKernelRuntime {
             request.interaction_mode,
         )?;
         Ok(expected_name)
+    }
+
+    async fn ensure_copilot_state_volume(
+        &self,
+        request: &RuntimeCreateSession,
+    ) -> Result<(), AgentHostError> {
+        if request.harness != HarnessName::CopilotCli {
+            return Ok(());
+        }
+        if self
+            .backend
+            .inspect_volume(&self.config.copilot_volume)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if recovery_expected(request) {
+            return Err(AgentHostError::conflict(format!(
+                "durable Copilot state volume {:?} is missing",
+                self.config.copilot_volume
+            )));
+        }
+        self.backend
+            .ensure_volume(
+                &self.config.copilot_volume,
+                btree_map([(LABEL_ROLE, "copilot-state"), (LABEL_MANAGED, "true")]),
+            )
+            .await
     }
 
     async fn matching_kernel_container(
@@ -311,6 +352,17 @@ impl DockerKernelRuntime {
             "kernel",
             request.interaction_mode,
         )?;
+        if container
+            .labels
+            .get("agentspace.harness")
+            .map(String::as_str)
+            != Some(request.harness.as_str())
+        {
+            return Err(AgentHostError::conflict(format!(
+                "Docker container {:?} has an incompatible AgentSpace harness label",
+                container.name
+            )));
+        }
         Ok(Some(container))
     }
 
@@ -579,6 +631,7 @@ impl KernelRuntime for DockerKernelRuntime {
         &self,
         request: RuntimeCreateSession,
     ) -> Result<KernelRuntimeSession, AgentHostError> {
+        self.ensure_copilot_state_volume(&request).await?;
         let workspace_volume_name = self.ensure_session_workspace_volume(&request).await?;
         let matching_container = self.matching_kernel_container(&request).await?;
         let container_name = if let Some(container) = matching_container {
@@ -1931,6 +1984,10 @@ fn session_workspace_labels(request: &RuntimeCreateSession) -> BTreeMap<String, 
     ])
 }
 
+fn recovery_expected(request: &RuntimeCreateSession) -> bool {
+    request.env.get(RUNTIME_RECOVERY_ENV).map(String::as_str) == Some("1")
+}
+
 fn validate_session_resource_labels(
     resource_kind: &str,
     resource_name: &str,
@@ -2167,8 +2224,9 @@ mod tests {
 
     use super::{
         ContainerRunSpec, DockerBackend, DockerContainerResource, DockerKernelRuntime,
-        DockerRuntimeConfig, DockerStats, DockerVolumeResource, PortBinding,
-        SESSION_WORKSPACE_MOUNT_PATH, VolumeMount, btree_map, container_create_body,
+        DockerRuntimeConfig, DockerStats, DockerVolumeResource, PortBinding, RUNTIME_RECOVERY_ENV,
+        SESSION_WORKSPACE_MOUNT_PATH, TERMINAL_RESUME_ENV, VolumeMount, btree_map,
+        container_create_body, session_workspace_labels,
         session_workspace_volume_name_from_container, summarize_docker_stats,
         terminal_exec_options,
     };
@@ -2855,6 +2913,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cli_recovery_recreates_missing_container_with_durable_state() {
+        let backend = FakeDockerBackend::default();
+        let (runtime, health_server) = runtime_with_health(&backend).await;
+        let session_id = "12345678-1234-5678-9234-567812345678";
+        let mut request = runtime_request(session_id);
+        request.harness = HarnessName::CopilotCli;
+        request.interaction_mode = InteractionMode::Cli;
+
+        runtime
+            .create_session(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("initial CLI create failed: {error}"));
+        {
+            let mut state = backend.state();
+            state.containers.clear();
+            state.running.clear();
+        }
+        request
+            .env
+            .insert(RUNTIME_RECOVERY_ENV.to_owned(), "1".to_owned());
+
+        runtime
+            .create_session(request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("CLI recovery failed: {error}"));
+
+        {
+            let state = backend.state();
+            assert_eq!(state.run_specs.len(), 2);
+            assert_eq!(
+                state.run_specs[1]
+                    .environment
+                    .get(TERMINAL_RESUME_ENV)
+                    .map(String::as_str),
+                Some("1")
+            );
+            assert!(
+                !state.run_specs[1]
+                    .environment
+                    .contains_key(RUNTIME_RECOVERY_ENV)
+            );
+            assert_eq!(
+                state
+                    .created_volumes
+                    .iter()
+                    .filter(|(name, _labels)| {
+                        name == "agentspace-session-workspace-12345678-123"
+                    })
+                    .count(),
+                1
+            );
+            assert!(state.volumes.contains("agentspace-kernel_copilot-config"));
+            drop(state);
+        }
+
+        {
+            let mut state = backend.state();
+            state.containers.clear();
+            state.running.clear();
+            state
+                .volumes
+                .remove("agentspace-session-workspace-12345678-123");
+            state
+                .volume_labels
+                .remove("agentspace-session-workspace-12345678-123");
+        }
+        let result = runtime.create_session(request.clone()).await;
+        let Err(error) = result else {
+            panic!("missing durable workspace must fail");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("durable session workspace volume")
+        );
+
+        {
+            let mut state = backend.state();
+            seed_volume(
+                &mut state,
+                "agentspace-session-workspace-12345678-123",
+                session_workspace_labels(&request),
+            );
+            state.volumes.remove("agentspace-kernel_copilot-config");
+            state
+                .volume_labels
+                .remove("agentspace-kernel_copilot-config");
+        }
+        let result = runtime.create_session(request).await;
+        let Err(error) = result else {
+            panic!("missing durable Copilot state must fail");
+        };
+        assert!(error.to_string().contains("durable Copilot state volume"));
+        health_server.abort();
+    }
+
+    #[tokio::test]
     async fn adoption_uses_full_labels_instead_of_cosmetic_names() {
         let backend = FakeDockerBackend::default();
         let (runtime, health_server) = runtime_with_health(&backend).await;
@@ -2956,8 +3111,46 @@ mod tests {
         };
         assert!(matches!(error, AgentHostError::Conflict { .. }));
 
+        let harness_backend = FakeDockerBackend::default();
+        let (harness_runtime, harness_health_server) = runtime_with_health(&harness_backend).await;
+        {
+            let mut state = harness_backend.state();
+            seed_volume(
+                &mut state,
+                "harness-workspace",
+                btree_map([
+                    ("agentspace.role", "session-workspace"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "harness-collision"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+            );
+            seed_container(
+                &mut state,
+                "harness-container",
+                btree_map([
+                    ("agentspace.role", "kernel"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "harness-collision"),
+                    ("agentspace.interaction_mode", "chat"),
+                    ("agentspace.harness", "copilot-cli"),
+                ]),
+                true,
+                "running",
+                Some("harness-workspace"),
+            );
+        }
+        let result = harness_runtime
+            .create_session(runtime_request("harness-collision"))
+            .await;
+        let Err(error) = result else {
+            panic!("stale harness label should fail");
+        };
+        assert!(matches!(error, AgentHostError::Conflict { .. }));
+
         health_server.abort();
         volume_health_server.abort();
+        harness_health_server.abort();
     }
 
     #[tokio::test]

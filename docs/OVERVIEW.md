@@ -1,309 +1,159 @@
-# AgentSpace — System Overview
+# AgentSpace system overview
 
-AgentSpace is a system for defining, interacting with, and observing AI agents. It wraps headless agent CLIs (GitHub Copilot CLI, OpenAI Codex, etc.) in a uniform interface and exposes them through a layered service architecture with web and terminal UIs.
-
-## Goals
-
-1. **Uniform agent interface** — Abstract over different AI agent CLIs behind a single protocol so callers never deal with harness-specific I/O.
-2. **Container isolation** — Each agent session runs in its own Docker container, with its own process and filesystem.
-3. **Layered services** — Separate kernel lifecycle, session orchestration, and user-facing concerns into distinct services with clean boundaries.
-4. **Multiple clients** — Support web, terminal, and programmatic access through a single gateway API.
+AgentSpace defines, runs, and observes AI agents through one durable control
+plane. Harness-specific CLIs run in isolated kernel containers; clients use
+`client_service`, not the container runtime or `agent_host` directly.
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                        Clients                          │
-│  ┌─────────┐   ┌─────────┐   ┌──────────────┐          │
-│  │  webui  │   │ cli_ui  │   │ cli_channel   │          │
-│  │ :8003   │   │ (TUI)   │   │ (headless)    │          │
-│  └────┬────┘   └────┬────┘   └──────┬───────┘          │
-│       │              │              │                   │
-│       └──────────────┼──────────────┘                   │
-│                      │ HTTP                             │
-│              ┌───────▼────────┐                         │
-│              │ client_service │  user-facing gateway     │
-│              │     :8002      │  agents, sessions,       │
-│              │                │  transcripts             │
-│              └───────┬────────┘                         │
-│                      │ HTTP                             │
-│              ┌───────▼────────┐                         │
-│              │   agent_host   │  kernel lifecycle,       │
-│              │     :8001      │  skills, container mgmt  │
-│              └───────┬────────┘                         │
-│                      │ Docker API + HTTP                │
-│       ┌──────────────┼──────────────┐                   │
-│  ┌────▼────┐    ┌────▼────┐    ┌────▼────┐              │
-│  │ kernel  │    │ kernel  │    │ kernel  │  ...          │
-│  │ :8000   │    │ :8000   │    │ :8000   │              │
-│  │(echo)   │    │(copilot)│    │(codex)  │  ...         │
-│  └─────────┘    └─────────┘    └─────────┘              │
-│  one container per session                              │
-└─────────────────────────────────────────────────────────┘
-```
-
-Inter-service communication uses HTTP APIs. Kernel containers are spawned dynamically by `agent_host` and communicate over a shared Docker network (`agentspace-stack`).
-
-## Repository Layout
-
-```
-agentspace/
-├── kernels/
-│   ├── kernel/              # Protocol, events, base class (the abstraction)
-│   ├── kernel_echo/         # In-process echo kernel (testing)
-│   ├── kernel_claude_code/  # Claude Code CLI adapter
-│   ├── kernel_copilot/      # GitHub Copilot CLI adapter
-│   ├── kernel_codex/        # OpenAI Codex CLI adapter
-│   └── kernel_host/         # Container entry point + HTTP service
-├── services/
-│   ├── agent_host_rs/       # Kernel lifecycle manager + skills
-│   └── client_service_rs/   # Public API gateway
-├── clients/
-│   ├── webui/               # React/TypeScript dashboard
-│   └── cli_ui/              # Textual TUI client
-├── channels/
-│   └── cli_channel/         # Headless CLI session client
-├── compose.yaml             # Full-stack Docker Compose
-├── justfile                 # Dev workflow commands
-└── pyproject.toml           # uv workspace root
-```
-
-## Components
-
-### Kernel Layer
-
-The kernel is the innermost layer. It wraps a headless agent CLI and exposes a uniform async interface.
-
-#### `kernel` — Protocol & Events
-
-Defines the structural type contract (`Kernel` protocol), the `BaseKernel` subprocess helper, and the standard JSONL event format. All kernels emit the same event types:
-
-| Event | Purpose |
-|-------|---------|
-| `session_start` | Emitted once with `session_id` and kernel name |
-| `status` | Transitions: `idle`, `busy`, `error`, `done` |
-| `text_delta` | Incremental text chunk from the agent |
-| `tool_call` | Agent is invoking a tool |
-| `tool_result` | Result of a tool invocation |
-| `error` | Non-fatal error or warning |
-| `session_end` | Session complete, kernel will exit |
-
-The `Kernel` protocol:
-
-```python
-class Kernel(Protocol):
-    @property
-    def name(self) -> str: ...
-    @property
-    def status(self) -> KernelStatus: ...
-    @property
-    def resume_token(self) -> str | None: ...
-    async def start(self, config: KernelConfig) -> None: ...
-    async def send(self, message: str) -> None: ...
-    def recv(self) -> AsyncIterator[KernelEvent]: ...
-    async def stop(self) -> None: ...
-```
-
-`BaseKernel` provides shared subprocess machinery (spawn, read stdout/stderr, queue events). Harness-specific subclasses override `harness_cmd()`, `harness_env()`, and `parse_harness_output()`.
-
-#### `kernel_echo` — Reference Implementation
-
-Echoes input back word-by-word as `text_delta` events. No subprocess. Used for testing the infrastructure end-to-end without API keys or a real harness.
-
-#### `kernel_copilot` — GitHub Copilot CLI
-
-Wraps the `copilot` CLI in non-interactive prompt mode with JSON output. Supports session resumption via `--resume=SESSION_ID`, model selection, reasoning effort, and additional skill directories via `--add-dir`. Maps Copilot-specific events (`assistant.message_delta`, `assistant.tool_call`, etc.) into the standard event stream.
-
-#### `kernel_codex` — OpenAI Codex CLI
-
-Wraps `codex exec` with similar patterns. Supports session threads, model selection, and maps Codex events (`turn.completed`, `agent_message`, `command_execution`) into the standard stream.
-
-#### `kernel_claude_code` — Claude Code CLI
-
-Wraps `claude --print --bare --output-format stream-json` with resumable sessions, explicit `--add-dir` handling for mounted skills and extra paths, and a scaffolded event parser that normalizes Claude output into the shared kernel event stream.
-
-#### `kernel_host` — Container Entry Point
-
-Runs inside each kernel container. Has two modes:
-
-- **Runner mode** (`python -m kernel_host.runner "prompt"`) — one-shot CLI that prints JSONL to stdout.
-- **Service mode** (`python -m kernel_host.app`) — long-lived FastAPI server (port 8000) exposing `/messages`, `/session`, `/history`, `/logs`, and `/reset` endpoints. This is the mode used in production; `agent_host` talks to each container over HTTP.
-
-A registry maps harness names (`echo`, `claude-code`, `copilot-cli`, `codex`) to kernel classes.
-
-### Service Layer
-
-#### `agent_host` — Kernel Lifecycle Manager
-
-Manages kernel sessions by spawning and supervising Docker containers. Each session gets its own container (`agentspace-kernel-{session_id[:12]}`) running the `kernel_host` image.
-
-Responsibilities:
-- Create/destroy kernel containers via the Docker API
-- Route messages to the correct container's HTTP API
-- Track session state (active, status, metadata)
-- Manage skills on a shared Docker volume (`agentspace-skills`)
-
-Key API endpoints (port 8001):
-
-| Route | Purpose |
-|-------|---------|
-| `POST /sessions` | Create a session (spawns a container) |
-| `POST /sessions/{id}/messages` | Send a message, receive events |
-| `GET /sessions` | List sessions |
-| `DELETE /sessions/{id}` | Destroy session (removes container) |
-| `POST /sessions/{id}/reset` | Reset session |
-| `GET /sessions/{id}/history` | Message turn history |
-| `GET /sessions/{id}/logs` | Raw subprocess output |
-| `CRUD /skills` | Create, list, get, update, delete skills |
-
-The `DockerKernelRuntime` implements the `KernelRuntime` protocol, which could be swapped for a different container backend.
-
-#### `client_service` — Public API Gateway
-
-The single entry point for all clients. No client talks to `agent_host` directly.
-The implementation lives in `services/client_service_rs`.
-
-Responsibilities:
-- CRUD for agent definitions (name, harness type, system prompt, skills)
-- Session lifecycle — maps client-facing sessions to `agent_host` sessions
-- Chat transcript persistence (in-memory for now)
-- Session source tracking (`channel_name`, `client_type`)
-
-Key API endpoints (port 8002):
-
-| Route | Purpose |
-|-------|---------|
-| `CRUD /agents` | Agent definitions |
-| `POST /sessions` | Create session for an agent |
-| `GET /sessions` | List sessions |
-| `GET /sessions/{id}/messages` | Chat transcript |
-| `POST /sessions/{id}/messages` | Send message |
-| `GET /kernels` | List kernel sessions (proxied) |
-| `DELETE /kernels/{id}` | Kill a kernel (proxied) |
-| `GET /kernels/{id}/logs` | Kernel logs (proxied) |
-| `CRUD /skills` | Skills management (proxied) |
-
-Data models: `AgentRecord`, `SessionRecord`, `MessageRecord`, with `HarnessName` enum (`echo`, `claude-code`, `copilot-cli`, `codex`) and `ClientType` enum (`cli`, `webui`).
-
-### Client Layer
-
-#### `webui` — React Dashboard
-
-A TypeScript/React single-page app served via Nginx (port 8003). Views:
-
-- **Chat** — select an agent, start a session, send messages, view streaming responses
-- **Agents** — create/edit/delete agent definitions
-- **Sessions** — list and manage chat sessions
-- **Kernels** — view running kernel containers, logs, kill kernels
-- **Skills** — CRUD for skills with a Monaco code editor
-
-Features: dark mode, collapsible sidebar, responsive layout. Talks only to `client_service`.
-
-#### `cli_ui` — Terminal UI
-
-A Python TUI built with [Textual](https://textual.textualize.io). Provides the same capabilities as the web UI in a terminal: agent selection, session management, chat with streaming output. Talks only to `client_service`.
-
-#### `cli_channel` — Headless CLI Client
-
-A thin `httpx`-based client that creates or resumes sessions through `client_service`. Proof-of-concept for external integrations and channel relay processes.
-
-## Data Flow
-
-A chat message flows through the full stack:
-
 ```mermaid
-sequenceDiagram
-    participant C as Client (webui / cli_ui)
-    participant CS as client_service
-    participant AH as agent_host
-    participant KH as kernel_host (container)
-    participant K as Kernel (claude / copilot / codex)
+flowchart LR
+    Web["React Web UI<br/>:8003"]
+    Other["CLI / gateway / future clients"]
+    Client["client_service<br/>:8002<br/>public API + SQLite"]
+    Memory["memory service<br/>private"]
+    Host["agent_host<br/>:8001<br/>runtime orchestration"]
+    Kernel["kernel_host container<br/>one per session"]
+    Tmux["tmux + PTY attachments"]
+    Harness["Copilot CLI / ACP / other harness"]
 
-    C->>CS: POST /sessions/{id}/messages
-    CS->>AH: POST /sessions/{id}/messages
-    AH->>KH: POST /messages
-    KH->>K: send(message)
-    K->>K: spawn CLI subprocess
-    K-->>KH: KernelEvent stream
-    KH-->>AH: event list (JSON)
-    AH-->>CS: event list
-    CS->>CS: record transcript
-    CS-->>C: { events, assistant_message, session }
+    Web --> Client
+    Other --> Client
+    Client --> Memory
+    Client --> Host
+    Host -->|Docker API + HTTP| Kernel
+    Kernel --> Harness
+    Kernel --> Tmux
+    Host -->|Docker exec PTY| Tmux
 ```
 
-## Compose Stack
+Compose uses the `agentspace-stack` network. Dynamic kernel and gateway
+containers are created by `agent_host`, not declared as long-running Compose
+services.
 
-The `compose.yaml` defines four services:
+### `client_service`
 
-| Service | Port | Role |
-|---------|------|------|
-| `kernel-host-image` | — | Build-only; produces the kernel container image |
-| `agent-host` | 8001 | Spawns kernel containers, mounts Docker socket |
-| `client-service` | 8002 | Public gateway |
-| `webui` | 8003 | Static React app + Nginx reverse proxy |
+The public gateway and durable authority:
 
-Kernel containers are not defined in Compose — they are created dynamically by `agent_host` using the Docker API. They join the `agentspace-stack` network and share two named volumes:
+- agent, connection, secret, workspace, gateway, and skill configuration;
+- durable Chat and CLI session records in SQLite;
+- non-secret CLI launch snapshots and durable Copilot UUIDs;
+- Chat transcript persistence;
+- terminal HTTP controls and bounded WebSocket proxying; and
+- orphan cleanup decisions based on durable session ownership.
 
-- `agentspace-kernel_copilot-config` — Copilot authentication data
-- `agentspace-skills` — skill files mounted read-only into kernels
+### `agent_host`
 
-## Development
+The runtime orchestrator:
 
-### Prerequisites
+- creates, adopts, replaces, and destroys labeled kernel containers;
+- reuses stable session-workspace volumes;
+- validates full session, role, mode, and harness labels;
+- proxies structured kernel HTTP operations;
+- owns Docker exec PTY attach/resize and bounded attachment queues; and
+- reconciles stale tmux clients after service restart.
 
-- Python 3.13+, [uv](https://docs.astral.sh/uv/) package manager
-- Node.js 22.13+ with pnpm (for webui)
-- Podman or Docker
+Ordinary shutdown is non-destructive. Explicit session deletion and managed
+orphan cleanup are destructive.
 
-### Workspace
+### `kernel_host`
 
-The repo is a `uv` workspace for Python packages, plus a Cargo workspace for
-service crates under `services/client_service_rs` and `services/agent_host_rs`.
+The per-session container service:
 
+- exposes the common Chat/event interface for headless harness adapters;
+- shares Copilot launch/provider/profile/skill construction with Chat;
+- manages one named tmux session for interactive Copilot CLI mode; and
+- reports pane state, exit status, clients, and fixed attach argv.
+
+PTY bytes do not pass through kernel HTTP. `agent_host` attaches the fixed tmux
+argv with Docker exec and forwards raw bytes over WebSocket.
+
+## Session modes
+
+### Chat
+
+A client sends a message to `client_service`, which ensures the stable runtime,
+streams normalized kernel events through `agent_host`, and persists the
+resulting transcript.
+
+### CLI
+
+1. `client_service` creates a durable session row before runtime work.
+2. It stores a generated Copilot UUID and a non-secret launch snapshot.
+3. Current secret/config values are resolved only when a runtime is ensured.
+4. `agent_host` creates or adopts the labeled container and stable workspace.
+5. `kernel_host` atomically creates/adopts the named tmux session.
+6. Each WebSocket creates an independent Docker exec tmux client.
+7. Binary frames remain raw PTY input/output; text frames carry resize and
+   lifecycle control.
+
+Multiple browsers or future terminal clients can attach simultaneously. Tmux
+owns the process and scrollback, so detaching clients does not stop Copilot.
+See [TERMINAL_PROTOCOL.md](TERMINAL_PROTOCOL.md).
+
+## Identity, persistence, and recovery
+
+The full client session ID is the stable runtime identity. Containers and
+session-workspace volumes carry:
+
+```text
+agentspace.managed=true
+agentspace.role=kernel|session-workspace
+agentspace.session_id=<full durable session id>
+agentspace.interaction_mode=chat|cli
 ```
-kernels/*  channels/*  clients/cli_ui
+
+Kernel containers also carry the harness label. Truncated resource names are
+cosmetic and are never sufficient for adoption or deletion.
+
+Persistence boundaries:
+
+- browser/Web UI disconnect: the live tmux session continues;
+- `client_service` or `agent_host` restart: a surviving labeled container and
+  tmux session are adopted;
+- kernel container or host loss: the exact pane, process, screen, and tmux
+  scrollback are lost;
+- recovery after container/host loss: the same Copilot UUID, Copilot state
+  volume, and session-workspace volume launch a new tmux process and report
+  `attach_kind=resumed`; and
+- missing required config, secret, Copilot state, or session workspace:
+  recovery fails explicitly and never substitutes a new Copilot UUID.
+
+Pre-migration records without durable workspace identity are exposed as
+`legacy-unrecoverable`.
+
+## Data and volumes
+
+| Data | Location |
+| --- | --- |
+| Configuration, sessions, transcripts, encrypted secrets | `mounts/data/client_service/client_service.sqlite` |
+| Secret encryption key | `CLIENT_SERVICE_SECRET_KEY` outside the database |
+| Copilot authentication and durable session state | `agentspace-kernel_copilot-config` |
+| Per-session working files | labeled `agentspace-session-workspace-*` volumes |
+| Managed skills | `agentspace-skills` |
+| Shared Markdown memory | `agentspace-memory-data` |
+| User workspaces and skill resources | separately labeled named volumes |
+
+## Trust boundary
+
+AgentSpace has no user authentication. The terminal is a shell-equivalent
+capability, and `agent_host` controls the local container engine socket.
+Compose binds published ports to loopback by default. Trusted local use needs
+no TLS certificates. Do not expose the services to an untrusted network; add
+authentication, authorization, and TLS at a trusted reverse proxy first.
+
+## Operations and validation
+
+```sh
+just stack-up
+just stack-status
+just stack-logs
+just stack-down
+just terminal-container-integration
+just webui-screenshots
+just check
 ```
 
-### Commands
-
-```bash
-just bootstrap       # uv sync + pnpm install
-just stack-up        # start with an available Podman or Docker runtime
-just stack-down      # compose down + cleanup with the selected runtime
-just stack-logs      # tail logs
-just stack-status    # compose ps
-```
-
-### Quality
-
-```bash
-uv run pytest        # tests
-uv run ruff check .  # lint
-uv run pyright       # strict type checking
-```
-
-The codebase uses strict pyright type-checking, ruff with all lint rules enabled, and pytest with async support.
-
-## Current Status
-
-**Implemented:**
-
-- Kernel abstraction with protocol, base class, and JSONL event contract
-- Four kernel implementations: echo, claude-code, copilot-cli, codex
-- Kernel host with both runner and HTTP service modes
-- Docker-based kernel container lifecycle
-- Agent host service with skills management
-- Client service gateway with agents, sessions, and transcript storage
-- Web UI with chat, agents, sessions, kernels, and skills views
-- Terminal UI with equivalent functionality
-- CLI channel proof-of-concept
-- Full Docker Compose stack
-- Automated tests for events, kernels, runner, services
-
-**Not yet implemented:**
-
-- `proto/` — formal API contract definitions
-- `channels/` — platform relays (Discord, Matrix, IRC)
-- `store/` — shared durable database library
-- Streaming attach / real-time observer fan-out
-- Authentication and multi-user support
+`stack-down` cleans only explicitly managed, labeled dynamic resources and
+retains durable owned workspace volumes. See [OPERATIONS.md](OPERATIONS.md) for
+backup, restart/adoption, cleanup, and container-gated validation guidance.

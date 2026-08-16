@@ -288,14 +288,16 @@ impl SessionRegistry {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
         validate_session_id_or_error(&session_id)?;
-        if let Some(record) = self.inner.sessions.read().await.get(&session_id) {
-            return Ok(record.summary());
+        let existing = self.inner.sessions.read().await.get(&session_id).cloned();
+        if let Some(record) = &existing {
+            validate_existing_session_identity(record, &request)?;
         }
         if request.harness == HarnessName::CopilotCli && Uuid::parse_str(&session_id).is_err() {
             return Err(AgentHostError::validation(
                 "Copilot session_id must be a UUID",
             ));
         }
+
         let caller_env = request.env;
         let mut merged_env: BTreeMap<String, String> = std::env::vars().collect();
         for key in [
@@ -345,23 +347,31 @@ impl SessionRegistry {
                 .await?;
         }
         let runtime_summary = self.inner.runtime.summary(&runtime_session).await?;
-        let mut record = SessionRecord {
+        let mut record = existing.unwrap_or_else(|| SessionRecord {
             session_id: session_id.clone(),
             harness: request.harness,
             interaction_mode: request.interaction_mode,
             runtime_session: runtime_session.clone(),
-            env: merged_env,
-            additional_paths,
-            skills: request.skills,
-            workspace_mounts,
+            env: BTreeMap::new(),
+            additional_paths: Vec::new(),
+            skills: Vec::new(),
+            workspace_mounts: Vec::new(),
             history: Vec::new(),
             status: KernelStatus::Idle,
             resume_token: None,
-            container_name: self.inner.runtime.container_name(&runtime_session),
-            vscode_url: self.inner.runtime.vscode_url(&runtime_session),
-            free_port_url: self.inner.runtime.free_port_url(&runtime_session),
+            container_name: None,
+            vscode_url: None,
+            free_port_url: None,
             stats: None,
-        };
+        });
+        record.runtime_session = runtime_session.clone();
+        record.env = merged_env;
+        record.additional_paths = additional_paths;
+        record.skills = request.skills;
+        record.workspace_mounts = workspace_mounts;
+        record.container_name = self.inner.runtime.container_name(&runtime_session);
+        record.vscode_url = self.inner.runtime.vscode_url(&runtime_session);
+        record.free_port_url = self.inner.runtime.free_port_url(&runtime_session);
         record.apply_runtime_summary(runtime_summary);
         let summary = record.summary();
         self.inner.sessions.write().await.insert(session_id, record);
@@ -994,6 +1004,19 @@ impl Drop for AgentEventStream {
             events,
         ));
     }
+}
+
+fn validate_existing_session_identity(
+    record: &SessionRecord,
+    request: &CreateSessionRequest,
+) -> Result<(), AgentHostError> {
+    if record.harness == request.harness && record.interaction_mode == request.interaction_mode {
+        return Ok(());
+    }
+    Err(AgentHostError::conflict(format!(
+        "session {:?} is already registered as harness {:?} in {:?} mode",
+        record.session_id, record.harness, record.interaction_mode
+    )))
 }
 
 async fn finalize_stream(
@@ -1729,7 +1752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requested_session_identity_is_validated_and_idempotent() {
+    async fn requested_session_identity_is_validated_reensured_and_immutable() {
         let runtime = FakeRuntime::default();
         let registry = SessionRegistry::with_runtime(Arc::new(runtime.clone()));
         let request = CreateSessionRequest {
@@ -1754,9 +1777,9 @@ mod tests {
         assert_eq!(first.session_id, "stable-session-123");
         assert_eq!(second.session_id, first.session_id);
         assert_eq!(first.interaction_mode, InteractionMode::Chat);
-        assert_eq!(runtime.state().created.len(), 1);
+        assert_eq!(runtime.state().created.len(), 2);
 
-        let registered = registry
+        let result = registry
             .create_session(CreateSessionRequest {
                 session_id: Some(first.session_id),
                 harness: HarnessName::CopilotCli,
@@ -1766,11 +1789,12 @@ mod tests {
                 skills: Vec::new(),
                 workspace_mounts: Vec::new(),
             })
-            .await
-            .unwrap_or_else(|error| panic!("registered create failed: {error}"));
-        assert_eq!(registered.harness, HarnessName::Echo);
-        assert_eq!(registered.interaction_mode, InteractionMode::Chat);
-        assert_eq!(runtime.state().created.len(), 1);
+            .await;
+        let Err(conflict) = result else {
+            panic!("registered session identity must not change mode or harness");
+        };
+        assert!(matches!(conflict, AgentHostError::Conflict { .. }));
+        assert_eq!(runtime.state().created.len(), 2);
 
         let result = registry
             .create_session(CreateSessionRequest {

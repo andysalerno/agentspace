@@ -51,7 +51,7 @@ harnesses:
 
 - define agents with a harness, system prompt, skills, and environment;
 - run each agent session in its own `kernel_host` container;
-- chat through a React web UI or a small CLI client;
+- chat or attach to a persistent interactive Copilot CLI through the Web UI;
 - inspect sessions, messages, tool calls, logs, and running kernels;
 - attach persistent workspaces and open container-hosted VS Code sessions;
 - manage reusable skills, model connections, and write-only secret values;
@@ -75,6 +75,7 @@ flowchart LR
     Client["client_service<br/>:8002"]
     Host["agent_host<br/>:8001"]
     Kernel["kernel_host containers<br/>one per session"]
+    Terminal["tmux + PTY attachments"]
     Harness["Agent CLI / ACP server"]
     Memory["memory service"]
 
@@ -86,12 +87,16 @@ flowchart LR
     Host --> Kernel
     Host -. manages .-> Gateway
     Kernel --> Harness
+    Host --> Terminal
+    Kernel --> Terminal
 ```
 
 `client_service` is the client-facing API and persistence layer. Clients
 should not call `agent_host` directly. `agent_host` manages session,
 workspace, gateway, and container lifecycles. Each kernel container translates
-between a harness-specific protocol and AgentSpace's common event model.
+between a harness-specific protocol and AgentSpace's common event model. CLI
+terminal control follows Web UI → `client_service` → `agent_host` →
+`kernel_host`/tmux; PTY bytes use bounded WebSockets and Docker exec.
 
 ## Quick start
 
@@ -126,6 +131,10 @@ just stack-up
 Then open <http://127.0.0.1:8003>. Create an agent using the `echo` harness for
 a credential-free smoke test.
 
+Compose binds published services to loopback by default. The local trusted
+deployment has no authentication and needs no TLS certificates. Do not expose
+it to an untrusted network.
+
 Useful stack commands:
 
 | Command | Purpose |
@@ -133,14 +142,36 @@ Useful stack commands:
 | `just stack-up` | Build and start the full stack |
 | `just stack-status` | Show service status |
 | `just stack-logs` | Follow stack logs |
-| `just stack-down` | Stop the stack and clean up spawned containers |
+| `just stack-down` | Stop the stack and safely clean managed dynamic resources |
 | `just build-image-stack` | Build all stack images without starting them |
+| `just terminal-container-integration` | Run the opt-in kernel/tmux/PTY integration |
 
 `just stack-up` selects a reachable Podman daemon when available and otherwise
 uses Docker. Set `CONTAINER_RUNTIME=podman` or `CONTAINER_RUNTIME=docker` to
 choose explicitly.
 
 ### Using Copilot CLI
+
+Create an agent with a `cli` block using `copilot-cli`, then start it from the
+Web UI **CLI** view. A CLI connection is optional: omit it for GitHub Copilot
+authentication, or select a connection for a BYOK-compatible provider.
+
+Declarative configuration uses:
+
+```yaml
+apiVersion: agentspace.dev/v1alpha1
+kind: AgentSpaceConfig
+metadata:
+  name: local
+spec:
+  agents:
+    - id: reviewer
+      name: Reviewer
+      harness: copilot-cli
+      cli:
+        harness: copilot-cli
+      systemPrompt: Review the current workspace.
+```
 
 The Docker helper can populate the named Copilot configuration volume used by
 spawned kernel containers:
@@ -151,9 +182,17 @@ cp kernels/kernel_host/.env.example kernels/kernel_host/.env
 ./kernels/kernel_host/spawn-kernel.sh setup
 ```
 
-Run `/login` in the interactive Copilot session. This helper currently uses
-Docker Compose directly. Other harnesses have their own authentication and
-configuration requirements.
+Run `/login` in the interactive terminal when GitHub authentication is needed.
+The volume preserves authentication and Copilot session state. AgentSpace also
+persists a separate Copilot UUID and session workspace for every CLI session.
+Multiple browsers can attach to the same live tmux pane; closing them detaches
+without stopping Copilot.
+
+The exact live pane, process, screen, and tmux scrollback survive client and
+Rust service restarts only while the kernel container survives. Container or
+host loss creates a new tmux process with the same Copilot UUID, Copilot state,
+and workspace. Missing required secret/config/state/workspace data causes an
+explicit recovery error rather than a replacement UUID.
 
 ## Services and data
 
@@ -167,14 +206,25 @@ configuration requirements.
 Local state includes:
 
 - client-service SQLite data under `mounts/data/client_service`;
+- per-session working files in labeled `agentspace-session-workspace-*` named
+  volumes;
 - the shared memory corpus in the `agentspace-memory-data` named volume;
 - managed skills in the `agentspace-skills` named volume, with built-in skills
   sourced from `mounts/skills`; and
-- harness authentication state in harness-specific named volumes.
+- Copilot authentication and durable session state in
+  `agentspace-kernel_copilot-config`.
 
 `CLIENT_SERVICE_SECRET_KEY` encrypts write-only configuration secrets stored in
 SQLite. Generate it with `openssl rand -base64 32` before storing secrets, keep
 it stable for the lifetime of the database, and never commit `.env` files.
+
+Back up the SQLite database, encryption key, Copilot state volume, and required
+workspace volumes together. Explicit session deletion removes that session's
+managed runtime and scratch workspace. `just stack-down` removes running and
+stopped managed dynamic containers plus reported orphan volumes without broad
+name-based deletion; durable owned workspaces remain recoverable. See
+[docs/OPERATIONS.md](docs/OPERATIONS.md) and
+[docs/TERMINAL_PROTOCOL.md](docs/TERMINAL_PROTOCOL.md).
 
 ## Development
 

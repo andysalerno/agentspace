@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def emit(message: str, *, error: bool = False) -> None:
+    stream = sys.stderr if error else sys.stdout
+    stream.write(f"{message}\n")
+    stream.flush()
+
+
+def session_id() -> str:
+    prefix = "--session-id="
+    return next(
+        (
+            argument.removeprefix(prefix)
+            for argument in sys.argv[1:]
+            if argument.startswith(prefix)
+        ),
+        "",
+    )
+
+
+def main() -> int:
+    durable_session_id = session_id()
+    if not durable_session_id:
+        emit("missing --session-id", error=True)
+        return 64
+
+    config_dir = Path(os.environ.get("COPILOT_CONFIG_DIR", "/root/.copilot"))
+    config_dir.mkdir(parents=True, exist_ok=True)
+    state_path = config_dir / "terminal-integration-state.json"
+    state = json.loads(state_path.read_text()) if state_path.exists() else {}
+    invocations = int(state.get("invocations", 0)) + 1
+    state = {"session_id": durable_session_id, "invocations": invocations}
+    state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
+
+    emit("FAKE_COPILOT_READY")
+    emit(f"SESSION {durable_session_id}")
+    emit(f"INVOCATION {invocations}")
+    emit("UNICODE ASCII·e\u0301·界·🚀")
+    for raw_line in sys.stdin.buffer:
+        line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+        if line == "size":
+            size = os.get_terminal_size(sys.stdin.fileno())
+            emit(f"SIZE cols={size.columns} rows={size.lines}")
+        elif line == "state":
+            marker = Path("/workspace/integration-marker")
+            marker_value = (
+                marker.read_text(encoding="utf-8").strip()
+                if marker.exists()
+                else "missing"
+            )
+            emit(
+                f"STATE session={durable_session_id} invocation={invocations} "
+                f"workspace={marker_value}"
+            )
+        elif line.startswith("exit"):
+            fields = line.split(maxsplit=1)
+            return int(fields[1]) if len(fields) == 2 else 0
+        else:
+            emit(f"ECHO {line}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

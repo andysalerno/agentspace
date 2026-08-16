@@ -85,7 +85,7 @@ services:
       - AGENT_HOST_GATEWAY_CLIENT_SERVICE_URL=http://client-service:8002
       - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     ports:
-      - "${CONTAINER_AGENT_HOST_PORT:-8001}:8001"
+      - "${AGENTSPACE_BIND_HOST:-127.0.0.1}:${CONTAINER_AGENT_HOST_PORT:-8001}:8001"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - skills:/skills
@@ -125,7 +125,7 @@ services:
       # Unset falls back to the default local WebUI origins.
       - CLIENT_SERVICE_CORS_ALLOWED_ORIGINS=${CLIENT_SERVICE_CORS_ALLOWED_ORIGINS:-}
     ports:
-      - "${CONTAINER_CLIENT_SERVICE_PORT:-8002}:8002"
+      - "${AGENTSPACE_BIND_HOST:-127.0.0.1}:${CONTAINER_CLIENT_SERVICE_PORT:-8002}:8002"
     volumes:
       - ${AGENTSPACE_HOST_WORKSPACE:-.}/mounts/data/client_service:/data
     networks:
@@ -145,7 +145,7 @@ services:
       - WEBUI_CLIENT_SERVICE_BASE_URL=http://client-service:8002
       - WEBUI_CLIENT_SERVICE_TIMEOUT=60
     ports:
-      - "${CONTAINER_WEBUI_PORT:-8003}:8003"
+      - "${AGENTSPACE_BIND_HOST:-127.0.0.1}:${CONTAINER_WEBUI_PORT:-8003}:8003"
     networks:
       - agentspace
   # phoenix:

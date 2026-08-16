@@ -70,6 +70,7 @@ struct StubState {
     observations: Arc<Mutex<Vec<WebSocketObservation>>>,
     fail_create: Arc<AtomicBool>,
     terminal_unavailable: Arc<AtomicBool>,
+    terminal_resumed: Arc<AtomicBool>,
     ensure_count: Arc<AtomicUsize>,
     websocket_mode: Arc<Mutex<WebSocketMode>>,
 }
@@ -139,8 +140,16 @@ impl TestHarness {
     async fn start() -> Result<Self, Box<dyn Error + Send + Sync>> {
         let upstream = StubState::default();
         let upstream_server = spawn_server(stub_router(upstream.clone())).await?;
-        let config = AppConfig::new("127.0.0.1", 0, &upstream_server.base_url, BTreeMap::new())
-            .with_cors_allowed_origins([ALLOWED_ORIGIN]);
+        let config = AppConfig::new(
+            "127.0.0.1",
+            0,
+            &upstream_server.base_url,
+            BTreeMap::from([(
+                "CLIENT_SERVICE_SECRET_KEY".to_owned(),
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_owned(),
+            )]),
+        )
+        .with_cors_allowed_origins([ALLOWED_ORIGIN]);
         let agent_host = AgentHostClient::new(&upstream_server.base_url, Duration::from_secs(2))?;
         let app = build_router(AppState::with_agent_host(config, agent_host)?);
         let client_server = spawn_server(app).await?;
@@ -193,6 +202,21 @@ impl TestHarness {
         body: Value,
     ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
         self.request(reqwest::Method::PATCH, path, Some(body)).await
+    }
+
+    async fn put(
+        &self,
+        path: &str,
+        body: Value,
+    ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
+        self.request(reqwest::Method::PUT, path, Some(body)).await
+    }
+
+    async fn delete(
+        &self,
+        path: &str,
+    ) -> Result<(StatusCode, Value), Box<dyn Error + Send + Sync>> {
+        self.request(reqwest::Method::DELETE, path, None).await
     }
 
     async fn create_cli_session(&self) -> Result<(String, Value), Box<dyn Error + Send + Sync>> {
@@ -376,7 +400,11 @@ async fn upstream_terminal_status(
     if let Err(status) = state.record("GET", format!("/sessions/{session_id}/terminal"), None) {
         return status.into_response();
     }
-    terminal_response(&state, None, "running")
+    let attach_kind = state
+        .terminal_resumed
+        .load(Ordering::SeqCst)
+        .then_some("resumed");
+    terminal_response(&state, attach_kind, "running")
 }
 
 async fn upstream_terminal_ensure(
@@ -423,6 +451,7 @@ async fn upstream_terminal_resume(
     ) {
         return status.into_response();
     }
+    state.terminal_resumed.store(true, Ordering::SeqCst);
     terminal_response(&state, Some("resumed"), "running")
 }
 
@@ -438,7 +467,11 @@ async fn upstream_terminal_copy_mode(
     ) {
         return status.into_response();
     }
-    terminal_response(&state, None, "running")
+    let attach_kind = state
+        .terminal_resumed
+        .load(Ordering::SeqCst)
+        .then_some("resumed");
+    terminal_response(&state, attach_kind, "running")
 }
 
 async fn upstream_terminal_websocket(
@@ -637,6 +670,9 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
         .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(copied["state"], "running");
+    let (status, updated_session) = harness.get(&format!("/sessions/{session_id}")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated_session["runtime_generation"], 1);
 
     let session_creates = harness
         .upstream
@@ -732,6 +768,106 @@ async fn failed_cli_creation_is_retryable_without_false_success()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(recovered["runtime_status"], "live");
     assert_eq!(recovered["status"], "running");
+    Ok(())
+}
+
+#[tokio::test]
+async fn terminal_recovery_reports_missing_secret_and_recovers_after_restore()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let harness = TestHarness::start().await?;
+    let (status, _secret) = harness
+        .post("/secrets", json!({ "name": "PROVIDER_KEY" }))
+        .await?;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _empty) = harness
+        .put(
+            "/secrets/PROVIDER_KEY/value",
+            json!({ "value": "initial-key" }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _connection) = harness
+        .post(
+            "/connections",
+            json!({
+                "connection_id": "secret-provider",
+                "name": "Secret Provider",
+                "url": "https://provider.example/v1",
+                "api_flavor": "responses",
+                "api_key_secret": "PROVIDER_KEY",
+            }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _agent) = harness
+        .post(
+            "/agents",
+            json!({
+                "agent_id": "secret-cli-agent",
+                "name": "Secret CLI Agent",
+                "cli": {
+                    "harness": "copilot-cli",
+                    "connection_id": "secret-provider",
+                },
+            }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, session) = harness
+        .post(
+            "/sessions",
+            json!({
+                "agent_id": "secret-cli-agent",
+                "interaction_mode": "cli",
+            }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    let session_id = string_field(&session, "session_id")?;
+
+    let (status, _empty) = harness.delete("/secrets/PROVIDER_KEY/value").await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, error) = harness
+        .post(
+            &format!("/sessions/{session_id}/terminal/ensure"),
+            json!({}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"], "secret_values_unset");
+    assert_eq!(error["missing_secrets"][0]["name"], "PROVIDER_KEY");
+
+    let (status, _empty) = harness
+        .put(
+            "/secrets/PROVIDER_KEY/value",
+            json!({ "value": "restored-key" }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, terminal) = harness
+        .post(
+            &format!("/sessions/{session_id}/terminal/ensure"),
+            json!({}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{terminal}");
+    assert_eq!(terminal["state"], "running");
+
+    let creates = harness
+        .upstream
+        .requests()?
+        .into_iter()
+        .filter(|request| request.method == "POST" && request.path == "/sessions")
+        .collect::<Vec<_>>();
+    assert_eq!(creates.len(), 2);
+    assert_eq!(
+        creates[1].body.as_ref().ok_or("missing recovery body")?["env"]["AGENTSPACE_RUNTIME_RECOVERY"],
+        "1"
+    );
+    assert_eq!(
+        creates[1].body.as_ref().ok_or("missing recovery body")?["env"]["CONNECTION_API_KEY"],
+        "restored-key"
+    );
     Ok(())
 }
 
