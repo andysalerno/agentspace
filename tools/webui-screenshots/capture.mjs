@@ -36,6 +36,12 @@ const views = [
   ["cli", { steps: ["CLI"] }],
   ["cli-session", { steps: ["CLI", { css: ".cli-session-row-button" }] }],
   [
+    "cli-telemetry-details",
+    {
+      steps: ["CLI", { css: ".cli-session-row-button" }, "Usage details"],
+    },
+  ],
+  [
     "cli-session-narrow",
     {
       steps: ["CLI", { css: ".cli-session-row-button" }],

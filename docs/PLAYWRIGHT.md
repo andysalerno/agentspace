@@ -17,8 +17,9 @@ tool. Screenshots are captured for every view in both light and dark themes.
 
 ## Status
 
-The harness works and has been verified end to end: 16 views x 2 themes = 32
-screenshots, no page errors, with Monaco and markdown rendering correctly.
+The harness works and has been verified end to end: 18 views x 2 themes = 36
+screenshots, no page errors, with Monaco, markdown rendering, and the CLI
+telemetry strip/details UI working correctly.
 
 `dev.Dockerfile` was updated to install the Chromium runtime libraries and
 fonts. **That change only takes effect once the dev image is rebuilt.**
@@ -247,16 +248,21 @@ node capture.mjs ./out
 | `WIDTH` / `HEIGHT` | `1440` / `900` | Viewport size. |
 | `PW_SYSROOT` | `./.sysroot` | Override the fallback sysroot location. |
 
-View ids: `chat`, `chat-session`, `cli`, `cli-session`, `agents`,
-`workspaces`, `sessions`, `kernels`, `memory`, `gateways`, `skills`, `info`,
-`config`, `config-secrets`, `config-kernels`, `connections`.
+View ids: `chat`, `chat-session`, `cli`, `cli-session`,
+`cli-telemetry-details`, `cli-session-narrow`, `agents`, `workspaces`,
+`sessions`, `kernels`, `memory`, `gateways`, `skills`, `info`, `config`,
+`config-secrets`, `config-kernels`, `connections`.
 
 `chat-session` opens the first session so the transcript is captured; `chat`
 leaves the empty state visible. `cli-session` opens the deterministic CLI
-fixture and waits for its mock terminal WebSocket. The mock sends a `ready`
-frame followed by raw binary ANSI/Unicode terminal output, so the screenshot
-exercises xterm rendering without a backend, Copilot login, or container
-daemon. `cli` leaves the CLI session rail visible without selecting a session.
+fixture, waits for its mock terminal WebSocket, and captures the full-width CLI
+telemetry summary strip. `cli-session-narrow` replays that same session at a
+narrower viewport so the compact telemetry summary is exercised.
+`cli-telemetry-details` opens the **Usage details** surface against the same
+fixture. The mock sends a `ready` frame followed by raw binary ANSI/Unicode
+terminal output, so the CLI screenshots still exercise xterm rendering without
+a backend, Copilot login, or container daemon. `cli` leaves the CLI session
+rail visible without selecting a session.
 
 Output files are named `<theme>-<view>.png`.
 
@@ -268,7 +274,7 @@ that reason. A single long-lived browser walking the whole matrix gets killed
 around the sixth or seventh view. If you rewrite the harness, keep that
 property.
 
-The container is not generously provisioned, and a full run launches 28
+The container is not generously provisioned, and a full run launches 36
 browsers. During the session that built this harness, the surrounding tool
 process eventually failed to spawn any new shell at all (`No such file or
 directory (os error 2)`), with the filesystem intact. The cause was never

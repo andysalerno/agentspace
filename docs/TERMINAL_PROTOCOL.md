@@ -4,6 +4,11 @@ AgentSpace exposes persistent CLI sessions through `client_service`. Browser
 and future non-browser clients use the same HTTP and WebSocket contract; they
 must not call `agent_host` or `kernel_host` directly.
 
+Structured CLI usage telemetry is described separately in
+[`docs/TELEMETRY_PROTOCOL.md`](./TELEMETRY_PROTOCOL.md). It is fetched through a
+different JSON route family; terminal routes and WebSocket frames never carry
+telemetry payloads.
+
 ## Public HTTP routes
 
 All routes are under `/sessions/{session_id}/terminal` on `client_service`.
@@ -28,7 +33,8 @@ pane interaction state.
 `client_service` proxies equivalent internal routes on `agent_host`.
 `agent_host` uses `kernel_host`'s `/terminal`, `/terminal/ensure`,
 `/terminal/stop`, `/terminal/resume`, and `/terminal/detach-client` routes for
-control only. PTY bytes never travel over those internal HTTP routes.
+control only. PTY bytes never travel over those internal HTTP routes, and no
+telemetry data is multiplexed into them.
 
 ## WebSocket frames
 
@@ -63,6 +69,9 @@ that tmux client only. Multiple clients can attach simultaneously, receive the
 same pane output, and send input. Tmux uses its `window-size smallest` policy
 when client dimensions differ.
 
+No terminal frame carries telemetry. Telemetry fetch failures do not alter
+terminal frame types, close codes, or PTY readiness.
+
 ## Errors and close codes
 
 Errors detected before upgrade are ordinary JSON HTTP errors:
@@ -75,6 +84,10 @@ Errors detected before upgrade are ordinary JSON HTTP errors:
 - `422` for invalid control payloads; and
 - `503` when `agent_host`, the kernel controller, or the container runtime is
   unavailable.
+
+Telemetry health is independent from terminal health: a CLI can have a running
+terminal while `/sessions/{session_id}/telemetry` is `starting`, `degraded`, or
+`unavailable`.
 
 After upgrade, these close codes are used:
 
