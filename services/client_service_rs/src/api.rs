@@ -1147,6 +1147,7 @@ async fn create_cli_session(
     session.runtime_generation = None;
     session.runtime_status = Some(RuntimeStatus::Starting);
     session.workspace_volume_identity = Some(session_id);
+    session.telemetry_volume_identity = Some(session.session_id.clone());
     session.workspace_mounts = session_mounts.to_vec();
     session.launch_snapshot = Some(launch_snapshot);
 
@@ -1489,6 +1490,7 @@ async fn ensure_cli_runtime_locked(
         .agent_host
         .create_session(AgentHostSessionCreate {
             session_id: &session.session_id,
+            telemetry_volume_identity: session.telemetry_volume_identity.as_deref(),
             interaction_mode: InteractionMode::Cli.as_str(),
             harness: CliHarnessName::CopilotCli.as_str(),
             skills: Some(&agent.skills),
@@ -4860,6 +4862,7 @@ async fn ensure_chat_runtime_locked(
         .agent_host
         .create_session(AgentHostSessionCreate {
             session_id: &session.session_id,
+            telemetry_volume_identity: None,
             interaction_mode: InteractionMode::Chat.as_str(),
             harness: agent.harness.as_str(),
             skills: Some(&agent.skills),

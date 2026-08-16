@@ -585,6 +585,10 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let harness = TestHarness::start().await?;
     let (session_id, session) = harness.create_cli_session().await?;
+    assert_eq!(
+        session["telemetry_volume_identity"],
+        json!(session_id.clone())
+    );
     assert_eq!(session["runtime_status"], "live");
     assert_eq!(session["status"], "running");
     assert!(session.get("agent_host_session_id").is_none());
@@ -670,6 +674,7 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
     for request in &session_creates {
         let body = request.body.as_ref().ok_or("missing create body")?;
         assert_eq!(body["session_id"], session_id);
+        assert_eq!(body["telemetry_volume_identity"], session_id);
         assert_eq!(body["interaction_mode"], "cli");
         assert_eq!(body["harness"], "copilot-cli");
         assert_eq!(body["env"]["KERNEL_SESSION_ID"], harness_session_id);
@@ -849,6 +854,10 @@ async fn terminal_recovery_reports_missing_secret_and_recovers_after_restore()
     assert_eq!(
         creates[1].body.as_ref().ok_or("missing recovery body")?["env"]["AGENTSPACE_RUNTIME_RECOVERY"],
         "1"
+    );
+    assert_eq!(
+        creates[1].body.as_ref().ok_or("missing recovery body")?["telemetry_volume_identity"],
+        session_id
     );
     assert_eq!(
         creates[1].body.as_ref().ok_or("missing recovery body")?["env"]["CONNECTION_API_KEY"],

@@ -918,6 +918,7 @@ async fn created_session_message_listing_shape_matches_contract()
     assert_eq!(session["status"], "idle");
     assert_eq!(session["interaction_mode"], "chat");
     assert_eq!(session["recovery_state"], "recoverable");
+    assert!(session["telemetry_volume_identity"].is_null());
     assert!(session.get("workspace_volume_identity").is_none());
     assert!(session["cli_harness"].is_null());
     assert_eq!(session["message_count"], json!(0));
@@ -1018,12 +1019,16 @@ async fn cli_sessions_create_durable_upstream_terminal_runtime()
     assert!(session.get("launch_snapshot").is_none());
     let harness_session_id = string_field(&session, "harness_session_id")?;
     uuid::Uuid::parse_str(&harness_session_id)?;
+    let session_id = string_field(&session, "session_id")?;
+    assert_eq!(
+        session["telemetry_volume_identity"],
+        json!(session_id.clone())
+    );
     assert!(
         !serde_json::to_string(&session)?.contains("must-not-be-snapshotted"),
         "CLI launch snapshot persisted a credential"
     );
 
-    let session_id = string_field(&session, "session_id")?;
     let (status, detail) = get_json(app.clone(), &format!("/sessions/{session_id}")).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["interaction_mode"], "cli");

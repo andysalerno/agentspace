@@ -32,6 +32,7 @@ const MAX_TERMINAL_WEBSOCKET_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
 
 pub struct AgentHostSessionCreate<'a> {
     pub session_id: &'a str,
+    pub telemetry_volume_identity: Option<&'a str>,
     pub interaction_mode: &'a str,
     pub harness: &'a str,
     pub skills: Option<&'a [String]>,
@@ -108,6 +109,12 @@ impl AgentHostClient {
     ) -> AgentHostResult<JsonObject> {
         let mut payload = JsonObject::new();
         payload.insert("session_id".to_owned(), json!(request.session_id));
+        if let Some(telemetry_volume_identity) = request.telemetry_volume_identity {
+            payload.insert(
+                "telemetry_volume_identity".to_owned(),
+                json!(telemetry_volume_identity),
+            );
+        }
         payload.insert(
             "interaction_mode".to_owned(),
             json!(request.interaction_mode),
@@ -2399,6 +2406,7 @@ mod tests {
         let response = client
             .create_session(AgentHostSessionCreate {
                 session_id: "stable-session",
+                telemetry_volume_identity: Some("telemetry-stable"),
                 interaction_mode: "chat",
                 harness: "copilot",
                 skills: Some(&skills),
@@ -2417,6 +2425,7 @@ mod tests {
                 query: None,
                 body: Some(json!({
                     "session_id": "stable-session",
+                    "telemetry_volume_identity": "telemetry-stable",
                     "interaction_mode": "chat",
                     "harness": "copilot",
                     "skills": ["skill-a", "skill-b"],
@@ -2438,6 +2447,7 @@ mod tests {
         client
             .create_session(AgentHostSessionCreate {
                 session_id: "stable-session",
+                telemetry_volume_identity: None,
                 interaction_mode: "chat",
                 harness: "copilot",
                 skills: None,

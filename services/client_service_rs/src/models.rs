@@ -799,6 +799,8 @@ pub struct SessionRecord {
     pub runtime_status: Option<RuntimeStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_volume_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_volume_identity: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_mounts: Vec<WorkspaceMountRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -838,6 +840,7 @@ impl SessionRecord {
             runtime_generation: None,
             runtime_status: None,
             workspace_volume_identity: None,
+            telemetry_volume_identity: None,
             workspace_mounts: Vec::new(),
             launch_snapshot: None,
             vscode_url: None,
@@ -893,6 +896,7 @@ pub struct PublicSessionSummary<'a> {
     pub runtime_generation: Option<u64>,
     pub runtime_status: Option<&'static str>,
     pub recovery_state: &'static str,
+    pub telemetry_volume_identity: Option<&'a str>,
     pub vscode_url: Option<&'a str>,
     pub free_port_url: Option<&'a str>,
     pub created_at: &'a str,
@@ -915,6 +919,7 @@ impl<'a> From<&'a SessionRecord> for PublicSessionSummary<'a> {
             runtime_generation: session.runtime_generation,
             runtime_status: session.runtime_status.map(RuntimeStatus::as_str),
             recovery_state: session.recovery_state().as_str(),
+            telemetry_volume_identity: session.telemetry_volume_identity.as_deref(),
             vscode_url: session.vscode_url.as_deref(),
             free_port_url: session.free_port_url.as_deref(),
             created_at: &session.created_at,
@@ -1313,6 +1318,7 @@ mod tests {
                 "runtime_generation": null,
                 "runtime_status": null,
                 "recovery_state": "legacy-unrecoverable",
+                "telemetry_volume_identity": null,
                 "vscode_url": null,
                 "free_port_url": null,
                 "created_at": "c",

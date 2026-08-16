@@ -1935,6 +1935,7 @@ mod tests {
         first_registry
             .create_session(crate::sessions::CreateSessionRequest {
                 session_id: Some(SESSION_ID.to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Cli,
                 env: BTreeMap::new(),
@@ -1963,6 +1964,7 @@ mod tests {
         restarted_registry
             .create_session(crate::sessions::CreateSessionRequest {
                 session_id: Some(SESSION_ID.to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Cli,
                 env: BTreeMap::new(),

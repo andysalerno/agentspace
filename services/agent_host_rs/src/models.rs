@@ -383,6 +383,7 @@ pub struct DockerKernelSession {
     pub session_id: String,
     pub container_name: String,
     pub session_workspace_volume_name: String,
+    pub session_telemetry_volume_name: Option<String>,
     pub base_url: String,
     pub vscode_url: Option<String>,
     pub free_port_url: Option<String>,
@@ -439,6 +440,7 @@ pub struct SessionSummary {
 pub enum CleanupResourceKind {
     KernelContainer,
     SessionWorkspaceVolume,
+    SessionTelemetryVolume,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]

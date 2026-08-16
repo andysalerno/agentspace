@@ -40,6 +40,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostEr
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeCreateSession {
     pub session_id: String,
+    pub telemetry_volume_identity: Option<String>,
     pub harness: HarnessName,
     pub interaction_mode: InteractionMode,
     pub env: BTreeMap<String, String>,
@@ -269,6 +270,7 @@ impl SessionRegistry {
         ServiceSummary::ready("session lifecycle routes are active")
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn create_session(
         &self,
         request: CreateSessionRequest,
@@ -279,6 +281,9 @@ impl SessionRegistry {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
         validate_session_id_or_error(&session_id)?;
+        if let Some(telemetry_volume_identity) = request.telemetry_volume_identity.as_deref() {
+            validate_session_id_or_error(telemetry_volume_identity)?;
+        }
         let existing = self.inner.sessions.read().await.get(&session_id).cloned();
         if let Some(record) = &existing {
             validate_existing_session_identity(record, &request)?;
@@ -322,6 +327,7 @@ impl SessionRegistry {
         );
         let runtime_request = RuntimeCreateSession {
             session_id: session_id.clone(),
+            telemetry_volume_identity: request.telemetry_volume_identity.clone(),
             harness: request.harness,
             interaction_mode: request.interaction_mode,
             env: merged_env.clone(),
@@ -340,6 +346,7 @@ impl SessionRegistry {
         let runtime_summary = self.inner.runtime.summary(&runtime_session).await?;
         let mut record = existing.unwrap_or_else(|| SessionRecord {
             session_id: session_id.clone(),
+            telemetry_volume_identity: request.telemetry_volume_identity.clone(),
             harness: request.harness,
             interaction_mode: request.interaction_mode,
             runtime_session: runtime_session.clone(),
@@ -356,6 +363,7 @@ impl SessionRegistry {
             stats: None,
         });
         record.runtime_session = runtime_session.clone();
+        record.telemetry_volume_identity = request.telemetry_volume_identity.clone();
         record.env = merged_env;
         record.additional_paths = additional_paths;
         record.skills = request.skills;
@@ -453,6 +461,7 @@ impl SessionRegistry {
         self.destroy_session(session_id).await?;
         self.create_session(CreateSessionRequest {
             session_id: Some(record.session_id),
+            telemetry_volume_identity: record.telemetry_volume_identity,
             harness: record.harness,
             interaction_mode: record.interaction_mode,
             env: record.env,
@@ -725,6 +734,8 @@ pub struct CreateSessionRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub telemetry_volume_identity: Option<String>,
+    #[serde(default)]
     pub harness: HarnessName,
     #[serde(default)]
     pub interaction_mode: InteractionMode,
@@ -823,6 +834,7 @@ struct CleanupRequest {
 #[derive(Clone)]
 struct SessionRecord {
     session_id: String,
+    telemetry_volume_identity: Option<String>,
     harness: HarnessName,
     interaction_mode: InteractionMode,
     runtime_session: KernelRuntimeSession,
@@ -996,13 +1008,19 @@ fn validate_existing_session_identity(
     record: &SessionRecord,
     request: &CreateSessionRequest,
 ) -> Result<(), AgentHostError> {
-    if record.harness == request.harness && record.interaction_mode == request.interaction_mode {
-        return Ok(());
+    if record.harness != request.harness || record.interaction_mode != request.interaction_mode {
+        return Err(AgentHostError::conflict(format!(
+            "session {:?} is already registered as harness {:?} in {:?} mode",
+            record.session_id, record.harness, record.interaction_mode
+        )));
     }
-    Err(AgentHostError::conflict(format!(
-        "session {:?} is already registered as harness {:?} in {:?} mode",
-        record.session_id, record.harness, record.interaction_mode
-    )))
+    if record.telemetry_volume_identity != request.telemetry_volume_identity {
+        return Err(AgentHostError::conflict(format!(
+            "session {:?} is already registered with telemetry volume identity {:?}",
+            record.session_id, record.telemetry_volume_identity
+        )));
+    }
+    Ok(())
 }
 
 async fn finalize_stream(
@@ -1688,6 +1706,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env,
@@ -1748,6 +1767,7 @@ mod tests {
         let registry = SessionRegistry::with_runtime(Arc::new(runtime.clone()));
         let request = CreateSessionRequest {
             session_id: Some("stable-session-123".to_owned()),
+            telemetry_volume_identity: Some("stable-session-123".to_owned()),
             harness: HarnessName::Echo,
             interaction_mode: InteractionMode::Chat,
             env: BTreeMap::new(),
@@ -1768,11 +1788,20 @@ mod tests {
         assert_eq!(first.session_id, "stable-session-123");
         assert_eq!(second.session_id, first.session_id);
         assert_eq!(first.interaction_mode, InteractionMode::Chat);
-        assert_eq!(runtime.state().created.len(), 2);
+        {
+            let state = runtime.state();
+            assert_eq!(state.created.len(), 2);
+            assert_eq!(
+                state.created[0].telemetry_volume_identity.as_deref(),
+                Some("stable-session-123")
+            );
+            drop(state);
+        }
 
         let result = registry
             .create_session(CreateSessionRequest {
                 session_id: Some(first.session_id),
+                telemetry_volume_identity: Some("stable-session-123".to_owned()),
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Cli,
                 env: BTreeMap::new(),
@@ -1789,7 +1818,26 @@ mod tests {
 
         let result = registry
             .create_session(CreateSessionRequest {
+                session_id: Some("stable-session-123".to_owned()),
+                telemetry_volume_identity: Some("different-telemetry".to_owned()),
+                harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await;
+        let Err(conflict) = result else {
+            panic!("registered session identity must not change telemetry identity");
+        };
+        assert!(matches!(conflict, AgentHostError::Conflict { .. }));
+        assert_eq!(runtime.state().created.len(), 2);
+
+        let result = registry
+            .create_session(CreateSessionRequest {
                 session_id: Some("not valid!".to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1806,6 +1854,7 @@ mod tests {
         let result = registry
             .create_session(CreateSessionRequest {
                 session_id: Some("valid-but-not-uuid".to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1827,6 +1876,7 @@ mod tests {
         registry
             .create_session(CreateSessionRequest {
                 session_id: Some("stable-session".to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1857,6 +1907,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1909,6 +1960,7 @@ mod tests {
         let enabled = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1921,6 +1973,7 @@ mod tests {
         registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2041,6 +2094,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2073,6 +2127,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2111,6 +2166,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2137,6 +2193,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),

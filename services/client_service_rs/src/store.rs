@@ -894,6 +894,7 @@ mod tests {
             session.runtime_generation = Some(2);
             session.runtime_status = Some(RuntimeStatus::Starting);
             session.workspace_volume_identity = Some("workspace-identity".to_owned());
+            session.telemetry_volume_identity = Some("telemetry-identity".to_owned());
             session.workspace_mounts = vec![WorkspaceMountRecord::new(
                 "workspace",
                 WorkspaceMountMode::ReadOnly,
@@ -1004,6 +1005,10 @@ mod tests {
                 Some("workspace-identity")
             );
             assert_eq!(
+                session.telemetry_volume_identity.as_deref(),
+                Some("telemetry-identity")
+            );
+            assert_eq!(
                 session.workspace_mounts,
                 vec![WorkspaceMountRecord::new(
                     "workspace",
@@ -1068,9 +1073,79 @@ mod tests {
         assert_eq!(session.interaction_mode, InteractionMode::Chat);
         assert_eq!(session.cli_harness, None);
         assert_eq!(session.launch_snapshot, None);
+        assert_eq!(session.telemetry_volume_identity, None);
         assert!(session.workspace_mounts.is_empty());
         assert_eq!(session.recovery_state(), RecoveryState::LegacyUnrecoverable);
         assert_eq!(session.summary()["recovery_state"], "legacy-unrecoverable");
+
+        cleanup_sqlite_path(&path);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_migrates_existing_durable_sessions_without_telemetry_identity()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let path = sqlite_test_path()?;
+        {
+            let connection = rusqlite::Connection::open(&path)?;
+            connection.execute_batch(
+                "
+                CREATE TABLE client_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    agent_host_session_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    channel_name TEXT,
+                    client_type TEXT,
+                    interaction_mode TEXT NOT NULL DEFAULT 'chat',
+                    cli_harness TEXT,
+                    cli_connection_id TEXT,
+                    harness_session_id TEXT,
+                    runtime_generation INTEGER,
+                    runtime_status TEXT,
+                    workspace_volume_identity TEXT,
+                    workspace_mounts TEXT,
+                    launch_snapshot TEXT,
+                    vscode_url TEXT,
+                    free_port_url TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                INSERT INTO client_sessions (
+                    session_id, agent_id, agent_host_session_id, status,
+                    channel_name, client_type, interaction_mode, cli_harness,
+                    cli_connection_id, harness_session_id, runtime_generation,
+                    runtime_status, workspace_volume_identity, workspace_mounts,
+                    launch_snapshot, vscode_url, free_port_url, created_at, updated_at
+                ) VALUES (
+                    'recoverable', 'agent', 'recoverable', 'running',
+                    'webui', 'webui', 'cli', 'copilot-cli',
+                    NULL, '87654321-4321-4765-a321-876543210000', 1,
+                    'live', 'workspace-identity', NULL,
+                    NULL, NULL, NULL, '2024-01-01', '2024-01-01'
+                );
+                ",
+            )?;
+        }
+
+        let stores = StoreSet::sqlite(&path)?;
+        let session =
+            stores
+                .sessions
+                .get("recoverable")?
+                .ok_or_else(|| StoreError::SessionNotFound {
+                    session_id: "recoverable".to_owned(),
+                })?;
+        assert_eq!(session.interaction_mode, InteractionMode::Cli);
+        assert_eq!(session.cli_harness, Some(CliHarnessName::CopilotCli));
+        assert_eq!(
+            session.workspace_volume_identity.as_deref(),
+            Some("workspace-identity")
+        );
+        assert_eq!(session.telemetry_volume_identity, None);
+        assert_eq!(session.recovery_state(), RecoveryState::Recoverable);
+        assert_eq!(session.summary()["recovery_state"], "recoverable");
+        assert!(session.summary()["telemetry_volume_identity"].is_null());
 
         cleanup_sqlite_path(&path);
         Ok(())

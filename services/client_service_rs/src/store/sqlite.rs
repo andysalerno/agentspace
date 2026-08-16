@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS client_sessions (
     runtime_generation INTEGER,
     runtime_status TEXT,
     workspace_volume_identity TEXT,
+    telemetry_volume_identity TEXT,
     workspace_mounts TEXT,
     launch_snapshot TEXT,
     vscode_url TEXT,
@@ -445,6 +446,7 @@ impl SqliteSessionStore {
                        runtime_generation = ?,
                        runtime_status = ?,
                        workspace_volume_identity = ?,
+                       telemetry_volume_identity = ?,
                        workspace_mounts = ?,
                        launch_snapshot = ?,
                        vscode_url = ?,
@@ -465,6 +467,7 @@ impl SqliteSessionStore {
                     optional_u64_to_i64(session.runtime_generation)?,
                     session.runtime_status.map(RuntimeStatus::as_str),
                     session.workspace_volume_identity,
+                    session.telemetry_volume_identity,
                     serialize_workspace_mounts(&session.workspace_mounts)?,
                     serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
                     session.vscode_url,
@@ -500,9 +503,10 @@ impl SqliteSessionStore {
                     session_id, agent_id, agent_host_session_id, status,
                     channel_name, client_type, interaction_mode, cli_harness,
                     cli_connection_id, harness_session_id, runtime_generation,
-                    runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
+                    runtime_status, workspace_volume_identity, telemetry_volume_identity,
+                    workspace_mounts, launch_snapshot,
                     vscode_url, free_port_url, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     agent_host_session_id = excluded.agent_host_session_id,
@@ -516,6 +520,7 @@ impl SqliteSessionStore {
                     runtime_generation = excluded.runtime_generation,
                     runtime_status = excluded.runtime_status,
                     workspace_volume_identity = excluded.workspace_volume_identity,
+                    telemetry_volume_identity = excluded.telemetry_volume_identity,
                     workspace_mounts = excluded.workspace_mounts,
                     launch_snapshot = excluded.launch_snapshot,
                     vscode_url = excluded.vscode_url,
@@ -536,6 +541,7 @@ impl SqliteSessionStore {
                     optional_u64_to_i64(session.runtime_generation)?,
                     session.runtime_status.map(RuntimeStatus::as_str),
                     session.workspace_volume_identity,
+                    session.telemetry_volume_identity,
                     serialize_workspace_mounts(&session.workspace_mounts)?,
                     serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
                     session.vscode_url,
@@ -714,6 +720,10 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
                 "workspace_volume_identity",
                 "workspace_volume_identity TEXT",
             ),
+            (
+                "telemetry_volume_identity",
+                "telemetry_volume_identity TEXT",
+            ),
             ("workspace_mounts", "workspace_mounts TEXT"),
             ("launch_snapshot", "launch_snapshot TEXT"),
             ("vscode_url", "vscode_url TEXT"),
@@ -821,6 +831,7 @@ fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, Store
             .transpose()
             .map_err(validation_error("sessions"))?,
         workspace_volume_identity: row.get("workspace_volume_identity")?,
+        telemetry_volume_identity: row.get("telemetry_volume_identity")?,
         workspace_mounts: deserialize_workspace_mounts(workspace_mounts_raw.as_deref())?,
         launch_snapshot: deserialize_launch_snapshot(launch_snapshot_raw.as_deref())?,
         vscode_url: row.get("vscode_url")?,
@@ -936,9 +947,10 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
             session_id, agent_id, agent_host_session_id, status,
             channel_name, client_type, interaction_mode, cli_harness,
             cli_connection_id, harness_session_id, runtime_generation,
-            runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
+            runtime_status, workspace_volume_identity, telemetry_volume_identity,
+            workspace_mounts, launch_snapshot,
             vscode_url, free_port_url, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             session.session_id,
@@ -954,6 +966,7 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
             optional_u64_to_i64(session.runtime_generation).map_err(store_error_to_sqlite)?,
             session.runtime_status.map(RuntimeStatus::as_str),
             session.workspace_volume_identity,
+            session.telemetry_volume_identity,
             serialize_workspace_mounts(&session.workspace_mounts).map_err(store_error_to_sqlite)?,
             serialize_launch_snapshot(session.launch_snapshot.as_ref())
                 .map_err(store_error_to_sqlite)?,
