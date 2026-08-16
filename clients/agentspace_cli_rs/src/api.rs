@@ -165,6 +165,14 @@ pub enum ApiError {
 }
 
 impl ApiError {
+    #[must_use]
+    pub const fn is_not_found(&self) -> bool {
+        matches!(
+            self,
+            Self::Response { status, .. } if status.as_u16() == 404
+        )
+    }
+
     fn from_reqwest(source: reqwest::Error) -> Self {
         if source.is_timeout() {
             return Self::Timeout {

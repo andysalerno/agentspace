@@ -65,11 +65,11 @@ pub async fn execute(
         }
         SkillsCommand::Sync { directory } => {
             let (skill_id, files) = collect_skill_directory(&directory)?;
-            let existing = client
-                .list_skills()
-                .await?
-                .into_iter()
-                .find(|skill| skill.skill_id == skill_id);
+            let existing = match client.get_skill(&skill_id).await {
+                Ok(skill) => Some(skill),
+                Err(error) if error.is_not_found() => None,
+                Err(error) => return Err(error),
+            };
             let (action, skill) = match existing {
                 None => (
                     "created",
@@ -171,6 +171,7 @@ fn print_value<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeMap,
         fs,
         sync::{Arc, Mutex},
     };
@@ -179,11 +180,14 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::api::ApiError;
     use crate::skills::model::SkillSummary;
+    use reqwest::StatusCode;
 
     #[derive(Clone)]
     struct StubClient {
         existing: Option<SkillSource>,
+        fail_get: bool,
         calls: Arc<Mutex<Vec<&'static str>>>,
     }
 
@@ -191,6 +195,15 @@ mod tests {
         fn new(existing: Option<SkillSource>) -> Self {
             Self {
                 existing,
+                fail_get: false,
+                calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                existing: None,
+                fail_get: true,
                 calls: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -213,20 +226,31 @@ mod tests {
     #[async_trait]
     impl SkillsClient for StubClient {
         async fn list_skills(&self) -> Result<Vec<SkillSummary>, SkillsError> {
-            self.record("list");
-            Ok(self
-                .existing
-                .map(|source| {
-                    vec![SkillSummary {
-                        skill_id: "weather-report".to_owned(),
-                        source,
-                    }]
-                })
-                .unwrap_or_default())
+            unreachable!("not used by sync")
         }
 
-        async fn get_skill(&self, _skill_id: &str) -> Result<Skill, SkillsError> {
-            unreachable!("not used by sync")
+        async fn get_skill(&self, skill_id: &str) -> Result<Skill, SkillsError> {
+            self.record("get");
+            if self.fail_get {
+                return Err(SkillsError::Api(ApiError::Unavailable {
+                    message: "offline".to_owned(),
+                }));
+            }
+            self.existing.map_or_else(
+                || {
+                    Err(SkillsError::Api(ApiError::Response {
+                        status: StatusCode::NOT_FOUND,
+                        detail: format!("skill not found: {skill_id}"),
+                    }))
+                },
+                |source| {
+                    Ok(Skill {
+                        skill_id: skill_id.to_owned(),
+                        files: BTreeMap::new(),
+                        source,
+                    })
+                },
+            )
         }
 
         async fn create_skill(&self, request: CreateSkillRequest) -> Result<Skill, SkillsError> {
@@ -282,7 +306,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("sync: {error}"));
 
-        assert_eq!(client.calls(), vec!["list", "create"]);
+        assert_eq!(client.calls(), vec!["get", "create"]);
     }
 
     #[tokio::test]
@@ -294,7 +318,7 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("sync: {error}"));
 
-        assert_eq!(client.calls(), vec!["list", "update"]);
+        assert_eq!(client.calls(), vec!["get", "update"]);
     }
 
     #[tokio::test]
@@ -306,6 +330,18 @@ mod tests {
             execute(SkillsCommand::Sync { directory }, &client, false).await,
             Err(SkillsError::BuiltinReadOnly { .. })
         ));
-        assert_eq!(client.calls(), vec!["list"]);
+        assert_eq!(client.calls(), vec!["get"]);
+    }
+
+    #[tokio::test]
+    async fn sync_propagates_non_not_found_probe_errors() {
+        let (_root, directory) = skill_directory();
+        let client = StubClient::failing();
+
+        assert!(matches!(
+            execute(SkillsCommand::Sync { directory }, &client, false).await,
+            Err(SkillsError::Api(ApiError::Unavailable { .. }))
+        ));
+        assert_eq!(client.calls(), vec!["get"]);
     }
 }

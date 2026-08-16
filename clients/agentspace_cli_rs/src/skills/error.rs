@@ -25,6 +25,11 @@ pub enum SkillsError {
 
 impl SkillsError {
     #[must_use]
+    pub const fn is_not_found(&self) -> bool {
+        matches!(self, Self::Api(error) if error.is_not_found())
+    }
+
+    #[must_use]
     pub const fn exit_code(&self) -> i32 {
         match self {
             Self::InvalidSkillDirectory { .. }

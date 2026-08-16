@@ -9,7 +9,26 @@ use super::error::SkillsError;
 pub fn collect_skill_directory(
     skill_dir: &Path,
 ) -> Result<(String, BTreeMap<String, String>), SkillsError> {
-    if !skill_dir.is_dir() {
+    let metadata = match fs::symlink_metadata(skill_dir) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Err(SkillsError::InvalidSkillDirectory {
+                path: skill_dir.to_owned(),
+            });
+        }
+        Err(source) => {
+            return Err(SkillsError::Io {
+                path: skill_dir.to_owned(),
+                source,
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(SkillsError::Symlink {
+            path: skill_dir.to_owned(),
+        });
+    }
+    if !metadata.is_dir() {
         return Err(SkillsError::InvalidSkillDirectory {
             path: skill_dir.to_owned(),
         });
@@ -146,6 +165,18 @@ mod tests {
 
         assert!(matches!(
             collect_skill_directory(&skill),
+            Err(SkillsError::Symlink { .. })
+        ));
+
+        let target = root.path().join("target-skill");
+        fs::create_dir(&target).unwrap_or_else(|error| panic!("create target: {error}"));
+        fs::write(target.join("SKILL.md"), "# Target\n")
+            .unwrap_or_else(|error| panic!("write target manifest: {error}"));
+        let linked_root = root.path().join("root-link");
+        symlink(&target, &linked_root)
+            .unwrap_or_else(|error| panic!("create root symlink: {error}"));
+        assert!(matches!(
+            collect_skill_directory(&linked_root),
             Err(SkillsError::Symlink { .. })
         ));
     }
