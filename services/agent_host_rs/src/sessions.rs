@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
+    path::{Component, Path as FsPath},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -117,7 +118,7 @@ pub trait KernelRuntime: Send + Sync {
         session: &KernelRuntimeSession,
         workspace_id: String,
         volume_name: String,
-        exclude_names: Vec<String>,
+        exclude_paths: Vec<String>,
     ) -> Result<serde_json::Value, AgentHostError>;
 
     async fn clone_workspace(
@@ -205,8 +206,20 @@ impl SessionRegistry {
         if let Some(record) = self.inner.sessions.read().await.get(&session_id) {
             return Ok(record.summary());
         }
+        if request.harness == HarnessName::CopilotCli && Uuid::parse_str(&session_id).is_err() {
+            return Err(AgentHostError::validation(
+                "Copilot session_id must be a UUID",
+            ));
+        }
         let caller_env = request.env;
         let mut merged_env: BTreeMap<String, String> = std::env::vars().collect();
+        for key in [
+            "CONNECTION_URL",
+            "CONNECTION_API_KEY",
+            "CONNECTION_API_FLAVOR",
+        ] {
+            merged_env.remove(key);
+        }
         merged_env.extend(caller_env);
         let workspace_mounts = validate_workspace_mount_requests(request.workspace_mounts)?;
         let skill_volumes = match &self.inner.skills {
@@ -450,6 +463,7 @@ impl SessionRegistry {
     ) -> Result<serde_json::Value, AgentHostError> {
         validate_workspace_id_or_error(&request.workspace_id)?;
         validate_volume_name_or_error(&request.volume_name)?;
+        let exclude_paths = validate_relative_exclude_paths(request.exclude_paths)?;
         let record = self.get_record(session_id).await?;
         self.inner
             .runtime
@@ -457,7 +471,7 @@ impl SessionRegistry {
                 &record.runtime_session,
                 request.workspace_id,
                 request.volume_name,
-                request.exclude_names,
+                exclude_paths,
             )
             .await
     }
@@ -563,8 +577,8 @@ struct SendMessageRequest {
 pub struct SnapshotWorkspaceRequest {
     pub workspace_id: String,
     pub volume_name: String,
-    #[serde(default)]
-    pub exclude_names: Vec<String>,
+    #[serde(default, alias = "exclude_names")]
+    pub exclude_paths: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -870,6 +884,31 @@ fn validate_volume_name_or_error(volume_name: &str) -> Result<(), AgentHostError
             "volume_name must start with an alphanumeric character and contain only letters, digits, underscore, dot, or dash",
         ))
     }
+}
+
+fn validate_relative_exclude_paths(paths: Vec<String>) -> Result<Vec<String>, AgentHostError> {
+    let mut validated = Vec::with_capacity(paths.len());
+    let mut seen = BTreeSet::new();
+    for path in paths {
+        let parsed = FsPath::new(&path);
+        let valid = !path.is_empty()
+            && !path.contains('\\')
+            && !path.contains('\0')
+            && !parsed.is_absolute()
+            && parsed
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            && path.split('/').all(|component| !component.is_empty());
+        if !valid {
+            return Err(AgentHostError::validation(format!(
+                "exclude_paths entries must be normalized relative paths without traversal: {path:?}"
+            )));
+        }
+        if seen.insert(path.clone()) {
+            validated.push(path);
+        }
+    }
+    Ok(validated)
 }
 
 fn valid_workspace_id(workspace_id: &str) -> bool {
@@ -1377,13 +1416,13 @@ mod tests {
             session: &KernelRuntimeSession,
             workspace_id: String,
             volume_name: String,
-            exclude_names: Vec<String>,
+            exclude_paths: Vec<String>,
         ) -> Result<serde_json::Value, AgentHostError> {
             Ok(json!({
                 "session": session_key(session),
                 "workspace_id": workspace_id,
                 "volume_name": volume_name,
-                "exclude_names": exclude_names,
+                "exclude_paths": exclude_paths,
             }))
         }
 
@@ -1535,6 +1574,22 @@ mod tests {
             .await;
         let Err(invalid) = result else {
             panic!("invalid identity should fail");
+        };
+        assert!(matches!(invalid, AgentHostError::Validation { .. }));
+
+        let result = registry
+            .create_session(CreateSessionRequest {
+                session_id: Some("valid-but-not-uuid".to_owned()),
+                harness: HarnessName::CopilotCli,
+                interaction_mode: InteractionMode::Chat,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await;
+        let Err(invalid) = result else {
+            panic!("non-UUID Copilot identity should fail");
         };
         assert!(matches!(invalid, AgentHostError::Validation { .. }));
     }
@@ -1967,7 +2022,10 @@ mod tests {
             json!({
                 "workspace_id": "saved-workspace",
                 "volume_name": "agentspace-workspace-saved-workspace",
-                "exclude_names": ["mounted-workspace"]
+                "exclude_paths": [
+                    "mounted-workspace",
+                    ".github/agents/agentspace-session.agent.md"
+                ]
             }),
         )
         .await;
@@ -1998,13 +2056,52 @@ mod tests {
 
         assert_eq!(snapshot_status, StatusCode::OK);
         assert_eq!(snapshot["workspace_id"], "saved-workspace");
-        assert_eq!(snapshot["exclude_names"], json!(["mounted-workspace"]));
+        assert_eq!(
+            snapshot["exclude_paths"],
+            json!([
+                "mounted-workspace",
+                ".github/agents/agentspace-session.agent.md"
+            ])
+        );
         assert_eq!(clone_status, StatusCode::OK);
         assert_eq!(cloned["workspace_id"], "cloned-workspace");
         assert_eq!(vscode_status, StatusCode::OK);
         assert_eq!(vscode["container_name"], "editor-todo-list-code");
         assert_eq!(reset_status, StatusCode::OK);
         assert_eq!(reset_session_id, session_id);
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_rejects_unsafe_exclude_paths() {
+        let app = router_with_runtime(FakeRuntime::default());
+        let (_created_status, _created, session_id) = create_mounted_session(&app).await;
+
+        for invalid in [
+            "../secret",
+            "/absolute",
+            ".github/../secret",
+            r".github\agents\profile",
+            "",
+        ] {
+            let (status, payload) = json_request(
+                &app,
+                Method::POST,
+                &format!("/sessions/{session_id}/workspace/snapshot"),
+                json!({
+                    "workspace_id": "saved-workspace",
+                    "volume_name": "agentspace-workspace-saved-workspace",
+                    "exclude_paths": [invalid]
+                }),
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(
+                payload["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("exclude_paths"))
+            );
+        }
     }
 
     #[tokio::test]

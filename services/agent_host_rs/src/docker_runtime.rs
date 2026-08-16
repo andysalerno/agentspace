@@ -44,29 +44,7 @@ const CONTAINER_NAME_PLACEHOLDER: &str = concat!("{", "container_name", "}");
 const HOST_IP_PLACEHOLDER: &str = concat!("{", "host_ip", "}");
 const HOST_PORT_PLACEHOLDER: &str = concat!("{", "host_port", "}");
 const CONTAINER_PORT_PLACEHOLDER: &str = concat!("{", "container_port", "}");
-const WORKSPACE_SNAPSHOT_SCRIPT: &str = r#"
-from __future__ import annotations
-
-import os
-import pathlib
-import shutil
-
-source = pathlib.Path("/workspace-src")
-dest = pathlib.Path("/workspace-dest")
-exclude_env = os.environ.get("AGENTSPACE_WORKSPACE_EXCLUDES", "")
-exclude = {item for item in exclude_env.split(",") if item}
-dest.mkdir(parents=True, exist_ok=True)
-for entry in source.iterdir():
-    if entry.name in exclude:
-        continue
-    target = dest / entry.name
-    if entry.is_symlink():
-        target.symlink_to(os.readlink(entry))
-    elif entry.is_dir():
-        shutil.copytree(entry, target, symlinks=True, dirs_exist_ok=True)
-    else:
-        shutil.copy2(entry, target)
-"#;
+const WORKSPACE_SNAPSHOT_SCRIPT: &str = include_str!("../scripts/snapshot_workspace.py");
 
 pub type DockerRuntime = DockerKernelRuntime;
 
@@ -140,6 +118,13 @@ impl DockerKernelRuntime {
     fn kernel_environment(&self, request: &RuntimeCreateSession) -> BTreeMap<String, String> {
         let mut environment = request.env.clone();
         environment.insert("KERNEL_HARNESS".to_owned(), request.harness.to_string());
+        environment.insert(
+            "AGENTSPACE_SESSION_ID".to_owned(),
+            request.session_id.clone(),
+        );
+        if request.harness == HarnessName::CopilotCli {
+            environment.insert("KERNEL_SESSION_ID".to_owned(), request.session_id.clone());
+        }
         if !request.additional_paths.is_empty() {
             environment.insert(
                 "KERNEL_ADDITIONAL_PATHS".to_owned(),
@@ -154,6 +139,12 @@ impl DockerKernelRuntime {
             "KERNEL_SKILLS_STAGING_DIR".to_owned(),
             "/mnt/all-skills".to_owned(),
         );
+        if request.harness == HarnessName::CopilotCli {
+            environment.insert(
+                "KERNEL_LEGACY_COPILOT_SKILLS_DIR".to_owned(),
+                "/root/.copilot/skills".to_owned(),
+            );
+        }
         environment.insert("KERNEL_ENABLED_SKILLS".to_owned(), request.skills.join(","));
         environment
             .entry("KERNEL_VSCODE_ENABLED".to_owned())
@@ -426,7 +417,7 @@ impl DockerKernelRuntime {
         source_volume_name: &str,
         target_workspace_id: &str,
         target_volume_name: &str,
-        exclude_names: &[String],
+        exclude_paths: &[String],
     ) -> Result<(), AgentHostError> {
         self.backend.require_volume(source_volume_name).await?;
         self.backend
@@ -450,7 +441,10 @@ impl DockerKernelRuntime {
                 ],
                 environment: btree_map([
                     ("AGENTSPACE_WORKSPACE_ID", target_workspace_id),
-                    ("AGENTSPACE_WORKSPACE_EXCLUDES", &exclude_names.join(",")),
+                    (
+                        "AGENTSPACE_WORKSPACE_EXCLUDE_PATHS_JSON",
+                        &serde_json::to_string(exclude_paths)?,
+                    ),
                 ]),
                 labels: btree_map([("agentspace.role", "workspace-snapshot")]),
                 name: None,
@@ -874,14 +868,14 @@ impl KernelRuntime for DockerKernelRuntime {
         session: &KernelRuntimeSession,
         workspace_id: String,
         volume_name: String,
-        exclude_names: Vec<String>,
+        exclude_paths: Vec<String>,
     ) -> Result<Value, AgentHostError> {
         let handle = Self::docker_session(session)?;
         self.copy_workspace_volume(
             &handle.session_workspace_volume_name,
             &workspace_id,
             &volume_name,
-            &exclude_names,
+            &exclude_paths,
         )
         .await?;
         Ok(json!({ "workspace_id": workspace_id, "volume_name": volume_name }))
@@ -1829,7 +1823,7 @@ const fn skills_mount_path(harness: HarnessName) -> &'static str {
     match harness {
         HarnessName::Acp => "/workspace/.agents/skills",
         HarnessName::ClaudeCode | HarnessName::Codex | HarnessName::Echo => "/skills",
-        HarnessName::CopilotCli => "/root/.copilot/skills",
+        HarnessName::CopilotCli => "/workspace/.github/skills",
         HarnessName::Opencode => "/root/.config/opencode/skills",
     }
 }
@@ -2196,6 +2190,8 @@ mod tests {
             assert!(spec.detach);
             assert_eq!(spec.name.as_deref(), Some("agentspace-kernel-test"));
             assert_eq!(spec.environment["KERNEL_HARNESS"], "echo");
+            assert_eq!(spec.environment["AGENTSPACE_SESSION_ID"], "test");
+            assert!(!spec.environment.contains_key("KERNEL_SESSION_ID"));
             assert_eq!(spec.environment["KERNEL_FREE_PORT"], "8081");
             assert_eq!(
                 spec.ports,
@@ -2239,6 +2235,39 @@ mod tests {
             );
             drop(state);
         }
+    }
+
+    #[test]
+    fn copilot_kernel_environment_uses_durable_session_workspace_paths() {
+        let runtime = DockerKernelRuntime::new(
+            DockerRuntimeConfig::default(),
+            Arc::new(FakeDockerBackend::default()),
+        );
+        let request = RuntimeCreateSession {
+            session_id: "durable-session".to_owned(),
+            harness: HarnessName::CopilotCli,
+            interaction_mode: InteractionMode::Chat,
+            env: BTreeMap::new(),
+            additional_paths: Vec::new(),
+            skills: vec!["alpha".to_owned()],
+            skill_volumes: Vec::new(),
+            workspace_mounts: Vec::new(),
+        };
+
+        let environment = runtime.kernel_environment(&request);
+
+        assert_eq!(environment["KERNEL_SESSION_ID"], "durable-session");
+        assert_eq!(environment["AGENTSPACE_SESSION_ID"], "durable-session");
+        assert_eq!(
+            environment["KERNEL_SKILLS_DIR"],
+            "/workspace/.github/skills"
+        );
+        assert_eq!(environment["KERNEL_SKILLS_STAGING_DIR"], "/mnt/all-skills");
+        assert_eq!(
+            environment["KERNEL_LEGACY_COPILOT_SKILLS_DIR"],
+            "/root/.copilot/skills"
+        );
+        assert_eq!(environment["KERNEL_ENABLED_SKILLS"], "alpha");
     }
 
     #[tokio::test]
@@ -2823,6 +2852,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn docker_runtime_snapshots_with_nested_relative_exclusions() {
+        let backend = FakeDockerBackend::default();
+        backend
+            .state()
+            .volumes
+            .insert("agentspace-session-workspace-session".to_owned());
+        let runtime =
+            DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "agentspace-kernel-session".to_owned(),
+            session_workspace_volume_name: "agentspace-session-workspace-session".to_owned(),
+            base_url: "http://kernel".to_owned(),
+            vscode_url: None,
+            free_port_url: None,
+        });
+        let exclude_paths = vec![
+            ".github/agents/agentspace-session.agent.md".to_owned(),
+            ".github/skills/alpha".to_owned(),
+        ];
+
+        runtime
+            .snapshot_session_workspace(
+                &session,
+                "target".to_owned(),
+                "agentspace-workspace-target".to_owned(),
+                exclude_paths.clone(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("snapshot failed: {error}"));
+
+        let state = backend.state();
+        let exclude_paths_json =
+            state.run_specs[0].environment["AGENTSPACE_WORKSPACE_EXCLUDE_PATHS_JSON"].clone();
+        let snapshot_script = state.run_specs[0].entrypoint[2].clone();
+        drop(state);
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&exclude_paths_json)
+                .unwrap_or_else(|error| panic!("exclude paths were not JSON: {error}")),
+            exclude_paths
+        );
+        assert!(snapshot_script.contains("agentspace-owned-profile"));
+        assert!(snapshot_script.contains("PurePosixPath"));
+    }
+
+    #[tokio::test]
     async fn docker_runtime_opens_workspace_vscode() {
         let backend = FakeDockerBackend::default();
         backend
@@ -2935,7 +3010,7 @@ mod tests {
         );
         assert_eq!(
             skills_mount_path(HarnessName::CopilotCli),
-            "/root/.copilot/skills"
+            "/workspace/.github/skills"
         );
         assert_eq!(
             skills_mount_path(HarnessName::Opencode),

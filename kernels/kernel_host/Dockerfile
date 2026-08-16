@@ -81,6 +81,7 @@ WORKDIR /app
 # Copy all kernel packages and root project config
 COPY pyproject.toml uv.lock ./
 COPY kernels/kernel kernels/kernel
+COPY kernels/copilot_launch kernels/copilot_launch
 COPY kernels/kernel_claude_code kernels/kernel_claude_code
 COPY kernels/kernel_echo kernels/kernel_echo
 COPY kernels/kernel_codex kernels/kernel_codex

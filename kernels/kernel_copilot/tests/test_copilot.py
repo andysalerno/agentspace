@@ -3,6 +3,7 @@
 Uses the real Copilot CLI JSON output format to verify that
 ``_map_event`` produces the correct standardized kernel events.
 """
+# ruff: noqa: E501, SLF001
 # pyright: reportPrivateUsage=false
 
 import json
@@ -30,6 +31,7 @@ SAMPLE_LINES: list[str] = [
     '{"type":"assistant.turn_end","data":{"turnId":"0"},"id":"c9494b6e-03bf-4089-beb7-3e9ee687c4d2","timestamp":"2026-03-28T20:34:46.822Z","parentId":"6c6f4d9f-346a-4fbe-acb3-2d2ebbfeea33"}',
     '{"type":"result","timestamp":"2026-03-28T20:34:46.825Z","sessionId":"a33fcb66-76b2-4d89-b5ca-2ad99167348b","exitCode":0,"usage":{"premiumRequests":6,"totalApiDurationMs":1641,"sessionDurationMs":5704,"codeChanges":{"linesAdded":0,"linesRemoved":0,"filesModified":[]}}}',
 ]
+TEST_SESSION_ID = "0cb916db-26aa-40f2-86b5-1ba81b225fd2"
 
 
 def _parse_lines() -> list[dict[str, object]]:
@@ -92,7 +94,7 @@ class TestCopilotMapping:
 
         events = await _drain(kernel)
         assert len(events) == 1
-        assert events[0].type == EventType.STATUS
+        assert events[0].type == EventType.SESSION_STATUS
         assert events[0].status == KernelStatus.IDLE
 
     @pytest.mark.asyncio
@@ -216,11 +218,11 @@ class TestCopilotMapping:
 
         # Should have: 3 text_deltas + 1 status(idle)
         assert types.count(EventType.TEXT_DELTA) == 3
-        assert types.count(EventType.STATUS) == 1
+        assert types.count(EventType.SESSION_STATUS) == 1
 
         # text_deltas come before the status(idle)
         first_delta = types.index(EventType.TEXT_DELTA)
-        idle_idx = types.index(EventType.STATUS)
+        idle_idx = types.index(EventType.SESSION_STATUS)
         assert first_delta < idle_idx
 
         # Verify streamed text
@@ -306,10 +308,10 @@ class TestCopilotKernelLifecycle:
         events = [event async for event in kernel.recv()]
         assert [event.type for event in events] == [
             EventType.SESSION_START,
-            EventType.STATUS,
-            EventType.ERROR,
-            EventType.STATUS,
-            EventType.STATUS,
+            EventType.SESSION_STATUS,
+            EventType.SESSION_ERROR,
+            EventType.SESSION_STATUS,
+            EventType.SESSION_STATUS,
             EventType.SESSION_END,
         ]
         assert events[2].message == "failed to start copilot CLI: Access is denied"
@@ -333,10 +335,10 @@ class TestCopilotKernelLifecycle:
         events = [event async for event in kernel.recv()]
         assert [event.type for event in events] == [
             EventType.SESSION_START,
-            EventType.STATUS,
-            EventType.ERROR,
-            EventType.STATUS,
-            EventType.STATUS,
+            EventType.SESSION_STATUS,
+            EventType.SESSION_ERROR,
+            EventType.SESSION_STATUS,
+            EventType.SESSION_STATUS,
             EventType.SESSION_END,
         ]
         assert (
@@ -394,11 +396,11 @@ class TestCopilotKernelLifecycle:
     @pytest.mark.asyncio
     async def test_start_uses_config_session_id(self) -> None:
         kernel = CopilotKernel()
-        await kernel.start(KernelConfig(session_id="resume-123"))
+        await kernel.start(KernelConfig(session_id=TEST_SESSION_ID))
 
         events = await _drain(kernel)
         assert len(events) == 1
-        assert events[0].session_id == "resume-123"
+        assert events[0].session_id == TEST_SESSION_ID
 
     def test_build_command_includes_runtime_config(self) -> None:
         kernel = CopilotKernel()
@@ -410,7 +412,7 @@ class TestCopilotKernelLifecycle:
                 "COPILOT_ADDITIONAL_PATHS": "/workspace:/workspace-extra",
                 "COPILOT_EXTRA_ARGS": "--enable-all-github-mcp-tools\n--stream\non",
             },
-            session_id="session-123",
+            session_id=TEST_SESSION_ID,
             additional_paths=("/repo",),
         )
 
@@ -423,7 +425,8 @@ class TestCopilotKernelLifecycle:
         assert "high" in cmd
         assert "--config-dir" in cmd
         assert "/root/.copilot" in cmd
-        assert "--resume=session-123" in cmd
+        assert f"--session-id={TEST_SESSION_ID}" in cmd
+        assert not any(arg.startswith("--resume") for arg in cmd)
         assert cmd.count("--add-dir") == 3
         assert "/repo" in cmd
         assert "/workspace" in cmd

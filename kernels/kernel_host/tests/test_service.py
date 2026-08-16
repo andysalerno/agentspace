@@ -19,6 +19,7 @@ from kernel_host.service import (
     KernelSessionService,
     discover_skill_dirs,
     link_enabled_skills,
+    service_from_env,
 )
 
 if TYPE_CHECKING:
@@ -183,6 +184,57 @@ async def test_service_reuses_resume_token(
     assert len(second_events) == 5
     assert summary["resume_token"] == "resume-kernel-host"  # noqa: S105
     assert summary["turns"] == 2
+
+
+@pytest.mark.asyncio
+async def test_service_starts_with_known_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernels: list[StubKernel] = []
+
+    def fake_get_kernel(_harness_name: HarnessName) -> StubKernel:
+        kernel = StubKernel()
+        kernels.append(kernel)
+        return kernel
+
+    monkeypatch.setattr("kernel_host.service.get_kernel", fake_get_kernel)
+    service = KernelSessionService(
+        harness=HarnessName.COPILOT_CLI,
+        env={},
+        additional_paths=(),
+        session_id="durable-session",
+    )
+
+    await service.send_message("hello")
+
+    assert kernels[0].start_configs[0].session_id == "durable-session"
+
+
+@pytest.mark.asyncio
+async def test_service_reset_preserves_known_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernels: list[StubKernel] = []
+
+    def fake_get_kernel(_harness_name: HarnessName) -> StubKernel:
+        kernel = StubKernel()
+        kernels.append(kernel)
+        return kernel
+
+    monkeypatch.setattr("kernel_host.service.get_kernel", fake_get_kernel)
+    service = KernelSessionService(
+        harness=HarnessName.COPILOT_CLI,
+        env={},
+        additional_paths=(),
+        session_id="durable-session",
+    )
+
+    await service.send_message("hello")
+    summary = await service.reset()
+    await service.send_message("again")
+
+    assert summary["resume_token"] == "durable-session"  # noqa: S105
+    assert kernels[1].start_configs[0].session_id == "durable-session"
 
 
 @pytest.mark.asyncio
@@ -378,3 +430,25 @@ def test_link_enabled_skills_does_not_remove_non_staging_symlinks(
     link_enabled_skills(str(staging), str(skills), enabled_skills=set())
 
     assert (skills / "external").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_service_from_env_leaves_copilot_skill_projection_to_shared_builder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    staging = tmp_path / "staging"
+    skills = tmp_path / "workspace/.github/skills"
+    (staging / "alpha").mkdir(parents=True)
+    monkeypatch.setenv("KERNEL_HARNESS", HarnessName.COPILOT_CLI)
+    monkeypatch.setenv("KERNEL_SESSION_ID", "durable-session")
+    monkeypatch.setenv("KERNEL_SKILLS_STAGING_DIR", str(staging))
+    monkeypatch.setenv("KERNEL_SKILLS_DIR", str(skills))
+    monkeypatch.setenv("KERNEL_ENABLED_SKILLS", "alpha")
+
+    service = service_from_env()
+    summary = await service.summary()
+
+    assert not skills.exists()
+    assert summary["resume_token"] == "durable-session"  # noqa: S105
+    assert summary["additional_paths"] == []

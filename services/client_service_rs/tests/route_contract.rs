@@ -81,7 +81,7 @@ async fn stub_snapshot_workspace(
         "session_id": session_id,
         "workspace_id": payload["workspace_id"],
         "volume_name": payload["volume_name"],
-        "exclude_names": payload["exclude_names"],
+        "exclude_paths": payload["exclude_paths"],
     }))
 }
 

@@ -1473,18 +1473,8 @@ async fn save_session_workspace(
     );
     let volume_name = workspace.volume_name();
     let workspace_id = workspace.workspace_id.clone();
-    let mut exclude_names = state
-        .agents
-        .get(&session.agent_id)?
-        .map(|agent| {
-            agent
-                .workspace_mounts
-                .into_iter()
-                .map(|mount| mount.workspace_id)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    exclude_names.push(".agents".to_owned());
+    let agent = state.agents.get(&session.agent_id)?;
+    let exclude_paths = session_workspace_exclude_paths(agent.as_ref(), &session.session_id);
     state.workspaces.insert(workspace.clone())?;
     let snapshot_result = state
         .agent_host
@@ -1492,7 +1482,7 @@ async fn save_session_workspace(
             &session.agent_host_session_id,
             &workspace_id,
             &volume_name,
-            &exclude_names,
+            &exclude_paths,
         )
         .await;
     if let Err(error) = snapshot_result {
@@ -1511,10 +1501,35 @@ async fn save_session_workspace(
         session_id = %session_id,
         workspace_id = %workspace_id,
         kernel_session_id = %session.agent_host_session_id,
-        excluded_workspace_count = exclude_names.len(),
+        excluded_path_count = exclude_paths.len(),
         "api handler completed"
     );
     Ok(Json(value))
+}
+
+fn session_workspace_exclude_paths(agent: Option<&AgentRecord>, session_id: &str) -> Vec<String> {
+    let mut exclude_paths = agent
+        .map(|agent| {
+            agent
+                .workspace_mounts
+                .iter()
+                .map(|mount| mount.workspace_id.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    exclude_paths.push(".agents".to_owned());
+    if let Some(agent) = agent.filter(|agent| agent.harness == HarnessName::CopilotCli) {
+        if !agent.system_prompt.is_empty() {
+            exclude_paths.push(format!(".github/agents/agentspace-{session_id}.agent.md"));
+        }
+        exclude_paths.extend(
+            agent
+                .skills
+                .iter()
+                .map(|skill| format!(".github/skills/{skill}")),
+        );
+    }
+    exclude_paths
 }
 
 async fn delete_session(
@@ -5345,10 +5360,39 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
     use tower::ServiceExt;
 
-    use super::send_stream_item;
+    use super::{send_stream_item, session_workspace_exclude_paths};
     use crate::{
-        ActiveTurnStreamState, AppConfig, AppState, agent_host::AgentHostClient, build_router,
+        ActiveTurnStreamState, AppConfig, AppState,
+        agent_host::AgentHostClient,
+        build_router,
+        models::{AgentRecord, HarnessName, WorkspaceMountMode, WorkspaceMountRecord},
     };
+
+    #[test]
+    fn copilot_workspace_exclusions_preserve_unrelated_github_content() {
+        let mut agent = AgentRecord::new(
+            "copilot-agent",
+            "Copilot Agent",
+            HarnessName::CopilotCli,
+            "prompt",
+        );
+        agent.skills = vec!["alpha".to_owned(), "beta".to_owned()];
+        agent.workspace_mounts = vec![WorkspaceMountRecord::new(
+            "mounted-workspace",
+            WorkspaceMountMode::ReadOnly,
+        )];
+
+        assert_eq!(
+            session_workspace_exclude_paths(Some(&agent), "durable-session"),
+            vec![
+                "mounted-workspace",
+                ".agents",
+                ".github/agents/agentspace-durable-session.agent.md",
+                ".github/skills/alpha",
+                ".github/skills/beta",
+            ]
+        );
+    }
 
     #[test]
     fn extract_tool_calls_collects_streamed_terminal_output() {

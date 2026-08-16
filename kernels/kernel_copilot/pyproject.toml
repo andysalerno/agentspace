@@ -3,7 +3,10 @@ name = "kernel-copilot"
 version = "0.1.0"
 description = "Copilot CLI kernel implementation — wraps copilot CLI"
 requires-python = ">=3.13"
-dependencies = ["kernel"]
+dependencies = ["copilot-launch", "kernel"]
+
+[tool.uv.sources]
+copilot-launch = { path = "../copilot_launch" }
 
 [build-system]
 requires = ["hatchling"]
@@ -15,4 +18,3 @@ packages = ["src/kernel_copilot"]
 [tool.pyright]
 pythonVersion = "3.13"
 typeCheckingMode = "strict"
-
