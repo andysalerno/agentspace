@@ -5,7 +5,7 @@ use crate::api::ApiClient;
 use super::{
     client::SkillsClient,
     error::SkillsError,
-    model::{CreateSkillRequest, Skill, SkillSummary, SkillVersion, UpdateSkillRequest},
+    model::{CreateSkillRequest, Skill, SkillSummary, SkillVersionSummary, UpdateSkillRequest},
 };
 
 #[derive(Clone, Debug)]
@@ -46,7 +46,7 @@ impl SkillsClient for HttpSkillsClient {
             .map_err(Into::into)
     }
 
-    async fn list_versions(&self, skill_id: &str) -> Result<Vec<SkillVersion>, SkillsError> {
+    async fn list_versions(&self, skill_id: &str) -> Result<Vec<SkillVersionSummary>, SkillsError> {
         self.api
             .get(&[skill_id, "versions"])
             .await

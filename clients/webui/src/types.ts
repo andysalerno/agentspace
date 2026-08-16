@@ -147,13 +147,14 @@ export type Skill = {
   skill_id: string;
   files?: Record<string, string>;
   source?: "builtin" | "user";
+  file_count?: number;
 };
 
 export type SkillVersion = {
   skill_id: string;
   version: number;
   created_at: string;
-  files: Record<string, string>;
+  file_count: number;
 };
 
 export type SessionSummary = {

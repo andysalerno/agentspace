@@ -4,7 +4,8 @@ use agentspace_cli_rs::skills::{
     client::SkillsClient,
     http_client::HttpSkillsClient,
     model::{
-        CreateSkillRequest, Skill, SkillSource, SkillSummary, SkillVersion, UpdateSkillRequest,
+        CreateSkillRequest, Skill, SkillSource, SkillSummary, SkillVersionSummary,
+        UpdateSkillRequest,
     },
 };
 use axum::{
@@ -36,6 +37,7 @@ async fn start_server() -> Result<(HttpSkillsClient, tokio::task::JoinHandle<()>
                 Json(vec![SkillSummary {
                     skill_id: "weather-report".to_owned(),
                     source: SkillSource::User,
+                    file_count: 1,
                 }])
             })
             .post(|Json(request): Json<Value>| async move {
@@ -64,11 +66,11 @@ async fn start_server() -> Result<(HttpSkillsClient, tokio::task::JoinHandle<()>
         .route(
             "/skills/{skill_id}/versions",
             get(|Path(skill_id): Path<String>| async move {
-                Json(vec![SkillVersion {
+                Json(vec![SkillVersionSummary {
                     skill_id,
                     version: 1,
                     created_at: "2026-08-16T00:00:00Z".to_owned(),
-                    files: files("# Created\n"),
+                    file_count: 1,
                 }])
             }),
         )
@@ -106,7 +108,7 @@ async fn start_server() -> Result<(HttpSkillsClient, tokio::task::JoinHandle<()>
 async fn http_client_covers_complete_skills_contract() -> Result<(), Box<dyn Error>> {
     let (client, server) = start_server().await?;
 
-    assert_eq!(client.list_skills().await?.len(), 1);
+    assert_eq!(client.list_skills().await?[0].file_count, 1);
     assert_eq!(
         client.get_skill("weather-report").await?.files,
         files("# Existing\n")
@@ -134,7 +136,9 @@ async fn http_client_covers_complete_skills_contract() -> Result<(), Box<dyn Err
             .files,
         files("# Updated\n")
     );
-    assert_eq!(client.list_versions("weather-report").await?[0].version, 1);
+    let version = &client.list_versions("weather-report").await?[0];
+    assert_eq!(version.version, 1);
+    assert_eq!(version.file_count, 1);
     assert_eq!(
         client.rollback("weather-report", 1).await?.files,
         files("# Created\n")

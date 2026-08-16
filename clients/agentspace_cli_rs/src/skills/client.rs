@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use super::{
     error::SkillsError,
-    model::{CreateSkillRequest, Skill, SkillSummary, SkillVersion, UpdateSkillRequest},
+    model::{CreateSkillRequest, Skill, SkillSummary, SkillVersionSummary, UpdateSkillRequest},
 };
 
 #[async_trait]
@@ -15,7 +15,7 @@ pub trait SkillsClient: Send + Sync {
         skill_id: &str,
         request: UpdateSkillRequest,
     ) -> Result<Skill, SkillsError>;
-    async fn list_versions(&self, skill_id: &str) -> Result<Vec<SkillVersion>, SkillsError>;
+    async fn list_versions(&self, skill_id: &str) -> Result<Vec<SkillVersionSummary>, SkillsError>;
     async fn rollback(&self, skill_id: &str, version: u64) -> Result<Skill, SkillsError>;
     async fn delete_skill(&self, skill_id: &str) -> Result<(), SkillsError>;
 }

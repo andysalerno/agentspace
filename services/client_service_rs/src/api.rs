@@ -2754,7 +2754,7 @@ async fn list_skills(State(state): State<AppState>) -> Result<Json<Vec<Value>>, 
             json!({
                 "skill_id": skill.id,
                 "source": "user",
-                "files": skill.files,
+                "file_count": skill.files.len(),
             })
         })
         .collect();

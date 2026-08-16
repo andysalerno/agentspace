@@ -13,14 +13,15 @@ pub struct Skill {
 pub struct SkillSummary {
     pub skill_id: String,
     pub source: SkillSource,
+    pub file_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct SkillVersion {
+pub struct SkillVersionSummary {
     pub skill_id: String,
     pub version: u64,
     pub created_at: String,
-    pub files: BTreeMap<String, String>,
+    pub file_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -10,7 +10,7 @@ use super::{
     error::SkillsError,
     fs::collect_skill_directory,
     http_client::HttpSkillsClient,
-    model::{CreateSkillRequest, Skill, SkillSource, SkillVersion, UpdateSkillRequest},
+    model::{CreateSkillRequest, Skill, SkillSource, SkillVersionSummary, UpdateSkillRequest},
 };
 
 #[derive(Args, Debug)]
@@ -55,7 +55,10 @@ pub async fn execute(
             let skills = client.list_skills().await?;
             print_value(&skills, json, |skills| {
                 for skill in skills {
-                    println!("{}\t{}", skill.skill_id, skill.source);
+                    println!(
+                        "{}\t{}\t{} files",
+                        skill.skill_id, skill.source, skill.file_count
+                    );
                 }
             })
         }
@@ -142,13 +145,11 @@ fn print_skill(skill: &Skill) {
     }
 }
 
-fn print_versions(versions: &[SkillVersion]) {
+fn print_versions(versions: &[SkillVersionSummary]) {
     for version in versions {
         println!(
             "{}\t{}\t{} files",
-            version.version,
-            version.created_at,
-            version.files.len()
+            version.version, version.created_at, version.file_count
         );
     }
 }
@@ -275,7 +276,10 @@ mod tests {
             })
         }
 
-        async fn list_versions(&self, _skill_id: &str) -> Result<Vec<SkillVersion>, SkillsError> {
+        async fn list_versions(
+            &self,
+            _skill_id: &str,
+        ) -> Result<Vec<SkillVersionSummary>, SkillsError> {
             unreachable!("not used by sync")
         }
 

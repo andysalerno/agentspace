@@ -116,14 +116,24 @@ impl SkillRegistry {
     pub async fn list_skill_versions(
         &self,
         skill_id: &str,
-    ) -> Result<Vec<SkillVersion>, SkillError> {
+    ) -> Result<Vec<SkillVersionSummary>, SkillError> {
         let service = self.service.clone();
         let skill_id = skill_id.to_owned();
         run_skill_task("list skill versions", move || {
             let service = service.read().map_err(|_| SkillError::LockPoisoned {
                 operation: "lock skill service for list versions",
             })?;
-            service.list_skill_versions(&skill_id)
+            service.list_skill_versions(&skill_id).map(|versions| {
+                versions
+                    .into_iter()
+                    .map(|version| SkillVersionSummary {
+                        skill_id: version.skill_id,
+                        version: version.version,
+                        created_at: version.created_at,
+                        file_count: version.files.len(),
+                    })
+                    .collect()
+            })
         })
         .await
     }
@@ -256,6 +266,7 @@ pub struct Skill {
 pub struct SkillSummary {
     pub skill_id: String,
     pub source: SkillSource,
+    pub file_count: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -271,6 +282,14 @@ pub struct SkillVersion {
     pub version: u64,
     pub created_at: String,
     pub files: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SkillVersionSummary {
+    pub skill_id: String,
+    pub version: u64,
+    pub created_at: String,
+    pub file_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -652,6 +671,7 @@ impl SkillsService {
             if validate_skill_id(&skill_id).is_ok() {
                 skills.push(SkillSummary {
                     source: self.source_for(&skill_id),
+                    file_count: count_skill_files(&entry.path())?,
                     skill_id,
                 });
             }
@@ -1033,6 +1053,22 @@ fn read_skill_files(skill_dir: &Path) -> Result<BTreeMap<String, String>, SkillE
     Ok(files)
 }
 
+fn count_skill_files(skill_dir: &Path) -> Result<usize, SkillError> {
+    let mut count = 0;
+    for entry in read_dir_sorted(skill_dir, "count skill files")? {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|source| io_error("inspect skill file", &path, source))?;
+        if file_type.is_dir() {
+            count += count_skill_files(&path)?;
+        } else if file_type.is_file() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn build_skill_zip(files: &BTreeMap<String, String>) -> Result<Vec<u8>, SkillError> {
     let cursor = io::Cursor::new(Vec::new());
     let mut writer = ZipWriter::new(cursor);
@@ -1282,7 +1318,7 @@ async fn download_skill(
 async fn list_skill_versions(
     State(state): State<AppState>,
     AxumPath(skill_id): AxumPath<String>,
-) -> Result<Json<Vec<SkillVersion>>, SkillHttpError> {
+) -> Result<Json<Vec<SkillVersionSummary>>, SkillHttpError> {
     state
         .skills
         .list_skill_versions(&skill_id)
@@ -1897,7 +1933,8 @@ mod tests {
         assert_eq!(updated["files"]["SKILL.md"], "# Updated");
         assert_eq!(versions_status, StatusCode::OK);
         assert_eq!(versions.as_array().map_or(0, Vec::len), 2);
-        assert_eq!(versions[0]["files"]["SKILL.md"], "# My Skill");
+        assert_eq!(versions[0]["file_count"], 1);
+        assert!(versions[0].get("files").is_none());
         assert_eq!(rollback_status, StatusCode::OK);
         assert_eq!(rollback["files"]["SKILL.md"], "# My Skill");
         assert_eq!(deleted_status, StatusCode::NO_CONTENT);

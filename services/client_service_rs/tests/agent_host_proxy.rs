@@ -347,12 +347,12 @@ async fn list_host_skills(State(state): State<StubState>) -> Result<Json<Value>,
     Ok(Json(json!([
         {
             "skill_id": "stub-skill",
-            "files": { "SKILL.md": "content" }
+            "file_count": 1
         },
         {
             "skill_id": "skill-a",
             "source": "builtin",
-            "files": {}
+            "file_count": 0
         }
     ])))
 }
@@ -409,7 +409,7 @@ async fn list_host_skill_versions(
             "skill_id": skill_id,
             "version": 1,
             "created_at": "2026-01-01T00:00:00.000000Z",
-            "files": { "SKILL.md": "# Version 1" }
+            "file_count": 1
         }
     ])))
 }
@@ -817,6 +817,8 @@ async fn skill_routes_proxy_versions_and_auto_enable_creator()
     let (status, versions) = get_json(&app, "/skills/agent-skill/versions").await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(versions[0]["version"], 1);
+    assert_eq!(versions[0]["file_count"], 1);
+    assert!(versions[0].get("files").is_none());
 
     let (status, rolled_back) =
         post_json(&app, "/skills/agent-skill/versions/1/rollback", json!({})).await?;
@@ -1226,6 +1228,8 @@ async fn skills_routes_proxy_crud_and_not_found_status() -> Result<(), Box<dyn E
     let (status, skills) = get_json(&app, "/skills").await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(skills[0]["skill_id"], "stub-skill");
+    assert_eq!(skills[0]["file_count"], 1);
+    assert!(skills[0].get("files").is_none());
 
     let (status, skill) = get_json(&app, "/skills/stub-skill").await?;
     assert_eq!(status, StatusCode::OK);
