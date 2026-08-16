@@ -70,6 +70,7 @@ struct StubState {
     fail_create: Arc<AtomicBool>,
     terminal_unavailable: Arc<AtomicBool>,
     telemetry_fail: Arc<AtomicBool>,
+    telemetry_missing: Arc<AtomicBool>,
     terminal_resumed: Arc<AtomicBool>,
     ensure_count: Arc<AtomicUsize>,
     websocket_mode: Arc<Mutex<WebSocketMode>>,
@@ -333,6 +334,7 @@ async fn create_upstream_session(
     if state.fail_create.load(Ordering::SeqCst) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    state.telemetry_missing.store(false, Ordering::SeqCst);
     Json(json!({
         "session_id": body["session_id"],
         "status": "idle",
@@ -526,6 +528,9 @@ async fn upstream_session_telemetry(
 ) -> Response {
     if let Err(status) = state.record("GET", format!("/sessions/{session_id}/telemetry"), None) {
         return status.into_response();
+    }
+    if state.telemetry_missing.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
     }
     if state.telemetry_fail.load(Ordering::SeqCst) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -918,6 +923,61 @@ async fn telemetry_route_returns_service_unavailable_for_upstream_failures()
         error["detail"],
         "agent_host returned HTTP 503 Service Unavailable"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn telemetry_route_normalizes_stale_runtime_until_terminal_recovery()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let harness = TestHarness::start().await?;
+    let (session_id, _session) = harness.create_cli_session().await?;
+    harness
+        .upstream
+        .telemetry_missing
+        .store(true, Ordering::SeqCst);
+
+    let (status, unavailable) = harness
+        .get(&format!("/sessions/{session_id}/telemetry"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unavailable["state"], "unavailable");
+    assert_eq!(
+        unavailable["reason"],
+        "telemetry runtime is unavailable until the session is recovered"
+    );
+
+    let (status, terminal) = harness
+        .post(
+            &format!("/sessions/{session_id}/terminal/ensure"),
+            json!({}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{terminal}");
+    assert_eq!(terminal["state"], "running");
+
+    let (status, recovered) = harness
+        .get(&format!("/sessions/{session_id}/telemetry"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recovered["state"], "live");
+
+    let recorded = harness.upstream.requests()?;
+    let session_creates = recorded
+        .iter()
+        .filter(|request| request.method == "POST" && request.path == "/sessions")
+        .collect::<Vec<_>>();
+    assert_eq!(session_creates.len(), 2);
+    assert_eq!(
+        session_creates[1]
+            .body
+            .as_ref()
+            .ok_or("missing recovery body")?["telemetry_volume_identity"],
+        session_id
+    );
+    assert!(recorded.iter().any(|request| {
+        request.method == "POST"
+            && request.path == format!("/sessions/{session_id}/terminal/ensure")
+    }));
     Ok(())
 }
 

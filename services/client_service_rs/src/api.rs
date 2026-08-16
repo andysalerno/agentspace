@@ -1881,11 +1881,22 @@ async fn session_telemetry(
         )));
     }
 
-    let snapshot = state
+    let snapshot = match state
         .agent_host
         .telemetry(&session.agent_host_session_id)
         .await
-        .map_err(telemetry_upstream_error)?;
+    {
+        Ok(snapshot) => snapshot,
+        Err(AgentHostError::HttpStatus { status, .. })
+            if status == StatusCode::NOT_FOUND
+                && session.recovery_state() == RecoveryState::Recoverable =>
+        {
+            TelemetrySnapshot::unavailable(
+                "telemetry runtime is unavailable until the session is recovered",
+            )
+        }
+        Err(error) => return Err(telemetry_upstream_error(error)),
+    };
     Ok(Json(snapshot))
 }
 

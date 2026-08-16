@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+import zlib
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 import pytest
@@ -9,6 +10,7 @@ from kernel_host.telemetry import (
     CacheReportingState,
     CopilotOtelTelemetryProvider,
     TelemetryContentMode,
+    TelemetryReaderLimits,
     TelemetryRuntimeInfo,
     TelemetryRuntimeState,
     TelemetrySnapshot,
@@ -619,6 +621,97 @@ async def test_provider_degrades_on_malformed_records_and_content_policy_conflic
 
 
 @pytest.mark.asyncio
+async def test_provider_degrades_on_invalid_utf8_jsonl_records(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    valid = json.dumps(
+        _span_record(
+            trace_id=TRACE_ID,
+            span_id="chat-valid",
+            name="chat gpt-5.6-sol",
+            start_seconds=2,
+            end_seconds=3,
+            attributes=_chat_attributes(raw_input_tokens=10, output_tokens=2),
+        ),
+        separators=(",", ":"),
+    ).encode("utf-8")
+    managed.write_bytes(b"\xff\xfe\n" + valid + b"\n")
+
+    snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
+
+    assert snapshot.state == TelemetryState.DEGRADED
+    assert snapshot.counts.model_calls == 1
+    assert _warning_count(snapshot, TelemetryWarningCode.MALFORMED_RECORD) == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_sanitizes_hostile_numeric_fields_for_json_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+
+    hostile = _span_record(
+        trace_id=TRACE_ID,
+        span_id="chat-hostile",
+        name="chat gpt-5.6-sol",
+        start_seconds=1,
+        end_seconds=2,
+        attributes={
+            **_agent_attributes(),
+            "gen_ai.response.model": "gpt-5.6-sol",
+            "gen_ai.request.model": "gpt-5.6-sol",
+            "gen_ai.usage.input_tokens": -1,
+            "gen_ai.usage.output_tokens": 2**65,
+            "gen_ai.usage.cache_read.input_tokens": -5,
+            "gen_ai.usage.cache_creation.input_tokens": 2**65,
+            "github.copilot.nano_aiu": -2,
+            "github.copilot.cost": float("nan"),
+        },
+        events=[
+            {
+                "name": "github.copilot.session.usage_info",
+                "time": _timestamp(2),
+                "attributes": {
+                    "github.copilot.current_tokens": -1,
+                    "github.copilot.token_limit": 2**65,
+                    "github.copilot.messages_length": 3,
+                },
+            }
+        ],
+    )
+    _write_jsonl(managed, [hostile])
+
+    snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
+    replayed = await _provider(telemetry_dir, runtime_info).snapshot()
+
+    assert snapshot.state == TelemetryState.DEGRADED
+    assert replayed == snapshot
+    assert snapshot.counts.model_calls == 1
+    assert snapshot.latest_call is not None
+    assert snapshot.context is not None
+    assert snapshot.session.raw_input_tokens is None
+    assert snapshot.session.output_tokens is None
+    assert snapshot.session.cache_read_input_tokens is None
+    assert snapshot.session.cache_write_input_tokens is None
+    assert snapshot.session.nano_aiu is None
+    assert snapshot.session.opaque_cost is None
+    assert snapshot.session.total_tokens is None
+    assert snapshot.latest_call.usage.opaque_cost is None
+    assert snapshot.context.tokens is None
+    assert snapshot.context.limit is None
+    assert snapshot.context.message_count == 3
+    assert _warning_count(snapshot, TelemetryWarningCode.INVALID_USAGE_SHAPE) >= 1
+    assert json.dumps(asdict(snapshot), allow_nan=False)
+
+
+@pytest.mark.asyncio
 async def test_provider_restarts_from_checkpoint_and_recovers_from_corruption(
     tmp_path: Path,
 ) -> None:
@@ -665,6 +758,91 @@ async def test_provider_restarts_from_checkpoint_and_recovers_from_corruption(
 
 
 @pytest.mark.asyncio
+async def test_provider_restarts_from_invalid_utf8_checkpoint(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+    _write_jsonl(
+        managed,
+        [
+            _span_record(
+                trace_id=TRACE_ID,
+                span_id="chat-1",
+                name="chat gpt-5.6-sol",
+                start_seconds=1,
+                end_seconds=2,
+                attributes=_chat_attributes(raw_input_tokens=20, output_tokens=3),
+            ),
+        ],
+    )
+
+    first_snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
+    checkpoint_path = _provider(telemetry_dir, runtime_info).checkpoint_path
+    checkpoint_path.write_bytes(zlib.compress(b"\xff\xfe", level=9))
+
+    corrupted_snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
+
+    assert corrupted_snapshot.state == TelemetryState.DEGRADED
+    assert (
+        corrupted_snapshot.session.total_tokens == first_snapshot.session.total_tokens
+    )
+    assert (
+        _warning_count(
+            corrupted_snapshot,
+            TelemetryWarningCode.CHECKPOINT_CORRUPT,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_writes_compact_high_span_checkpoints_with_exact_restart_totals(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    with managed.open("w", encoding="utf-8") as handle:
+        for index in range(12_000):
+            handle.write(
+                json.dumps(
+                    _span_record(
+                        trace_id=f"trace-{index // 4}",
+                        span_id=f"chat-{index}",
+                        name="chat gpt-5.6-sol",
+                        start_seconds=index + 1,
+                        end_seconds=index + 2,
+                        attributes=_chat_attributes(
+                            raw_input_tokens=index + 1,
+                            output_tokens=1,
+                            cache_read_tokens=1,
+                            cache_write_tokens=0,
+                            nano_aiu=1,
+                            opaque_cost=0.01,
+                        ),
+                    ),
+                    separators=(",", ":"),
+                )
+                + "\n"
+            )
+
+    provider = _provider(telemetry_dir, runtime_info)
+    first_snapshot = await provider.snapshot()
+    replayed_snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
+
+    assert (
+        provider.checkpoint_path.stat().st_size
+        <= TelemetryReaderLimits().max_checkpoint_bytes
+    )
+    assert first_snapshot.counts.model_calls == 12_000
+    assert replayed_snapshot == first_snapshot
+
+
+@pytest.mark.asyncio
 async def test_provider_degrades_on_newer_checkpoint_versions_without_resetting_totals(
     tmp_path: Path,
 ) -> None:
@@ -687,9 +865,11 @@ async def test_provider_degrades_on_newer_checkpoint_versions_without_resetting_
 
     provider = _provider(telemetry_dir, runtime_info)
     first_snapshot = await provider.snapshot()
-    provider.checkpoint_path.write_text(
-        json.dumps({"checkpoint_version": 99}),
-        encoding="utf-8",
+    provider.checkpoint_path.write_bytes(
+        zlib.compress(
+            json.dumps({"checkpoint_version": 99}).encode("utf-8"),
+            level=9,
+        ),
     )
 
     replayed_snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
@@ -704,8 +884,8 @@ async def test_provider_degrades_on_newer_checkpoint_versions_without_resetting_
         == 1
     )
     assert (
-        json.loads(provider.checkpoint_path.read_text(encoding="utf-8"))[
-            "checkpoint_version"
-        ]
+        json.loads(
+            zlib.decompress(provider.checkpoint_path.read_bytes()).decode("utf-8")
+        )["checkpoint_version"]
         == 99
     )

@@ -1705,6 +1705,121 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn telemetry_snapshot_deserialization_accepts_sanitized_null_numeric_fields() {
+        let payload = json!({
+            "schema_version": 1,
+            "state": "degraded",
+            "reason": "invalid_usage_shape",
+            "content_mode": "metadata",
+            "source_version": "1.0.81-0",
+            "observed_at": "2026-08-15T00:00:00Z",
+            "received_at": "2026-08-15T00:00:01Z",
+            "session": {
+                "raw_input_tokens": null,
+                "effective_input_tokens": null,
+                "output_tokens": null,
+                "total_tokens": null,
+                "reasoning_output_tokens": null,
+                "cache_read_input_tokens": null,
+                "cache_write_input_tokens": null,
+                "other_input_tokens": null,
+                "fresh_input_tokens": null,
+                "cache_reuse_percent": null,
+                "nano_aiu": null,
+                "opaque_cost": null
+            },
+            "latest_call": {
+                "started_at": "2026-08-15T00:00:00Z",
+                "ended_at": "2026-08-15T00:00:01Z",
+                "duration_ms": null,
+                "model": "gpt-5.6-sol",
+                "requested_model": "gpt-5.6-sol",
+                "provider": "openai",
+                "agent_id": null,
+                "agent_name": null,
+                "is_subagent": false,
+                "cache_reporting": "unreported",
+                "token_accounting_convention": "unknown",
+                "usage": {
+                    "raw_input_tokens": null,
+                    "effective_input_tokens": null,
+                    "output_tokens": null,
+                    "total_tokens": null,
+                    "reasoning_output_tokens": null,
+                    "cache_read_input_tokens": null,
+                    "cache_write_input_tokens": null,
+                    "other_input_tokens": null,
+                    "fresh_input_tokens": null,
+                    "cache_reuse_percent": null,
+                    "nano_aiu": null,
+                    "opaque_cost": null
+                }
+            },
+            "last_interaction": null,
+            "context": {
+                "tokens": null,
+                "limit": null,
+                "message_count": 3,
+                "observed_at": "2026-08-15T00:00:00Z"
+            },
+            "counts": {
+                "interactions": 1,
+                "model_calls": 1,
+                "tool_calls": 0,
+                "subagent_invocations": 0,
+                "subagent_model_calls": 0,
+                "errors": 0
+            },
+            "subagents": {
+                "invocations": 0,
+                "model_calls": 0,
+                "effective_input_tokens": null,
+                "output_tokens": null,
+                "cache_read_input_tokens": null,
+                "cache_write_input_tokens": null,
+                "duration_ms": null
+            },
+            "cache_signal": {
+                "state": "unknown",
+                "confidence": null,
+                "reason": null
+            },
+            "reporting": {
+                "model_calls": 1,
+                "cache_reported_calls": 0,
+                "convention_resolved_calls": 0,
+                "effective_input_covered_calls": 0,
+                "context_reported": true
+            },
+            "warnings": {
+                "total": 1,
+                "items": [{
+                    "code": "invalid_usage_shape",
+                    "count": 1
+                }]
+            }
+        });
+
+        let snapshot: TelemetrySnapshot = serde_json::from_value(payload)
+            .unwrap_or_else(|error| panic!("failed to deserialize telemetry snapshot: {error}"));
+
+        assert_eq!(snapshot.state, TelemetryState::Degraded);
+        assert!(snapshot.session.raw_input_tokens.is_none());
+        assert_eq!(
+            snapshot
+                .context
+                .as_ref()
+                .and_then(|context| context.message_count),
+            Some(3)
+        );
+        assert_eq!(
+            snapshot.warnings.items.first().map(|warning| warning.code),
+            Some(TelemetryWarningCode::InvalidUsageShape)
+        );
+    }
+
+    #[test]
     fn connection_summary_hides_api_key_by_default() {
         let mut connection = ConnectionRecord::new("conn", "Connection", "http://example.test");
         connection.created_at = "c".to_owned();

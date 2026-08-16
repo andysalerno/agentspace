@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import logging
+import math
 import os
 import uuid
+import zlib
 from collections import Counter
 from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
@@ -20,9 +24,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 TELEMETRY_SNAPSHOT_SCHEMA_VERSION = 1
-TELEMETRY_CHECKPOINT_SCHEMA_VERSION = 1
-TELEMETRY_CHECKPOINT_FILE_NAME = ".agentspace-telemetry-checkpoint-v1.json"
+TELEMETRY_CHECKPOINT_SCHEMA_VERSION = 2
+TELEMETRY_CHECKPOINT_FILE_NAME = ".agentspace-telemetry-checkpoint-v2.zlib"
+_LEGACY_TELEMETRY_CHECKPOINT_FILE_NAME = ".agentspace-telemetry-checkpoint-v1.json"
 _MANAGED_TELEMETRY_DIR = PurePosixPath("/var/lib/agentspace/telemetry")
+_U64_MAX = (1 << 64) - 1
 _CACHE_WRITE_ALIASES = (
     "gen_ai.usage.cache_creation.input_tokens",
     "gen_ai.usage.cache_write.input_tokens",
@@ -384,6 +390,9 @@ class CopilotOtelTelemetryProvider:
         self._now = now or _utc_now
         self._lock = asyncio.Lock()
         self._checkpoint_path = self._telemetry_dir / TELEMETRY_CHECKPOINT_FILE_NAME
+        self._legacy_checkpoint_path = (
+            self._telemetry_dir / _LEGACY_TELEMETRY_CHECKPOINT_FILE_NAME
+        )
         self._loaded = False
         self._checkpoint_write_disabled = False
         self._dirty = False
@@ -418,13 +427,19 @@ class CopilotOtelTelemetryProvider:
             self._dirty = False
         return snapshot
 
-    def _load_or_replay(self, runtime_info: TelemetryRuntimeInfo) -> None:  # noqa: PLR0911
-        if not self._checkpoint_path.is_file():
+    def _load_or_replay(  # noqa: C901, PLR0911, PLR0912
+        self,
+        runtime_info: TelemetryRuntimeInfo,
+    ) -> None:
+        checkpoint_path = self._checkpoint_path
+        if not checkpoint_path.is_file():
+            checkpoint_path = self._legacy_checkpoint_path
+        if not checkpoint_path.is_file():
             self._replay_all_files(runtime_info)
             return
 
         try:
-            size = self._checkpoint_path.stat().st_size
+            size = checkpoint_path.stat().st_size
         except OSError as error:
             logger.warning("failed to stat telemetry checkpoint: %s", error)
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
@@ -437,8 +452,11 @@ class CopilotOtelTelemetryProvider:
             return
 
         try:
-            payload = json.loads(self._checkpoint_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
+            if checkpoint_path == self._checkpoint_path:
+                payload = _read_compact_checkpoint(checkpoint_path)
+            else:
+                payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, zlib.error) as error:
             logger.warning("failed to read telemetry checkpoint: %s", error)
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
@@ -462,16 +480,24 @@ class CopilotOtelTelemetryProvider:
             self._replay_all_files(runtime_info)
             return
 
-        if version != TELEMETRY_CHECKPOINT_SCHEMA_VERSION:
+        restored = False
+        if version == 1:
+            restored = self._restore_checkpoint(data)
+        elif version == TELEMETRY_CHECKPOINT_SCHEMA_VERSION:
+            restored = self._restore_compact_checkpoint(data)
+        else:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
             return
 
-        if not self._restore_checkpoint(data):
+        if not restored:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
+            return
+        if checkpoint_path != self._checkpoint_path:
+            self._dirty = True
 
-    def _restore_checkpoint(  # noqa: C901, PLR0911, PLR0912
+    def _restore_checkpoint_metadata(  # noqa: C901, PLR0911, PLR0912
         self,
         payload: Mapping[str, object],
     ) -> bool:
@@ -532,6 +558,11 @@ class CopilotOtelTelemetryProvider:
             if conflict is None:
                 return False
             self._duplicate_conflicts.append(conflict)
+        return True
+
+    def _restore_checkpoint(self, payload: Mapping[str, object]) -> bool:
+        if not self._restore_checkpoint_metadata(payload):
+            return False
 
         spans = _sequence(payload.get("spans"))
         if spans is None:
@@ -542,6 +573,34 @@ class CopilotOtelTelemetryProvider:
             if span_mapping is None:
                 return False
             span = _deserialize_span(span_mapping)
+            if span is None:
+                return False
+            self._spans[span.key.encoded()] = span
+            if span.source_version is not None:
+                self._source_version = span.source_version
+            self._observe_source_time(span.ended_at_ns)
+        return True
+
+    def _restore_compact_checkpoint(
+        self,
+        payload: Mapping[str, object],
+    ) -> bool:
+        if not self._restore_checkpoint_metadata(payload):
+            return False
+
+        source_files = _string_sequence(payload.get("source_files"))
+        if source_files is None:
+            return False
+
+        spans = _sequence(payload.get("spans"))
+        if spans is None:
+            return False
+        self._spans = {}
+        for item in spans:
+            span_mapping = _mapping(item)
+            if span_mapping is None:
+                return False
+            span = _deserialize_compact_span(span_mapping, source_files)
             if span is None:
                 return False
             self._spans[span.key.encoded()] = span
@@ -781,7 +840,7 @@ class CopilotOtelTelemetryProvider:
         self._received_at = received_at
         try:
             payload = json.loads(raw_line)
-        except json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
             self._record_warning(TelemetryWarningCode.MALFORMED_RECORD)
             return
 
@@ -937,15 +996,20 @@ class CopilotOtelTelemetryProvider:
         self,
         attributes: Mapping[str, object],
     ) -> _ModelUsageDetails:
-        raw_input_tokens = _parse_int(attributes.get("gen_ai.usage.input_tokens"))
-        output_tokens = _parse_int(attributes.get("gen_ai.usage.output_tokens"))
-        reasoning_output_tokens = _parse_int(
+        raw_input_tokens = self._bounded_u64(
+            attributes.get("gen_ai.usage.input_tokens"),
+        )
+        output_tokens = self._bounded_u64(attributes.get("gen_ai.usage.output_tokens"))
+        reasoning_output_tokens = self._bounded_u64(
             attributes.get("gen_ai.usage.reasoning.output_tokens"),
         )
-        cache_read_tokens = _parse_int(
+        cache_read_tokens = self._bounded_u64(
             attributes.get("gen_ai.usage.cache_read.input_tokens"),
         )
-        cache_write_tokens = _first_present_int(attributes, _CACHE_WRITE_ALIASES)
+        cache_write_tokens = self._first_present_bounded_u64(
+            attributes,
+            _CACHE_WRITE_ALIASES,
+        )
 
         cache_reporting = CacheReportingState.UNREPORTED
         if cache_read_tokens is not None or cache_write_tokens is not None:
@@ -1023,12 +1087,14 @@ class CopilotOtelTelemetryProvider:
             else None,
             other_input_tokens=other_input_tokens,
             fresh_input_tokens=fresh_input_tokens,
-            cache_reuse_percent=cache_reuse_percent,
-            nano_aiu=_parse_int(attributes.get("github.copilot.nano_aiu")),
-            opaque_cost=_parse_float(attributes.get("github.copilot.cost")),
+            cache_reuse_percent=self._sanitize_optional_float(cache_reuse_percent),
+            nano_aiu=self._bounded_u64(attributes.get("github.copilot.nano_aiu")),
+            opaque_cost=self._bounded_finite_float(
+                attributes.get("github.copilot.cost")
+            ),
         )
         return _ModelUsageDetails(
-            usage=usage,
+            usage=self._sanitize_usage_breakdown(usage),
             cache_reporting=cache_reporting,
             token_accounting_convention=convention,
         )
@@ -1073,16 +1139,18 @@ class CopilotOtelTelemetryProvider:
                 or fallback_time_ns
             )
             context = ContextUsage(
-                tokens=_parse_int(attributes.get("github.copilot.current_tokens")),
-                limit=_parse_int(attributes.get("github.copilot.token_limit")),
-                message_count=_parse_int(
+                tokens=self._bounded_u64(
+                    attributes.get("github.copilot.current_tokens")
+                ),
+                limit=self._bounded_u64(attributes.get("github.copilot.token_limit")),
+                message_count=self._bounded_u64(
                     attributes.get("github.copilot.messages_length"),
                 ),
                 observed_at=_isoformat_ns(observed_ns),
             )
             if best is None or observed_ns >= best[0]:
                 best = (observed_ns, context)
-        return None if best is None else best[1]
+        return None if best is None else self._sanitize_context_usage(best[1])
 
     def _extract_source_version(self, record: Mapping[str, object]) -> str | None:
         scope = _mapping(record.get("instrumentationScope")) or {}
@@ -1172,11 +1240,16 @@ class CopilotOtelTelemetryProvider:
                 latest_context = span.context
                 latest_context_ns = context_ns
 
-        session_usage = _aggregate_usage(
-            [span.usage for span in model_spans if span.usage is not None],
+        latest_context = self._sanitize_context_usage(latest_context)
+        session_usage = self._sanitize_usage_breakdown(
+            _aggregate_usage(
+                [span.usage for span in model_spans if span.usage is not None],
+            ),
         )
-        subagent_usage = _aggregate_usage(
-            [span.usage for span in subagent_model_spans if span.usage is not None],
+        subagent_usage = self._sanitize_usage_breakdown(
+            _aggregate_usage(
+                [span.usage for span in subagent_model_spans if span.usage is not None],
+            ),
         )
 
         reporting = ReportingCoverage(
@@ -1221,10 +1294,12 @@ class CopilotOtelTelemetryProvider:
             errors=sum(1 for span in span_index.values() if span.is_error),
         )
 
-        subagent_duration_ms = _sum_all(
-            _duration_ms(span.started_at_ns, span.ended_at_ns)
-            for span in agent_spans
-            if span.key.encoded() in subagent_ids
+        subagent_duration_ms = self._sanitize_optional_u64(
+            _sum_all(
+                _duration_ms(span.started_at_ns, span.ended_at_ns)
+                for span in agent_spans
+                if span.key.encoded() in subagent_ids
+            ),
         )
         subagents = SubagentBreakdown(
             invocations=len(subagent_ids),
@@ -1239,10 +1314,11 @@ class CopilotOtelTelemetryProvider:
         latest_call = None
         if latest_call_span is not None and latest_call_span.usage is not None:
             latest_agent = nearest_agent(latest_call_span)
+            latest_usage = self._sanitize_usage_breakdown(latest_call_span.usage.usage)
             latest_call = ModelCallSummary(
                 started_at=latest_call_span.started_at,
                 ended_at=latest_call_span.ended_at,
-                duration_ms=_duration_ms(
+                duration_ms=self._duration_ms_or_none(
                     latest_call_span.started_at_ns,
                     latest_call_span.ended_at_ns,
                 ),
@@ -1259,7 +1335,7 @@ class CopilotOtelTelemetryProvider:
                 token_accounting_convention=(
                     latest_call_span.usage.token_accounting_convention
                 ),
-                usage=latest_call_span.usage.usage,
+                usage=latest_usage,
             )
 
         cache_signal = self._build_cache_signal(
@@ -1406,7 +1482,20 @@ class CopilotOtelTelemetryProvider:
 
         return CacheSignal(state=CacheSignalState.HEALTHY)
 
-    def _write_checkpoint(self, snapshot: TelemetrySnapshot) -> None:
+    def _write_checkpoint(self, _snapshot: TelemetrySnapshot) -> None:
+        ordered_spans = sorted(
+            self._spans.values(),
+            key=lambda span: (
+                span.started_at_ns,
+                span.ended_at_ns,
+                span.key.trace_id,
+                span.key.span_id,
+            ),
+        )
+        source_files = sorted({span.provenance.file_name for span in ordered_spans})
+        source_file_indices = {
+            file_name: index for index, file_name in enumerate(source_files)
+        }
         payload = {
             "checkpoint_version": TELEMETRY_CHECKPOINT_SCHEMA_VERSION,
             "content_mode": self._content_mode.value,
@@ -1423,6 +1512,7 @@ class CopilotOtelTelemetryProvider:
                     key=lambda cursor: cursor.path,
                 )
             ],
+            "source_files": source_files,
             "duplicate_conflicts": [
                 {
                     "key": asdict(conflict.key),
@@ -1432,20 +1522,24 @@ class CopilotOtelTelemetryProvider:
                 for conflict in self._duplicate_conflicts
             ],
             "spans": [
-                _serialize_span(span)
-                for span in sorted(
-                    self._spans.values(),
-                    key=lambda span: (
-                        span.started_at_ns,
-                        span.ended_at_ns,
-                        span.key.trace_id,
-                        span.key.span_id,
-                    ),
+                _serialize_compact_span(
+                    span,
+                    source_file_indices=source_file_indices,
                 )
+                for span in ordered_spans
             ],
-            "snapshot": asdict(snapshot),
         }
-        _atomic_write_json(self._checkpoint_path, payload)
+        encoded = _encode_compact_checkpoint(payload)
+        if len(encoded) > self._limits.max_checkpoint_bytes:
+            logger.error(
+                "refusing to write telemetry checkpoint larger than configured "
+                "limit: %s > %s",
+                len(encoded),
+                self._limits.max_checkpoint_bytes,
+            )
+            self._checkpoint_write_disabled = True
+            return
+        _atomic_write_bytes(self._checkpoint_path, encoded)
 
     def _observe_source_time(self, candidate_ns: int) -> None:
         if self._observed_at_ns is None or candidate_ns > self._observed_at_ns:
@@ -1456,6 +1550,92 @@ class CopilotOtelTelemetryProvider:
         if code.value in _DEGRADED_WARNING_CODES:
             self._degraded_reasons.add(code.value)
         self._dirty = True
+
+    def _bounded_u64(self, value: object) -> int | None:
+        if value is None:
+            return None
+        parsed = _parse_int(value)
+        if parsed is None or parsed < 0 or parsed > _U64_MAX:
+            self._record_warning(TelemetryWarningCode.INVALID_USAGE_SHAPE)
+            return None
+        return parsed
+
+    def _bounded_finite_float(self, value: object) -> float | None:
+        if value is None:
+            return None
+        parsed = _parse_float(value)
+        if parsed is None or not math.isfinite(parsed):
+            self._record_warning(TelemetryWarningCode.INVALID_USAGE_SHAPE)
+            return None
+        return parsed
+
+    def _first_present_bounded_u64(
+        self,
+        attributes: Mapping[str, object],
+        keys: Sequence[str],
+    ) -> int | None:
+        for key in keys:
+            if key in attributes:
+                return self._bounded_u64(attributes.get(key))
+        return None
+
+    def _sanitize_usage_breakdown(self, usage: UsageBreakdown) -> UsageBreakdown:
+        return UsageBreakdown(
+            raw_input_tokens=self._sanitize_optional_u64(usage.raw_input_tokens),
+            effective_input_tokens=self._sanitize_optional_u64(
+                usage.effective_input_tokens
+            ),
+            output_tokens=self._sanitize_optional_u64(usage.output_tokens),
+            total_tokens=self._sanitize_optional_u64(usage.total_tokens),
+            reasoning_output_tokens=self._sanitize_optional_u64(
+                usage.reasoning_output_tokens
+            ),
+            cache_read_input_tokens=self._sanitize_optional_u64(
+                usage.cache_read_input_tokens
+            ),
+            cache_write_input_tokens=self._sanitize_optional_u64(
+                usage.cache_write_input_tokens
+            ),
+            other_input_tokens=self._sanitize_optional_u64(usage.other_input_tokens),
+            fresh_input_tokens=self._sanitize_optional_u64(usage.fresh_input_tokens),
+            cache_reuse_percent=self._sanitize_optional_float(
+                usage.cache_reuse_percent
+            ),
+            nano_aiu=self._sanitize_optional_u64(usage.nano_aiu),
+            opaque_cost=self._sanitize_optional_float(usage.opaque_cost),
+        )
+
+    def _sanitize_context_usage(
+        self,
+        context: ContextUsage | None,
+    ) -> ContextUsage | None:
+        if context is None:
+            return None
+        return ContextUsage(
+            tokens=self._sanitize_optional_u64(context.tokens),
+            limit=self._sanitize_optional_u64(context.limit),
+            message_count=self._sanitize_optional_u64(context.message_count),
+            observed_at=context.observed_at,
+        )
+
+    def _sanitize_optional_u64(self, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value < 0 or value > _U64_MAX:
+            self._record_warning(TelemetryWarningCode.INVALID_USAGE_SHAPE)
+            return None
+        return value
+
+    def _sanitize_optional_float(self, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if not math.isfinite(value):
+            self._record_warning(TelemetryWarningCode.INVALID_USAGE_SHAPE)
+            return None
+        return value
+
+    def _duration_ms_or_none(self, started_at_ns: int, ended_at_ns: int) -> int | None:
+        return self._sanitize_optional_u64(_duration_ms(started_at_ns, ended_at_ns))
 
     def _bounded_string(self, value: object) -> str | None:
         parsed = _parse_string(value)
@@ -1642,14 +1822,17 @@ def _parse_int(value: object) -> int | None:
 def _parse_float(value: object) -> float | None:
     if isinstance(value, bool):
         return None
+    parsed: float | None = None
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+        parsed = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value)
+            parsed = float(value)
         except ValueError:
             return None
-    return None
+    if parsed is None or not math.isfinite(parsed):
+        return None
+    return parsed
 
 
 def _parse_timestamp_ns(value: object) -> int | None:
@@ -1678,16 +1861,6 @@ def _span_suffix(name: str, prefix: str) -> str | None:
         return None
     if name.startswith(f"{prefix} "):
         return name[len(prefix) + 1 :]
-    return None
-
-
-def _first_present_int(
-    attributes: Mapping[str, object], keys: Sequence[str]
-) -> int | None:
-    for key in keys:
-        value = _parse_int(attributes.get(key))
-        if value is not None:
-            return value
     return None
 
 
@@ -1793,6 +1966,161 @@ def _serialize_span(span: _TelemetrySpan) -> dict[str, object]:
     }
 
 
+def _serialize_compact_span(  # noqa: C901
+    span: _TelemetrySpan,
+    *,
+    source_file_indices: Mapping[str, int],
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "k": [span.key.trace_id, span.key.span_id],
+        "t": _encode_span_kind(span.kind),
+        "s": span.started_at_ns,
+        "e": span.ended_at_ns,
+        "d": _encode_digest(span.digest),
+        "r": [
+            source_file_indices[span.provenance.file_name],
+            span.provenance.offset,
+        ],
+    }
+    if span.parent_span_id is not None:
+        payload["p"] = span.parent_span_id
+
+    flags = 0
+    if span.is_error:
+        flags |= 1
+    if span.has_compaction_or_truncation:
+        flags |= 2
+    if flags:
+        payload["f"] = flags
+
+    if span.model is not None:
+        payload["m"] = span.model
+    if span.requested_model is not None:
+        payload["q"] = span.requested_model
+    if span.provider is not None:
+        payload["v"] = span.provider
+    if span.conversation_id is not None:
+        payload["c"] = span.conversation_id
+    if span.agent_id is not None or span.agent_name is not None:
+        payload["a"] = [span.agent_id, span.agent_name]
+    if span.usage is not None:
+        payload["u"] = _serialize_compact_usage(span.usage)
+    if span.context is not None:
+        payload["x"] = _serialize_compact_context(span.context)
+    if span.source_version is not None:
+        payload["o"] = span.source_version
+    return payload
+
+
+def _serialize_compact_usage(usage: _ModelUsageDetails) -> list[object]:
+    return [
+        usage.usage.raw_input_tokens,
+        usage.usage.effective_input_tokens,
+        usage.usage.output_tokens,
+        usage.usage.total_tokens,
+        usage.usage.reasoning_output_tokens,
+        usage.usage.cache_read_input_tokens,
+        usage.usage.cache_write_input_tokens,
+        usage.usage.other_input_tokens,
+        usage.usage.fresh_input_tokens,
+        usage.usage.cache_reuse_percent,
+        usage.usage.nano_aiu,
+        usage.usage.opaque_cost,
+        _encode_cache_reporting(usage.cache_reporting),
+        _encode_accounting_convention(usage.token_accounting_convention),
+    ]
+
+
+def _serialize_compact_context(context: ContextUsage) -> list[object]:
+    return [
+        context.tokens,
+        context.limit,
+        context.message_count,
+        context.observed_at,
+    ]
+
+
+def _encode_span_kind(kind: _SpanKind) -> str:
+    return {
+        _SpanKind.AGENT: "a",
+        _SpanKind.MODEL_CALL: "m",
+        _SpanKind.TOOL_CALL: "t",
+        _SpanKind.OTHER: "o",
+    }[kind]
+
+
+def _decode_span_kind(value: object) -> _SpanKind | None:
+    parsed = _parse_string(value)
+    if parsed is None:
+        return None
+    return {
+        "a": _SpanKind.AGENT,
+        "m": _SpanKind.MODEL_CALL,
+        "t": _SpanKind.TOOL_CALL,
+        "o": _SpanKind.OTHER,
+    }.get(parsed)
+
+
+def _encode_cache_reporting(value: CacheReportingState) -> str:
+    return "r" if value == CacheReportingState.REPORTED else "u"
+
+
+def _decode_cache_reporting(value: object) -> CacheReportingState | None:
+    parsed = _parse_string(value)
+    if parsed is None:
+        return None
+    return {
+        "r": CacheReportingState.REPORTED,
+        "u": CacheReportingState.UNREPORTED,
+    }.get(parsed)
+
+
+def _encode_accounting_convention(value: TokenAccountingConvention) -> str:
+    return {
+        TokenAccountingConvention.INCLUSIVE: "i",
+        TokenAccountingConvention.ADDITIVE: "a",
+        TokenAccountingConvention.UNKNOWN: "u",
+    }[value]
+
+
+def _decode_accounting_convention(
+    value: object,
+) -> TokenAccountingConvention | None:
+    parsed = _parse_string(value)
+    if parsed is None:
+        return None
+    return {
+        "i": TokenAccountingConvention.INCLUSIVE,
+        "a": TokenAccountingConvention.ADDITIVE,
+        "u": TokenAccountingConvention.UNKNOWN,
+    }.get(parsed)
+
+
+def _encode_digest(value: str) -> str:
+    try:
+        raw = bytes.fromhex(value)
+    except ValueError:
+        raw = value.encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_digest(value: object) -> str | None:
+    parsed = _parse_string(value)
+    if parsed is None:
+        return None
+    padding = "=" * ((4 - len(parsed) % 4) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(parsed + padding)
+    except (ValueError, binascii.Error):
+        return None
+    if len(raw) == hashlib.sha256().digest_size:
+        return raw.hex()
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def _deserialize_file_cursor(value: Mapping[str, object]) -> _FileCursor | None:
     path = _parse_string(value.get("path"))
     device = _parse_int(value.get("device"))
@@ -1813,6 +2141,133 @@ def _deserialize_file_cursor(value: Mapping[str, object]) -> _FileCursor | None:
         inode=inode,
         offset=offset,
         sealed=sealed,
+    )
+
+
+def _deserialize_compact_span(
+    value: Mapping[str, object],
+    source_files: Sequence[str],
+) -> _TelemetrySpan | None:
+    key_payload = _sequence(value.get("k"))
+    provenance_payload = _sequence(value.get("r"))
+    kind = _decode_span_kind(value.get("t"))
+    digest = _decode_digest(value.get("d"))
+    started_at_ns = _parse_int(value.get("s"))
+    ended_at_ns = _parse_int(value.get("e"))
+    if (
+        key_payload is None
+        or len(key_payload) != 2
+        or provenance_payload is None
+        or len(provenance_payload) != 2
+        or kind is None
+        or digest is None
+        or started_at_ns is None
+        or ended_at_ns is None
+    ):
+        return None
+
+    trace_id = _parse_string(key_payload[0])
+    span_id = _parse_string(key_payload[1])
+    provenance_file_index = _parse_int(provenance_payload[0])
+    provenance_offset = _parse_int(provenance_payload[1])
+    if (
+        trace_id is None
+        or span_id is None
+        or provenance_file_index is None
+        or provenance_offset is None
+        or provenance_file_index < 0
+        or provenance_file_index >= len(source_files)
+    ):
+        return None
+
+    usage = _deserialize_compact_usage(value.get("u"))
+    if value.get("u") is not None and usage is None:
+        return None
+
+    context = _deserialize_compact_context(value.get("x"))
+    if value.get("x") is not None and context is None:
+        return None
+
+    flags = _parse_int(value.get("f")) or 0
+    agent_pair = _sequence(value.get("a"))
+    if agent_pair is not None and len(agent_pair) != 2:
+        return None
+
+    return _TelemetrySpan(
+        key=_SpanKey(trace_id=trace_id, span_id=span_id),
+        parent_span_id=_parse_string(value.get("p")),
+        kind=kind,
+        name=None,
+        started_at_ns=started_at_ns,
+        ended_at_ns=ended_at_ns,
+        started_at=_isoformat_ns(started_at_ns),
+        ended_at=_isoformat_ns(ended_at_ns),
+        is_error=bool(flags & 1),
+        model=_parse_string(value.get("m")),
+        requested_model=_parse_string(value.get("q")),
+        provider=_parse_string(value.get("v")),
+        conversation_id=_parse_string(value.get("c")),
+        interaction_id=None,
+        turn_id=None,
+        response_id=None,
+        previous_response_id=None,
+        agent_id=None if agent_pair is None else _parse_string(agent_pair[0]),
+        agent_name=None if agent_pair is None else _parse_string(agent_pair[1]),
+        tool_name=None,
+        tool_type=None,
+        tool_call_id=None,
+        usage=usage,
+        context=context,
+        has_compaction_or_truncation=bool(flags & 2),
+        source_version=_parse_string(value.get("o")),
+        provenance=_SpanProvenance(
+            file_name=source_files[provenance_file_index],
+            offset=provenance_offset,
+        ),
+        digest=digest,
+    )
+
+
+def _deserialize_compact_usage(value: object) -> _ModelUsageDetails | None:
+    sequence = _sequence(value)
+    if sequence is None or len(sequence) != 14:
+        return None
+    cache_reporting = _decode_cache_reporting(sequence[12])
+    convention = _decode_accounting_convention(sequence[13])
+    if cache_reporting is None or convention is None:
+        return None
+    return _ModelUsageDetails(
+        usage=UsageBreakdown(
+            raw_input_tokens=_parse_int(sequence[0]),
+            effective_input_tokens=_parse_int(sequence[1]),
+            output_tokens=_parse_int(sequence[2]),
+            total_tokens=_parse_int(sequence[3]),
+            reasoning_output_tokens=_parse_int(sequence[4]),
+            cache_read_input_tokens=_parse_int(sequence[5]),
+            cache_write_input_tokens=_parse_int(sequence[6]),
+            other_input_tokens=_parse_int(sequence[7]),
+            fresh_input_tokens=_parse_int(sequence[8]),
+            cache_reuse_percent=_parse_float(sequence[9]),
+            nano_aiu=_parse_int(sequence[10]),
+            opaque_cost=_parse_float(sequence[11]),
+        ),
+        cache_reporting=cache_reporting,
+        token_accounting_convention=convention,
+    )
+
+
+def _deserialize_compact_context(value: object) -> ContextUsage | None:
+    sequence = _sequence(value)
+    if sequence is None or len(sequence) != 4:
+        return None
+    observed_at = sequence[3]
+    if observed_at is not None and not isinstance(observed_at, str):
+        return None
+    return ContextUsage(
+        tokens=_parse_int(sequence[0]),
+        limit=_parse_int(sequence[1]),
+        message_count=_parse_int(sequence[2]),
+        observed_at=observed_at,
     )
 
 
@@ -2108,12 +2563,28 @@ def _tool_definitions_are_safe(  # noqa: C901, PLR0911, PLR0912
     return True
 
 
-def _atomic_write_json(path: Path, payload: Mapping[str, object]) -> None:
+def _encode_compact_checkpoint(payload: Mapping[str, object]) -> bytes:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return zlib.compress(encoded, level=9)
+
+
+def _read_compact_checkpoint(path: Path) -> object:
+    raw = path.read_bytes()
+    decoded = zlib.decompress(raw)
+    return json.loads(decoded.decode("utf-8"))
+
+
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f"{path.name}.{uuid.uuid4()}.tmp")
     try:
-        with temporary_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+        with temporary_path.open("wb") as handle:
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         temporary_path.replace(path)
