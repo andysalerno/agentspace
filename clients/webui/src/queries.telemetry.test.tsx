@@ -193,4 +193,30 @@ describe("useSessionTelemetry", () => {
         await flushQueryWork();
         expect(api.getSessionTelemetry).toHaveBeenCalledTimes(3);
     });
+
+    it("does not fetch while hidden and fetches when visibility returns", async () => {
+        setVisibility("hidden");
+        render(
+            <HookHarness active={false} sessionId="cli-session" />,
+            { wrapper: wrapper() },
+        );
+
+        await flushQueryWork();
+        expect(api.getSessionTelemetry).not.toHaveBeenCalled();
+
+        act(() => {
+            focusManager.setFocused(false);
+            focusManager.setFocused(true);
+            onlineManager.setOnline(false);
+            onlineManager.setOnline(true);
+        });
+        await flushQueryWork();
+        expect(api.getSessionTelemetry).not.toHaveBeenCalled();
+
+        act(() => {
+            setVisibility("visible");
+        });
+        await flushQueryWork();
+        expect(api.getSessionTelemetry).toHaveBeenCalledTimes(1);
+    });
 });

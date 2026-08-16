@@ -126,7 +126,7 @@ export const useSessionTelemetry = (
       ? queryKeys.sessionTelemetry(sessionId)
       : (["sessions", "__none__", "telemetry"] as const),
     queryFn: () => api.getSessionTelemetry(sessionId as string),
-    enabled: sessionId !== null,
+    enabled: sessionId !== null && documentVisible,
     refetchInterval: sessionId !== null && documentVisible
       ? (options?.active === true
           ? ACTIVE_TELEMETRY_POLL_MS

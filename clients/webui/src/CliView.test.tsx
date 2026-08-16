@@ -442,7 +442,7 @@ describe("CliView", () => {
         expect(screen.getAllByText("1 subagent").length).toBeGreaterThan(0);
 
         await user.click(screen.getByRole("button", { name: "Usage details" }));
-        expect(await screen.findByRole("dialog", { name: "CLI telemetry details" }))
+        expect(await screen.findByRole("region", { name: "CLI telemetry details" }))
             .toBeTruthy();
         expect(screen.queryByText("Telemetry state")).toBeNull();
         expect(screen.getByText("Session usage")).toBeTruthy();

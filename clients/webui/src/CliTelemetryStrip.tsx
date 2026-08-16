@@ -207,10 +207,7 @@ export default function CliTelemetryStrip({
                     )}
                 </div>
 
-                <div
-                    aria-hidden="true"
-                    className="cli-telemetry-summary cli-telemetry-summary-wide"
-                >
+                <div className="cli-telemetry-summary cli-telemetry-summary-wide">
                     <SummaryItem label="Session" value={totalSummary} />
                     <SummaryItem label="Latest" value={latestSummary} />
                     <SummaryItem label="Cache" tooltip={CACHE_REUSE_TOOLTIP} value={cacheSummary} />
@@ -251,11 +248,9 @@ export default function CliTelemetryStrip({
             {detailsOpen && (
                 <section
                     aria-labelledby={titleId}
-                    aria-modal="false"
                     className="cli-telemetry-details-surface"
                     id={detailsId}
-                    role="dialog"
-                    tabIndex={-1}
+                    role="region"
                 >
                     <div className="cli-telemetry-details-header">
                         <div>
