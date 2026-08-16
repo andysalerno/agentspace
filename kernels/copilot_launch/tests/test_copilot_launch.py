@@ -257,6 +257,29 @@ def test_interactive_launch_rejects_unmanaged_telemetry_path(
         )
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/var/lib/agentspace/telemetry/4CB3DF39-797E-4542-8FD1-D24665699E4D.jsonl",
+        "/var/lib/agentspace/telemetry/4cb3df39797e45428fd1d24665699e4d.jsonl",
+    ],
+)
+def test_interactive_launch_rejects_noncanonical_uuid_telemetry_path(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    with pytest.raises(CopilotLaunchError, match="canonical UUID"):
+        build_interactive_launch(
+            CopilotLaunchConfig(
+                session_id=SESSION_ID,
+                workspace_dir=str(tmp_path),
+                env={"AGENTSPACE_SESSION_ID": OTHER_SESSION_ID},
+            ),
+            process_env={},
+            telemetry_file_path=path,
+        )
+
+
 def test_profile_is_deterministic_owned_and_selected(tmp_path: Path) -> None:
     session_id = SESSION_ID
     config = CopilotLaunchConfig(

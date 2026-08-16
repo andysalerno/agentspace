@@ -91,17 +91,19 @@ not stop the terminal or PTY transport.
 Current reader bounds are enforced inside `kernel_host`:
 
 - 256 managed JSONL files;
-- 64 MiB of selected raw telemetry bytes per snapshot pass;
+- 64 MiB of unread raw telemetry bytes per snapshot pass;
 - 512 KiB per JSONL line;
-- 50,000 distinct normalized spans; and
-- an 8 MiB checkpoint file.
+- 50,000 distinct normalized spans;
+- an 8 MiB compressed checkpoint file; and
+- 64 MiB of uncompressed checkpoint data while loading the compact checkpoint.
 
 When those bounds are exceeded, or when the reader hits malformed data,
 duplicate conflicts, checkpoint problems, or content-policy conflicts,
 `/sessions/{session_id}/telemetry` reports warnings and typically
 `state=degraded`. `state=starting` means the managed source exists but no
 completed model call has been normalized yet. `state=unavailable` means the
-session has no managed telemetry identity or has not been recovered yet.
+session has no managed telemetry identity, has not been recovered yet, or its
+runtime is not currently inspectable.
 Upstream telemetry provider failures surface as `503` responses instead. The
 browser may also show `stale` when it is holding a previous successful snapshot
 during polling retries.

@@ -6,10 +6,12 @@ from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
 import pytest
+from kernel_host import telemetry as telemetry_module
 from kernel_host.telemetry import (
     CacheReportingState,
     CopilotOtelTelemetryProvider,
     TelemetryContentMode,
+    TelemetryProviderRuntimeError,
     TelemetryReaderLimits,
     TelemetryRuntimeInfo,
     TelemetryRuntimeState,
@@ -20,7 +22,7 @@ from kernel_host.telemetry import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
 SOURCE_VERSION = "1.0.81-0"
@@ -153,10 +155,17 @@ def _write_jsonl(
     trailing: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    path.write_text(_jsonl_text(records, trailing=trailing), encoding="utf-8")
+
+
+def _jsonl_text(
+    records: Sequence[Mapping[str, object]],
+    *,
+    trailing: str = "",
+) -> str:
+    return (
         "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records)
-        + trailing,
-        encoding="utf-8",
+        + trailing
     )
 
 
@@ -172,11 +181,13 @@ def _provider(
     runtime_info: RuntimeInfoStub,
     *,
     default_convention: TokenAccountingConvention = TokenAccountingConvention.INCLUSIVE,
+    limits: TelemetryReaderLimits | None = None,
 ) -> CopilotOtelTelemetryProvider:
     return CopilotOtelTelemetryProvider(
         telemetry_dir=telemetry_dir,
         runtime_info_provider=runtime_info,
         default_token_accounting_convention=default_convention,
+        limits=limits,
     )
 
 
@@ -289,6 +300,137 @@ async def test_provider_normalizes_inclusive_usage_and_ignores_unmanaged_files(
         snapshot.latest_call.token_accounting_convention
         == TokenAccountingConvention.INCLUSIVE
     )
+
+
+@pytest.mark.asyncio
+async def test_provider_continues_ingesting_when_lifetime_file_size_exceeds_budget(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+
+    first_record = _span_record(
+        trace_id=TRACE_ID,
+        span_id="chat-1",
+        name="chat gpt-5.6-sol",
+        start_seconds=1,
+        end_seconds=2,
+        attributes=_chat_attributes(raw_input_tokens=10, output_tokens=2),
+    )
+    later_records = [
+        _span_record(
+            trace_id=TRACE_ID,
+            span_id="chat-2",
+            name="chat gpt-5.6-sol",
+            start_seconds=3,
+            end_seconds=4,
+            attributes=_chat_attributes(raw_input_tokens=20, output_tokens=3),
+        ),
+        _span_record(
+            trace_id=TRACE_ID,
+            span_id="chat-3",
+            name="chat gpt-5.6-sol",
+            start_seconds=5,
+            end_seconds=6,
+            attributes=_chat_attributes(raw_input_tokens=30, output_tokens=4),
+        ),
+    ]
+    first_chunk = _jsonl_text([first_record])
+    later_chunk = _jsonl_text(later_records)
+    first_bytes = len(first_chunk.encode("utf-8"))
+    later_bytes = len(later_chunk.encode("utf-8"))
+    budget = max(first_bytes, later_bytes) + 1
+
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    managed.write_text(first_chunk, encoding="utf-8")
+    provider = _provider(
+        telemetry_dir,
+        runtime_info,
+        limits=TelemetryReaderLimits(max_total_bytes=budget),
+    )
+
+    first_snapshot = await provider.snapshot()
+    managed.write_text(first_chunk + later_chunk, encoding="utf-8")
+    second_snapshot = await provider.snapshot()
+
+    assert first_snapshot.counts.model_calls == 1
+    assert second_snapshot.counts.model_calls == 3
+    assert second_snapshot.session.raw_input_tokens == 60
+    assert (
+        _warning_count(second_snapshot, TelemetryWarningCode.SIZE_LIMIT_EXCEEDED) == 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_incremental_ingestion_seeks_to_cursor_and_reads_only_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+
+    first_record = _span_record(
+        trace_id=TRACE_ID,
+        span_id="chat-1",
+        name="chat gpt-5.6-sol",
+        start_seconds=1,
+        end_seconds=2,
+        attributes=_chat_attributes(raw_input_tokens=10, output_tokens=2),
+    )
+    second_record = _span_record(
+        trace_id=TRACE_ID,
+        span_id="chat-2",
+        name="chat gpt-5.6-sol",
+        start_seconds=3,
+        end_seconds=4,
+        attributes=_chat_attributes(raw_input_tokens=20, output_tokens=3),
+    )
+    first_chunk = _jsonl_text([first_record])
+    second_chunk = _jsonl_text([second_record])
+    first_bytes = len(first_chunk.encode("utf-8"))
+    second_bytes = len(second_chunk.encode("utf-8"))
+
+    managed.parent.mkdir(parents=True, exist_ok=True)
+    managed.write_text(first_chunk, encoding="utf-8")
+    provider = _provider(
+        telemetry_dir,
+        runtime_info,
+        limits=TelemetryReaderLimits(
+            max_total_bytes=max(first_bytes, second_bytes) + 1
+        ),
+    )
+    await provider.snapshot()
+    managed.write_text(first_chunk + second_chunk, encoding="utf-8")
+
+    calls: list[tuple[Path, int, int]] = []
+    original_read_bounded_bytes: Callable[..., bytes] = telemetry_module.__dict__[
+        "_read_bounded_bytes"
+    ]
+
+    def tracking_read_bounded_bytes(
+        path: Path,
+        *,
+        start_offset: int,
+        max_bytes: int,
+    ) -> bytes:
+        calls.append((path, start_offset, max_bytes))
+        return original_read_bounded_bytes(
+            path,
+            start_offset=start_offset,
+            max_bytes=max_bytes,
+        )
+
+    monkeypatch.setattr(
+        telemetry_module,
+        "_read_bounded_bytes",
+        tracking_read_bounded_bytes,
+    )
+    snapshot = await provider.snapshot()
+
+    assert snapshot.counts.model_calls == 2
+    assert calls == [(managed, first_bytes, second_bytes)]
 
 
 @pytest.mark.asyncio
@@ -583,6 +725,45 @@ async def test_provider_retains_live_partial_records_and_discards_dead_tails(
 
 
 @pytest.mark.asyncio
+async def test_provider_surfaces_runtime_unavailable_without_dropping_totals(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+    _write_jsonl(
+        managed,
+        [
+            _span_record(
+                trace_id=TRACE_ID,
+                span_id="chat-1",
+                name="chat gpt-5.6-sol",
+                start_seconds=1,
+                end_seconds=2,
+                attributes=_chat_attributes(raw_input_tokens=20, output_tokens=3),
+            ),
+        ],
+    )
+
+    provider = _provider(telemetry_dir, runtime_info)
+    live_snapshot = await provider.snapshot()
+
+    runtime_info.state = TelemetryRuntimeState.UNAVAILABLE
+    runtime_info.reason = (
+        "telemetry runtime is unavailable until the session is recovered"
+    )
+    unavailable_snapshot = await provider.snapshot()
+
+    assert live_snapshot.state == TelemetryState.LIVE
+    assert unavailable_snapshot.state == TelemetryState.UNAVAILABLE
+    assert unavailable_snapshot.reason == runtime_info.reason
+    assert unavailable_snapshot.counts.model_calls == live_snapshot.counts.model_calls
+    assert (
+        unavailable_snapshot.session.total_tokens == live_snapshot.session.total_tokens
+    )
+
+
+@pytest.mark.asyncio
 async def test_provider_degrades_on_malformed_records_and_content_policy_conflicts(
     tmp_path: Path,
 ) -> None:
@@ -712,6 +893,42 @@ async def test_provider_sanitizes_hostile_numeric_fields_for_json_and_checkpoint
 
 
 @pytest.mark.asyncio
+async def test_provider_raises_runtime_error_when_checkpoint_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+    _write_jsonl(
+        managed,
+        [
+            _span_record(
+                trace_id=TRACE_ID,
+                span_id="chat-1",
+                name="chat gpt-5.6-sol",
+                start_seconds=1,
+                end_seconds=2,
+                attributes=_chat_attributes(raw_input_tokens=20, output_tokens=3),
+            ),
+        ],
+    )
+
+    def fail_checkpoint_write(_path: Path, _payload: bytes) -> None:
+        msg = "read-only file system"
+        raise OSError(msg)
+
+    monkeypatch.setattr(
+        telemetry_module,
+        "_atomic_write_bytes",
+        fail_checkpoint_write,
+    )
+
+    with pytest.raises(TelemetryProviderRuntimeError, match="read-only file system"):
+        await _provider(telemetry_dir, runtime_info).snapshot()
+
+
+@pytest.mark.asyncio
 async def test_provider_restarts_from_checkpoint_and_recovers_from_corruption(
     tmp_path: Path,
 ) -> None:
@@ -783,6 +1000,101 @@ async def test_provider_restarts_from_invalid_utf8_checkpoint(
     checkpoint_path.write_bytes(zlib.compress(b"\xff\xfe", level=9))
 
     corrupted_snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
+
+    assert corrupted_snapshot.state == TelemetryState.DEGRADED
+    assert (
+        corrupted_snapshot.session.total_tokens == first_snapshot.session.total_tokens
+    )
+    assert (
+        _warning_count(
+            corrupted_snapshot,
+            TelemetryWarningCode.CHECKPOINT_CORRUPT,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_compact_checkpoint_with_trailing_garbage(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+    _write_jsonl(
+        managed,
+        [
+            _span_record(
+                trace_id=TRACE_ID,
+                span_id="chat-1",
+                name="chat gpt-5.6-sol",
+                start_seconds=1,
+                end_seconds=2,
+                attributes=_chat_attributes(raw_input_tokens=20, output_tokens=3),
+            ),
+        ],
+    )
+
+    provider = _provider(telemetry_dir, runtime_info)
+    first_snapshot = await provider.snapshot()
+    provider.checkpoint_path.write_bytes(
+        provider.checkpoint_path.read_bytes() + b"junk"
+    )
+
+    corrupted_snapshot = await _provider(telemetry_dir, runtime_info).snapshot()
+
+    assert corrupted_snapshot.state == TelemetryState.DEGRADED
+    assert (
+        corrupted_snapshot.session.total_tokens == first_snapshot.session.total_tokens
+    )
+    assert (
+        _warning_count(
+            corrupted_snapshot,
+            TelemetryWarningCode.CHECKPOINT_CORRUPT,
+        )
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_rejects_compact_checkpoint_exceeding_uncompressed_limit(
+    tmp_path: Path,
+) -> None:
+    telemetry_dir = tmp_path / "telemetry"
+    managed = telemetry_dir / f"{ACTIVE_FILE_ID}.jsonl"
+    runtime_info = RuntimeInfoStub()
+    _write_jsonl(
+        managed,
+        [
+            _span_record(
+                trace_id=TRACE_ID,
+                span_id="chat-1",
+                name="chat gpt-5.6-sol",
+                start_seconds=1,
+                end_seconds=2,
+                attributes=_chat_attributes(raw_input_tokens=20, output_tokens=3),
+            ),
+        ],
+    )
+
+    provider = _provider(telemetry_dir, runtime_info)
+    first_snapshot = await provider.snapshot()
+    payload = json.loads(
+        zlib.decompress(provider.checkpoint_path.read_bytes()).decode("utf-8")
+    )
+    payload["padding"] = "x" * 4096
+    provider.checkpoint_path.write_bytes(
+        zlib.compress(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            level=9,
+        ),
+    )
+
+    corrupted_snapshot = await _provider(
+        telemetry_dir,
+        runtime_info,
+        limits=TelemetryReaderLimits(max_checkpoint_uncompressed_bytes=1024),
+    ).snapshot()
 
     assert corrupted_snapshot.state == TelemetryState.DEGRADED
     assert (

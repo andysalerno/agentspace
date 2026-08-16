@@ -194,10 +194,13 @@ def _managed_telemetry_environment(
         msg = f"telemetry file must be a JSONL file in {TELEMETRY_DIR}"
         raise CopilotLaunchError(msg)
     try:
-        uuid.UUID(path.stem)
+        parsed = uuid.UUID(path.stem)
     except ValueError as error:
         msg = "telemetry filename must use a UUID launch identity"
         raise CopilotLaunchError(msg) from error
+    if path.stem != str(parsed):
+        msg = "telemetry filename must use a canonical UUID launch identity"
+        raise CopilotLaunchError(msg)
 
     runtime_session_id = config.env.get("AGENTSPACE_SESSION_ID")
     if not runtime_session_id:

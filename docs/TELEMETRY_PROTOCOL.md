@@ -85,36 +85,48 @@ volume at `/var/lib/agentspace/telemetry`.
 Current reader bounds are:
 
 - at most 256 managed source files;
-- at most 64 MiB of selected raw-file bytes per snapshot pass;
+- at most 64 MiB of unread raw-file bytes per snapshot pass;
 - at most 512 KiB per JSONL line;
 - at most 50,000 distinct normalized spans;
-- at most 8 MiB for the checkpoint file;
+- at most 8 MiB for the compressed checkpoint file;
+- at most 64 MiB of uncompressed data when loading the compact checkpoint;
 - strings truncated to 256 characters; and
 - at most 64 metadata-only tool definitions per span.
 
 The checkpoint file is:
 
 ```text
-/var/lib/agentspace/telemetry/.agentspace-telemetry-checkpoint-v1.json
+/var/lib/agentspace/telemetry/.agentspace-telemetry-checkpoint-v2.zlib
 ```
 
 It is written atomically by creating a sibling temporary file in the same
 directory, flushing and `fsync`ing it, renaming it into place, and then syncing
 the directory where supported.
 
-The checkpoint currently stores normalized spans, file identities and offsets,
-warnings, degraded reasons, content mode, observed/received timestamps, and a
-copy of the latest snapshot.
+The v2 checkpoint stores a compact normalized payload: spans, shared source-file
+tables, file identities and offsets, warnings, degraded reasons, content mode,
+source/received/observed metadata, and related restart state. It does **not**
+embed a copied `TelemetrySnapshot`.
+
+Checkpoint loads use bounded streaming zlib decompression and reject truncated,
+trailing-invalid, or over-limit payloads as `checkpoint_corrupt`. The legacy
+`.agentspace-telemetry-checkpoint-v1.json` file is accepted only as migration
+input and is rewritten as v2 on the next successful checkpoint write.
 
 ### Restart and tail behavior
 
 On restart, `kernel_host`:
 
 - restores from a valid checkpoint and continues from saved byte offsets;
+- reads only unread bytes from each saved cursor, capped by the remaining
+  per-pass budget, and continues later passes from the last committed offset if
+  backlog remains;
 - replays managed raw files from the beginning if the checkpoint is corrupt or
   unreadable;
 - replays raw files and leaves checkpoint writing disabled if it finds a newer
-  checkpoint version it does not understand; and
+  checkpoint version it does not understand;
+- surfaces checkpoint write I/O failures as runtime/provider failures rather
+  than silently dropping durability; and
 - never intentionally resets totals to zero.
 
 Incremental tail handling is strict:
@@ -162,7 +174,8 @@ Server snapshots currently emit:
 - `degraded`: a usable partial snapshot with warning-backed data-quality
   problems; and
 - `unavailable`: telemetry is unsupported for the current session or the runtime
-  is not currently inspectable.
+  is not currently inspectable, even if previously normalized totals remain
+  present.
 
 `stale` exists in the public enum but is currently a **WebUI display state**,
 not a `kernel_host` output state. The browser shows `stale` when it keeps an
@@ -171,7 +184,8 @@ older successful snapshot while polling retries after a later request failure.
 `reason` semantics are current-state specific:
 
 - `starting` currently uses `waiting for first completed model call`;
-- `unavailable` returns an explicit availability reason;
+- `unavailable` returns an explicit availability reason while preserving any
+  last-known normalized totals already loaded into the snapshot;
 - `degraded` returns one primary degraded reason; and
 - when several degraded reasons exist, the current primary `reason` is the
   lexicographically smallest degraded-warning code. Use `warnings.items` for the
@@ -394,8 +408,14 @@ Current public availability behavior:
 - existing session with no active `agent_host_session_id` yet: `200` with
   `state=unavailable` and reason
   `telemetry runtime is unavailable until the session is recovered`;
-- upstream file/runtime transport failure: `503`; and
+- upstream file/runtime transport failure (including checkpoint write I/O
+  failure): `503`; and
 - successful but partial normalization: `200` with `state=degraded`.
+
+A successful `200` response with `state=unavailable` may still retain
+last-known normalized totals from a prior checkpoint or earlier in-process
+ingestion. Clients should key liveness from `state`/`reason`, not from whether
+aggregate fields are populated.
 
 Internal `kernel_host`/`agent_host` routes can return a harness-specific
 unavailable reason. The public `client_service` route intentionally

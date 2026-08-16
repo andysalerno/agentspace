@@ -28,6 +28,7 @@ TELEMETRY_CHECKPOINT_SCHEMA_VERSION = 2
 TELEMETRY_CHECKPOINT_FILE_NAME = ".agentspace-telemetry-checkpoint-v2.zlib"
 _LEGACY_TELEMETRY_CHECKPOINT_FILE_NAME = ".agentspace-telemetry-checkpoint-v1.json"
 _MANAGED_TELEMETRY_DIR = PurePosixPath("/var/lib/agentspace/telemetry")
+_CHECKPOINT_DECOMPRESS_CHUNK_BYTES = 64 * 1024
 _U64_MAX = (1 << 64) - 1
 _CACHE_WRITE_ALIASES = (
     "gen_ai.usage.cache_creation.input_tokens",
@@ -279,6 +280,7 @@ class TelemetryReaderLimits:
     max_line_bytes: int = 512 * 1024
     max_distinct_spans: int = 50_000
     max_checkpoint_bytes: int = 8 * 1024 * 1024
+    max_checkpoint_uncompressed_bytes: int = 64 * 1024 * 1024
     max_string_length: int = 256
     max_tool_definitions: int = 64
 
@@ -316,6 +318,12 @@ class _DuplicateConflict:
     key: _SpanKey
     first: _SpanProvenance
     second: _SpanProvenance
+
+
+@dataclass(frozen=True, slots=True)
+class _IngestReadResult:
+    bytes_read: int = 0
+    deferred_due_to_budget: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,10 +425,12 @@ class CopilotOtelTelemetryProvider:
             return await asyncio.to_thread(self._snapshot_sync, runtime_info)
 
     def _snapshot_sync(self, runtime_info: TelemetryRuntimeInfo) -> TelemetrySnapshot:
+        should_ingest_incremental = True
         if not self._loaded:
-            self._load_or_replay(runtime_info)
+            should_ingest_incremental = self._load_or_replay(runtime_info)
             self._loaded = True
-        self._ingest_incremental(runtime_info)
+        if should_ingest_incremental:
+            self._ingest_incremental(runtime_info)
         snapshot = self._build_snapshot(runtime_info)
         if self._dirty and not self._checkpoint_write_disabled:
             self._write_checkpoint(snapshot)
@@ -430,13 +440,13 @@ class CopilotOtelTelemetryProvider:
     def _load_or_replay(  # noqa: C901, PLR0911, PLR0912
         self,
         runtime_info: TelemetryRuntimeInfo,
-    ) -> None:
+    ) -> bool:
         checkpoint_path = self._checkpoint_path
         if not checkpoint_path.is_file():
             checkpoint_path = self._legacy_checkpoint_path
         if not checkpoint_path.is_file():
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         try:
             size = checkpoint_path.stat().st_size
@@ -444,41 +454,46 @@ class CopilotOtelTelemetryProvider:
             logger.warning("failed to stat telemetry checkpoint: %s", error)
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         if size > self._limits.max_checkpoint_bytes:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         try:
             if checkpoint_path == self._checkpoint_path:
-                payload = _read_compact_checkpoint(checkpoint_path)
+                payload = _read_compact_checkpoint(
+                    checkpoint_path,
+                    max_uncompressed_bytes=(
+                        self._limits.max_checkpoint_uncompressed_bytes
+                    ),
+                )
             else:
                 payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, zlib.error) as error:
             logger.warning("failed to read telemetry checkpoint: %s", error)
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         data = _mapping(payload)
         if data is None:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         version = _parse_int(data.get("checkpoint_version"))
         if version is None:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         if version > TELEMETRY_CHECKPOINT_SCHEMA_VERSION:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_NEWER_VERSION)
             self._checkpoint_write_disabled = True
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         restored = False
         if version == 1:
@@ -488,14 +503,15 @@ class CopilotOtelTelemetryProvider:
         else:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
-            return
+            return False
 
         if not restored:
             self._record_warning(TelemetryWarningCode.CHECKPOINT_CORRUPT)
             self._replay_all_files(runtime_info)
-            return
+            return False
         if checkpoint_path != self._checkpoint_path:
             self._dirty = True
+        return True
 
     def _restore_checkpoint_metadata(  # noqa: C901, PLR0911, PLR0912
         self,
@@ -626,16 +642,15 @@ class CopilotOtelTelemetryProvider:
         self._received_at = received_at
         self._observed_at_ns = None
         self._has_source_files = False
-        selected_files = self._discover_selected_files(runtime_info)
-        for path in selected_files:
-            self._ingest_file(path, cursor=None, runtime_info=runtime_info)
+        self._ingest_selected_files(
+            self._discover_selected_files(runtime_info),
+            runtime_info=runtime_info,
+        )
 
     def _ingest_incremental(self, runtime_info: TelemetryRuntimeInfo) -> None:
         selected_files = self._discover_selected_files(runtime_info)
         current_paths = {str(path) for path in selected_files}
-        for path in selected_files:
-            cursor = self._file_cursors.get(str(path))
-            self._ingest_file(path, cursor=cursor, runtime_info=runtime_info)
+        self._ingest_selected_files(selected_files, runtime_info=runtime_info)
 
         missing_paths = [
             path
@@ -645,7 +660,7 @@ class CopilotOtelTelemetryProvider:
         if missing_paths:
             self._dirty = True
 
-    def _discover_selected_files(  # noqa: C901
+    def _discover_selected_files(
         self, runtime_info: TelemetryRuntimeInfo
     ) -> list[Path]:
         if not self._telemetry_dir.exists():
@@ -684,38 +699,47 @@ class CopilotOtelTelemetryProvider:
         if len(ordered) > self._limits.max_files:
             self._record_warning(TelemetryWarningCode.FILE_LIMIT_EXCEEDED)
             ordered = ordered[: self._limits.max_files]
+        return ordered
 
-        total_bytes = 0
-        selected: list[Path] = []
-        for path in ordered:
-            try:
-                size = path.stat().st_size
-            except OSError as error:
-                msg = f"failed to stat telemetry file {path.name}: {error}"
-                raise TelemetryProviderRuntimeError(msg) from error
-            if total_bytes + size > self._limits.max_total_bytes:
-                self._record_warning(TelemetryWarningCode.SIZE_LIMIT_EXCEEDED)
-                break
-            total_bytes += size
-            selected.append(path)
-        return selected
+    def _ingest_selected_files(
+        self,
+        selected_files: Sequence[Path],
+        *,
+        runtime_info: TelemetryRuntimeInfo,
+    ) -> None:
+        remaining_bytes = self._limits.max_total_bytes
+        size_limited = False
+        for path in selected_files:
+            cursor = self._file_cursors.get(str(path))
+            result = self._ingest_file(
+                path,
+                cursor=cursor,
+                runtime_info=runtime_info,
+                max_bytes=remaining_bytes,
+            )
+            remaining_bytes = max(0, remaining_bytes - result.bytes_read)
+            size_limited = size_limited or result.deferred_due_to_budget
 
-    def _ingest_file(
+        if size_limited:
+            self._record_warning(TelemetryWarningCode.SIZE_LIMIT_EXCEEDED)
+
+    def _ingest_file(  # noqa: PLR0911
         self,
         path: Path,
         *,
         cursor: _FileCursor | None,
         runtime_info: TelemetryRuntimeInfo,
-    ) -> None:
+        max_bytes: int,
+    ) -> _IngestReadResult:
         try:
             stat_result = path.stat()
         except OSError as error:
             logger.warning("failed to stat telemetry file %s: %s", path.name, error)
-            return
+            return _IngestReadResult()
 
         if cursor is not None:
             if cursor.sealed:
-                return
+                return _IngestReadResult()
             if (
                 stat_result.st_ino != cursor.inode
                 or stat_result.st_dev != cursor.device
@@ -728,7 +752,7 @@ class CopilotOtelTelemetryProvider:
                     offset=stat_result.st_size,
                     sealed=True,
                 )
-                return
+                return _IngestReadResult()
             if stat_result.st_size < cursor.offset:
                 self._record_warning(TelemetryWarningCode.SOURCE_FILE_CHANGED)
                 self._file_cursors[str(path)] = _FileCursor(
@@ -738,7 +762,7 @@ class CopilotOtelTelemetryProvider:
                     offset=stat_result.st_size,
                     sealed=True,
                 )
-                return
+                return _IngestReadResult()
 
         start_offset = 0 if cursor is None else cursor.offset
         if stat_result.st_size == start_offset:
@@ -750,18 +774,29 @@ class CopilotOtelTelemetryProvider:
                     offset=start_offset,
                 )
                 self._dirty = True
-            return
+            return _IngestReadResult()
+
+        unread_bytes = stat_result.st_size - start_offset
+        if max_bytes <= 0:
+            return _IngestReadResult(deferred_due_to_budget=True)
+        read_limit = min(unread_bytes, max_bytes)
 
         try:
-            raw_bytes = path.read_bytes()[start_offset:]
+            raw_bytes = _read_bounded_bytes(
+                path,
+                start_offset=start_offset,
+                max_bytes=read_limit,
+            )
         except OSError as error:
             msg = f"failed to read telemetry file {path.name}: {error}"
             raise TelemetryProviderRuntimeError(msg) from error
 
+        read_end_offset = start_offset + len(raw_bytes)
         end_offset = self._consume_complete_records(
             raw_bytes=raw_bytes,
             path=path,
             start_offset=start_offset,
+            read_end_offset=read_end_offset,
             file_size=stat_result.st_size,
             runtime_info=runtime_info,
         )
@@ -774,13 +809,18 @@ class CopilotOtelTelemetryProvider:
             sealed=bool(cursor and cursor.sealed),
         )
         self._dirty = True
+        return _IngestReadResult(
+            bytes_read=len(raw_bytes),
+            deferred_due_to_budget=read_end_offset < stat_result.st_size,
+        )
 
-    def _consume_complete_records(  # noqa: C901, PLR0911
+    def _consume_complete_records(  # noqa: C901, PLR0911, PLR0913
         self,
         *,
         raw_bytes: bytes,
         path: Path,
         start_offset: int,
+        read_end_offset: int,
         file_size: int,
         runtime_info: TelemetryRuntimeInfo,
     ) -> int:
@@ -788,6 +828,7 @@ class CopilotOtelTelemetryProvider:
             return start_offset
 
         newline_index = raw_bytes.rfind(b"\n")
+        reached_file_end = read_end_offset >= file_size
         active_path = runtime_info.active_launch_path
         can_discard_partial = runtime_info.state == TelemetryRuntimeState.IDLE
         if runtime_info.state == TelemetryRuntimeState.RUNNING and active_path != str(
@@ -798,8 +839,8 @@ class CopilotOtelTelemetryProvider:
         if newline_index < 0:
             if len(raw_bytes) > self._limits.max_line_bytes:
                 self._record_warning(TelemetryWarningCode.LINE_TOO_LONG)
-                return file_size
-            if can_discard_partial:
+                return file_size if reached_file_end else read_end_offset
+            if reached_file_end and can_discard_partial:
                 self._record_warning(TelemetryWarningCode.PARTIAL_RECORD_DISCARDED)
                 return file_size
             return start_offset
@@ -823,8 +864,8 @@ class CopilotOtelTelemetryProvider:
         if trailing:
             if len(trailing) > self._limits.max_line_bytes:
                 self._record_warning(TelemetryWarningCode.LINE_TOO_LONG)
-                return file_size
-            if can_discard_partial:
+                return file_size if reached_file_end else read_end_offset
+            if reached_file_end and can_discard_partial:
                 self._record_warning(TelemetryWarningCode.PARTIAL_RECORD_DISCARDED)
                 return file_size
         return end_offset
@@ -1163,7 +1204,7 @@ class CopilotOtelTelemetryProvider:
             resource_attributes.get("service.version"),
         ) or self._bounded_string(resource_attributes.get("github.copilot.version"))
 
-    def _build_snapshot(  # noqa: C901, PLR0915
+    def _build_snapshot(  # noqa: C901, PLR0912, PLR0915
         self,
         runtime_info: TelemetryRuntimeInfo,
     ) -> TelemetrySnapshot:
@@ -1360,7 +1401,10 @@ class CopilotOtelTelemetryProvider:
 
         state = TelemetryState.LIVE
         reason: str | None = None
-        if not model_spans:
+        if runtime_info.state == TelemetryRuntimeState.UNAVAILABLE:
+            state = TelemetryState.UNAVAILABLE
+            reason = runtime_info.reason or "telemetry unavailable"
+        elif not model_spans:
             if self._degraded_reasons:
                 state = TelemetryState.DEGRADED
                 reason = min(self._degraded_reasons)
@@ -1529,7 +1573,18 @@ class CopilotOtelTelemetryProvider:
                 for span in ordered_spans
             ],
         }
-        encoded = _encode_compact_checkpoint(payload)
+        serialized = _serialize_compact_checkpoint(payload)
+        if len(serialized) > self._limits.max_checkpoint_uncompressed_bytes:
+            logger.error(
+                "refusing to write telemetry checkpoint larger than configured "
+                "uncompressed limit: %s > %s",
+                len(serialized),
+                self._limits.max_checkpoint_uncompressed_bytes,
+            )
+            self._checkpoint_write_disabled = True
+            return
+
+        encoded = _compress_compact_checkpoint(serialized)
         if len(encoded) > self._limits.max_checkpoint_bytes:
             logger.error(
                 "refusing to write telemetry checkpoint larger than configured "
@@ -1539,7 +1594,11 @@ class CopilotOtelTelemetryProvider:
             )
             self._checkpoint_write_disabled = True
             return
-        _atomic_write_bytes(self._checkpoint_path, encoded)
+        try:
+            _atomic_write_bytes(self._checkpoint_path, encoded)
+        except OSError as error:
+            msg = f"failed to write telemetry checkpoint: {error}"
+            raise TelemetryProviderRuntimeError(msg) from error
 
     def _observe_source_time(self, candidate_ns: int) -> None:
         if self._observed_at_ns is None or candidate_ns > self._observed_at_ns:
@@ -2563,20 +2622,60 @@ def _tool_definitions_are_safe(  # noqa: C901, PLR0911, PLR0912
     return True
 
 
-def _encode_compact_checkpoint(payload: Mapping[str, object]) -> bytes:
-    encoded = json.dumps(
+def _serialize_compact_checkpoint(payload: Mapping[str, object]) -> bytes:
+    return json.dumps(
         payload,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
     ).encode("utf-8")
-    return zlib.compress(encoded, level=9)
 
 
-def _read_compact_checkpoint(path: Path) -> object:
+def _compress_compact_checkpoint(payload: bytes) -> bytes:
+    return zlib.compress(payload, level=9)
+
+
+def _read_compact_checkpoint(path: Path, *, max_uncompressed_bytes: int) -> object:
     raw = path.read_bytes()
-    decoded = zlib.decompress(raw)
+    decompressor = zlib.decompressobj()
+    decoded = bytearray()
+    for start in range(0, len(raw), _CHECKPOINT_DECOMPRESS_CHUNK_BYTES):
+        chunk = raw[start : start + _CHECKPOINT_DECOMPRESS_CHUNK_BYTES]
+        while chunk:
+            remaining = max_uncompressed_bytes - len(decoded)
+            if remaining < 0:
+                msg = "telemetry checkpoint exceeded configured uncompressed limit"
+                raise zlib.error(msg)
+            piece = decompressor.decompress(chunk, remaining + 1)
+            if len(piece) > remaining:
+                msg = "telemetry checkpoint exceeded configured uncompressed limit"
+                raise zlib.error(msg)
+            decoded.extend(piece)
+            if decompressor.unused_data:
+                break
+            chunk = decompressor.unconsumed_tail
+        if decompressor.unused_data:
+            break
+
+    remaining = max_uncompressed_bytes - len(decoded)
+    if remaining < 0:
+        msg = "telemetry checkpoint exceeded configured uncompressed limit"
+        raise zlib.error(msg)
+    tail = decompressor.flush(remaining + 1)
+    if len(tail) > remaining:
+        msg = "telemetry checkpoint exceeded configured uncompressed limit"
+        raise zlib.error(msg)
+    decoded.extend(tail)
+    if not decompressor.eof or decompressor.unused_data or decompressor.unconsumed_tail:
+        msg = "telemetry checkpoint contains trailing or incomplete compressed data"
+        raise zlib.error(msg)
     return json.loads(decoded.decode("utf-8"))
+
+
+def _read_bounded_bytes(path: Path, *, start_offset: int, max_bytes: int) -> bytes:
+    with path.open("rb") as handle:
+        handle.seek(start_offset)
+        return handle.read(max_bytes)
 
 
 def _atomic_write_bytes(path: Path, payload: bytes) -> None:
