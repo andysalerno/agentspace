@@ -31,22 +31,29 @@ const viewport = {
 // A step is an accessible button name, or `{ css }` for elements that have no
 // stable accessible name (list rows built from live data, for example).
 const views = [
-  ["chat", ["Chat"]],
-  ["chat-session", ["Chat", { css: ".session-row-button" }]],
-  ["cli", ["CLI"]],
-  ["cli-session", ["CLI", { css: ".cli-session-row-button" }]],
-  ["agents", ["Agents"]],
-  ["workspaces", ["Workspaces"]],
-  ["sessions", ["Sessions"]],
-  ["kernels", ["Running kernels"]],
-  ["memory", ["Memory"]],
-  ["gateways", ["Gateways"]],
-  ["skills", ["Skills"]],
-  ["info", ["System info"]],
-  ["config", ["Configuration", "Declarative"]],
-  ["config-secrets", ["Configuration", "Secrets"]],
-  ["config-kernels", ["Configuration", "Kernels"]],
-  ["connections", ["Configuration", "Connections"]],
+  ["chat", { steps: ["Chat"] }],
+  ["chat-session", { steps: ["Chat", { css: ".session-row-button" }] }],
+  ["cli", { steps: ["CLI"] }],
+  ["cli-session", { steps: ["CLI", { css: ".cli-session-row-button" }] }],
+  [
+    "cli-session-narrow",
+    {
+      steps: ["CLI", { css: ".cli-session-row-button" }],
+      viewport: { width: 900, height: viewport.height },
+    },
+  ],
+  ["agents", { steps: ["Agents"] }],
+  ["workspaces", { steps: ["Workspaces"] }],
+  ["sessions", { steps: ["Sessions"] }],
+  ["kernels", { steps: ["Running kernels"] }],
+  ["memory", { steps: ["Memory"] }],
+  ["gateways", { steps: ["Gateways"] }],
+  ["skills", { steps: ["Skills"] }],
+  ["info", { steps: ["System info"] }],
+  ["config", { steps: ["Configuration", "Declarative"] }],
+  ["config-secrets", { steps: ["Configuration", "Secrets"] }],
+  ["config-kernels", { steps: ["Configuration", "Kernels"] }],
+  ["connections", { steps: ["Configuration", "Connections"] }],
 ];
 
 // Fallback for hosts without the Chromium shared libraries installed (see
@@ -82,12 +89,12 @@ mkdirSync(outDir, { recursive: true });
 
 let failures = 0;
 for (const theme of themes) {
-  for (const [id, path] of views) {
+  for (const [id, spec] of views) {
     if (only && !only.includes(id)) continue;
     // One browser per view: a single long-lived browser accumulates enough
     // renderer memory to get OOM-killed part way through the matrix.
     const browser = await chromium.launch({ args: ["--disable-gpu"], env: browserEnv });
-    const ctx = await browser.newContext({ viewport });
+    const ctx = await browser.newContext({ viewport: spec.viewport ?? viewport });
     const page = await ctx.newPage();
     // A view that throws still paints something, so treat runtime errors as
     // failures rather than letting a broken view screenshot its way to green.
@@ -103,7 +110,7 @@ for (const theme of themes) {
     try {
       await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
       await page.waitForTimeout(1500);
-      for (const step of path) {
+      for (const step of spec.steps) {
         const target = typeof step === "string"
           ? page.getByRole("button", { name: step, exact: true })
           : page.locator(step.css);

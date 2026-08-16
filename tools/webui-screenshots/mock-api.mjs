@@ -39,6 +39,153 @@ const terminalStatus = {
   attachment_count: 1,
 };
 
+const liveTelemetry = {
+  schema_version: 1,
+  state: "live",
+  reason: null,
+  content_mode: "metadata",
+  source_version: "1.0.81-0",
+  observed_at: "2026-07-28T14:32:08Z",
+  received_at: "2026-07-28T14:32:09Z",
+  session: {
+    raw_input_tokens: 48960,
+    effective_input_tokens: 48216,
+    output_tokens: 154,
+    total_tokens: 48370,
+    reasoning_output_tokens: 21,
+    cache_read_input_tokens: 48012,
+    cache_write_input_tokens: 112,
+    other_input_tokens: 92,
+    fresh_input_tokens: 204,
+    cache_reuse_percent: 99.6,
+    nano_aiu: 6400000,
+    opaque_cost: 0.1472,
+  },
+  latest_call: {
+    started_at: "2026-07-28T14:31:57Z",
+    ended_at: "2026-07-28T14:32:05Z",
+    duration_ms: 8000,
+    model: "gpt-5.6-sol",
+    requested_model: "gpt-5.6-sol",
+    provider: "openai",
+    agent_id: "builtin:task",
+    agent_name: "task",
+    is_subagent: false,
+    cache_reporting: "reported",
+    token_accounting_convention: "inclusive",
+    usage: {
+      raw_input_tokens: 16520,
+      effective_input_tokens: 16512,
+      output_tokens: 13,
+      total_tokens: 16525,
+      reasoning_output_tokens: 3,
+      cache_read_input_tokens: 16404,
+      cache_write_input_tokens: 18,
+      other_input_tokens: 90,
+      fresh_input_tokens: 108,
+      cache_reuse_percent: 99.3,
+      nano_aiu: 2300000,
+      opaque_cost: 0.0412,
+    },
+  },
+  last_interaction: null,
+  context: {
+    tokens: 17832,
+    limit: 272000,
+    message_count: 18,
+    observed_at: "2026-07-28T14:32:05Z",
+  },
+  counts: {
+    interactions: 4,
+    model_calls: 7,
+    tool_calls: 11,
+    subagent_invocations: 1,
+    subagent_model_calls: 2,
+    errors: 0,
+  },
+  subagents: {
+    invocations: 1,
+    model_calls: 2,
+    effective_input_tokens: 9200,
+    output_tokens: 44,
+    cache_read_input_tokens: 9100,
+    cache_write_input_tokens: 50,
+    duration_ms: 18000,
+  },
+  cache_signal: {
+    state: "healthy",
+    confidence: null,
+    reason: null,
+  },
+  reporting: {
+    model_calls: 7,
+    cache_reported_calls: 7,
+    convention_resolved_calls: 7,
+    effective_input_covered_calls: 7,
+    context_reported: true,
+  },
+  warnings: {
+    total: 0,
+    items: [],
+  },
+};
+
+const unavailableTelemetry = {
+  schema_version: 1,
+  state: "unavailable",
+  reason: "telemetry is unavailable for this session",
+  content_mode: "metadata",
+  source_version: null,
+  observed_at: null,
+  received_at: null,
+  session: {
+    raw_input_tokens: null,
+    effective_input_tokens: null,
+    output_tokens: null,
+    total_tokens: null,
+    reasoning_output_tokens: null,
+    cache_read_input_tokens: null,
+    cache_write_input_tokens: null,
+    other_input_tokens: null,
+    fresh_input_tokens: null,
+    cache_reuse_percent: null,
+    nano_aiu: null,
+    opaque_cost: null,
+  },
+  latest_call: null,
+  last_interaction: null,
+  context: null,
+  counts: {
+    interactions: 0,
+    model_calls: 0,
+    tool_calls: 0,
+    subagent_invocations: 0,
+    subagent_model_calls: 0,
+    errors: 0,
+  },
+  subagents: {
+    invocations: 0,
+    model_calls: 0,
+    effective_input_tokens: null,
+    output_tokens: null,
+    cache_read_input_tokens: null,
+    cache_write_input_tokens: null,
+    duration_ms: null,
+  },
+  cache_signal: null,
+  reporting: {
+    model_calls: 0,
+    cache_reported_calls: 0,
+    convention_resolved_calls: 0,
+    effective_input_covered_calls: 0,
+    context_reported: false,
+  },
+  warnings: {
+    total: 0,
+    items: [],
+  },
+};
+
 const longAnswer = `Here's what I found in \`services/client_service_rs\`.
 
 The session router builds its response **before** the kernel stream is drained, so late \`tool_call\` updates are dropped. Three options:
@@ -200,6 +347,10 @@ const server = http.createServer(async (req, res) => {
     if (path === "/api/config/export") return sendText(canonicalConfig, "text/yaml");
     if (path.startsWith("/api/config/export/")) return sendText(canonicalConfig, "text/yaml");
     if (path === "/api/config/validate" || path === "/api/config/plan") return send({ valid: true, generation: 12, active_generation: 11, source_sha256: "a1b2c3d4e5f6a7b8", semantic_sha256: "f0e1d2c3b4a59687", creates: ["agent/docs-writer"], updates: ["connection/openai-prod"], deletes: [], unchanged: ["workspace/agentspace", "workspace/scratch"] });
+    if (/^\/api\/sessions\/[^/]+\/telemetry$/.test(path)) {
+      const sessionId = path.split("/")[3];
+      return send(sessionId === "cli-6f4e93c1-52aa-4d91" ? liveTelemetry : unavailableTelemetry);
+    }
     if (/^\/api\/sessions\/[^/]+\/terminal$/.test(path)) return send(terminalStatus);
     if (/^\/api\/sessions\/[^/]+\/terminal\/(ensure|resume|copy-mode)$/.test(path)) return send(terminalStatus);
     if (/^\/api\/sessions\/[^/]+\/terminal\/stop$/.test(path)) {

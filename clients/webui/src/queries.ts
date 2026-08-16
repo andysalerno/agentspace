@@ -1,5 +1,10 @@
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "./api";
+import {
+  ACTIVE_TELEMETRY_POLL_MS,
+  IDLE_TELEMETRY_POLL_MS,
+} from "./telemetry";
 
 // Polling interval for resources that can change due to other clients or
 // out-of-band activity (other browser tabs, gateways, container lifecycle).
@@ -11,6 +16,8 @@ export const queryKeys = {
   agents: ["agents"] as const,
   sessions: ["sessions"] as const,
   session: (sessionId: string) => ["sessions", sessionId] as const,
+  sessionTelemetry: (sessionId: string) =>
+    ["sessions", sessionId, "telemetry"] as const,
   terminal: (sessionId: string) => ["sessions", sessionId, "terminal"] as const,
   kernels: ["kernels"] as const,
   kernelLogs: (sessionId: string) => ["kernels", sessionId, "logs"] as const,
@@ -94,6 +101,41 @@ export const useTerminalStatus = (sessionId: string | null, enabled: boolean) =>
     refetchInterval: POLL_MS,
     retry: false,
   });
+
+function useDocumentVisible(): boolean {
+  const [visible, setVisible] = useState(() => document.visibilityState !== "hidden");
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      setVisible(document.visibilityState !== "hidden");
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, []);
+
+  return visible;
+}
+
+export const useSessionTelemetry = (
+  sessionId: string | null,
+  options?: { active?: boolean },
+) => {
+  const documentVisible = useDocumentVisible();
+  return useQuery({
+    queryKey: sessionId
+      ? queryKeys.sessionTelemetry(sessionId)
+      : (["sessions", "__none__", "telemetry"] as const),
+    queryFn: () => api.getSessionTelemetry(sessionId as string),
+    enabled: sessionId !== null,
+    refetchInterval: sessionId !== null && documentVisible
+      ? (options?.active === true
+          ? ACTIVE_TELEMETRY_POLL_MS
+          : IDLE_TELEMETRY_POLL_MS)
+      : false,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
+  });
+};
 
 export const useKernels = () =>
   useQuery({

@@ -231,6 +231,151 @@ export type TerminalStatus = {
   attachment_count: number;
 };
 
+export type TelemetryState =
+  | "starting"
+  | "live"
+  | "stale"
+  | "unavailable"
+  | "degraded";
+
+export type TelemetryContentMode =
+  | "metadata"
+  | "content"
+  | "policy_conflict";
+
+export type CacheReportingState = "reported" | "unreported";
+
+export type TokenAccountingConvention = "inclusive" | "additive" | "unknown";
+
+export type CacheSignalState =
+  | "healthy"
+  | "cache_reset_suspected"
+  | "expected_boundary"
+  | "unknown";
+
+export type CacheSignalConfidence = "low" | "medium";
+
+export type CacheSignalReason =
+  | "reuse_collapsed"
+  | "context_discontinuity"
+  | "compaction_or_truncation"
+  | "model_changed";
+
+export type TelemetryWarningCode =
+  | "checkpoint_corrupt"
+  | "checkpoint_newer_version"
+  | "content_policy_conflict"
+  | "duplicate_conflict"
+  | "field_truncated"
+  | "file_limit_exceeded"
+  | "invalid_usage_shape"
+  | "line_too_long"
+  | "malformed_record"
+  | "partial_record_discarded"
+  | "size_limit_exceeded"
+  | "source_file_changed"
+  | "span_limit_exceeded"
+  | "unknown_record";
+
+export type UsageBreakdown = {
+  raw_input_tokens: number | null;
+  effective_input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  reasoning_output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_write_input_tokens: number | null;
+  other_input_tokens: number | null;
+  fresh_input_tokens: number | null;
+  cache_reuse_percent: number | null;
+  nano_aiu: number | null;
+  opaque_cost: number | null;
+};
+
+export type ModelCallSummary = {
+  started_at: string | null;
+  ended_at: string | null;
+  duration_ms: number | null;
+  model: string | null;
+  requested_model: string | null;
+  provider: string | null;
+  agent_id: string | null;
+  agent_name: string | null;
+  is_subagent: boolean;
+  cache_reporting: CacheReportingState;
+  token_accounting_convention: TokenAccountingConvention;
+  usage: UsageBreakdown;
+};
+
+export type ActivityCounts = {
+  interactions: number;
+  model_calls: number;
+  tool_calls: number;
+  subagent_invocations: number;
+  subagent_model_calls: number;
+  errors: number;
+};
+
+export type ReportingCoverage = {
+  model_calls: number;
+  cache_reported_calls: number;
+  convention_resolved_calls: number;
+  effective_input_covered_calls: number;
+  context_reported: boolean;
+};
+
+export type ContextUsage = {
+  tokens: number | null;
+  limit: number | null;
+  message_count: number | null;
+  observed_at: string | null;
+};
+
+export type SubagentBreakdown = {
+  invocations: number;
+  model_calls: number;
+  effective_input_tokens: number | null;
+  output_tokens: number | null;
+  cache_read_input_tokens: number | null;
+  cache_write_input_tokens: number | null;
+  duration_ms: number | null;
+};
+
+export type CacheSignal = {
+  state: CacheSignalState;
+  confidence: CacheSignalConfidence | null;
+  reason: CacheSignalReason | null;
+};
+
+export type TelemetryWarning = {
+  code: TelemetryWarningCode;
+  count: number;
+};
+
+export type TelemetryWarningSummary = {
+  total: number;
+  items: TelemetryWarning[];
+};
+
+export type TelemetrySnapshot = {
+  schema_version: number;
+  state: TelemetryState;
+  reason: string | null;
+  content_mode: TelemetryContentMode;
+  source_version: string | null;
+  observed_at: string | null;
+  received_at: string | null;
+  session: UsageBreakdown;
+  latest_call: ModelCallSummary | null;
+  last_interaction: UsageBreakdown | null;
+  context: ContextUsage | null;
+  counts: ActivityCounts;
+  subagents: SubagentBreakdown;
+  cache_signal: CacheSignal | null;
+  reporting: ReportingCoverage;
+  warnings: TelemetryWarningSummary;
+};
+
 export type TerminalReadyFrame = {
   type: "ready";
   attachment_id: string;

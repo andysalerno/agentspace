@@ -18,6 +18,7 @@ import {
     useAgents,
     useKernels,
     useSession,
+    useSessionTelemetry,
     useSessions,
     useTerminalStatus,
 } from "./queries";
@@ -40,7 +41,9 @@ import {
 } from "./fluent";
 import { EmptyState, FormDialog, LoadingState, StatusBadge } from "./ui";
 import { statusTone } from "./status";
+import CliTelemetryStrip from "./CliTelemetryStrip";
 import Terminal from "./Terminal";
+import { isSessionTelemetryActive } from "./telemetry";
 import type {
     TerminalAttachment,
     TerminalConnectionState,
@@ -153,6 +156,14 @@ export default function CliView({
         terminalQueryEnabled,
     );
     const terminalStatus = terminalStatusQuery.data ?? localTerminalStatus;
+    const telemetryActive = isSessionTelemetryActive(
+        selectedSession?.status,
+        selectedSession?.active_turn !== undefined,
+        terminalStatus,
+    );
+    const telemetryQuery = useSessionTelemetry(selectedSessionId, {
+        active: telemetryActive,
+    });
 
     const cacheTerminalStatus = useCallback(
         (sessionId: string, status: TerminalStatus) => {
@@ -470,7 +481,7 @@ export default function CliView({
                                     }
                                 </span>
                                 <details className="cli-details">
-                                    <summary>Details</summary>
+                                    <summary>Session details</summary>
                                     <dl>
                                         <dt>AgentSpace session</dt>
                                         <dd>{selectedSession.session_id}</dd>
@@ -483,6 +494,13 @@ export default function CliView({
                                     </dl>
                                 </details>
                             </div>
+                            <CliTelemetryStrip
+                                dataUpdatedAt={telemetryQuery.dataUpdatedAt}
+                                key={selectedSession.session_id}
+                                telemetry={telemetryQuery.data}
+                                telemetryError={telemetryQuery.error}
+                                telemetryPending={telemetryQuery.isPending}
+                            />
                         </div>
                         <div className="chat-header-actions">
                             {vscodeUrl !== null && (

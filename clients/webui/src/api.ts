@@ -28,6 +28,7 @@ import type {
   Skill,
   SkillVersion,
   SystemInfo,
+  TelemetrySnapshot,
   TerminalStatus,
   Workspace,
   WorkspaceMount,
@@ -378,6 +379,8 @@ export const api = {
     requestJson<SessionSummary>(`/sessions/${sessionId}/reset`, { method: "POST" }),
   getTerminalStatus: (sessionId: string) =>
     requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal`),
+  getSessionTelemetry: (sessionId: string) =>
+    requestJson<TelemetrySnapshot>(`/sessions/${sessionId}/telemetry`),
   ensureTerminal: (sessionId: string) =>
     requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/ensure`, {
       method: "POST",
