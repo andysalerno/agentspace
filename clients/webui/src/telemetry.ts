@@ -8,7 +8,6 @@ import type {
     TerminalStatus,
     UsageBreakdown,
 } from "./types";
-import type { StatusTone } from "./ui";
 
 export const ACTIVE_TELEMETRY_POLL_MS = 2_000;
 export const IDLE_TELEMETRY_POLL_MS = 5_000;
@@ -58,20 +57,20 @@ export function formatCompactCount(value: number): string {
 }
 
 export function formatExactCount(value: number | null): string {
-    return value === null ? "Not reported" : integerFormatter.format(value);
+    return value === null ? "N/A" : integerFormatter.format(value);
 }
 
 export function formatPercent(value: number | null): string {
-    return value === null ? "Not reported" : `${percentFormatter.format(value)}%`;
+    return value === null ? "N/A" : `${percentFormatter.format(value)}%`;
 }
 
 export function formatOpaqueCost(value: number | null): string {
-    return value === null ? "Not reported" : costFormatter.format(value);
+    return value === null ? "N/A" : costFormatter.format(value);
 }
 
 export function formatDuration(durationMs: number | null): string {
     if (durationMs === null) {
-        return "Not reported";
+        return "N/A";
     }
     if (durationMs < 1_000) {
         return `${integerFormatter.format(durationMs)}ms`;
@@ -121,21 +120,6 @@ export function humanizeSnakeCase(value: string): string {
         .join(" ");
 }
 
-export function telemetryStateTone(state: TelemetryState): StatusTone {
-    switch (state) {
-        case "live":
-            return "ok";
-        case "starting":
-        case "stale":
-            return "warn";
-        case "degraded":
-            return "error";
-        case "unavailable":
-        default:
-            return "neutral";
-    }
-}
-
 export function telemetryContentModeLabel(value: TelemetryContentMode): string {
     return humanizeSnakeCase(value);
 }
@@ -174,7 +158,7 @@ export function telemetryDisplayState(
 export function telemetryDisplayReason(
     snapshot: TelemetrySnapshot | undefined,
     error: unknown,
-    isPending: boolean,
+    _isPending: boolean,
 ): string | null {
     if (snapshot !== undefined && error instanceof Error) {
         return `Retained browser snapshot while telemetry retries after: ${error.message}`;
@@ -190,9 +174,6 @@ export function telemetryDisplayReason(
     }
     if (error !== null && error !== undefined) {
         return errorMessage(error);
-    }
-    if (isPending) {
-        return "Waiting for the first telemetry snapshot.";
     }
     return null;
 }
@@ -215,32 +196,20 @@ export function isSessionTelemetryActive(
 
 export function formatSessionTotalSummary(
     usage: UsageBreakdown,
-    state: TelemetryState,
+    _state: TelemetryState,
 ): string {
     if (usage.total_tokens !== null) {
         return `${formatCompactCount(usage.total_tokens)} tokens`;
     }
-    if (state === "unavailable") {
-        return "Not available";
-    }
-    if (state === "starting") {
-        return "Waiting for totals";
-    }
-    return "Not reported";
+    return "N/A";
 }
 
 export function formatLatestCallSummary(
     latestCall: ModelCallSummary | null,
-    state: TelemetryState,
+    _state: TelemetryState,
 ): string {
     if (latestCall === null) {
-        if (state === "unavailable") {
-            return "Not available";
-        }
-        if (state === "starting") {
-            return "Waiting for first call";
-        }
-        return "No completed call";
+        return "N/A";
     }
     const input = latestCall.usage.effective_input_tokens;
     const output = latestCall.usage.output_tokens;
@@ -248,23 +217,23 @@ export function formatLatestCallSummary(
         return `${formatCompactCount(input)} input / ${formatCompactCount(output)} output`;
     }
     if (input !== null) {
-        return `${formatCompactCount(input)} input / output not reported`;
+        return `${formatCompactCount(input)} input / N/A`;
     }
     if (output !== null) {
-        return `Input not reported / ${formatCompactCount(output)} output`;
+        return `N/A / ${formatCompactCount(output)} output`;
     }
-    return "Input/output not reported";
+    return "N/A";
 }
 
 export function formatCacheSummary(
     snapshot: TelemetrySnapshot | undefined,
-    state: TelemetryState,
+    _state: TelemetryState,
 ): string {
     if (snapshot === undefined) {
-        return state === "starting" ? "Waiting for cache" : "Not available";
+        return "N/A";
     }
     if (snapshot.state === "unavailable") {
-        return "Not available";
+        return "N/A";
     }
     const percent = snapshot.session.cache_reuse_percent;
     const read = snapshot.session.cache_read_input_tokens;
@@ -278,42 +247,36 @@ export function formatCacheSummary(
         return `${formatCompactCount(read)} read (partial)`;
     }
     if (snapshot.reporting.model_calls === 0) {
-        return "No completed call";
+        return "N/A";
     }
-    return "Not reported";
+    return "N/A";
 }
 
 export function formatContextSummary(
     context: ContextUsage | null,
-    state: TelemetryState,
+    _state: TelemetryState,
 ): string {
     if (context === null) {
-        if (state === "unavailable") {
-            return "Not available";
-        }
-        if (state === "starting") {
-            return "Waiting for context";
-        }
-        return "Not reported";
+        return "N/A";
     }
     if (context.tokens !== null && context.limit !== null) {
         return `${formatCompactCount(context.tokens)} / ${formatCompactCount(context.limit)}`;
     }
     if (context.tokens !== null) {
-        return `${formatCompactCount(context.tokens)} / limit unknown`;
+        return `${formatCompactCount(context.tokens)} / N/A`;
     }
     if (context.limit !== null) {
-        return `Usage unknown / ${formatCompactCount(context.limit)}`;
+        return `N/A / ${formatCompactCount(context.limit)}`;
     }
-    return "Not reported";
+    return "N/A";
 }
 
 export function formatSubagentSummary(
     snapshot: TelemetrySnapshot | undefined,
-    state: TelemetryState,
+    _state: TelemetryState,
 ): string {
     if (snapshot === undefined || snapshot.state === "unavailable") {
-        return state === "starting" ? "Waiting for subagents" : "Not available";
+        return "N/A";
     }
     const count = snapshot.counts.subagent_invocations;
     return count === 1 ? "1 subagent" : `${integerFormatter.format(count)} subagents`;
@@ -321,7 +284,7 @@ export function formatSubagentSummary(
 
 export function formatCoverage(covered: number, total: number): string {
     if (total === 0) {
-        return "No completed model calls";
+        return "N/A";
     }
     if (covered === total) {
         return `All ${integerFormatter.format(total)}`;
@@ -365,7 +328,7 @@ export function coverageStateLabel(
     reporting: ReportingCoverage,
 ): string {
     if (reporting.model_calls === 0) {
-        return "No completed model calls";
+        return "N/A";
     }
     if (
         reporting.cache_reported_calls === reporting.model_calls

@@ -11,7 +11,6 @@ import {
     isSessionTelemetryActive,
     telemetryDisplayReason,
     telemetryDisplayState,
-    telemetryStateTone,
     telemetryStatusAge,
 } from "./telemetry";
 import type {
@@ -174,14 +173,14 @@ describe("telemetry helpers", () => {
         } satisfies TelemetrySnapshot;
 
         expect(formatSessionTotalSummary(partial.session, partial.state)).toBe(
-            "Waiting for totals",
+            "N/A",
         );
         expect(formatLatestCallSummary(partial.latest_call, partial.state)).toBe(
-            "Waiting for first call",
+            "N/A",
         );
         expect(formatCacheSummary(partial, "live")).toBe("16.4k read (partial)");
         expect(formatContextSummary(partial.context, partial.state)).toBe(
-            "Waiting for context",
+            "N/A",
         );
 
         const unavailable = {
@@ -189,10 +188,10 @@ describe("telemetry helpers", () => {
             state: "unavailable" as const,
         } satisfies TelemetrySnapshot;
         expect(formatSessionTotalSummary(unavailable.session, unavailable.state)).toBe(
-            "Not available",
+            "N/A",
         );
         expect(formatLatestCallSummary(unavailable.latest_call, unavailable.state)).toBe(
-            "Not available",
+            "N/A",
         );
     });
 
@@ -209,9 +208,7 @@ describe("telemetry helpers", () => {
         expect(telemetryDisplayState(undefined, null, true)).toBe("starting");
     });
 
-    it("labels telemetry state, coverage, age, and activity clearly", () => {
-        expect(telemetryStateTone("live")).toBe("ok");
-        expect(telemetryStateTone("degraded")).toBe("error");
+    it("labels coverage, age, and activity clearly", () => {
         expect(coverageStateLabel(SNAPSHOT.reporting)).toBe("Complete");
         expect(
             telemetryStatusAge(

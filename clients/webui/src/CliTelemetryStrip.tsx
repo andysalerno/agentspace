@@ -24,12 +24,10 @@ import {
     telemetryContentModeLabel,
     telemetryDisplayReason,
     telemetryDisplayState,
-    telemetryStateTone,
     telemetryStatusAge,
     usageReported,
 } from "./telemetry";
 import type { TelemetrySnapshot, UsageBreakdown } from "./types";
-import { StatusBadge } from "./ui";
 
 type CliTelemetryStripProps = {
     telemetry: TelemetrySnapshot | undefined;
@@ -40,7 +38,7 @@ type CliTelemetryStripProps = {
 
 function valueOrPlaceholder(value: string | null | undefined): string {
     if (value === null || value === undefined || value.trim() === "") {
-        return "Not reported";
+        return "N/A";
     }
     return value;
 }
@@ -54,7 +52,7 @@ function ageLabel(age: string | null, state: string): string | null {
 
 function cacheSignalLabel(snapshot: TelemetrySnapshot | undefined): string {
     if (snapshot?.cache_signal === null || snapshot?.cache_signal === undefined) {
-        return "Not reported";
+        return "N/A";
     }
     const { state, confidence, reason } = snapshot.cache_signal;
     const parts = [humanizeSnakeCase(state)];
@@ -69,19 +67,19 @@ function cacheSignalLabel(snapshot: TelemetrySnapshot | undefined): string {
 
 function contextDetailValue(snapshot: TelemetrySnapshot | undefined): string {
     if (snapshot?.context === null || snapshot?.context === undefined) {
-        return snapshot?.state === "unavailable" ? "Not available" : "Not reported";
+        return "N/A";
     }
     const { tokens, limit } = snapshot.context;
     if (tokens !== null && limit !== null) {
         return `${formatExactCount(tokens)} / ${formatExactCount(limit)}`;
     }
     if (tokens !== null) {
-        return `${formatExactCount(tokens)} / limit unknown`;
+        return `${formatExactCount(tokens)} / N/A`;
     }
     if (limit !== null) {
-        return `Usage unknown / ${formatExactCount(limit)}`;
+        return `N/A / ${formatExactCount(limit)}`;
     }
-    return "Not reported";
+    return "N/A";
 }
 
 function sessionUsageUnavailable(snapshot: TelemetrySnapshot | undefined): boolean {
@@ -187,14 +185,14 @@ export default function CliTelemetryStrip({
     const reason = telemetryDisplayReason(telemetry, telemetryError, telemetryPending);
     const age = ageLabel(telemetryStatusAge(telemetry, dataUpdatedAt), state);
     const totalSummary = telemetry === undefined
-        ? (state === "starting" ? "Waiting for totals" : "Not available")
+        ? "N/A"
         : formatSessionTotalSummary(telemetry.session, state);
     const latestSummary = telemetry === undefined
-        ? (state === "starting" ? "Waiting for first call" : "Not available")
+        ? "N/A"
         : formatLatestCallSummary(telemetry.latest_call, state);
     const cacheSummary = formatCacheSummary(telemetry, state);
     const contextSummary = telemetry === undefined
-        ? (state === "starting" ? "Waiting for context" : "Not available")
+        ? "N/A"
         : formatContextSummary(telemetry.context, state);
     const subagentSummary = formatSubagentSummary(telemetry, state);
     const observedCounts = telemetry !== undefined && shouldShowObservedCounts(telemetry);
@@ -203,7 +201,6 @@ export default function CliTelemetryStrip({
         <div aria-label="CLI telemetry summary" className="cli-telemetry" role="group">
             <div className="cli-telemetry-strip">
                 <div className="cli-telemetry-status">
-                    <StatusBadge label={state} tone={telemetryStateTone(state)} />
                     {age !== null && <span className="cli-telemetry-age">{age}</span>}
                     {telemetry !== undefined && telemetryError !== null && telemetryError !== undefined && (
                         <span className="cli-telemetry-note">retained browser data</span>
@@ -280,15 +277,15 @@ export default function CliTelemetryStrip({
                     <div className="cli-telemetry-sections">
                         <DetailsSection title="Session usage">
                             {telemetry === undefined
-                                ? <p className="muted">Waiting for telemetry.</p>
+                                ? <p className="muted">N/A</p>
                                 : sessionUsageUnavailable(telemetry)
-                                ? <p className="muted">Usage is unavailable for this session.</p>
+                                ? <p className="muted">N/A</p>
                                 : <UsageRows usage={telemetry.session} />}
                         </DetailsSection>
 
                         <DetailsSection title="Latest model call">
                             {telemetry?.latest_call === null || telemetry?.latest_call === undefined
-                                ? <p className="muted">No completed model call has been reported yet.</p>
+                                ? <p className="muted">N/A</p>
                                 : (
                                     <>
                                         <DetailsGrid>
@@ -363,9 +360,9 @@ export default function CliTelemetryStrip({
 
                         <DetailsSection title="Coverage & counts">
                             {telemetry === undefined
-                                ? <p className="muted">Waiting for telemetry.</p>
+                                ? <p className="muted">N/A</p>
                                 : !observedCounts
-                                ? <p className="muted">Counts are unavailable while telemetry is unavailable.</p>
+                                ? <p className="muted">N/A</p>
                                 : (
                                     <DetailsGrid>
                                         <DetailRow
@@ -439,9 +436,9 @@ export default function CliTelemetryStrip({
 
                         <DetailsSection title="Subagent usage">
                             {telemetry === undefined
-                                ? <p className="muted">Waiting for telemetry.</p>
+                                ? <p className="muted">N/A</p>
                                 : !observedCounts
-                                ? <p className="muted">Subagent usage is unavailable while telemetry is unavailable.</p>
+                                ? <p className="muted">N/A</p>
                                 : (
                                     <DetailsGrid>
                                         <DetailRow
@@ -501,9 +498,7 @@ export default function CliTelemetryStrip({
                                     label="Messages in context"
                                     value={telemetry?.context?.message_count === null
                                         || telemetry?.context?.message_count === undefined
-                                        ? (telemetry?.state === "unavailable"
-                                            ? "Not available"
-                                            : "Not reported")
+                                        ? "N/A"
                                         : formatExactCount(telemetry.context.message_count)}
                                 />
                                 <DetailRow
@@ -524,7 +519,7 @@ export default function CliTelemetryStrip({
                                 />
                                 <DetailRow
                                     label="System prompt tokens"
-                                    value="Not reported by Copilot"
+                                    value="N/A"
                                 />
                                 <DetailRow
                                     label="Cache signal"
@@ -535,11 +530,10 @@ export default function CliTelemetryStrip({
 
                         <DetailsSection title="Health & policy">
                             <DetailsGrid>
-                                <DetailRow label="Telemetry state" value={state} />
                                 <DetailRow
                                     label="Content mode"
                                     value={telemetry === undefined
-                                        ? "Not reported"
+                                        ? "N/A"
                                         : telemetryContentModeLabel(
                                             telemetry.content_mode,
                                         )}
@@ -551,7 +545,7 @@ export default function CliTelemetryStrip({
                                 <DetailRow
                                     label="Warnings"
                                     value={telemetry === undefined
-                                        ? "Not reported"
+                                        ? "N/A"
                                         : formatWarnings(telemetry)}
                                 />
                                 <DetailRow

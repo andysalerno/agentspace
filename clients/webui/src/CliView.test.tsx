@@ -409,7 +409,7 @@ describe("CliView", () => {
         );
 
         expect(await screen.findByLabelText("Mock terminal")).toBeTruthy();
-        expect(screen.getAllByText("live").length).toBeGreaterThanOrEqual(2);
+        expect(screen.getAllByText("live")).toHaveLength(1);
         expect(screen.getByText("Started")).toBeTruthy();
         expect(screen.getByText("1 attachment")).toBeTruthy();
         expect(screen.getByText(/AgentSpace session-…/)).toBeTruthy();
@@ -436,6 +436,7 @@ describe("CliView", () => {
         const summary = screen.getByLabelText("CLI telemetry summary");
         expect(summary.closest(".terminal-shell")).toBeNull();
         expect(summary.closest(".terminal-status")).toBeNull();
+        expect(summary.querySelector(".status-badge")).toBeNull();
         expect(screen.getAllByText("99.6% (48k read)").length).toBeGreaterThan(0);
         expect(screen.getByText("17.8k / 272k")).toBeTruthy();
         expect(screen.getAllByText("1 subagent").length).toBeGreaterThan(0);
@@ -443,10 +444,11 @@ describe("CliView", () => {
         await user.click(screen.getByRole("button", { name: "Usage details" }));
         expect(await screen.findByRole("dialog", { name: "CLI telemetry details" }))
             .toBeTruthy();
+        expect(screen.queryByText("Telemetry state")).toBeNull();
         expect(screen.getByText("Session usage")).toBeTruthy();
         expect(screen.getByText("Coverage & counts")).toBeTruthy();
         expect(screen.getByText("Health & policy")).toBeTruthy();
-        expect(screen.getByText("Not reported by Copilot")).toBeTruthy();
+        expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
         expect(screen.getByText("Metadata")).toBeTruthy();
     });
 
@@ -464,14 +466,13 @@ describe("CliView", () => {
         await screen.findByLabelText("Mock terminal");
         const summary = screen.getByLabelText("CLI telemetry summary");
         await waitFor(() => {
-            expect(summary.textContent).toContain("Not available");
+            expect(summary.textContent).toContain("N/A");
         });
         expect(screen.queryByText("0 tokens")).toBeNull();
         expect(screen.queryByText("0% cache")).toBeNull();
 
         await user.click(screen.getByRole("button", { name: "Usage details" }));
-        expect(await screen.findByText("Usage is unavailable for this session."))
-            .toBeTruthy();
+        expect((await screen.findAllByText("N/A")).length).toBeGreaterThan(0);
     });
 
     it("opens browser-local scrollback without mutating the shared tmux pane", async () => {

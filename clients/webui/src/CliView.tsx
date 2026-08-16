@@ -24,7 +24,6 @@ import {
 } from "./queries";
 import { promptSaveWorkspace, promptWorkspaceSaveDetails } from "./saveWorkspacePrompt";
 import type {
-    SessionSummary,
     TerminalAttachKind,
     TerminalStatus,
 } from "./types";
@@ -39,7 +38,7 @@ import {
     Select,
     Tooltip,
 } from "./fluent";
-import { EmptyState, FormDialog, LoadingState, StatusBadge } from "./ui";
+import { EmptyState, FormDialog, LoadingState } from "./ui";
 import { statusTone } from "./status";
 import CliTelemetryStrip from "./CliTelemetryStrip";
 import Terminal from "./Terminal";
@@ -68,36 +67,6 @@ function compactId(value: string): string {
 
 function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
-}
-
-function runtimeLabel(
-    session: SessionSummary,
-    terminal: TerminalStatus | null,
-    connectionState: TerminalConnectionState,
-    operation: OperationState,
-): string {
-    if (session.recovery_state === "legacy-unrecoverable") {
-        return "legacy-unrecoverable";
-    }
-    if (operation !== null) {
-        return operation;
-    }
-    if (connectionState === "ready") {
-        return "live";
-    }
-    if (connectionState === "reconnecting" || connectionState === "disconnected") {
-        return "disconnected";
-    }
-    if (connectionState === "error") {
-        return "error";
-    }
-    if (terminal?.state === "exited") {
-        return "exited";
-    }
-    if (terminal?.state === "missing") {
-        return "disconnected";
-    }
-    return session.runtime_status ?? session.status;
 }
 
 function attachKindLabel(kind: TerminalAttachKind | null): string | null {
@@ -369,9 +338,6 @@ export default function CliView({
     const agentName = selectedSession === undefined
         ? ""
         : (agentMap.get(selectedSession.agent_id)?.name ?? selectedSession.agent_id);
-    const displayStatus = selectedSession === undefined
-        ? "disconnected"
-        : runtimeLabel(selectedSession, terminalStatus, connectionState, operation);
     const displayAttachKind = attachKindLabel(attachKind);
     const busy = creating || operation !== null || saving || deleting;
     const canReconnect = selectedSession !== undefined
@@ -457,7 +423,6 @@ export default function CliView({
                         <div className="chat-header-title">
                             <div className="chat-header-heading">
                                 <h2>{agentName}</h2>
-                                <StatusBadge label={displayStatus} tone={statusTone(displayStatus)} />
                                 {displayAttachKind !== null && (
                                     <span className={`attach-kind ${attachKind ?? ""}`}>
                                         {displayAttachKind}
