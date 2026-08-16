@@ -19,6 +19,7 @@ DEFAULT_SKILLS_STAGING_DIR = "/mnt/all-skills"
 NO_AUTH_API_KEY = "not-required"
 PROFILE_DIR = PurePosixPath(".github/agents")
 SKILLS_DIR = PurePosixPath(".github/skills")
+TELEMETRY_DIR = PurePosixPath("/var/lib/agentspace/telemetry")
 
 _PROVIDER_ENV_NAMES = (
     "COPILOT_PROVIDER_TYPE",
@@ -39,6 +40,7 @@ _SECRET_ENV_NAMES = (
 )
 _SAFE_SESSION_ID = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?")
 _RESERVED_SESSION_ARGS = ("--resume", "--session-id")
+_TELEMETRY_ENV_PREFIXES = ("OTEL_", "COPILOT_OTEL_")
 
 
 class CopilotLaunchError(ValueError):
@@ -91,12 +93,18 @@ def build_interactive_launch(
     config: CopilotLaunchConfig,
     *,
     process_env: Mapping[str, str] | None = None,
+    telemetry_file_path: str | None = None,
 ) -> CopilotLaunch:
     artifacts = prepare_workspace_artifacts(config)
     argv = build_interactive_argv(config, agent_name=artifacts.agent_name)
+    environment = build_copilot_environment(config.env, process_env=process_env)
+    if telemetry_file_path is not None:
+        environment.update(
+            _managed_telemetry_environment(config, telemetry_file_path),
+        )
     return CopilotLaunch(
         argv=argv,
-        environment=build_copilot_environment(config.env, process_env=process_env),
+        environment=environment,
         cwd=config.workspace_dir,
         artifacts=artifacts,
         redacted_argv=argv,
@@ -142,6 +150,9 @@ def build_copilot_environment(
 ) -> dict[str, str]:
     environment = dict(os.environ if process_env is None else process_env)
     environment.update(config_env)
+    for name in tuple(environment):
+        if name.startswith(_TELEMETRY_ENV_PREFIXES):
+            environment.pop(name)
 
     connection_url = config_env.get("CONNECTION_URL")
     connection_api_key = config_env.get("CONNECTION_API_KEY")
@@ -168,6 +179,38 @@ def build_copilot_environment(
         environment.pop(name, None)
 
     return environment
+
+
+def _managed_telemetry_environment(
+    config: CopilotLaunchConfig,
+    telemetry_file_path: str,
+) -> dict[str, str]:
+    path = PurePosixPath(telemetry_file_path)
+    if (
+        not path.is_absolute()
+        or path.parent != TELEMETRY_DIR
+        or path.suffix != ".jsonl"
+    ):
+        msg = f"telemetry file must be a JSONL file in {TELEMETRY_DIR}"
+        raise CopilotLaunchError(msg)
+    try:
+        uuid.UUID(path.stem)
+    except ValueError as error:
+        msg = "telemetry filename must use a UUID launch identity"
+        raise CopilotLaunchError(msg) from error
+
+    runtime_session_id = config.env.get("AGENTSPACE_SESSION_ID")
+    if not runtime_session_id:
+        msg = "AGENTSPACE_SESSION_ID is required for managed telemetry"
+        raise CopilotLaunchError(msg)
+
+    return {
+        "COPILOT_OTEL_ENABLED": "true",
+        "COPILOT_OTEL_EXPORTER_TYPE": "file",
+        "COPILOT_OTEL_FILE_EXPORTER_PATH": str(path),
+        "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "false",
+        "OTEL_RESOURCE_ATTRIBUTES": f"agentspace.session.id={runtime_session_id}",
+    }
 
 
 def prepare_workspace_artifacts(

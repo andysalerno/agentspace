@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 MINIMUM_TMUX_VERSION = (3, 2)
 TMUX_CONFIG_PATH = "/etc/agentspace/tmux.conf"
 TMUX_SOCKET_PATH = "/run/agentspace-tmux.sock"
+TELEMETRY_DIR = "/var/lib/agentspace/telemetry"
 TERMINAL_LAUNCH_ARGV_ENV = "AGENTSPACE_TERMINAL_LAUNCH_ARGV"
 TERMINAL_LAUNCH_CWD_ENV = "AGENTSPACE_TERMINAL_LAUNCH_CWD"
 TERMINAL_ATTACHMENT_ID_ENV = "AGENTSPACE_TERMINAL_ATTACHMENT_ID"
@@ -319,13 +320,18 @@ class TerminalController:
     async def _prepare_launch(self) -> CopilotLaunch:
         def prepare() -> CopilotLaunch:
             Path(self._config.workspace_dir).mkdir(parents=True, exist_ok=True)
+            launch_id = uuid.uuid4()
             return build_interactive_launch(
                 CopilotLaunchConfig(
                     session_id=self._config.copilot_session_id,
-                    env=self._config.env,
+                    env={
+                        **self._config.env,
+                        "AGENTSPACE_SESSION_ID": self._config.runtime_session_id,
+                    },
                     additional_paths=self._config.additional_paths,
                     workspace_dir=self._config.workspace_dir,
                 ),
+                telemetry_file_path=f"{TELEMETRY_DIR}/{launch_id}.jsonl",
             )
 
         return await asyncio.to_thread(prepare)
