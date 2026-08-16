@@ -50,10 +50,14 @@ RUN apt-get update && \
         ripgrep \
         sed \
         tar \
+        tmux \
         unzip \
         wget \
         xz-utils \
         zip && \
+    tmux_version="$(tmux -V | awk '{print $2}')" && \
+    dpkg --compare-versions "$tmux_version" ge "3.2" && \
+    echo "validated tmux $tmux_version (minimum 3.2)" && \
     curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     curl -fsSL https://gh.io/copilot-install | bash && \
@@ -72,9 +76,11 @@ RUN apt-get update && \
 # Ensure opencode is in PATH
 RUN ln -sf /root/.opencode/bin/opencode /usr/local/bin/opencode
 
-ENV UV_COMPILE_BYTECODE=1
-ENV UV_LINK_MODE=copy
-ENV AGENTSPACE_MEMORY_DIR=/var/lib/agentspace/memory
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    AGENTSPACE_MEMORY_DIR=/var/lib/agentspace/memory
 
 WORKDIR /app
 
@@ -89,6 +95,7 @@ COPY kernels/kernel_copilot kernels/kernel_copilot
 COPY kernels/kernel_opencode kernels/kernel_opencode
 COPY kernels/kernel_acp kernels/kernel_acp
 COPY kernels/kernel_host kernels/kernel_host
+COPY --chmod=0444 kernels/kernel_host/tmux.conf /etc/agentspace/tmux.conf
 
 # Install kernel_host and all its dependencies
 RUN --mount=type=cache,id=agentspace-uv-cache,target=/root/.cache/uv,sharing=locked \
