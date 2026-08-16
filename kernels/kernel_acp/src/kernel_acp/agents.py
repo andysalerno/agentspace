@@ -30,6 +30,7 @@ DEFAULT_AGENT = OPENCODE_AGENT
 CHAT_COMPLETIONS_FLAVOR = "chat_completions"
 RESPONSES_FLAVOR = "responses"
 DEFAULT_API_FLAVOR = CHAT_COMPLETIONS_FLAVOR
+NO_AUTH_API_KEY = "not-required"
 
 OPENCODE_CUSTOM_AGENT_NAME = "custom"
 OPENCODE_PROVIDER_NAME = "customprovider"
@@ -83,13 +84,13 @@ class ConnectionSettings:
             env.get("CONNECTION_API_KEY")
             or env.get("KERNEL_ACP_API_KEY")
             or env.get("KERNEL_OPENCODE_API_KEY")
+            or NO_AUTH_API_KEY
         )
         model_name = env.get("KERNEL_ACP_MODEL_NAME") or env.get(
             "KERNEL_OPENCODE_MODEL_NAME",
         )
         required = {
             "CONNECTION_URL": base_url,
-            "CONNECTION_API_KEY": api_key,
             "KERNEL_ACP_MODEL_NAME": model_name,
         }
         missing = [name for name, value in required.items() if not value]
@@ -97,8 +98,8 @@ class ConnectionSettings:
             msg = (
                 "ACP kernel is missing required environment "
                 f"variable(s): {', '.join(missing)}. Assign a Connection with "
-                "a URL and API key, and set KERNEL_ACP_MODEL_NAME on the agent "
-                "or kernel configuration."
+                "a URL, and set KERNEL_ACP_MODEL_NAME on the agent or kernel "
+                "configuration."
             )
             raise ValueError(msg)
         api_flavor = (
@@ -108,7 +109,7 @@ class ConnectionSettings:
         )
         return cls(
             base_url=cast("str", base_url),
-            api_key=cast("str", api_key),
+            api_key=api_key,
             model_name=cast("str", model_name),
             api_flavor=api_flavor,
         )

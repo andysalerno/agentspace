@@ -175,6 +175,7 @@ def test_interactive_launch_uses_shared_session_and_provider_semantics(
     assert f"--session-id={SESSION_ID}" in launch.argv
     assert f"--agent=agentspace-{OTHER_SESSION_ID}" in launch.argv
     assert "-p" not in launch.argv
+    assert launch.environment["COPILOT_PROVIDER_API_KEY"] == "not-required"
     assert launch.environment["COPILOT_PROVIDER_WIRE_API"] == "responses"
 
 

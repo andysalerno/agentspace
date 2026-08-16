@@ -1258,7 +1258,7 @@ fn cli_launch_snapshot(
     Ok(CliLaunchSnapshot {
         schema_version: 1,
         provider,
-        model: env_sources.get("COPILOT_MODEL").cloned(),
+        model: cli_model_source(&env_sources, agent.harness),
         reasoning_effort: env_sources.get("COPILOT_REASONING_EFFORT").cloned(),
         options: CliLaunchOptionsSnapshot {
             no_auto_update: true,
@@ -1268,6 +1268,23 @@ fn cli_launch_snapshot(
         },
         additional_paths,
         agent_profile: agent_profile_snapshot(config_agent, session_id),
+    })
+}
+
+fn cli_model_source(
+    env_sources: &BTreeMap<String, LaunchValueSource>,
+    agent_harness: HarnessName,
+) -> Option<LaunchValueSource> {
+    env_sources.get("COPILOT_MODEL").cloned().or_else(|| {
+        let fallback = match agent_harness {
+            HarnessName::Acp => "KERNEL_ACP_MODEL_NAME",
+            HarnessName::Opencode => "KERNEL_OPENCODE_MODEL_NAME",
+            HarnessName::CopilotCli
+            | HarnessName::Codex
+            | HarnessName::ClaudeCode
+            | HarnessName::Echo => return None,
+        };
+        env_sources.get(fallback).cloned()
     })
 }
 
@@ -4592,6 +4609,15 @@ fn flatten_text(events: &[KernelEvent]) -> String {
             && update.get("sessionUpdate").and_then(Value::as_str) == Some("agent_message_chunk")
         {
             chunks.push(content_text(update.get("content")));
+            continue;
+        }
+        if event.get("type").and_then(Value::as_str) == Some("session/error")
+            && let Some(message) = event
+                .get("message")
+                .or_else(|| event.get("error").and_then(|error| error.get("message")))
+                .and_then(Value::as_str)
+        {
+            chunks.push(format!("Error: {message}"));
         }
     }
     chunks.join("").trim().to_owned()
@@ -6331,7 +6357,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        send_stream_item, session_workspace_exclude_paths,
+        cli_model_source, flatten_text, send_stream_item, session_workspace_exclude_paths,
         terminal_origin_matches_forwarded_request,
     };
     use crate::{
@@ -6371,6 +6397,43 @@ mod tests {
             "http://192.0.2.10:8003",
             &headers
         ));
+    }
+
+    #[test]
+    fn cli_model_uses_explicit_copilot_value_before_agent_harness_fallback() {
+        let acp_model = LaunchValueSource::Literal {
+            value: "acp-model".to_owned(),
+        };
+        let copilot_model = LaunchValueSource::Literal {
+            value: "copilot-model".to_owned(),
+        };
+        let mut sources = BTreeMap::from([("KERNEL_ACP_MODEL_NAME".to_owned(), acp_model.clone())]);
+
+        assert_eq!(
+            cli_model_source(&sources, HarnessName::Acp),
+            Some(acp_model)
+        );
+        sources.insert("COPILOT_MODEL".to_owned(), copilot_model.clone());
+        assert_eq!(
+            cli_model_source(&sources, HarnessName::Acp),
+            Some(copilot_model)
+        );
+    }
+
+    #[test]
+    fn session_errors_are_visible_in_assistant_message_text() {
+        let events = vec![serde_json::Map::from_iter([
+            ("type".to_owned(), json!("session/error")),
+            (
+                "error".to_owned(),
+                json!({"message": "provider rejected the request"}),
+            ),
+        ])];
+
+        assert_eq!(
+            flatten_text(&events),
+            "Error: provider rejected the request"
+        );
     }
 
     #[test]

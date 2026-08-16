@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_DIR = "/workspace"
 DEFAULT_SKILLS_STAGING_DIR = "/mnt/all-skills"
+NO_AUTH_API_KEY = "not-required"
 PROFILE_DIR = PurePosixPath(".github/agents")
 SKILLS_DIR = PurePosixPath(".github/skills")
 
@@ -155,11 +156,10 @@ def build_copilot_environment(
             {
                 "COPILOT_PROVIDER_TYPE": "openai",
                 "COPILOT_PROVIDER_BASE_URL": connection_url,
+                "COPILOT_PROVIDER_API_KEY": connection_api_key or NO_AUTH_API_KEY,
                 "COPILOT_PROVIDER_WIRE_API": wire_api,
             },
         )
-        if connection_api_key:
-            environment["COPILOT_PROVIDER_API_KEY"] = connection_api_key
     elif connection_api_key or connection_api_flavor:
         msg = "CONNECTION_URL is required when configuring a Copilot provider"
         raise CopilotLaunchError(msg)

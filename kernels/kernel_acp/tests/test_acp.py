@@ -450,7 +450,28 @@ class TestOpencodeAgent:
 
         message = str(exc_info.value)
         assert "CONNECTION_URL" in message
-        assert "CONNECTION_API_KEY" in message
+
+    def test_write_config_supports_connection_without_api_key(
+        self,
+        agent: OpencodeAgent,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        agent.write_config(
+            {
+                "CONNECTION_URL": "http://local.test/v1",
+                "KERNEL_ACP_MODEL_NAME": "local-model",
+            },
+        )
+
+        config = json.loads(
+            (tmp_path / ".config" / "opencode" / "opencode.json").read_text()
+        )
+        assert (
+            config["provider"]["customprovider"]["options"]["apiKey"] == "not-required"
+        )
 
 
 class TestPiAgent:
@@ -675,7 +696,22 @@ class TestPiAgent:
 
         message = str(exc_info.value)
         assert "CONNECTION_URL" in message
-        assert "CONNECTION_API_KEY" in message
+
+    def test_provision_supports_connection_without_api_key(
+        self,
+        agent: PiAgent,
+        tmp_path: Path,
+    ) -> None:
+        agent.provision(
+            {
+                "PI_CODING_AGENT_DIR": str(tmp_path / "pi"),
+                "CONNECTION_URL": "http://local.test/v1",
+                "KERNEL_ACP_MODEL_NAME": "local-model",
+            },
+        )
+
+        models = json.loads((tmp_path / "pi" / "models.json").read_text())
+        assert models["providers"]["customprovider"]["apiKey"] == "not-required"
 
 
 class TestAcpRequests:
