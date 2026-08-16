@@ -107,7 +107,7 @@ pub struct Backlink {
     pub raw_target: String,
 }
 
-/// The result of `memory links <path> [--backlinks]`.
+/// The result of `agentspace memory links <path> [--backlinks]`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LinksReport {
     pub path: String,

@@ -1,4 +1,4 @@
-//! The Axum HTTP adapter for `memory --serve`.
+//! The Axum HTTP adapter for `agentspace memory --serve`.
 //!
 //! Every handler calls through [`MemoryClient`] -- never directly against
 //! [`crate::service::MemoryService`] or [`crate::store::MemoryStore`] -- the

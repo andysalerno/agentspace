@@ -3,13 +3,9 @@ name = "memory_rs"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "Rust scaffold for the AgentSpace memory service and CLI"
+description = "AgentSpace durable Markdown memory domain and HTTP service"
 license = "MIT"
 publish = false
-
-[[bin]]
-name = "memory"
-path = "src/main.rs"
 
 [dependencies]
 async-trait = "0.1"

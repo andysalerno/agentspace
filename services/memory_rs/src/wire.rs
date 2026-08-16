@@ -81,8 +81,8 @@ impl TryFrom<PageWire> for Page {
     }
 }
 
-/// Query parameters accepted by `GET /v1/pages`, mirroring `memory pages ls`
-/// and `memory query`.
+/// Query parameters accepted by `GET /v1/pages`, mirroring
+/// `agentspace memory pages ls` and `agentspace memory query`.
 ///
 /// A repeatable CLI flag (`--with-tag`) is represented on the wire as a
 /// single comma-separated value rather than a repeated query key, since
@@ -94,8 +94,8 @@ pub struct ListPagesQuery {
     #[serde(default, rename = "with-tag")]
     pub with_tag: Option<String>,
     pub limit: Option<usize>,
-    /// When present and non-empty, performs `memory query` instead of
-    /// `memory pages ls`.
+    /// When present and non-empty, performs `agentspace memory query` instead
+    /// of `agentspace memory pages ls`.
     pub text: Option<String>,
 }
 

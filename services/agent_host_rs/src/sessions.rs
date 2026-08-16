@@ -2203,7 +2203,7 @@ mod tests {
         let builtin_dir = root.join("builtin");
         write_test_file(
             &builtin_dir.join("memory/SKILL.md"),
-            "# Memory\nUse the memory CLI.",
+            "# Memory\nUse the agentspace memory CLI.",
         );
         write_test_file(
             &builtin_dir.join("memory/agentspace.json"),

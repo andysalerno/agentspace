@@ -28,7 +28,7 @@ use tokio::{
 
 use crate::error::MISSING_COMMAND;
 
-/// The fixed set of executables `memory run` is allowed to invoke.
+/// The fixed set of executables `agentspace memory run` is allowed to invoke.
 pub const ALLOWED_COMMANDS: &[&str] = &["rg", "ls", "cat", "head", "tail", "wc", "stat", "pwd"];
 
 /// Returns whether `command` is in the fixed read-oriented allowlist.
@@ -37,7 +37,7 @@ pub fn is_allowed(command: &str) -> bool {
     ALLOWED_COMMANDS.contains(&command)
 }
 
-/// Execution-time and output-byte limits applied to every `memory run`
+/// Execution-time and output-byte limits applied to every `agentspace memory run`
 /// invocation.
 #[derive(Clone, Copy, Debug)]
 pub struct RunLimits {
@@ -54,7 +54,7 @@ impl Default for RunLimits {
     }
 }
 
-/// How a `memory run` invocation ended, distinguishing the invoked
+/// How an `agentspace memory run` invocation ended, distinguishing the invoked
 /// command's own exit code from every other termination reason.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunOutcome {

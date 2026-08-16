@@ -11,7 +11,7 @@
 use crate::{error::MemoryError, model::Revision, path::PagePath};
 
 /// One `.md` file discovered while scanning the store, before path
-/// validation. Used by `memory check` to report files whose name is not a
+/// validation. Used by `agentspace memory check` to report files whose name is not a
 /// valid page path.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScannedFile {
@@ -28,7 +28,7 @@ pub struct ScannedFile {
 /// operation must wrap them in [`MemoryStore::with_lock`].
 pub trait MemoryStore: Send + Sync {
     /// The filesystem root this store is rooted at. Not part of the
-    /// agent-facing contract; used internally to resolve `memory run`'s
+    /// agent-facing contract; used internally to resolve `agentspace memory run`'s
     /// working directory.
     fn root(&self) -> &std::path::Path;
 
