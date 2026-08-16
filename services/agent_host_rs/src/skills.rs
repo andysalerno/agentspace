@@ -4,7 +4,7 @@ use std::{
     error::Error,
     fmt::{self, Display, Formatter},
     fs,
-    io::{self, Write},
+    io::{self, BufReader, Write},
     path::{Path, PathBuf, StripPrefixError},
     sync::{Arc, RwLock},
 };
@@ -18,7 +18,10 @@ use axum::{
     routing::{get, post},
 };
 use chrono::{SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{Error as _, IgnoredAny, MapAccess, Visitor},
+};
 use serde_json::json;
 use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
@@ -123,17 +126,7 @@ impl SkillRegistry {
             let service = service.read().map_err(|_| SkillError::LockPoisoned {
                 operation: "lock skill service for list versions",
             })?;
-            service.list_skill_versions(&skill_id).map(|versions| {
-                versions
-                    .into_iter()
-                    .map(|version| SkillVersionSummary {
-                        skill_id: version.skill_id,
-                        version: version.version,
-                        created_at: version.created_at,
-                        file_count: version.files.len(),
-                    })
-                    .collect()
-            })
+            service.list_skill_version_summaries(&skill_id)
         })
         .await
     }
@@ -290,6 +283,26 @@ pub struct SkillVersionSummary {
     pub version: u64,
     pub created_at: String,
     pub file_count: usize,
+}
+
+#[derive(Deserialize)]
+struct StoredSkillVersionSummary {
+    skill_id: String,
+    version: u64,
+    created_at: String,
+    #[serde(rename = "files", deserialize_with = "deserialize_file_count")]
+    file_count: usize,
+}
+
+impl From<StoredSkillVersionSummary> for SkillVersionSummary {
+    fn from(summary: StoredSkillVersionSummary) -> Self {
+        Self {
+            skill_id: summary.skill_id,
+            version: summary.version,
+            created_at: summary.created_at,
+            file_count: summary.file_count,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -768,6 +781,29 @@ impl SkillsService {
     }
 
     pub fn list_skill_versions(&self, skill_id: &str) -> Result<Vec<SkillVersion>, SkillError> {
+        let version_paths = self.skill_version_paths(skill_id)?;
+        let mut versions = version_paths
+            .iter()
+            .map(|path| read_skill_version(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        versions.sort_by_key(|version| version.version);
+        Ok(versions)
+    }
+
+    pub fn list_skill_version_summaries(
+        &self,
+        skill_id: &str,
+    ) -> Result<Vec<SkillVersionSummary>, SkillError> {
+        let version_paths = self.skill_version_paths(skill_id)?;
+        let mut versions = version_paths
+            .iter()
+            .map(|path| read_skill_version_summary(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        versions.sort_by_key(|version| version.version);
+        Ok(versions)
+    }
+
+    fn skill_version_paths(&self, skill_id: &str) -> Result<Vec<PathBuf>, SkillError> {
         validate_skill_id(skill_id)?;
         self.ensure_user_skill_exists(skill_id)?;
         let versions_dir = self.skill_versions_dir(skill_id);
@@ -775,7 +811,7 @@ impl SkillsService {
             return Ok(Vec::new());
         }
 
-        let mut versions = Vec::new();
+        let mut version_paths = Vec::new();
         for entry in read_dir_sorted(&versions_dir, "read skill versions dir")? {
             let path = entry.path();
             if !entry
@@ -788,10 +824,9 @@ impl SkillsService {
             if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
                 continue;
             }
-            versions.push(read_skill_version(&path)?);
+            version_paths.push(path);
         }
-        versions.sort_by_key(|version| version.version);
-        Ok(versions)
+        Ok(version_paths)
     }
 
     pub fn update_skill(
@@ -1114,6 +1149,44 @@ fn read_skill_version(path: &Path) -> Result<SkillVersion, SkillError> {
     let content =
         fs::read_to_string(path).map_err(|source| io_error("read skill version", path, source))?;
     serde_json::from_str(&content).map_err(|source| json_error("parse skill version", path, source))
+}
+
+fn read_skill_version_summary(path: &Path) -> Result<SkillVersionSummary, SkillError> {
+    let file =
+        fs::File::open(path).map_err(|source| io_error("open skill version", path, source))?;
+    serde_json::from_reader::<_, StoredSkillVersionSummary>(BufReader::new(file))
+        .map(Into::into)
+        .map_err(|source| json_error("parse skill version summary", path, source))
+}
+
+fn deserialize_file_count<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct FileCountVisitor;
+
+    impl<'de> Visitor<'de> for FileCountVisitor {
+        type Value = usize;
+
+        fn expecting(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a skill files object")
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut count = 0_usize;
+            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| A::Error::custom("skill file count overflow"))?;
+            }
+            Ok(count)
+        }
+    }
+
+    deserializer.deserialize_map(FileCountVisitor)
 }
 
 fn collect_skill_files(
@@ -1694,6 +1767,16 @@ mod tests {
         assert_eq!(
             versions[1].files.get("notes.md").map(String::as_str),
             Some("second")
+        );
+        let summaries = service
+            .list_skill_version_summaries("my-skill")
+            .unwrap_or_else(|error| panic!("failed to list version summaries: {error}"));
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| (summary.version, summary.file_count))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (2, 2)]
         );
 
         let rolled_back = service

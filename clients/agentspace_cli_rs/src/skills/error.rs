@@ -77,11 +77,7 @@ impl Display for SkillsError {
             Self::Environment(error) => Display::fmt(error, formatter),
             Self::Api(error) => Display::fmt(error, formatter),
             Self::InvalidSkillDirectory { path } => {
-                write!(
-                    formatter,
-                    "skill directory does not exist: {}",
-                    path.display()
-                )
+                write!(formatter, "invalid skill directory: {}", path.display())
             }
             Self::InvalidSkillId { skill_id } => write!(
                 formatter,
