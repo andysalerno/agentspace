@@ -14,11 +14,20 @@ from pydantic import BaseModel, Field
 
 from kernel_host.registry import HarnessName
 from kernel_host.service import service_from_env
+from kernel_host.telemetry import (
+    SessionTelemetryProvider,
+    TelemetryProviderRuntimeError,
+    TelemetryRuntimeInfo,
+    TelemetryRuntimeState,
+    TelemetrySnapshot,
+    telemetry_provider_from_env,
+)
 from kernel_host.terminal import (
     TerminalClientError,
     TerminalCommandError,
     TerminalConfigurationError,
     TerminalController,
+    TerminalState,
     TerminalStateError,
     TerminalStatus,
     terminal_controller_from_env,
@@ -52,6 +61,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
 app = FastAPI(title="Kernel Host", version="0.1.0", lifespan=lifespan)
 service = service_from_env()
 terminal_controller: TerminalController | None = None
+telemetry_provider: SessionTelemetryProvider | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -80,6 +90,48 @@ def _terminal_controller_for_request() -> TerminalController:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
 
+async def _telemetry_runtime_info() -> TelemetryRuntimeInfo:
+    try:
+        controller = _get_terminal_controller()
+    except TerminalConfigurationError as error:
+        return TelemetryRuntimeInfo(
+            state=TelemetryRuntimeState.UNAVAILABLE,
+            reason=str(error),
+        )
+    try:
+        status = await controller.status()
+    except (TerminalCommandError, TerminalConfigurationError) as error:
+        logger.exception("telemetry runtime inspection failed")
+        return TelemetryRuntimeInfo(
+            state=TelemetryRuntimeState.UNAVAILABLE,
+            reason=str(error),
+        )
+
+    if status.state != TerminalState.RUNNING or status.pane_pid is None:
+        return TelemetryRuntimeInfo(state=TelemetryRuntimeState.IDLE)
+
+    launch = controller.telemetry_launch_for_pane(status.pane_pid)
+    if launch is None:
+        return TelemetryRuntimeInfo(
+            state=TelemetryRuntimeState.UNAVAILABLE,
+            reason="active terminal has no managed telemetry launch metadata",
+        )
+    return TelemetryRuntimeInfo(
+        state=TelemetryRuntimeState.RUNNING,
+        active_launch_id=launch.launch_id,
+        active_launch_path=launch.file_path,
+    )
+
+
+def _get_telemetry_provider() -> SessionTelemetryProvider:
+    global telemetry_provider  # noqa: PLW0603
+    if telemetry_provider is None:
+        telemetry_provider = telemetry_provider_from_env(
+            runtime_info_provider=_telemetry_runtime_info,
+        )
+    return telemetry_provider
+
+
 def _serialize_terminal(status: TerminalStatus) -> dict[str, Any]:
     return {
         "state": status.state,
@@ -94,6 +146,10 @@ def _serialize_terminal(status: TerminalStatus) -> dict[str, Any]:
         "attachment_count": status.attachment_count,
         "clients": [asdict(client) for client in status.clients],
     }
+
+
+def _serialize_telemetry(snapshot: TelemetrySnapshot) -> dict[str, Any]:
+    return asdict(snapshot)
 
 
 async def _terminal_call(
@@ -179,6 +235,17 @@ async def history() -> dict[str, Any]:
 @app.get("/logs")
 async def logs() -> dict[str, Any]:
     return {"lines": await service.logs()}
+
+
+@app.get("/telemetry")
+async def telemetry() -> dict[str, Any]:
+    provider = _get_telemetry_provider()
+    try:
+        snapshot = await provider.snapshot()
+    except TelemetryProviderRuntimeError as error:
+        logger.exception("telemetry snapshot failed")
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return _serialize_telemetry(snapshot)
 
 
 @app.post("/reset")

@@ -10,7 +10,7 @@ import sys
 import uuid
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Protocol
 
 from copilot_launch import CopilotLaunch, CopilotLaunchConfig, build_interactive_launch
@@ -120,6 +120,12 @@ class TerminalClient:
     session_name: str
     pane_id: str
     attachment_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalTelemetryLaunch:
+    launch_id: str
+    file_path: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,18 +495,7 @@ class TerminalController:
         )
 
     def _attachment_id_for_pid(self, pid: int) -> str | None:
-        try:
-            environment = (
-                Path(self._config.proc_root) / str(pid) / "environ"
-            ).read_bytes()
-        except OSError:
-            return None
-        prefix = f"{TERMINAL_ATTACHMENT_ID_ENV}=".encode()
-        values = [
-            entry.removeprefix(prefix)
-            for entry in environment.split(b"\0")
-            if entry.startswith(prefix)
-        ]
+        values = self._environment_values_for_pid(pid, TERMINAL_ATTACHMENT_ID_ENV)
         if len(values) != 1:
             return None
         try:
@@ -509,6 +504,53 @@ class TerminalController:
         except (UnicodeDecodeError, ValueError):
             return None
         return attachment_id if str(parsed) == attachment_id else None
+
+    def telemetry_launch_for_pane(
+        self, pane_pid: int
+    ) -> TerminalTelemetryLaunch | None:
+        values = self._environment_values_for_pid(
+            pane_pid,
+            "COPILOT_OTEL_FILE_EXPORTER_PATH",
+        )
+        if len(values) != 1:
+            return None
+        try:
+            file_path = values[0].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        path = PurePosixPath(file_path)
+        if (
+            not path.is_absolute()
+            or str(path.parent) != TELEMETRY_DIR
+            or path.suffix != ".jsonl"
+        ):
+            return None
+        try:
+            parsed = uuid.UUID(path.stem)
+        except ValueError:
+            return None
+        launch_id = str(parsed)
+        if path.name != f"{launch_id}.jsonl":
+            return None
+        return TerminalTelemetryLaunch(launch_id=launch_id, file_path=str(path))
+
+    def _environment_values_for_pid(
+        self,
+        pid: int,
+        variable_name: str,
+    ) -> list[bytes]:
+        try:
+            environment = (
+                Path(self._config.proc_root) / str(pid) / "environ"
+            ).read_bytes()
+        except OSError:
+            return []
+        prefix = f"{variable_name}=".encode()
+        return [
+            entry.removeprefix(prefix)
+            for entry in environment.split(b"\0")
+            if entry.startswith(prefix)
+        ]
 
     @staticmethod
     def _observed_client(

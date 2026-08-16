@@ -3,8 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from kernel_host import app as app_module
+from kernel_host.telemetry import (
+    TelemetryProviderRuntimeError,
+    TelemetrySnapshot,
+    TelemetryState,
+)
 from kernel_host.terminal import (
     AttachKind,
     TerminalClient,
@@ -126,6 +132,22 @@ class StubTerminalController:
         return _terminal_status()
 
 
+class StubTelemetryProvider:
+    def __init__(
+        self,
+        *,
+        snapshot: TelemetrySnapshot | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.snapshot_value = snapshot or TelemetrySnapshot(state=TelemetryState.LIVE)
+        self.error = error
+
+    async def snapshot(self) -> TelemetrySnapshot:
+        if self.error is not None:
+            raise self.error
+        return self.snapshot_value
+
+
 def _terminal_status(
     *,
     state: TerminalState = TerminalState.RUNNING,
@@ -170,6 +192,7 @@ def test_current_and_terminal_routes_are_registered() -> None:
         ("POST", "/messages/stream"),
         ("GET", "/history"),
         ("GET", "/logs"),
+        ("GET", "/telemetry"),
         ("POST", "/reset"),
         ("DELETE", "/session"),
         ("POST", "/terminal/ensure"),
@@ -199,3 +222,56 @@ async def test_terminal_routes_return_structured_metadata(
     assert observed["clients"][0]["id"] == "/dev/pts/7"
     assert detached["pane_id"] == "%0"
     assert controller.detach_client_ids == ["/dev/pts/7"]
+
+
+@pytest.mark.asyncio
+async def test_telemetry_route_returns_structured_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        app_module,
+        "telemetry_provider",
+        StubTelemetryProvider(
+            snapshot=TelemetrySnapshot(
+                state=TelemetryState.LIVE,
+                reason=None,
+            ),
+        ),
+    )
+
+    observed = await app_module.telemetry()
+
+    assert observed["state"] == TelemetryState.LIVE
+    assert observed["reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_telemetry_route_returns_unavailable_for_unsupported_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KERNEL_HARNESS", "echo")
+    monkeypatch.setattr(app_module, "telemetry_provider", None)
+
+    observed = await app_module.telemetry()
+
+    assert observed["state"] == TelemetryState.UNAVAILABLE
+    assert observed["reason"] == "telemetry is unavailable for harness echo"
+
+
+@pytest.mark.asyncio
+async def test_telemetry_route_maps_runtime_failures_to_service_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        app_module,
+        "telemetry_provider",
+        StubTelemetryProvider(
+            error=TelemetryProviderRuntimeError("telemetry directory unreadable"),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await app_module.telemetry()
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "telemetry directory unreadable"
