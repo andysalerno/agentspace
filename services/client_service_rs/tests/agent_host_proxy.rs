@@ -715,6 +715,7 @@ async fn create_session_merges_environment_for_agent_host()
                     "env": {
                         "AGENTSPACE_AGENT_ID": "stub-agent",
                         "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                        "AGENTSPACE_SKILLS_API": "http://client-service:8002/skills",
                         "AGENT_ONLY": "agent",
                         "CONNECTION_API_FLAVOR": "responses",
                         "CONNECTION_API_KEY": "agent-secret",
@@ -922,6 +923,7 @@ async fn send_message_proxies_to_stream_and_persists_messages()
                     "env": {
                         "AGENTSPACE_AGENT_ID": "stub-agent",
                         "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                        "AGENTSPACE_SKILLS_API": "http://client-service:8002/skills",
                         "KERNEL_SYSTEM_PROMPT": "Be helpful"
                     },
                     "skills": []
@@ -938,6 +940,7 @@ async fn send_message_proxies_to_stream_and_persists_messages()
                     "env": {
                         "AGENTSPACE_AGENT_ID": "stub-agent",
                         "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                        "AGENTSPACE_SKILLS_API": "http://client-service:8002/skills",
                         "AGENTSPACE_RUNTIME_RECOVERY": "1",
                         "KERNEL_SYSTEM_PROMPT": "Be helpful"
                     },
