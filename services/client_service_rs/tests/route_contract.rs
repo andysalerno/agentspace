@@ -46,6 +46,10 @@ async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send +
             post(stub_snapshot_workspace),
         )
         .route(
+            "/sessions/{session_id}/telemetry",
+            get(stub_session_telemetry),
+        )
+        .route(
             "/sessions/{session_id}/terminal/ensure",
             post(stub_terminal_ensure),
         )
@@ -84,6 +88,115 @@ async fn stub_terminal_ensure(Path(_session_id): Path<String>) -> Json<Value> {
         "attach_kind": "started",
         "attachment_count": 0,
         "clients": [],
+    }))
+}
+
+async fn stub_session_telemetry(Path(_session_id): Path<String>) -> Json<Value> {
+    Json(json!({
+        "schema_version": 1,
+        "state": "live",
+        "reason": null,
+        "content_mode": "metadata",
+        "source_version": "1.0.81-0",
+        "observed_at": "2026-08-15T00:00:00Z",
+        "received_at": "2026-08-15T00:00:01Z",
+        "session": {
+            "raw_input_tokens": 12,
+            "effective_input_tokens": 9,
+            "output_tokens": 3,
+            "total_tokens": 15,
+            "reasoning_output_tokens": 1,
+            "cache_read_input_tokens": 2,
+            "cache_write_input_tokens": 1,
+            "other_input_tokens": 5,
+            "fresh_input_tokens": 7,
+            "cache_reuse_percent": 22.5,
+            "nano_aiu": 8,
+            "opaque_cost": 0.5
+        },
+        "latest_call": {
+            "started_at": "2026-08-15T00:00:00Z",
+            "ended_at": "2026-08-15T00:00:01Z",
+            "duration_ms": 1000,
+            "model": "gpt-5.6-sol",
+            "requested_model": "gpt-5.6-sol",
+            "provider": "openai",
+            "agent_id": "builtin:task",
+            "agent_name": "task",
+            "is_subagent": true,
+            "cache_reporting": "reported",
+            "token_accounting_convention": "inclusive",
+            "usage": {
+                "raw_input_tokens": 6,
+                "effective_input_tokens": 4,
+                "output_tokens": 2,
+                "total_tokens": 8,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 1,
+                "fresh_input_tokens": 3,
+                "cache_reuse_percent": 33.3,
+                "nano_aiu": 4,
+                "opaque_cost": 0.25
+            }
+        },
+        "last_interaction": {
+            "raw_input_tokens": 10,
+            "effective_input_tokens": 8,
+            "output_tokens": 3,
+            "total_tokens": 13,
+            "reasoning_output_tokens": 1,
+            "cache_read_input_tokens": 2,
+            "cache_write_input_tokens": 1,
+            "other_input_tokens": 5,
+            "fresh_input_tokens": 6,
+            "cache_reuse_percent": 20.0,
+            "nano_aiu": 6,
+            "opaque_cost": 0.4
+        },
+        "context": {
+            "tokens": 111,
+            "limit": 222,
+            "message_count": 3,
+            "observed_at": "2026-08-15T00:00:00Z"
+        },
+        "counts": {
+            "interactions": 1,
+            "model_calls": 2,
+            "tool_calls": 3,
+            "subagent_invocations": 4,
+            "subagent_model_calls": 5,
+            "errors": 6
+        },
+        "subagents": {
+            "invocations": 1,
+            "model_calls": 2,
+            "effective_input_tokens": 3,
+            "output_tokens": 4,
+            "cache_read_input_tokens": 5,
+            "cache_write_input_tokens": 6,
+            "duration_ms": 7
+        },
+        "cache_signal": {
+            "state": "cache_reset_suspected",
+            "confidence": "medium",
+            "reason": "context_discontinuity"
+        },
+        "reporting": {
+            "model_calls": 2,
+            "cache_reported_calls": 1,
+            "convention_resolved_calls": 2,
+            "effective_input_covered_calls": 2,
+            "context_reported": true
+        },
+        "warnings": {
+            "total": 2,
+            "items": [{
+                "code": "malformed_record",
+                "count": 2
+            }]
+        }
     }))
 }
 
@@ -214,6 +327,74 @@ async fn basic_routes_and_kernel_configs_match_contract() -> Result<(), Box<dyn 
     let (status, value) = get_json(app, "/kernel-configs/missing").await?;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_error_detail(&value);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_telemetry_route_matches_contract() -> Result<(), Box<dyn Error + Send + Sync>> {
+    let stub = spawn_stub_agent_host().await?;
+    let app = test_router(&stub.base_url)?;
+
+    let (status, _connection) = request_json(
+        app.clone(),
+        Method::POST,
+        "/connections",
+        Some(json!({
+            "connection_id": "openrouter",
+            "name": "OpenRouter",
+            "url": "https://openrouter.ai/api/v1",
+            "api_flavor": "responses",
+            "api_key": "must-not-be-snapshotted",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _agent) = request_json(
+        app.clone(),
+        Method::POST,
+        "/agents",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "name": "CLI Agent",
+            "cli": {
+                "harness": "copilot-cli",
+                "connection_id": "openrouter",
+            },
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, session) = request_json(
+        app.clone(),
+        Method::POST,
+        "/sessions",
+        Some(json!({
+            "agent_id": "cli-agent",
+            "interaction_mode": "cli",
+        })),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    let session_id = string_field(&session, "session_id")?;
+
+    let (status, telemetry) = get_json(app, &format!("/sessions/{session_id}/telemetry")).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(telemetry["schema_version"], 1);
+    assert_eq!(telemetry["state"], "live");
+    assert_eq!(telemetry["content_mode"], "metadata");
+    assert_eq!(telemetry["latest_call"]["cache_reporting"], "reported");
+    assert_eq!(
+        telemetry["latest_call"]["token_accounting_convention"],
+        "inclusive"
+    );
+    assert_eq!(telemetry["cache_signal"]["state"], "cache_reset_suspected");
+    assert_eq!(
+        telemetry["warnings"]["items"][0]["code"],
+        "malformed_record"
+    );
 
     Ok(())
 }
@@ -865,6 +1046,7 @@ async fn missing_session_routes_return_fastapi_style_errors_without_upstream()
 
     for (method, path) in [
         (Method::GET, "/sessions/missing"),
+        (Method::GET, "/sessions/missing/telemetry"),
         (Method::GET, "/sessions/missing/messages"),
         (Method::POST, "/sessions/missing/messages"),
         (Method::POST, "/sessions/missing/messages/stream"),
@@ -918,6 +1100,7 @@ async fn created_session_message_listing_shape_matches_contract()
     assert_eq!(session["status"], "idle");
     assert_eq!(session["interaction_mode"], "chat");
     assert_eq!(session["recovery_state"], "recoverable");
+    assert!(session["telemetry_volume_identity"].is_null());
     assert!(session.get("workspace_volume_identity").is_none());
     assert!(session["cli_harness"].is_null());
     assert_eq!(session["message_count"], json!(0));
@@ -1018,12 +1201,16 @@ async fn cli_sessions_create_durable_upstream_terminal_runtime()
     assert!(session.get("launch_snapshot").is_none());
     let harness_session_id = string_field(&session, "harness_session_id")?;
     uuid::Uuid::parse_str(&harness_session_id)?;
+    let session_id = string_field(&session, "session_id")?;
+    assert_eq!(
+        session["telemetry_volume_identity"],
+        json!(session_id.clone())
+    );
     assert!(
         !serde_json::to_string(&session)?.contains("must-not-be-snapshotted"),
         "CLI launch snapshot persisted a credential"
     );
 
-    let session_id = string_field(&session, "session_id")?;
     let (status, detail) = get_json(app.clone(), &format!("/sessions/{session_id}")).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(detail["interaction_mode"], "cli");

@@ -32,7 +32,8 @@ use crate::{
     models::{
         CleanupAction, CleanupReport, CleanupResource, CleanupResourceIdentity,
         CleanupResourceKind, DockerKernelSession, DockerStatsSummary, HarnessName, InteractionMode,
-        KernelEvent, KernelRuntimeSession, RuntimeSessionSummary, ServiceSummary, WorkspaceMount,
+        KernelEvent, KernelRuntimeSession, RuntimeSessionSummary, ServiceSummary,
+        TelemetrySnapshot, WorkspaceMount,
     },
     sessions::{EventStream, KernelRuntime, RuntimeCreateSession},
     terminal::{ATTACHMENT_ID_ENV, TerminalExec, TerminalStatus},
@@ -51,6 +52,7 @@ const HOST_IP_PLACEHOLDER: &str = concat!("{", "host_ip", "}");
 const HOST_PORT_PLACEHOLDER: &str = concat!("{", "host_port", "}");
 const CONTAINER_PORT_PLACEHOLDER: &str = concat!("{", "container_port", "}");
 const WORKSPACE_SNAPSHOT_SCRIPT: &str = include_str!("../scripts/snapshot_workspace.py");
+const SESSION_TELEMETRY_MOUNT_PATH: &str = "/var/lib/agentspace/telemetry";
 
 pub type DockerRuntime = DockerKernelRuntime;
 
@@ -96,12 +98,13 @@ impl DockerKernelRuntime {
         &self,
         container_name: &str,
         session_workspace_volume: &str,
+        session_telemetry_volume: Option<&str>,
         request: &RuntimeCreateSession,
     ) -> Result<(), AgentHostError> {
         let environment = self.kernel_environment(request);
         let ports = self.kernel_ports(&environment);
         let volumes = self
-            .kernel_volumes(session_workspace_volume, request)
+            .kernel_volumes(session_workspace_volume, session_telemetry_volume, request)
             .await?;
 
         self.backend
@@ -185,14 +188,22 @@ impl DockerKernelRuntime {
     async fn kernel_volumes(
         &self,
         session_workspace_volume: &str,
+        session_telemetry_volume: Option<&str>,
         request: &RuntimeCreateSession,
     ) -> Result<Vec<VolumeMount>, AgentHostError> {
-        let mut volumes = vec![
-            VolumeMount {
-                volume_name: session_workspace_volume.to_owned(),
-                bind: SESSION_WORKSPACE_MOUNT_PATH.to_owned(),
+        let mut volumes = vec![VolumeMount {
+            volume_name: session_workspace_volume.to_owned(),
+            bind: SESSION_WORKSPACE_MOUNT_PATH.to_owned(),
+            mode: "rw".to_owned(),
+        }];
+        if let Some(session_telemetry_volume) = session_telemetry_volume {
+            volumes.push(VolumeMount {
+                volume_name: session_telemetry_volume.to_owned(),
+                bind: SESSION_TELEMETRY_MOUNT_PATH.to_owned(),
                 mode: "rw".to_owned(),
-            },
+            });
+        }
+        volumes.extend([
             VolumeMount {
                 volume_name: self.config.copilot_volume.clone(),
                 bind: "/root/.copilot".to_owned(),
@@ -203,7 +214,7 @@ impl DockerKernelRuntime {
                 bind: "/mnt/all-skills".to_owned(),
                 mode: "ro".to_owned(),
             },
-        ];
+        ]);
         for mount in &request.workspace_mounts {
             volumes.push(self.workspace_volume_mount(mount).await?);
         }
@@ -233,7 +244,10 @@ impl DockerKernelRuntime {
             .list_volumes()
             .await?
             .into_iter()
-            .filter(|volume| volume.labels.get(LABEL_SESSION_ID) == Some(&request.session_id))
+            .filter(|volume| {
+                is_managed_role(&volume.labels, "session-workspace")
+                    && volume.labels.get(LABEL_SESSION_ID) == Some(&request.session_id)
+            })
             .collect::<Vec<_>>();
         if matching.len() > 1 {
             return Err(AgentHostError::conflict(format!(
@@ -285,6 +299,74 @@ impl DockerKernelRuntime {
             request.interaction_mode,
         )?;
         Ok(expected_name)
+    }
+
+    async fn ensure_session_telemetry_volume(
+        &self,
+        request: &RuntimeCreateSession,
+    ) -> Result<Option<String>, AgentHostError> {
+        let Some(telemetry_volume_identity) = request.telemetry_volume_identity.as_deref() else {
+            return Ok(None);
+        };
+        let expected_name = session_telemetry_volume_name(telemetry_volume_identity);
+        if let Some(volume) = self.backend.inspect_volume(&expected_name).await?
+            && volume.labels.get(LABEL_SESSION_ID) != Some(&request.session_id)
+        {
+            return Err(identity_collision(
+                "volume name",
+                &expected_name,
+                &request.session_id,
+            ));
+        }
+
+        let mut matching = self
+            .backend
+            .list_volumes()
+            .await?
+            .into_iter()
+            .filter(|volume| {
+                is_managed_role(&volume.labels, "session-telemetry")
+                    && volume.labels.get(LABEL_SESSION_ID) == Some(&request.session_id)
+            })
+            .collect::<Vec<_>>();
+        if matching.len() > 1 {
+            return Err(AgentHostError::conflict(format!(
+                "multiple Docker telemetry volumes claim session identity {:?}",
+                request.session_id
+            )));
+        }
+        if let Some(volume) = matching.pop() {
+            validate_telemetry_volume_labels("Docker volume", &volume.name, &volume.labels)?;
+            return Ok(Some(volume.name));
+        }
+        if recovery_expected(request) {
+            return Err(AgentHostError::conflict(format!(
+                "durable session telemetry volume for session {:?} is missing",
+                request.session_id
+            )));
+        }
+
+        self.backend
+            .ensure_volume(&expected_name, session_telemetry_labels(request))
+            .await?;
+        let created = self
+            .backend
+            .inspect_volume(&expected_name)
+            .await?
+            .ok_or_else(|| {
+                AgentHostError::runtime(format!(
+                    "Docker volume {expected_name:?} disappeared during creation"
+                ))
+            })?;
+        if created.labels.get(LABEL_SESSION_ID) != Some(&request.session_id) {
+            return Err(identity_collision(
+                "volume name",
+                &expected_name,
+                &request.session_id,
+            ));
+        }
+        validate_telemetry_volume_labels("Docker volume", &created.name, &created.labels)?;
+        Ok(Some(expected_name))
     }
 
     async fn ensure_copilot_state_volume(
@@ -584,13 +666,18 @@ impl DockerKernelRuntime {
                         result,
                     )
                 }
-                CleanupResourceKind::SessionWorkspaceVolume => {
+                CleanupResourceKind::SessionWorkspaceVolume
+                | CleanupResourceKind::SessionTelemetryVolume => {
                     let current = self.backend.inspect_volume(&reviewed.name).await?;
                     let labels = current
                         .as_ref()
                         .map(|resource| resource.labels.clone())
                         .unwrap_or_default();
-                    let result = match validate_reviewed_volume(current.as_ref(), &reviewed) {
+                    let result = match validate_reviewed_volume(
+                        current.as_ref(),
+                        &reviewed,
+                        reviewed.kind,
+                    ) {
                         Ok(()) => self.backend.remove_volume(&reviewed.name).await,
                         Err(error) => Err(error),
                     };
@@ -724,6 +811,41 @@ impl DockerKernelRuntime {
             _ => Err(AgentHostError::upstream_unavailable(detail)),
         }
     }
+
+    async fn telemetry_request(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TelemetrySnapshot, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        let response = self
+            .client
+            .get(format!("{}/telemetry", handle.base_url))
+            .send()
+            .await
+            .map_err(|error| {
+                AgentHostError::upstream_unavailable(format!(
+                    "kernel telemetry provider is unavailable: {error}"
+                ))
+            })?;
+        if response.status().is_success() {
+            return response.json::<TelemetrySnapshot>().await.map_err(|error| {
+                AgentHostError::upstream_unavailable(format!(
+                    "kernel telemetry provider returned an invalid response: {error}"
+                ))
+            });
+        }
+
+        let status = response.status();
+        let detail = response
+            .json::<KernelErrorResponse>()
+            .await
+            .ok()
+            .map_or_else(
+                || format!("kernel telemetry provider returned HTTP {status}"),
+                |payload| payload.detail,
+            );
+        Err(AgentHostError::upstream_unavailable(detail))
+    }
 }
 
 #[async_trait]
@@ -734,6 +856,7 @@ impl KernelRuntime for DockerKernelRuntime {
     ) -> Result<KernelRuntimeSession, AgentHostError> {
         self.ensure_copilot_state_volume(&request).await?;
         let workspace_volume_name = self.ensure_session_workspace_volume(&request).await?;
+        let telemetry_volume_name = self.ensure_session_telemetry_volume(&request).await?;
         let matching_container = self.matching_kernel_container(&request).await?;
         let container_name = if let Some(container) = matching_container {
             if container.running {
@@ -755,18 +878,48 @@ impl KernelRuntime for DockerKernelRuntime {
                         workspace_volume_name
                     )));
                 }
+                if let Some(expected_telemetry_volume) = telemetry_volume_name.as_deref() {
+                    let mounted_telemetry = container
+                        .mounts
+                        .get(SESSION_TELEMETRY_MOUNT_PATH)
+                        .ok_or_else(|| {
+                            AgentHostError::conflict(format!(
+                                "Docker container {:?} for session {:?} has no session telemetry mount",
+                                container.name, request.session_id
+                            ))
+                        })?;
+                    if mounted_telemetry != expected_telemetry_volume {
+                        return Err(AgentHostError::conflict(format!(
+                            "Docker container {:?} for session {:?} mounts telemetry volume {:?}, expected {:?}",
+                            container.name,
+                            request.session_id,
+                            mounted_telemetry,
+                            expected_telemetry_volume
+                        )));
+                    }
+                }
                 container.name
             } else {
                 self.backend.remove_container(&container.name).await?;
                 let expected_name = kernel_container_name(&request.session_id);
-                self.run_kernel_container(&expected_name, &workspace_volume_name, &request)
-                    .await?;
+                self.run_kernel_container(
+                    &expected_name,
+                    &workspace_volume_name,
+                    telemetry_volume_name.as_deref(),
+                    &request,
+                )
+                .await?;
                 expected_name
             }
         } else {
             let expected_name = kernel_container_name(&request.session_id);
-            self.run_kernel_container(&expected_name, &workspace_volume_name, &request)
-                .await?;
+            self.run_kernel_container(
+                &expected_name,
+                &workspace_volume_name,
+                telemetry_volume_name.as_deref(),
+                &request,
+            )
+            .await?;
             expected_name
         };
         let base_url = self
@@ -794,6 +947,7 @@ impl KernelRuntime for DockerKernelRuntime {
             session_id: request.session_id,
             container_name,
             session_workspace_volume_name: workspace_volume_name,
+            session_telemetry_volume_name: telemetry_volume_name,
             base_url,
             vscode_url,
             free_port_url,
@@ -945,12 +1099,33 @@ impl KernelRuntime for DockerKernelRuntime {
                 &handle.session_id,
             ));
         }
+        if let Some(session_telemetry_volume_name) = handle.session_telemetry_volume_name.as_deref()
+            && let Some(volume) = self
+                .backend
+                .inspect_volume(session_telemetry_volume_name)
+                .await?
+            && (!is_managed_role(&volume.labels, "session-telemetry")
+                || volume.labels.get(LABEL_SESSION_ID) != Some(&handle.session_id))
+        {
+            return Err(identity_collision(
+                "volume name",
+                session_telemetry_volume_name,
+                &handle.session_id,
+            ));
+        }
         self.backend
             .remove_container(&handle.container_name)
             .await?;
         self.backend
             .remove_volume(&handle.session_workspace_volume_name)
-            .await
+            .await?;
+        if let Some(session_telemetry_volume_name) = handle.session_telemetry_volume_name.as_deref()
+        {
+            self.backend
+                .remove_volume(session_telemetry_volume_name)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn destroy_session_by_id(&self, session_id: &str) -> Result<(), AgentHostError> {
@@ -965,7 +1140,7 @@ impl KernelRuntime for DockerKernelRuntime {
                         == Some(session_id)
             })
             .collect::<Vec<_>>();
-        let mut volumes = self
+        let mut workspace_volumes = self
             .backend
             .list_volumes()
             .await?
@@ -975,18 +1150,31 @@ impl KernelRuntime for DockerKernelRuntime {
                     && volume.labels.get(LABEL_SESSION_ID).map(String::as_str) == Some(session_id)
             })
             .collect::<Vec<_>>();
-        if containers.len() > 1 || volumes.len() > 1 {
+        let mut telemetry_volumes = self
+            .backend
+            .list_volumes()
+            .await?
+            .into_iter()
+            .filter(|volume| {
+                is_managed_role(&volume.labels, "session-telemetry")
+                    && volume.labels.get(LABEL_SESSION_ID).map(String::as_str) == Some(session_id)
+            })
+            .collect::<Vec<_>>();
+        if containers.len() > 1 || workspace_volumes.len() > 1 || telemetry_volumes.len() > 1 {
             return Err(AgentHostError::conflict(format!(
                 "multiple managed Docker resources claim session identity {session_id:?}"
             )));
         }
-        if containers.is_empty() && volumes.is_empty() {
+        if containers.is_empty() && workspace_volumes.is_empty() && telemetry_volumes.is_empty() {
             return Err(AgentHostError::session_not_found(session_id));
         }
         if let Some(container) = containers.pop() {
             self.backend.remove_container(&container.name).await?;
         }
-        if let Some(volume) = volumes.pop() {
+        if let Some(volume) = workspace_volumes.pop() {
+            self.backend.remove_volume(&volume.name).await?;
+        }
+        if let Some(volume) = telemetry_volumes.pop() {
             self.backend.remove_volume(&volume.name).await?;
         }
         Ok(())
@@ -1030,8 +1218,20 @@ impl KernelRuntime for DockerKernelRuntime {
             })
             .collect::<Vec<_>>();
         volumes.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut telemetry_volumes = self
+            .backend
+            .list_volumes()
+            .await?
+            .into_iter()
+            .filter(|volume| {
+                is_managed_role(&volume.labels, "session-telemetry")
+                    && !resource_is_owned(&volume.labels, owned_session_ids)
+            })
+            .collect::<Vec<_>>();
+        telemetry_volumes.sort_by(|left, right| left.name.cmp(&right.name));
 
-        let mut resources = Vec::with_capacity(containers.len() + volumes.len());
+        let mut resources =
+            Vec::with_capacity(containers.len() + volumes.len() + telemetry_volumes.len());
         for container in containers {
             resources.push(cleanup_resource(
                 CleanupResourceKind::KernelContainer,
@@ -1046,6 +1246,17 @@ impl KernelRuntime for DockerKernelRuntime {
         for volume in volumes {
             resources.push(cleanup_resource(
                 CleanupResourceKind::SessionWorkspaceVolume,
+                volume.name,
+                volume.resource_id,
+                &volume.labels,
+                None,
+                true,
+                Ok(()),
+            ));
+        }
+        for volume in telemetry_volumes {
+            resources.push(cleanup_resource(
+                CleanupResourceKind::SessionTelemetryVolume,
                 volume.name,
                 volume.resource_id,
                 &volume.labels,
@@ -1192,6 +1403,13 @@ impl KernelRuntime for DockerKernelRuntime {
             Some(tmux_client_id),
         )
         .await
+    }
+
+    async fn telemetry(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<TelemetrySnapshot, AgentHostError> {
+        self.telemetry_request(session).await
     }
 
     async fn terminal_attach(
@@ -2098,6 +2316,14 @@ fn session_workspace_labels(request: &RuntimeCreateSession) -> BTreeMap<String, 
     ])
 }
 
+fn session_telemetry_labels(request: &RuntimeCreateSession) -> BTreeMap<String, String> {
+    btree_map([
+        (LABEL_ROLE, "session-telemetry"),
+        (LABEL_MANAGED, "true"),
+        (LABEL_SESSION_ID, request.session_id.as_str()),
+    ])
+}
+
 fn recovery_expected(request: &RuntimeCreateSession) -> bool {
     request.env.get(RUNTIME_RECOVERY_ENV).map(String::as_str) == Some("1")
 }
@@ -2111,6 +2337,24 @@ fn validate_session_resource_labels(
 ) -> Result<(), AgentHostError> {
     if !is_managed_role(labels, expected_role)
         || labels.get(LABEL_INTERACTION_MODE).map(String::as_str) != Some(interaction_mode.as_str())
+    {
+        return Err(AgentHostError::conflict(format!(
+            "{resource_kind} {resource_name:?} has incompatible AgentSpace ownership labels"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_telemetry_volume_labels(
+    resource_kind: &str,
+    resource_name: &str,
+    labels: &BTreeMap<String, String>,
+) -> Result<(), AgentHostError> {
+    if !is_managed_role(labels, "session-telemetry")
+        || labels.get(LABEL_SESSION_ID).is_none()
+        || labels.get(LABEL_INTERACTION_MODE).is_some()
+        || labels.get(LABEL_RESOURCE_ID).is_some()
+        || labels.len() != 3
     {
         return Err(AgentHostError::conflict(format!(
             "{resource_kind} {resource_name:?} has incompatible AgentSpace ownership labels"
@@ -2165,6 +2409,7 @@ fn validate_reviewed_container(
 fn validate_reviewed_volume(
     current: Option<&DockerVolumeResource>,
     reviewed: &CleanupResourceIdentity,
+    kind: CleanupResourceKind,
 ) -> Result<(), AgentHostError> {
     let current = current.ok_or_else(|| {
         AgentHostError::conflict(format!(
@@ -2172,12 +2417,21 @@ fn validate_reviewed_volume(
             reviewed.name
         ))
     })?;
+    let expected_role = match kind {
+        CleanupResourceKind::SessionWorkspaceVolume => "session-workspace",
+        CleanupResourceKind::SessionTelemetryVolume => "session-telemetry",
+        CleanupResourceKind::KernelContainer => {
+            return Err(AgentHostError::runtime(
+                "volume cleanup validation received a container resource",
+            ));
+        }
+    };
     validate_reviewed_resource(
         "volume",
         &current.resource_id,
         &current.labels,
         reviewed,
-        "session-workspace",
+        expected_role,
     )
 }
 
@@ -2342,6 +2596,13 @@ fn session_workspace_volume_name(session_id: &str) -> String {
     format!("agentspace-session-workspace-{}", first_n(session_id, 12))
 }
 
+fn session_telemetry_volume_name(volume_identity: &str) -> String {
+    format!(
+        "agentspace-session-telemetry-{}",
+        first_n(volume_identity, 12)
+    )
+}
+
 #[cfg(test)]
 fn session_workspace_volume_name_from_container(
     container_name: &str,
@@ -2399,8 +2660,9 @@ mod tests {
     use super::{
         ContainerRunSpec, DockerBackend, DockerContainerResource, DockerKernelRuntime,
         DockerRuntimeConfig, DockerStats, DockerVolumeResource, PortBinding, RUNTIME_RECOVERY_ENV,
-        SESSION_WORKSPACE_MOUNT_PATH, TERMINAL_RESUME_ENV, VolumeMount, btree_map,
-        container_create_body, session_workspace_labels,
+        SESSION_TELEMETRY_MOUNT_PATH, SESSION_WORKSPACE_MOUNT_PATH, TERMINAL_RESUME_ENV,
+        VolumeMount, btree_map, container_create_body, session_telemetry_labels,
+        session_telemetry_volume_name, session_workspace_labels,
         session_workspace_volume_name_from_container, summarize_docker_stats,
         terminal_exec_options,
     };
@@ -2408,15 +2670,16 @@ mod tests {
         docker_runtime::skills_mount_path,
         errors::AgentHostError,
         models::{
-            CleanupAction, CleanupResourceIdentity, DockerKernelSession, HarnessName,
-            InteractionMode, KernelRuntimeSession, WorkspaceMount, WorkspaceMountMode,
+            CacheSignalState, CleanupAction, CleanupResourceIdentity, DockerKernelSession,
+            HarnessName, InteractionMode, KernelRuntimeSession, TelemetryContentMode,
+            TelemetryState, WorkspaceMount, WorkspaceMountMode,
         },
         sessions::{KernelRuntime, RuntimeCreateSession},
         skills::{SkillVolumeMode, SkillVolumeResource},
         terminal::{TerminalAttachKind, TerminalExec, TerminalState},
     };
 
-    type TerminalHttpCalls = Arc<Mutex<Vec<(String, JsonValue)>>>;
+    type KernelHttpCalls = Arc<Mutex<Vec<(String, JsonValue)>>>;
 
     #[derive(Clone, Default)]
     struct FakeDockerBackend {
@@ -2470,6 +2733,7 @@ mod tests {
     fn runtime_request(session_id: &str) -> RuntimeCreateSession {
         RuntimeCreateSession {
             session_id: session_id.to_owned(),
+            telemetry_volume_identity: None,
             harness: HarnessName::Echo,
             interaction_mode: InteractionMode::Chat,
             env: BTreeMap::new(),
@@ -2480,9 +2744,39 @@ mod tests {
         }
     }
 
+    fn runtime_request_with_telemetry(session_id: &str) -> RuntimeCreateSession {
+        let mut request = runtime_request(session_id);
+        request.telemetry_volume_identity = Some(session_id.to_owned());
+        request
+    }
+
     fn seed_volume(state: &mut FakeDockerState, name: &str, labels: BTreeMap<String, String>) {
         state.volumes.insert(name.to_owned());
         state.volume_labels.insert(name.to_owned(), labels);
+    }
+
+    fn seed_container_with_mounts(
+        state: &mut FakeDockerState,
+        name: &str,
+        labels: BTreeMap<String, String>,
+        running: bool,
+        status: &str,
+        mounts: BTreeMap<String, String>,
+    ) {
+        state.containers.insert(
+            name.to_owned(),
+            DockerContainerResource {
+                name: name.to_owned(),
+                resource_id: format!("container:{name}"),
+                labels,
+                running,
+                status: status.to_owned(),
+                mounts,
+            },
+        );
+        if running {
+            state.running.insert(name.to_owned());
+        }
     }
 
     fn seed_container(
@@ -2493,22 +2787,16 @@ mod tests {
         status: &str,
         workspace_volume: Option<&str>,
     ) {
-        state.containers.insert(
-            name.to_owned(),
-            DockerContainerResource {
-                name: name.to_owned(),
-                resource_id: format!("container:{name}"),
-                labels,
-                running,
-                status: status.to_owned(),
-                mounts: workspace_volume.map_or_else(BTreeMap::new, |volume| {
-                    BTreeMap::from([(SESSION_WORKSPACE_MOUNT_PATH.to_owned(), volume.to_owned())])
-                }),
-            },
+        seed_container_with_mounts(
+            state,
+            name,
+            labels,
+            running,
+            status,
+            workspace_volume.map_or_else(BTreeMap::new, |volume| {
+                BTreeMap::from([(SESSION_WORKSPACE_MOUNT_PATH.to_owned(), volume.to_owned())])
+            }),
         );
-        if running {
-            state.running.insert(name.to_owned());
-        }
     }
 
     #[async_trait]
@@ -2698,6 +2986,7 @@ mod tests {
             session_id: "session".to_owned(),
             container_name: "kernel".to_owned(),
             session_workspace_volume_name: "workspace".to_owned(),
+            session_telemetry_volume_name: None,
             base_url: "http://kernel".to_owned(),
             vscode_url: None,
             free_port_url: None,
@@ -2758,8 +3047,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn docker_runtime_proxies_structured_terminal_controls() {
-        let calls: TerminalHttpCalls = Arc::new(Mutex::new(Vec::new()));
+    #[allow(clippy::too_many_lines)]
+    async fn docker_runtime_proxies_structured_terminal_controls_and_telemetry() {
+        let calls: KernelHttpCalls = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap_or_else(|error| panic!("failed to bind terminal server: {error}"));
@@ -2772,6 +3062,7 @@ mod tests {
             .route("/terminal/stop", post(terminal_proxy_stub))
             .route("/terminal/resume", post(terminal_proxy_stub))
             .route("/terminal/detach-client", post(terminal_proxy_stub))
+            .route("/telemetry", get(telemetry_proxy_stub))
             .with_state(calls.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let runtime = DockerKernelRuntime::new(
@@ -2782,6 +3073,7 @@ mod tests {
             session_id: "session".to_owned(),
             container_name: "kernel".to_owned(),
             session_workspace_volume_name: "workspace".to_owned(),
+            session_telemetry_volume_name: None,
             base_url: format!("http://{address}"),
             vscode_url: None,
             free_port_url: None,
@@ -2815,6 +3107,10 @@ mod tests {
             .terminal_detach_client(&session, "/dev/pts/7")
             .await
             .unwrap_or_else(|error| panic!("detach failed: {error}"));
+        let telemetry = runtime
+            .telemetry(&session)
+            .await
+            .unwrap_or_else(|error| panic!("telemetry failed: {error}"));
 
         let calls = calls.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(
@@ -2828,15 +3124,30 @@ mod tests {
                 "/terminal/stop",
                 "/terminal/resume",
                 "/terminal/detach-client",
+                "/telemetry",
             ]
         );
         assert_eq!(calls[4].1, json!({ "tmux_client_id": "/dev/pts/7" }));
+        assert_eq!(calls[5].1, JsonValue::Null);
+        assert_eq!(telemetry.state, TelemetryState::Live);
+        assert_eq!(telemetry.content_mode, TelemetryContentMode::Metadata);
+        assert_eq!(
+            telemetry
+                .latest_call
+                .as_ref()
+                .and_then(|call| call.model.as_deref()),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(
+            telemetry.cache_signal.as_ref().map(|signal| signal.state),
+            Some(CacheSignalState::CacheResetSuspected)
+        );
         drop(calls);
         server.abort();
     }
 
     async fn terminal_proxy_stub(
-        State(calls): State<TerminalHttpCalls>,
+        State(calls): State<KernelHttpCalls>,
         request: Request<axum::body::Body>,
     ) -> Json<JsonValue> {
         let path = request.uri().path().to_owned();
@@ -2853,7 +3164,32 @@ mod tests {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push((path, body));
-        Json(json!({
+        Json(terminal_proxy_payload())
+    }
+
+    async fn telemetry_proxy_stub(
+        State(calls): State<KernelHttpCalls>,
+        request: Request<axum::body::Body>,
+    ) -> Json<JsonValue> {
+        let path = request.uri().path().to_owned();
+        let bytes = to_bytes(request.into_body(), 16 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("failed to read telemetry request: {error}"));
+        let body = if bytes.is_empty() {
+            JsonValue::Null
+        } else {
+            serde_json::from_slice(&bytes)
+                .unwrap_or_else(|error| panic!("failed to parse telemetry request: {error}"))
+        };
+        calls
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((path, body));
+        Json(telemetry_proxy_payload())
+    }
+
+    fn terminal_proxy_payload() -> JsonValue {
+        json!({
             "state": "running",
             "exit_status": null,
             "attach_kind": "attached",
@@ -2865,7 +3201,119 @@ mod tests {
             "pane_pid": 42,
             "attachment_count": 0,
             "clients": [],
-        }))
+        })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn telemetry_proxy_payload() -> JsonValue {
+        json!({
+            "schema_version": 1,
+            "state": "live",
+            "reason": null,
+            "content_mode": "metadata",
+            "source_version": "1.0.81-0",
+            "observed_at": "2026-08-15T00:00:00Z",
+            "received_at": "2026-08-15T00:00:01Z",
+            "session": {
+                "raw_input_tokens": 12,
+                "effective_input_tokens": 9,
+                "output_tokens": 3,
+                "total_tokens": 15,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 5,
+                "fresh_input_tokens": 7,
+                "cache_reuse_percent": 22.5,
+                "nano_aiu": 8,
+                "opaque_cost": 0.5
+            },
+            "latest_call": {
+                "started_at": "2026-08-15T00:00:00Z",
+                "ended_at": "2026-08-15T00:00:01Z",
+                "duration_ms": 1000,
+                "model": "gpt-5.6-sol",
+                "requested_model": "gpt-5.6-sol",
+                "provider": "openai",
+                "agent_id": "builtin:task",
+                "agent_name": "task",
+                "is_subagent": true,
+                "cache_reporting": "reported",
+                "token_accounting_convention": "inclusive",
+                "usage": {
+                    "raw_input_tokens": 6,
+                    "effective_input_tokens": 4,
+                    "output_tokens": 2,
+                    "total_tokens": 8,
+                    "reasoning_output_tokens": 1,
+                    "cache_read_input_tokens": 2,
+                    "cache_write_input_tokens": 1,
+                    "other_input_tokens": 1,
+                    "fresh_input_tokens": 3,
+                    "cache_reuse_percent": 33.3,
+                    "nano_aiu": 4,
+                    "opaque_cost": 0.25
+                }
+            },
+            "last_interaction": {
+                "raw_input_tokens": 10,
+                "effective_input_tokens": 8,
+                "output_tokens": 3,
+                "total_tokens": 13,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 5,
+                "fresh_input_tokens": 6,
+                "cache_reuse_percent": 20.0,
+                "nano_aiu": 6,
+                "opaque_cost": 0.4
+            },
+            "context": {
+                "tokens": 111,
+                "limit": 222,
+                "message_count": 3,
+                "observed_at": "2026-08-15T00:00:00Z"
+            },
+            "counts": {
+                "interactions": 1,
+                "model_calls": 2,
+                "tool_calls": 3,
+                "subagent_invocations": 4,
+                "subagent_model_calls": 5,
+                "errors": 6
+            },
+            "subagents": {
+                "invocations": 1,
+                "model_calls": 2,
+                "effective_input_tokens": 3,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 5,
+                "cache_write_input_tokens": 6,
+                "duration_ms": 7
+            },
+            "cache_signal": {
+                "state": "cache_reset_suspected",
+                "confidence": "medium",
+                "reason": "context_discontinuity"
+            },
+            "reporting": {
+                "model_calls": 2,
+                "cache_reported_calls": 1,
+                "convention_resolved_calls": 2,
+                "effective_input_covered_calls": 2,
+                "context_reported": true
+            },
+            "warnings": {
+                "total": 2,
+                "items": [
+                    {
+                        "code": "malformed_record",
+                        "count": 2
+                    }
+                ]
+            }
+        })
     }
 
     #[tokio::test]
@@ -2875,6 +3323,7 @@ mod tests {
             DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
         let request = RuntimeCreateSession {
             session_id: "test".to_owned(),
+            telemetry_volume_identity: Some("test".to_owned()),
             harness: HarnessName::Echo,
             interaction_mode: InteractionMode::Chat,
             env: BTreeMap::new(),
@@ -2891,6 +3340,7 @@ mod tests {
             .run_kernel_container(
                 "agentspace-kernel-test",
                 "agentspace-session-workspace-test",
+                Some("agentspace-session-telemetry-test"),
                 &request,
             )
             .await
@@ -2923,6 +3373,11 @@ mod tests {
             assert!(spec.volumes.contains(&VolumeMount {
                 volume_name: "agentspace-session-workspace-test".to_owned(),
                 bind: "/workspace".to_owned(),
+                mode: "rw".to_owned(),
+            }));
+            assert!(spec.volumes.contains(&VolumeMount {
+                volume_name: "agentspace-session-telemetry-test".to_owned(),
+                bind: "/var/lib/agentspace/telemetry".to_owned(),
                 mode: "rw".to_owned(),
             }));
             assert!(spec.volumes.contains(&VolumeMount {
@@ -2964,6 +3419,7 @@ mod tests {
         );
         let request = RuntimeCreateSession {
             session_id: "durable-session".to_owned(),
+            telemetry_volume_identity: None,
             harness: HarnessName::CopilotCli,
             interaction_mode: InteractionMode::Chat,
             env,
@@ -2993,10 +3449,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn create_adopts_running_container_and_reuses_volume_on_recreate() {
         let backend = FakeDockerBackend::default();
         let (runtime, health_server) = runtime_with_health(&backend).await;
-        let request = runtime_request("1234567890ab-full-session");
+        let request = runtime_request_with_telemetry("1234567890ab-full-session");
 
         let first = runtime
             .create_session(request.clone())
@@ -3030,6 +3487,11 @@ mod tests {
                     .map(String::as_str),
                 Some("chat")
             );
+            assert!(spec.volumes.contains(&VolumeMount {
+                volume_name: "agentspace-session-telemetry-1234567890ab".to_owned(),
+                bind: "/var/lib/agentspace/telemetry".to_owned(),
+                mode: "rw".to_owned(),
+            }));
             let volume_labels = state
                 .volume_labels
                 .get("agentspace-session-workspace-1234567890ab")
@@ -3054,6 +3516,28 @@ mod tests {
                     .map(String::as_str),
                 Some("chat")
             );
+            let telemetry_labels = state
+                .volume_labels
+                .get("agentspace-session-telemetry-1234567890ab")
+                .unwrap_or_else(|| panic!("session telemetry volume was not created"));
+            assert_eq!(
+                telemetry_labels
+                    .get("agentspace.session_id")
+                    .map(String::as_str),
+                Some("1234567890ab-full-session")
+            );
+            assert_eq!(
+                telemetry_labels.get("agentspace.role").map(String::as_str),
+                Some("session-telemetry")
+            );
+            assert_eq!(
+                telemetry_labels
+                    .get("agentspace.managed")
+                    .map(String::as_str),
+                Some("true")
+            );
+            assert!(!telemetry_labels.contains_key("agentspace.interaction_mode"));
+            assert!(!telemetry_labels.contains_key("agentspace.resource_id"));
             drop(state);
         }
 
@@ -3083,6 +3567,14 @@ mod tests {
             1
         );
         assert_eq!(
+            state
+                .created_volumes
+                .iter()
+                .filter(|(name, _labels)| { name == "agentspace-session-telemetry-1234567890ab" })
+                .count(),
+            1
+        );
+        assert_eq!(
             state.removed_containers,
             vec!["agentspace-kernel-1234567890ab"]
         );
@@ -3091,11 +3583,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn cli_recovery_recreates_missing_container_with_durable_state() {
         let backend = FakeDockerBackend::default();
         let (runtime, health_server) = runtime_with_health(&backend).await;
         let session_id = "12345678-1234-5678-9234-567812345678";
         let mut request = runtime_request(session_id);
+        request.telemetry_volume_identity = Some(session_id.to_owned());
         request.harness = HarnessName::CopilotCli;
         request.interaction_mode = InteractionMode::Cli;
 
@@ -3142,6 +3636,16 @@ mod tests {
                     .count(),
                 1
             );
+            assert_eq!(
+                state
+                    .created_volumes
+                    .iter()
+                    .filter(|(name, _labels)| {
+                        name == "agentspace-session-telemetry-12345678-123"
+                    })
+                    .count(),
+                1
+            );
             assert!(state.volumes.contains("agentspace-kernel_copilot-config"));
             drop(state);
         }
@@ -3156,6 +3660,12 @@ mod tests {
             state
                 .volume_labels
                 .remove("agentspace-session-workspace-12345678-123");
+            state
+                .volumes
+                .remove("agentspace-session-telemetry-12345678-123");
+            state
+                .volume_labels
+                .remove("agentspace-session-telemetry-12345678-123");
         }
         let result = runtime.create_session(request.clone()).await;
         let Err(error) = result else {
@@ -3174,16 +3684,50 @@ mod tests {
                 "agentspace-session-workspace-12345678-123",
                 session_workspace_labels(&request),
             );
+            seed_volume(
+                &mut state,
+                "agentspace-session-telemetry-12345678-123",
+                session_telemetry_labels(&request),
+            );
             state.volumes.remove("agentspace-kernel_copilot-config");
             state
                 .volume_labels
                 .remove("agentspace-kernel_copilot-config");
         }
-        let result = runtime.create_session(request).await;
+        let result = runtime.create_session(request.clone()).await;
         let Err(error) = result else {
             panic!("missing durable Copilot state must fail");
         };
         assert!(error.to_string().contains("durable Copilot state volume"));
+
+        {
+            let mut state = backend.state();
+            state
+                .volumes
+                .insert("agentspace-kernel_copilot-config".to_owned());
+            state.volume_labels.insert(
+                "agentspace-kernel_copilot-config".to_owned(),
+                btree_map([
+                    ("agentspace.role", "copilot-state"),
+                    ("agentspace.managed", "true"),
+                ]),
+            );
+            state
+                .volumes
+                .remove("agentspace-session-telemetry-12345678-123");
+            state
+                .volume_labels
+                .remove("agentspace-session-telemetry-12345678-123");
+        }
+        let result = runtime.create_session(request).await;
+        let Err(error) = result else {
+            panic!("missing durable telemetry volume must fail");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("durable session telemetry volume")
+        );
         health_server.abort();
     }
 
@@ -3203,7 +3747,16 @@ mod tests {
                     ("agentspace.interaction_mode", "chat"),
                 ]),
             );
-            seed_container(
+            seed_volume(
+                &mut state,
+                "renamed-telemetry-volume",
+                btree_map([
+                    ("agentspace.role", "session-telemetry"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "full-label-identity"),
+                ]),
+            );
+            seed_container_with_mounts(
                 &mut state,
                 "renamed-kernel-container",
                 btree_map([
@@ -3215,12 +3768,21 @@ mod tests {
                 ]),
                 true,
                 "running",
-                Some("renamed-workspace-volume"),
+                BTreeMap::from([
+                    (
+                        SESSION_WORKSPACE_MOUNT_PATH.to_owned(),
+                        "renamed-workspace-volume".to_owned(),
+                    ),
+                    (
+                        SESSION_TELEMETRY_MOUNT_PATH.to_owned(),
+                        "renamed-telemetry-volume".to_owned(),
+                    ),
+                ]),
             );
         }
 
         let session = runtime
-            .create_session(runtime_request("full-label-identity"))
+            .create_session(runtime_request_with_telemetry("full-label-identity"))
             .await
             .unwrap_or_else(|error| panic!("label-based adoption failed: {error}"));
 
@@ -3232,11 +3794,70 @@ mod tests {
             session.session_workspace_volume_name,
             "renamed-workspace-volume"
         );
+        assert_eq!(
+            session.session_telemetry_volume_name.as_deref(),
+            Some("renamed-telemetry-volume")
+        );
         assert!(backend.state().run_specs.is_empty());
         health_server.abort();
     }
 
     #[tokio::test]
+    async fn adoption_rejects_running_container_with_wrong_telemetry_mount() {
+        let backend = FakeDockerBackend::default();
+        let (runtime, health_server) = runtime_with_health(&backend).await;
+        {
+            let mut state = backend.state();
+            seed_volume(
+                &mut state,
+                "expected-workspace",
+                btree_map([
+                    ("agentspace.role", "session-workspace"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "telemetry-mismatch"),
+                    ("agentspace.interaction_mode", "chat"),
+                ]),
+            );
+            seed_volume(
+                &mut state,
+                "expected-telemetry",
+                btree_map([
+                    ("agentspace.role", "session-telemetry"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "telemetry-mismatch"),
+                ]),
+            );
+            seed_container_with_mounts(
+                &mut state,
+                "renamed-kernel-container",
+                btree_map([
+                    ("agentspace.role", "kernel"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "telemetry-mismatch"),
+                    ("agentspace.interaction_mode", "chat"),
+                    ("agentspace.harness", "echo"),
+                ]),
+                true,
+                "running",
+                BTreeMap::from([(
+                    SESSION_WORKSPACE_MOUNT_PATH.to_owned(),
+                    "expected-workspace".to_owned(),
+                )]),
+            );
+        }
+
+        let result = runtime
+            .create_session(runtime_request_with_telemetry("telemetry-mismatch"))
+            .await;
+        let Err(error) = result else {
+            panic!("missing telemetry mount must fail adoption");
+        };
+        assert!(error.to_string().contains("session telemetry mount"));
+        health_server.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn create_rejects_name_and_label_collisions() {
         let backend = FakeDockerBackend::default();
         let (runtime, health_server) = runtime_with_health(&backend).await;
@@ -3289,6 +3910,29 @@ mod tests {
         };
         assert!(matches!(error, AgentHostError::Conflict { .. }));
 
+        let telemetry_backend = FakeDockerBackend::default();
+        let (telemetry_runtime, telemetry_health_server) =
+            runtime_with_health(&telemetry_backend).await;
+        {
+            let mut state = telemetry_backend.state();
+            seed_volume(
+                &mut state,
+                "agentspace-session-telemetry-telemetry-co",
+                btree_map([
+                    ("agentspace.role", "session-telemetry"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "different-session"),
+                ]),
+            );
+        }
+        let result = telemetry_runtime
+            .create_session(runtime_request_with_telemetry("telemetry-collision"))
+            .await;
+        let Err(error) = result else {
+            panic!("telemetry volume name collision should fail");
+        };
+        assert!(matches!(error, AgentHostError::Conflict { .. }));
+
         let harness_backend = FakeDockerBackend::default();
         let (harness_runtime, harness_health_server) = runtime_with_health(&harness_backend).await;
         {
@@ -3328,10 +3972,12 @@ mod tests {
 
         health_server.abort();
         volume_health_server.abort();
+        telemetry_health_server.abort();
         harness_health_server.abort();
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn cleanup_reports_and_deletes_only_unowned_managed_resources() {
         let backend = FakeDockerBackend::default();
         let runtime =
@@ -3380,6 +4026,20 @@ mod tests {
                 }
                 seed_volume(&mut state, name, labels);
             }
+            for (name, session_id) in [
+                ("owned-telemetry", Some("owned")),
+                ("orphan-telemetry", Some("orphan-telemetry")),
+                ("unclaimed-telemetry", None),
+            ] {
+                let mut labels = btree_map([
+                    ("agentspace.role", "session-telemetry"),
+                    ("agentspace.managed", "true"),
+                ]);
+                if let Some(session_id) = session_id {
+                    labels.insert("agentspace.session_id".to_owned(), session_id.to_owned());
+                }
+                seed_volume(&mut state, name, labels);
+            }
         }
         let owned = BTreeSet::from(["owned".to_owned()]);
 
@@ -3387,7 +4047,7 @@ mod tests {
             .cleanup_orphans(&owned, true, None)
             .await
             .unwrap_or_else(|error| panic!("dry-run cleanup failed: {error}"));
-        assert_eq!(report.resources.len(), 4);
+        assert_eq!(report.resources.len(), 6);
         assert!(
             report
                 .resources
@@ -3416,16 +4076,19 @@ mod tests {
             .cleanup_orphans(&owned, false, Some(&reviewed))
             .await
             .unwrap_or_else(|error| panic!("cleanup failed: {error}"));
-        assert_eq!(report.deleted_count, 4);
+        assert_eq!(report.deleted_count, 6);
         assert_eq!(report.error_count, 0);
         let state = backend.state();
         assert!(state.containers.contains_key("owned-kernel"));
         assert!(state.containers.contains_key("legacy-kernel"));
         assert!(state.volume_labels.contains_key("owned-volume"));
+        assert!(state.volume_labels.contains_key("owned-telemetry"));
         assert!(!state.containers.contains_key("orphan-running"));
         assert!(!state.containers.contains_key("orphan-exited"));
         assert!(!state.volume_labels.contains_key("orphan-volume"));
         assert!(!state.volume_labels.contains_key("unclaimed-volume"));
+        assert!(!state.volume_labels.contains_key("orphan-telemetry"));
+        assert!(!state.volume_labels.contains_key("unclaimed-telemetry"));
         drop(state);
     }
 
@@ -3532,7 +4195,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_by_stable_identity_removes_container_and_workspace() {
+    async fn delete_by_stable_identity_removes_container_workspace_and_telemetry() {
         let backend = FakeDockerBackend::default();
         let runtime =
             DockerKernelRuntime::new(DockerRuntimeConfig::default(), Arc::new(backend.clone()));
@@ -3562,6 +4225,15 @@ mod tests {
                     ("agentspace.interaction_mode", "chat"),
                 ]),
             );
+            seed_volume(
+                &mut state,
+                "cosmetic-telemetry-volume",
+                btree_map([
+                    ("agentspace.role", "session-telemetry"),
+                    ("agentspace.managed", "true"),
+                    ("agentspace.session_id", "stable-delete"),
+                ]),
+            );
         }
 
         runtime
@@ -3571,7 +4243,10 @@ mod tests {
 
         let state = backend.state();
         assert_eq!(state.removed_containers, vec!["cosmetic-container-name"]);
-        assert_eq!(state.removed_volumes, vec!["cosmetic-volume-name"]);
+        assert_eq!(
+            state.removed_volumes,
+            vec!["cosmetic-volume-name", "cosmetic-telemetry-volume"]
+        );
         drop(state);
     }
 
@@ -3586,6 +4261,7 @@ mod tests {
         let runtime = DockerKernelRuntime::new(config, Arc::new(backend.clone()));
         let request = RuntimeCreateSession {
             session_id: "memory-enabled".to_owned(),
+            telemetry_volume_identity: None,
             harness: HarnessName::Echo,
             interaction_mode: InteractionMode::Chat,
             env: BTreeMap::new(),
@@ -3605,6 +4281,7 @@ mod tests {
             .run_kernel_container(
                 "agentspace-kernel-one",
                 "agentspace-session-workspace-one",
+                None,
                 &request,
             )
             .await
@@ -3613,6 +4290,7 @@ mod tests {
             .run_kernel_container(
                 "agentspace-kernel-two",
                 "agentspace-session-workspace-two",
+                None,
                 &request,
             )
             .await
@@ -3622,6 +4300,7 @@ mod tests {
                 session_id: "memory-enabled".to_owned(),
                 container_name: "agentspace-kernel-one".to_owned(),
                 session_workspace_volume_name: "agentspace-session-workspace-one".to_owned(),
+                session_telemetry_volume_name: None,
                 base_url: "http://agentspace-kernel-one:8000".to_owned(),
                 vscode_url: None,
                 free_port_url: None,
@@ -3741,6 +4420,7 @@ mod tests {
         env.insert("KERNEL_VSCODE_ENABLED".to_owned(), "0".to_owned());
         let request = RuntimeCreateSession {
             session_id: "test".to_owned(),
+            telemetry_volume_identity: None,
             harness: HarnessName::Echo,
             interaction_mode: InteractionMode::Chat,
             env,
@@ -3754,6 +4434,7 @@ mod tests {
             .run_kernel_container(
                 "agentspace-kernel-test",
                 "agentspace-session-workspace-test",
+                None,
                 &request,
             )
             .await
@@ -3833,6 +4514,7 @@ mod tests {
             session_id: "session".to_owned(),
             container_name: "agentspace-kernel-session".to_owned(),
             session_workspace_volume_name: "agentspace-session-workspace-session".to_owned(),
+            session_telemetry_volume_name: None,
             base_url: "http://kernel".to_owned(),
             vscode_url: None,
             free_port_url: None,
@@ -3875,6 +4557,7 @@ mod tests {
             session_id: "session".to_owned(),
             container_name: "agentspace-kernel-session".to_owned(),
             session_workspace_volume_name: "agentspace-session-workspace-session".to_owned(),
+            session_telemetry_volume_name: None,
             base_url: "http://kernel".to_owned(),
             vscode_url: None,
             free_port_url: None,
@@ -3904,6 +4587,7 @@ mod tests {
             session_id: "session".to_owned(),
             container_name: "agentspace-kernel-session".to_owned(),
             session_workspace_volume_name: "agentspace-session-workspace-session".to_owned(),
+            session_telemetry_volume_name: None,
             base_url: "http://kernel".to_owned(),
             vscode_url: None,
             free_port_url: None,
@@ -4063,6 +4747,14 @@ mod tests {
             .unwrap_or_else(|error| panic!("volume failed: {error}"));
 
         assert_eq!(volume, "agentspace-session-workspace-test");
+    }
+
+    #[test]
+    fn session_telemetry_volume_name_uses_identity_suffix() {
+        assert_eq!(
+            session_telemetry_volume_name("1234567890ab-full-session"),
+            "agentspace-session-telemetry-1234567890ab"
+        );
     }
 
     fn docker_stats(payload: serde_json::Value) -> DockerStats {

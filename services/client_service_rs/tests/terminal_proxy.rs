@@ -69,6 +69,8 @@ struct StubState {
     observations: Arc<Mutex<Vec<WebSocketObservation>>>,
     fail_create: Arc<AtomicBool>,
     terminal_unavailable: Arc<AtomicBool>,
+    telemetry_fail: Arc<AtomicBool>,
+    telemetry_missing: Arc<AtomicBool>,
     terminal_resumed: Arc<AtomicBool>,
     ensure_count: Arc<AtomicUsize>,
     websocket_mode: Arc<Mutex<WebSocketMode>>,
@@ -300,6 +302,10 @@ fn stub_router(state: StubState) -> Router {
             get(upstream_terminal_status),
         )
         .route(
+            "/sessions/{session_id}/telemetry",
+            get(upstream_session_telemetry),
+        )
+        .route(
             "/sessions/{session_id}/terminal/ensure",
             post(upstream_terminal_ensure),
         )
@@ -328,6 +334,7 @@ async fn create_upstream_session(
     if state.fail_create.load(Ordering::SeqCst) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
+    state.telemetry_missing.store(false, Ordering::SeqCst);
     Json(json!({
         "session_id": body["session_id"],
         "status": "idle",
@@ -390,6 +397,117 @@ fn terminal_response(
     Json(terminal_status(attach_kind, terminal_state)).into_response()
 }
 
+fn telemetry_snapshot(state: &str, reason: Option<&str>) -> Value {
+    json!({
+        "schema_version": 1,
+        "state": state,
+        "reason": reason,
+        "content_mode": "metadata",
+        "source_version": "1.0.81-0",
+        "observed_at": "2026-08-15T00:00:00Z",
+        "received_at": "2026-08-15T00:00:01Z",
+        "session": {
+            "raw_input_tokens": 12,
+            "effective_input_tokens": 9,
+            "output_tokens": 3,
+            "total_tokens": 15,
+            "reasoning_output_tokens": 1,
+            "cache_read_input_tokens": 2,
+            "cache_write_input_tokens": 1,
+            "other_input_tokens": 5,
+            "fresh_input_tokens": 7,
+            "cache_reuse_percent": 22.5,
+            "nano_aiu": 8,
+            "opaque_cost": 0.5
+        },
+        "latest_call": {
+            "started_at": "2026-08-15T00:00:00Z",
+            "ended_at": "2026-08-15T00:00:01Z",
+            "duration_ms": 1000,
+            "model": "gpt-5.6-sol",
+            "requested_model": "gpt-5.6-sol",
+            "provider": "openai",
+            "agent_id": "builtin:task",
+            "agent_name": "task",
+            "is_subagent": true,
+            "cache_reporting": "reported",
+            "token_accounting_convention": "inclusive",
+            "usage": {
+                "raw_input_tokens": 6,
+                "effective_input_tokens": 4,
+                "output_tokens": 2,
+                "total_tokens": 8,
+                "reasoning_output_tokens": 1,
+                "cache_read_input_tokens": 2,
+                "cache_write_input_tokens": 1,
+                "other_input_tokens": 1,
+                "fresh_input_tokens": 3,
+                "cache_reuse_percent": 33.3,
+                "nano_aiu": 4,
+                "opaque_cost": 0.25
+            }
+        },
+        "last_interaction": {
+            "raw_input_tokens": 10,
+            "effective_input_tokens": 8,
+            "output_tokens": 3,
+            "total_tokens": 13,
+            "reasoning_output_tokens": 1,
+            "cache_read_input_tokens": 2,
+            "cache_write_input_tokens": 1,
+            "other_input_tokens": 5,
+            "fresh_input_tokens": 6,
+            "cache_reuse_percent": 20.0,
+            "nano_aiu": 6,
+            "opaque_cost": 0.4
+        },
+        "context": {
+            "tokens": 111,
+            "limit": 222,
+            "message_count": 3,
+            "observed_at": "2026-08-15T00:00:00Z"
+        },
+        "counts": {
+            "interactions": 1,
+            "model_calls": 2,
+            "tool_calls": 3,
+            "subagent_invocations": 4,
+            "subagent_model_calls": 5,
+            "errors": 6
+        },
+        "subagents": {
+            "invocations": 1,
+            "model_calls": 2,
+            "effective_input_tokens": 3,
+            "output_tokens": 4,
+            "cache_read_input_tokens": 5,
+            "cache_write_input_tokens": 6,
+            "duration_ms": 7
+        },
+        "cache_signal": {
+            "state": "cache_reset_suspected",
+            "confidence": "medium",
+            "reason": "context_discontinuity"
+        },
+        "reporting": {
+            "model_calls": 2,
+            "cache_reported_calls": 1,
+            "convention_resolved_calls": 2,
+            "effective_input_covered_calls": 2,
+            "context_reported": true
+        },
+        "warnings": {
+            "total": 2,
+            "items": [
+                {
+                    "code": "malformed_record",
+                    "count": 2
+                }
+            ]
+        }
+    })
+}
+
 async fn upstream_terminal_status(
     State(state): State<StubState>,
     Path(session_id): Path<String>,
@@ -402,6 +520,22 @@ async fn upstream_terminal_status(
         .load(Ordering::SeqCst)
         .then_some("resumed");
     terminal_response(&state, attach_kind, "running")
+}
+
+async fn upstream_session_telemetry(
+    State(state): State<StubState>,
+    Path(session_id): Path<String>,
+) -> Response {
+    if let Err(status) = state.record("GET", format!("/sessions/{session_id}/telemetry"), None) {
+        return status.into_response();
+    }
+    if state.telemetry_missing.load(Ordering::SeqCst) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if state.telemetry_fail.load(Ordering::SeqCst) {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    Json(telemetry_snapshot("live", None)).into_response()
 }
 
 async fn upstream_terminal_ensure(
@@ -585,6 +719,10 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let harness = TestHarness::start().await?;
     let (session_id, session) = harness.create_cli_session().await?;
+    assert_eq!(
+        session["telemetry_volume_identity"],
+        json!(session_id.clone())
+    );
     assert_eq!(session["runtime_status"], "live");
     assert_eq!(session["status"], "running");
     assert!(session.get("agent_host_session_id").is_none());
@@ -670,6 +808,7 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
     for request in &session_creates {
         let body = request.body.as_ref().ok_or("missing create body")?;
         assert_eq!(body["session_id"], session_id);
+        assert_eq!(body["telemetry_volume_identity"], session_id);
         assert_eq!(body["interaction_mode"], "cli");
         assert_eq!(body["harness"], "copilot-cli");
         assert_eq!(body["env"]["KERNEL_SESSION_ID"], harness_session_id);
@@ -695,6 +834,150 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
     );
     assert!(harness.upstream.ensure_count.load(Ordering::SeqCst) >= 3);
     assert!(harness.upstream_server.base_url.starts_with("http://"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn telemetry_route_round_trips_live_payload_and_reports_local_unavailable()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let harness = TestHarness::start().await?;
+    let (session_id, _session) = harness.create_cli_session().await?;
+
+    let (status, telemetry) = harness
+        .get(&format!("/sessions/{session_id}/telemetry"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(telemetry["schema_version"], 1);
+    assert_eq!(telemetry["state"], "live");
+    assert_eq!(telemetry["content_mode"], "metadata");
+    assert_eq!(telemetry["latest_call"]["cache_reporting"], "reported");
+    assert_eq!(
+        telemetry["latest_call"]["token_accounting_convention"],
+        "inclusive"
+    );
+    assert_eq!(telemetry["cache_signal"]["state"], "cache_reset_suspected");
+    assert_eq!(
+        telemetry["warnings"]["items"][0]["code"],
+        "malformed_record"
+    );
+
+    let (status, _agent) = harness
+        .post(
+            "/agents",
+            json!({
+                "agent_id": "chat-agent",
+                "name": "Chat Agent",
+            }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, chat_session) = harness
+        .post(
+            "/sessions",
+            json!({
+                "agent_id": "chat-agent",
+                "client_type": "webui",
+            }),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let chat_session_id = string_field(&chat_session, "session_id")?;
+
+    let (status, unavailable) = harness
+        .get(&format!("/sessions/{chat_session_id}/telemetry"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unavailable["state"], "unavailable");
+    assert!(
+        unavailable["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("telemetry is unavailable"))
+    );
+
+    let recorded = harness.upstream.requests()?;
+    assert!(recorded.iter().any(|request| {
+        request.method == "GET" && request.path == format!("/sessions/{session_id}/telemetry")
+    }));
+    assert!(!recorded.iter().any(|request| {
+        request.method == "GET" && request.path == format!("/sessions/{chat_session_id}/telemetry")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn telemetry_route_returns_service_unavailable_for_upstream_failures()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let harness = TestHarness::start().await?;
+    let (session_id, _session) = harness.create_cli_session().await?;
+    harness
+        .upstream
+        .telemetry_fail
+        .store(true, Ordering::SeqCst);
+
+    let (status, error) = harness
+        .get(&format!("/sessions/{session_id}/telemetry"))
+        .await?;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        error["detail"],
+        "agent_host returned HTTP 503 Service Unavailable"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn telemetry_route_normalizes_stale_runtime_until_terminal_recovery()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let harness = TestHarness::start().await?;
+    let (session_id, _session) = harness.create_cli_session().await?;
+    harness
+        .upstream
+        .telemetry_missing
+        .store(true, Ordering::SeqCst);
+
+    let (status, unavailable) = harness
+        .get(&format!("/sessions/{session_id}/telemetry"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unavailable["state"], "unavailable");
+    assert_eq!(
+        unavailable["reason"],
+        "telemetry runtime is unavailable until the session is recovered"
+    );
+
+    let (status, terminal) = harness
+        .post(
+            &format!("/sessions/{session_id}/terminal/ensure"),
+            json!({}),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK, "{terminal}");
+    assert_eq!(terminal["state"], "running");
+
+    let (status, recovered) = harness
+        .get(&format!("/sessions/{session_id}/telemetry"))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(recovered["state"], "live");
+
+    let recorded = harness.upstream.requests()?;
+    let session_creates = recorded
+        .iter()
+        .filter(|request| request.method == "POST" && request.path == "/sessions")
+        .collect::<Vec<_>>();
+    assert_eq!(session_creates.len(), 2);
+    assert_eq!(
+        session_creates[1]
+            .body
+            .as_ref()
+            .ok_or("missing recovery body")?["telemetry_volume_identity"],
+        session_id
+    );
+    assert!(recorded.iter().any(|request| {
+        request.method == "POST"
+            && request.path == format!("/sessions/{session_id}/terminal/ensure")
+    }));
     Ok(())
 }
 
@@ -849,6 +1132,10 @@ async fn terminal_recovery_reports_missing_secret_and_recovers_after_restore()
     assert_eq!(
         creates[1].body.as_ref().ok_or("missing recovery body")?["env"]["AGENTSPACE_RUNTIME_RECOVERY"],
         "1"
+    );
+    assert_eq!(
+        creates[1].body.as_ref().ok_or("missing recovery body")?["telemetry_volume_identity"],
+        session_id
     );
     assert_eq!(
         creates[1].body.as_ref().ok_or("missing recovery body")?["env"]["CONNECTION_API_KEY"],

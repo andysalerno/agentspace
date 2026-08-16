@@ -473,6 +473,27 @@ async def test_status_maps_exec_environment_marker_to_tmux_client(
     assert status.clients[0].attachment_id == attachment_id
 
 
+def test_telemetry_launch_for_pane_reads_managed_launch_path(tmp_path: Path) -> None:
+    runner = FakeTmuxRunner(exists=True)
+    launch_id = "44444444-4444-4444-8444-444444444444"
+    environ = tmp_path / "proc" / str(runner.pane_pid) / "environ"
+    environ.parent.mkdir(parents=True)
+    environ.write_bytes(
+        b"TERM=xterm-256color\0"
+        + (
+            "COPILOT_OTEL_FILE_EXPORTER_PATH="
+            f"/var/lib/agentspace/telemetry/{launch_id}.jsonl\0"
+        ).encode()
+    )
+    controller = _controller(tmp_path, runner)
+
+    launch = controller.telemetry_launch_for_pane(runner.pane_pid)
+
+    assert launch is not None
+    assert launch.launch_id == launch_id
+    assert launch.file_path == f"/var/lib/agentspace/telemetry/{launch_id}.jsonl"
+
+
 @pytest.mark.asyncio
 async def test_launch_arguments_are_never_combined_into_a_shell_string(
     tmp_path: Path,

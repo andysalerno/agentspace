@@ -179,6 +179,107 @@ def test_interactive_launch_uses_shared_session_and_provider_semantics(
     assert launch.environment["COPILOT_PROVIDER_WIRE_API"] == "responses"
 
 
+def test_interactive_launch_owns_metadata_only_telemetry_environment(
+    tmp_path: Path,
+) -> None:
+    launch_id = "4cb3df39-797e-4542-8fd1-d24665699e4d"
+    launch = build_interactive_launch(
+        CopilotLaunchConfig(
+            session_id=SESSION_ID,
+            workspace_dir=str(tmp_path),
+            env={"AGENTSPACE_SESSION_ID": OTHER_SESSION_ID},
+        ),
+        process_env={
+            "COPILOT_OTEL_ENABLED": "false",
+            "COPILOT_OTEL_EXPORTER_TYPE": "otlp-http",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://elsewhere.example",
+            "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT": "true",
+        },
+        telemetry_file_path=f"/var/lib/agentspace/telemetry/{launch_id}.jsonl",
+    )
+
+    assert launch.environment["COPILOT_OTEL_ENABLED"] == "true"
+    assert launch.environment["COPILOT_OTEL_EXPORTER_TYPE"] == "file"
+    assert launch.environment["COPILOT_OTEL_FILE_EXPORTER_PATH"].endswith(
+        f"/{launch_id}.jsonl",
+    )
+    assert (
+        launch.environment["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"]
+        == "false"
+    )
+    assert (
+        launch.environment["OTEL_RESOURCE_ATTRIBUTES"]
+        == f"agentspace.session.id={OTHER_SESSION_ID}"
+    )
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in launch.environment
+
+
+def test_chat_launch_scrubs_telemetry_environment(tmp_path: Path) -> None:
+    launch = build_chat_launch(
+        CopilotLaunchConfig(
+            session_id=SESSION_ID,
+            workspace_dir=str(tmp_path),
+            env={"COPILOT_OTEL_ENABLED": "true"},
+        ),
+        "hello",
+        process_env={
+            "COPILOT_OTEL_EXPORTER_TYPE": "otlp-http",
+            "OTEL_EXPORTER_OTLP_ENDPOINT": "https://elsewhere.example",
+        },
+    )
+
+    assert not any(
+        name.startswith(("OTEL_", "COPILOT_OTEL_")) for name in launch.environment
+    )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/unmanaged/launch.jsonl",
+        "/var/lib/agentspace/telemetry/not-a-uuid.jsonl",
+        "/var/lib/agentspace/telemetry/4cb3df39-797e-4542-8fd1-d24665699e4d.log",
+    ],
+)
+def test_interactive_launch_rejects_unmanaged_telemetry_path(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    with pytest.raises(CopilotLaunchError, match="telemetry"):
+        build_interactive_launch(
+            CopilotLaunchConfig(
+                session_id=SESSION_ID,
+                workspace_dir=str(tmp_path),
+                env={"AGENTSPACE_SESSION_ID": OTHER_SESSION_ID},
+            ),
+            process_env={},
+            telemetry_file_path=path,
+        )
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/var/lib/agentspace/telemetry/4CB3DF39-797E-4542-8FD1-D24665699E4D.jsonl",
+        "/var/lib/agentspace/telemetry/4cb3df39797e45428fd1d24665699e4d.jsonl",
+    ],
+)
+def test_interactive_launch_rejects_noncanonical_uuid_telemetry_path(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    with pytest.raises(CopilotLaunchError, match="canonical UUID"):
+        build_interactive_launch(
+            CopilotLaunchConfig(
+                session_id=SESSION_ID,
+                workspace_dir=str(tmp_path),
+                env={"AGENTSPACE_SESSION_ID": OTHER_SESSION_ID},
+            ),
+            process_env={},
+            telemetry_file_path=path,
+        )
+
+
 def test_profile_is_deterministic_owned_and_selected(tmp_path: Path) -> None:
     session_id = SESSION_ID
     config = CopilotLaunchConfig(

@@ -383,6 +383,7 @@ pub struct DockerKernelSession {
     pub session_id: String,
     pub container_name: String,
     pub session_workspace_volume_name: String,
+    pub session_telemetry_volume_name: Option<String>,
     pub base_url: String,
     pub vscode_url: Option<String>,
     pub free_port_url: Option<String>,
@@ -418,6 +419,242 @@ pub struct RuntimeSessionSummary {
     pub free_port_url: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryState {
+    Starting,
+    Live,
+    Stale,
+    #[default]
+    Unavailable,
+    Degraded,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryContentMode {
+    #[default]
+    Metadata,
+    Content,
+    PolicyConflict,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheReportingState {
+    Reported,
+    #[default]
+    Unreported,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenAccountingConvention {
+    Inclusive,
+    Additive,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheSignalState {
+    Healthy,
+    CacheResetSuspected,
+    ExpectedBoundary,
+    #[default]
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheSignalConfidence {
+    Low,
+    Medium,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheSignalReason {
+    ReuseCollapsed,
+    ContextDiscontinuity,
+    CompactionOrTruncation,
+    ModelChanged,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryWarningCode {
+    CheckpointCorrupt,
+    CheckpointNewerVersion,
+    ContentPolicyConflict,
+    DuplicateConflict,
+    FieldTruncated,
+    FileLimitExceeded,
+    InvalidUsageShape,
+    LineTooLong,
+    MalformedRecord,
+    PartialRecordDiscarded,
+    SizeLimitExceeded,
+    SourceFileChanged,
+    SpanLimitExceeded,
+    UnknownRecord,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct UsageBreakdown {
+    pub raw_input_tokens: Option<u64>,
+    pub effective_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub reasoning_output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub other_input_tokens: Option<u64>,
+    pub fresh_input_tokens: Option<u64>,
+    pub cache_reuse_percent: Option<f64>,
+    pub nano_aiu: Option<u64>,
+    pub opaque_cost: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ModelCallSummary {
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub model: Option<String>,
+    pub requested_model: Option<String>,
+    pub provider: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_name: Option<String>,
+    pub is_subagent: bool,
+    pub cache_reporting: CacheReportingState,
+    pub token_accounting_convention: TokenAccountingConvention,
+    pub usage: UsageBreakdown,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ActivityCounts {
+    pub interactions: u64,
+    pub model_calls: u64,
+    pub tool_calls: u64,
+    pub subagent_invocations: u64,
+    pub subagent_model_calls: u64,
+    pub errors: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ReportingCoverage {
+    pub model_calls: u64,
+    pub cache_reported_calls: u64,
+    pub convention_resolved_calls: u64,
+    pub effective_input_covered_calls: u64,
+    pub context_reported: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct ContextUsage {
+    pub tokens: Option<u64>,
+    pub limit: Option<u64>,
+    pub message_count: Option<u64>,
+    pub observed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct SubagentBreakdown {
+    pub invocations: u64,
+    pub model_calls: u64,
+    pub effective_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_write_input_tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CacheSignal {
+    pub state: CacheSignalState,
+    pub confidence: Option<CacheSignalConfidence>,
+    pub reason: Option<CacheSignalReason>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TelemetryWarning {
+    pub code: TelemetryWarningCode,
+    pub count: u64,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TelemetryWarningSummary {
+    pub total: u64,
+    pub items: Vec<TelemetryWarning>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct TelemetrySnapshot {
+    pub schema_version: u64,
+    pub state: TelemetryState,
+    pub reason: Option<String>,
+    pub content_mode: TelemetryContentMode,
+    pub source_version: Option<String>,
+    pub observed_at: Option<String>,
+    pub received_at: Option<String>,
+    pub session: UsageBreakdown,
+    pub latest_call: Option<ModelCallSummary>,
+    pub last_interaction: Option<UsageBreakdown>,
+    pub context: Option<ContextUsage>,
+    pub counts: ActivityCounts,
+    pub subagents: SubagentBreakdown,
+    pub cache_signal: Option<CacheSignal>,
+    pub reporting: ReportingCoverage,
+    pub warnings: TelemetryWarningSummary,
+}
+
+impl Default for TelemetrySnapshot {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            state: TelemetryState::Unavailable,
+            reason: None,
+            content_mode: TelemetryContentMode::Metadata,
+            source_version: None,
+            observed_at: None,
+            received_at: None,
+            session: UsageBreakdown::default(),
+            latest_call: None,
+            last_interaction: None,
+            context: None,
+            counts: ActivityCounts::default(),
+            subagents: SubagentBreakdown::default(),
+            cache_signal: None,
+            reporting: ReportingCoverage::default(),
+            warnings: TelemetryWarningSummary::default(),
+        }
+    }
+}
+
+impl TelemetrySnapshot {
+    #[must_use]
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            schema_version: 1,
+            state: TelemetryState::Unavailable,
+            reason: Some(reason.into()),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
@@ -439,6 +676,7 @@ pub struct SessionSummary {
 pub enum CleanupResourceKind {
     KernelContainer,
     SessionWorkspaceVolume,
+    SessionTelemetryVolume,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -507,7 +745,12 @@ impl ServiceSummary {
 mod tests {
     use serde_json::json;
 
-    use super::{KernelEvent, KernelEventType, KernelStatus, WorkspaceMount, WorkspaceMountMode};
+    use super::{
+        ActivityCounts, CacheReportingState, ContextUsage, KernelEvent, KernelEventType,
+        KernelStatus, ModelCallSummary, ReportingCoverage, TelemetryContentMode, TelemetrySnapshot,
+        TelemetryState, TelemetryWarning, TelemetryWarningCode, TelemetryWarningSummary,
+        TokenAccountingConvention, UsageBreakdown, WorkspaceMount, WorkspaceMountMode,
+    };
 
     #[test]
     fn kernel_event_serialization_omits_absent_fields() {
@@ -542,5 +785,130 @@ mod tests {
                 "volume_name": "agentspace-workspace-todo-list-code"
             })
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn telemetry_snapshot_serialization_matches_kernel_shape() {
+        let snapshot = TelemetrySnapshot {
+            schema_version: 1,
+            state: TelemetryState::Live,
+            reason: None,
+            content_mode: TelemetryContentMode::Metadata,
+            source_version: Some("1.0.81-0".to_owned()),
+            observed_at: Some("2026-08-15T00:00:00Z".to_owned()),
+            received_at: Some("2026-08-15T00:00:01Z".to_owned()),
+            session: UsageBreakdown {
+                raw_input_tokens: Some(12),
+                effective_input_tokens: Some(9),
+                output_tokens: Some(3),
+                total_tokens: Some(15),
+                reasoning_output_tokens: Some(1),
+                cache_read_input_tokens: Some(2),
+                cache_write_input_tokens: Some(1),
+                other_input_tokens: Some(5),
+                fresh_input_tokens: Some(7),
+                cache_reuse_percent: Some(22.5),
+                nano_aiu: Some(8),
+                opaque_cost: Some(0.5),
+            },
+            latest_call: Some(ModelCallSummary {
+                started_at: Some("2026-08-15T00:00:00Z".to_owned()),
+                ended_at: Some("2026-08-15T00:00:01Z".to_owned()),
+                duration_ms: Some(1_000),
+                model: Some("gpt-5.6-sol".to_owned()),
+                requested_model: Some("gpt-5.6-sol".to_owned()),
+                provider: Some("openai".to_owned()),
+                agent_id: Some("builtin:task".to_owned()),
+                agent_name: Some("task".to_owned()),
+                is_subagent: true,
+                cache_reporting: CacheReportingState::Reported,
+                token_accounting_convention: TokenAccountingConvention::Inclusive,
+                usage: UsageBreakdown {
+                    raw_input_tokens: Some(6),
+                    effective_input_tokens: Some(4),
+                    output_tokens: Some(2),
+                    total_tokens: Some(8),
+                    reasoning_output_tokens: Some(1),
+                    cache_read_input_tokens: Some(2),
+                    cache_write_input_tokens: Some(1),
+                    other_input_tokens: Some(1),
+                    fresh_input_tokens: Some(3),
+                    cache_reuse_percent: Some(33.3),
+                    nano_aiu: Some(4),
+                    opaque_cost: Some(0.25),
+                },
+            }),
+            last_interaction: Some(UsageBreakdown {
+                raw_input_tokens: Some(10),
+                effective_input_tokens: Some(8),
+                output_tokens: Some(3),
+                total_tokens: Some(13),
+                reasoning_output_tokens: Some(1),
+                cache_read_input_tokens: Some(2),
+                cache_write_input_tokens: Some(1),
+                other_input_tokens: Some(5),
+                fresh_input_tokens: Some(6),
+                cache_reuse_percent: Some(20.0),
+                nano_aiu: Some(6),
+                opaque_cost: Some(0.4),
+            }),
+            context: Some(ContextUsage {
+                tokens: Some(111),
+                limit: Some(222),
+                message_count: Some(3),
+                observed_at: Some("2026-08-15T00:00:00Z".to_owned()),
+            }),
+            counts: ActivityCounts {
+                interactions: 1,
+                model_calls: 2,
+                tool_calls: 3,
+                subagent_invocations: 4,
+                subagent_model_calls: 5,
+                errors: 6,
+            },
+            subagents: super::SubagentBreakdown {
+                invocations: 1,
+                model_calls: 2,
+                effective_input_tokens: Some(3),
+                output_tokens: Some(4),
+                cache_read_input_tokens: Some(5),
+                cache_write_input_tokens: Some(6),
+                duration_ms: Some(7),
+            },
+            cache_signal: Some(super::CacheSignal {
+                state: super::CacheSignalState::CacheResetSuspected,
+                confidence: Some(super::CacheSignalConfidence::Medium),
+                reason: Some(super::CacheSignalReason::ContextDiscontinuity),
+            }),
+            reporting: ReportingCoverage {
+                model_calls: 2,
+                cache_reported_calls: 1,
+                convention_resolved_calls: 2,
+                effective_input_covered_calls: 2,
+                context_reported: true,
+            },
+            warnings: TelemetryWarningSummary {
+                total: 2,
+                items: vec![TelemetryWarning {
+                    code: TelemetryWarningCode::MalformedRecord,
+                    count: 2,
+                }],
+            },
+        };
+
+        let payload = serde_json::to_value(snapshot)
+            .unwrap_or_else(|error| panic!("failed to serialize telemetry snapshot: {error}"));
+
+        assert_eq!(payload["schema_version"], 1);
+        assert_eq!(payload["state"], "live");
+        assert_eq!(payload["content_mode"], "metadata");
+        assert_eq!(payload["latest_call"]["cache_reporting"], "reported");
+        assert_eq!(
+            payload["latest_call"]["token_accounting_convention"],
+            "inclusive"
+        );
+        assert_eq!(payload["cache_signal"]["state"], "cache_reset_suspected");
+        assert_eq!(payload["warnings"]["items"][0]["code"], "malformed_record");
     }
 }

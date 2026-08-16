@@ -15,6 +15,7 @@ import type {
     KernelSummary,
     SessionDetail,
     SessionSummary,
+    TelemetrySnapshot,
     TerminalAttachKind,
     TerminalStatus,
 } from "./types";
@@ -71,7 +72,14 @@ vi.mock("./Terminal", async () => {
                 onLifecycleStatus,
                 sessionId,
             ]);
-            return <div aria-label="Mock terminal">connected terminal</div>;
+            return (
+                <div className="terminal-shell">
+                    <div className="terminal-canvas">
+                        <div aria-label="Mock terminal">connected terminal</div>
+                    </div>
+                    <div className="terminal-status">Terminal ready</div>
+                </div>
+            );
         },
     };
 });
@@ -170,6 +178,146 @@ const RUNNING_TERMINAL: TerminalStatus = {
     attachment_count: 1,
 };
 
+const LIVE_TELEMETRY: TelemetrySnapshot = {
+    schema_version: 1,
+    state: "live",
+    reason: null,
+    content_mode: "metadata",
+    source_version: "1.0.81-0",
+    observed_at: "2026-08-16T08:00:00Z",
+    received_at: "2026-08-16T08:00:01Z",
+    session: {
+        raw_input_tokens: 48_960,
+        effective_input_tokens: 48_216,
+        output_tokens: 154,
+        total_tokens: 48_370,
+        reasoning_output_tokens: 21,
+        cache_read_input_tokens: 48_012,
+        cache_write_input_tokens: 112,
+        other_input_tokens: 92,
+        fresh_input_tokens: 204,
+        cache_reuse_percent: 99.6,
+        nano_aiu: 6_400_000,
+        opaque_cost: 0.1472,
+    },
+    latest_call: {
+        started_at: "2026-08-16T07:59:56Z",
+        ended_at: "2026-08-16T08:00:00Z",
+        duration_ms: 4_000,
+        model: "gpt-5.6-sol",
+        requested_model: "gpt-5.6-sol",
+        provider: "openai",
+        agent_id: "builtin:task",
+        agent_name: "task",
+        is_subagent: false,
+        cache_reporting: "reported",
+        token_accounting_convention: "inclusive",
+        usage: {
+            raw_input_tokens: 16_520,
+            effective_input_tokens: 16_512,
+            output_tokens: 13,
+            total_tokens: 16_525,
+            reasoning_output_tokens: 3,
+            cache_read_input_tokens: 16_404,
+            cache_write_input_tokens: 18,
+            other_input_tokens: 90,
+            fresh_input_tokens: 108,
+            cache_reuse_percent: 99.3,
+            nano_aiu: 2_300_000,
+            opaque_cost: 0.0412,
+        },
+    },
+    last_interaction: null,
+    context: {
+        tokens: 17_832,
+        limit: 272_000,
+        message_count: 18,
+        observed_at: "2026-08-16T08:00:00Z",
+    },
+    counts: {
+        interactions: 4,
+        model_calls: 7,
+        tool_calls: 11,
+        subagent_invocations: 1,
+        subagent_model_calls: 2,
+        errors: 0,
+    },
+    subagents: {
+        invocations: 1,
+        model_calls: 2,
+        effective_input_tokens: 9_200,
+        output_tokens: 44,
+        cache_read_input_tokens: 9_100,
+        cache_write_input_tokens: 50,
+        duration_ms: 18_000,
+    },
+    cache_signal: {
+        state: "healthy",
+        confidence: null,
+        reason: null,
+    },
+    reporting: {
+        model_calls: 7,
+        cache_reported_calls: 7,
+        convention_resolved_calls: 7,
+        effective_input_covered_calls: 7,
+        context_reported: true,
+    },
+    warnings: {
+        total: 0,
+        items: [],
+    },
+};
+
+const UNAVAILABLE_TELEMETRY: TelemetrySnapshot = {
+    ...LIVE_TELEMETRY,
+    state: "unavailable",
+    reason: "telemetry is unavailable for harness echo",
+    observed_at: null,
+    received_at: null,
+    session: {
+        raw_input_tokens: null,
+        effective_input_tokens: null,
+        output_tokens: null,
+        total_tokens: null,
+        reasoning_output_tokens: null,
+        cache_read_input_tokens: null,
+        cache_write_input_tokens: null,
+        other_input_tokens: null,
+        fresh_input_tokens: null,
+        cache_reuse_percent: null,
+        nano_aiu: null,
+        opaque_cost: null,
+    },
+    latest_call: null,
+    context: null,
+    counts: {
+        interactions: 0,
+        model_calls: 0,
+        tool_calls: 0,
+        subagent_invocations: 0,
+        subagent_model_calls: 0,
+        errors: 0,
+    },
+    subagents: {
+        invocations: 0,
+        model_calls: 0,
+        effective_input_tokens: null,
+        output_tokens: null,
+        cache_read_input_tokens: null,
+        cache_write_input_tokens: null,
+        duration_ms: null,
+    },
+    cache_signal: null,
+    reporting: {
+        model_calls: 0,
+        cache_reported_calls: 0,
+        convention_resolved_calls: 0,
+        effective_input_covered_calls: 0,
+        context_reported: false,
+    },
+};
+
 function detail(session = CLI_SESSION): SessionDetail {
     return { ...session, messages: [] };
 }
@@ -183,6 +331,7 @@ beforeEach(() => {
     vi.spyOn(api, "listKernels").mockResolvedValue([KERNEL]);
     vi.spyOn(api, "ensureTerminal").mockResolvedValue(RUNNING_TERMINAL);
     vi.spyOn(api, "getTerminalStatus").mockResolvedValue(RUNNING_TERMINAL);
+    vi.spyOn(api, "getSessionTelemetry").mockResolvedValue(LIVE_TELEMETRY);
     vi.spyOn(api, "createSession").mockResolvedValue(CLI_SESSION);
     vi.spyOn(api, "resumeTerminal").mockResolvedValue({
         ...RUNNING_TERMINAL,
@@ -260,13 +409,70 @@ describe("CliView", () => {
         );
 
         expect(await screen.findByLabelText("Mock terminal")).toBeTruthy();
-        expect(screen.getAllByText("live")).toHaveLength(2);
+        expect(screen.getAllByText("live")).toHaveLength(1);
         expect(screen.getByText("Started")).toBeTruthy();
         expect(screen.getByText("1 attachment")).toBeTruthy();
         expect(screen.getByText(/AgentSpace session-…/)).toBeTruthy();
         expect(screen.getByText(/Copilot copilot-…/)).toBeTruthy();
         expect(screen.getByRole("link", { name: "VS Code" }).getAttribute("href"))
             .toBe("http://localhost:8100/");
+        expect(screen.getByLabelText("CLI telemetry summary")).toBeTruthy();
+        expect(screen.getAllByText("48.4k tokens").length).toBeGreaterThan(0);
+        expect(screen.getByText("16.5k input / 13 output")).toBeTruthy();
+    });
+
+    it("renders the usage strip and accessible details outside the terminal chrome", async () => {
+        const user = userEvent.setup();
+        render(
+            <CliView
+                darkMode={false}
+                onSelectSession={vi.fn()}
+                selectedSessionId={CLI_SESSION.session_id}
+            />,
+            { wrapper: wrapper() },
+        );
+
+        await screen.findByLabelText("Mock terminal");
+        const summary = screen.getByLabelText("CLI telemetry summary");
+        expect(summary.closest(".terminal-shell")).toBeNull();
+        expect(summary.closest(".terminal-status")).toBeNull();
+        expect(summary.querySelector(".status-badge")).toBeNull();
+        expect(screen.getAllByText("99.6% (48k read)").length).toBeGreaterThan(0);
+        expect(screen.getByText("17.8k / 272k")).toBeTruthy();
+        expect(screen.getAllByText("1 subagent").length).toBeGreaterThan(0);
+
+        await user.click(screen.getByRole("button", { name: "Usage details" }));
+        expect(await screen.findByRole("region", { name: "CLI telemetry details" }))
+            .toBeTruthy();
+        expect(screen.queryByText("Telemetry state")).toBeNull();
+        expect(screen.getByText("Session usage")).toBeTruthy();
+        expect(screen.getByText("Coverage & counts")).toBeTruthy();
+        expect(screen.getByText("Health & policy")).toBeTruthy();
+        expect(screen.getAllByText("N/A").length).toBeGreaterThan(0);
+        expect(screen.getByText("Metadata")).toBeTruthy();
+    });
+
+    it("shows unavailable telemetry without success-shaped zero defaults", async () => {
+        vi.mocked(api.getSessionTelemetry).mockResolvedValue(UNAVAILABLE_TELEMETRY);
+        const user = userEvent.setup();
+        render(
+            <CliView
+                darkMode={false}
+                onSelectSession={vi.fn()}
+                selectedSessionId={CLI_SESSION.session_id}
+            />,
+            { wrapper: wrapper() },
+        );
+        await screen.findByLabelText("Mock terminal");
+        const summary = screen.getByLabelText("CLI telemetry summary");
+        await waitFor(() => {
+            expect(summary.textContent).toContain("N/A");
+        });
+        expect(screen.queryByText("0 tokens")).toBeNull();
+        expect(screen.queryByText("0% cache")).toBeNull();
+
+        await user.click(screen.getByRole("button", { name: "Usage details" }));
+        expect((await screen.findAllByText("N/A")).length).toBeGreaterThan(0);
     });
 
     it("opens browser-local scrollback without mutating the shared tmux pane", async () => {

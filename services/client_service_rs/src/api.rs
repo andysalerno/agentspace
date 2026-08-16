@@ -40,8 +40,8 @@ use crate::{
         ClientType, ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
         GatewayRecord, GatewayType, HarnessName, InteractionMode, LaunchValueSource, MessageRecord,
         MessageRole, PublicTerminalStatus, RecoveryState, RuntimeStatus, SessionRecord,
-        ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now,
-        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        TelemetrySnapshot, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus,
+        utc_now, validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
         validate_workspace_id,
     },
 };
@@ -132,6 +132,7 @@ pub fn router() -> Router<AppState> {
             "/sessions/{session_id}/messages/stream",
             post(stream_message),
         )
+        .route("/sessions/{session_id}/telemetry", get(session_telemetry))
         .merge(terminal_router())
         .route(
             "/sessions/{session_id}/workspace/save",
@@ -1147,6 +1148,7 @@ async fn create_cli_session(
     session.runtime_generation = None;
     session.runtime_status = Some(RuntimeStatus::Starting);
     session.workspace_volume_identity = Some(session_id);
+    session.telemetry_volume_identity = Some(session.session_id.clone());
     session.workspace_mounts = session_mounts.to_vec();
     session.launch_snapshot = Some(launch_snapshot);
 
@@ -1489,6 +1491,7 @@ async fn ensure_cli_runtime_locked(
         .agent_host
         .create_session(AgentHostSessionCreate {
             session_id: &session.session_id,
+            telemetry_volume_identity: session.telemetry_volume_identity.as_deref(),
             interaction_mode: InteractionMode::Cli.as_str(),
             harness: CliHarnessName::CopilotCli.as_str(),
             skills: Some(&agent.skills),
@@ -1862,6 +1865,41 @@ async fn terminal_status(
     Ok(Json(public_terminal_status(&terminal)?))
 }
 
+async fn session_telemetry(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<TelemetrySnapshot>, ApiError> {
+    let session = require_session(&state, &session_id)?;
+    if session.telemetry_volume_identity.is_none() {
+        return Ok(Json(TelemetrySnapshot::unavailable(
+            "telemetry is unavailable for this session",
+        )));
+    }
+    if session.agent_host_session_id.is_empty() {
+        return Ok(Json(TelemetrySnapshot::unavailable(
+            "telemetry runtime is unavailable until the session is recovered",
+        )));
+    }
+
+    let snapshot = match state
+        .agent_host
+        .telemetry(&session.agent_host_session_id)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(AgentHostError::HttpStatus { status, .. })
+            if status == StatusCode::NOT_FOUND
+                && session.recovery_state() == RecoveryState::Recoverable =>
+        {
+            TelemetrySnapshot::unavailable(
+                "telemetry runtime is unavailable until the session is recovered",
+            )
+        }
+        Err(error) => return Err(telemetry_upstream_error(error)),
+    };
+    Ok(Json(snapshot))
+}
+
 async fn terminal_ensure(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -2069,6 +2107,14 @@ fn terminal_upstream_error(error: AgentHostError) -> ApiError {
     } else {
         ApiError::service_unavailable(detail)
     }
+}
+
+fn telemetry_upstream_error(error: AgentHostError) -> ApiError {
+    let detail = match error {
+        AgentHostError::HttpStatus { status, .. } => format!("agent_host returned HTTP {status}"),
+        other => other.to_string(),
+    };
+    ApiError::service_unavailable(detail)
 }
 
 async fn proxy_terminal_websocket(browser: WebSocket, upstream: AgentHostWebSocket) {
@@ -4860,6 +4906,7 @@ async fn ensure_chat_runtime_locked(
         .agent_host
         .create_session(AgentHostSessionCreate {
             session_id: &session.session_id,
+            telemetry_volume_identity: None,
             interaction_mode: InteractionMode::Chat.as_str(),
             harness: agent.harness.as_str(),
             skills: Some(&agent.skills),

@@ -29,7 +29,7 @@ use crate::{
     models::{
         CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName, InteractionMode,
         KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus, RuntimeSessionSummary,
-        ServiceSummary, SessionSummary, WorkspaceMount, WorkspaceMountMode,
+        ServiceSummary, SessionSummary, TelemetrySnapshot, WorkspaceMount, WorkspaceMountMode,
     },
     skills::{SkillRegistry, SkillVolumeResource},
     terminal::{TerminalConnection, TerminalExec, TerminalService, TerminalStatus},
@@ -40,6 +40,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostEr
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeCreateSession {
     pub session_id: String,
+    pub telemetry_volume_identity: Option<String>,
     pub harness: HarnessName,
     pub interaction_mode: InteractionMode,
     pub env: BTreeMap<String, String>,
@@ -204,6 +205,15 @@ pub trait KernelRuntime: Send + Sync {
             "terminal resize is not supported by this runtime",
         ))
     }
+
+    async fn telemetry(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<TelemetrySnapshot, AgentHostError> {
+        Ok(TelemetrySnapshot::unavailable(
+            "telemetry is unavailable for this runtime",
+        ))
+    }
 }
 
 #[derive(Clone, Default)]
@@ -269,6 +279,7 @@ impl SessionRegistry {
         ServiceSummary::ready("session lifecycle routes are active")
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn create_session(
         &self,
         request: CreateSessionRequest,
@@ -279,6 +290,9 @@ impl SessionRegistry {
             .clone()
             .unwrap_or_else(|| Uuid::new_v4().simple().to_string());
         validate_session_id_or_error(&session_id)?;
+        if let Some(telemetry_volume_identity) = request.telemetry_volume_identity.as_deref() {
+            validate_session_id_or_error(telemetry_volume_identity)?;
+        }
         let existing = self.inner.sessions.read().await.get(&session_id).cloned();
         if let Some(record) = &existing {
             validate_existing_session_identity(record, &request)?;
@@ -322,6 +336,7 @@ impl SessionRegistry {
         );
         let runtime_request = RuntimeCreateSession {
             session_id: session_id.clone(),
+            telemetry_volume_identity: request.telemetry_volume_identity.clone(),
             harness: request.harness,
             interaction_mode: request.interaction_mode,
             env: merged_env.clone(),
@@ -340,6 +355,7 @@ impl SessionRegistry {
         let runtime_summary = self.inner.runtime.summary(&runtime_session).await?;
         let mut record = existing.unwrap_or_else(|| SessionRecord {
             session_id: session_id.clone(),
+            telemetry_volume_identity: request.telemetry_volume_identity.clone(),
             harness: request.harness,
             interaction_mode: request.interaction_mode,
             runtime_session: runtime_session.clone(),
@@ -356,6 +372,7 @@ impl SessionRegistry {
             stats: None,
         });
         record.runtime_session = runtime_session.clone();
+        record.telemetry_volume_identity = request.telemetry_volume_identity.clone();
         record.env = merged_env;
         record.additional_paths = additional_paths;
         record.skills = request.skills;
@@ -453,6 +470,7 @@ impl SessionRegistry {
         self.destroy_session(session_id).await?;
         self.create_session(CreateSessionRequest {
             session_id: Some(record.session_id),
+            telemetry_volume_identity: record.telemetry_volume_identity,
             harness: record.harness,
             interaction_mode: record.interaction_mode,
             env: record.env,
@@ -615,6 +633,11 @@ impl SessionRegistry {
             .await
     }
 
+    pub async fn telemetry(&self, session_id: &str) -> Result<TelemetrySnapshot, AgentHostError> {
+        let record = self.get_record(session_id).await?;
+        self.inner.runtime.telemetry(&record.runtime_session).await
+    }
+
     pub async fn terminal_status(
         &self,
         session_id: &str,
@@ -725,6 +748,8 @@ pub struct CreateSessionRequest {
     #[serde(default)]
     pub session_id: Option<String>,
     #[serde(default)]
+    pub telemetry_volume_identity: Option<String>,
+    #[serde(default)]
     pub harness: HarnessName,
     #[serde(default)]
     pub interaction_mode: InteractionMode,
@@ -823,6 +848,7 @@ struct CleanupRequest {
 #[derive(Clone)]
 struct SessionRecord {
     session_id: String,
+    telemetry_volume_identity: Option<String>,
     harness: HarnessName,
     interaction_mode: InteractionMode,
     runtime_session: KernelRuntimeSession,
@@ -996,13 +1022,19 @@ fn validate_existing_session_identity(
     record: &SessionRecord,
     request: &CreateSessionRequest,
 ) -> Result<(), AgentHostError> {
-    if record.harness == request.harness && record.interaction_mode == request.interaction_mode {
-        return Ok(());
+    if record.harness != request.harness || record.interaction_mode != request.interaction_mode {
+        return Err(AgentHostError::conflict(format!(
+            "session {:?} is already registered as harness {:?} in {:?} mode",
+            record.session_id, record.harness, record.interaction_mode
+        )));
     }
-    Err(AgentHostError::conflict(format!(
-        "session {:?} is already registered as harness {:?} in {:?} mode",
-        record.session_id, record.harness, record.interaction_mode
-    )))
+    if record.telemetry_volume_identity != request.telemetry_volume_identity {
+        return Err(AgentHostError::conflict(format!(
+            "session {:?} is already registered with telemetry volume identity {:?}",
+            record.session_id, record.telemetry_volume_identity
+        )));
+    }
+    Ok(())
 }
 
 async fn finalize_stream(
@@ -1184,6 +1216,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/sessions/{session_id}/history", get(history))
         .route("/sessions/{session_id}/logs", get(session_logs))
+        .route("/sessions/{session_id}/telemetry", get(session_telemetry))
         .route(
             "/sessions/{session_id}/container-logs",
             get(session_container_logs),
@@ -1293,6 +1326,18 @@ async fn session_logs(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let lines = state.sessions.logs(&session_id).await?;
     Ok(Json(json!({ "lines": lines })))
+}
+
+async fn session_telemetry(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<TelemetrySnapshot>, ApiError> {
+    state
+        .sessions
+        .telemetry(&session_id)
+        .await
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 async fn session_container_logs(
@@ -1443,9 +1488,14 @@ mod tests {
         AppConfig, AppState, build_router,
         errors::AgentHostError,
         models::{
-            CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName,
-            InteractionMode, KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus,
-            RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
+            ActivityCounts, CacheReportingState, CacheSignal, CacheSignalConfidence,
+            CacheSignalReason, CacheSignalState, CleanupReport, CleanupResourceIdentity,
+            ContextUsage, DockerStatsSummary, HarnessName, InteractionMode, KernelEvent,
+            KernelEventType, KernelRuntimeSession, KernelStatus, ModelCallSummary,
+            ReportingCoverage, RuntimeSessionSummary, SubagentBreakdown, TelemetryContentMode,
+            TelemetrySnapshot, TelemetryState, TelemetryWarning, TelemetryWarningCode,
+            TelemetryWarningSummary, TokenAccountingConvention, UsageBreakdown, WorkspaceMount,
+            WorkspaceMountMode,
         },
         skills::{SkillRegistry, SkillVolumeMode, SkillVolumeResource, SkillsService},
     };
@@ -1462,7 +1512,9 @@ mod tests {
         sent: Vec<(String, String)>,
         summaries: BTreeMap<String, RuntimeSessionSummary>,
         histories: BTreeMap<String, Vec<Vec<KernelEvent>>>,
+        telemetry: BTreeMap<String, TelemetrySnapshot>,
         fail_summary: bool,
+        fail_telemetry: bool,
     }
 
     impl FakeRuntime {
@@ -1478,6 +1530,7 @@ mod tests {
             request: RuntimeCreateSession,
         ) -> Result<KernelRuntimeSession, AgentHostError> {
             let container_name = format!("container-{}", &request.session_id[..8]);
+            let harness = request.harness;
             {
                 let mut state = self.state();
                 state.created.push(request);
@@ -1491,6 +1544,10 @@ mod tests {
                     },
                 );
                 state.histories.insert(container_name.clone(), Vec::new());
+                state.telemetry.insert(
+                    container_name.clone(),
+                    telemetry_snapshot_for_harness(harness),
+                );
             }
             Ok(KernelRuntimeSession::opaque(container_name))
         }
@@ -1676,6 +1733,140 @@ mod tests {
                 "vscode_url": "http://127.0.0.1:12345",
             }))
         }
+
+        async fn telemetry(
+            &self,
+            session: &KernelRuntimeSession,
+        ) -> Result<TelemetrySnapshot, AgentHostError> {
+            let key = session_key(session);
+            {
+                let state = self.state();
+                if state.fail_telemetry {
+                    return Err(AgentHostError::upstream_unavailable(
+                        "kernel telemetry provider is unavailable",
+                    ));
+                }
+                state.telemetry.get(&key).cloned()
+            }
+            .ok_or_else(|| AgentHostError::runtime("missing telemetry"))
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn telemetry_snapshot_for_harness(harness: HarnessName) -> TelemetrySnapshot {
+        if harness != HarnessName::CopilotCli {
+            return TelemetrySnapshot::unavailable(format!(
+                "telemetry is unavailable for harness {}",
+                harness.as_str()
+            ));
+        }
+
+        TelemetrySnapshot {
+            schema_version: 1,
+            state: TelemetryState::Live,
+            reason: None,
+            content_mode: TelemetryContentMode::Metadata,
+            source_version: Some("1.0.81-0".to_owned()),
+            observed_at: Some("2026-08-15T00:00:00Z".to_owned()),
+            received_at: Some("2026-08-15T00:00:01Z".to_owned()),
+            session: UsageBreakdown {
+                raw_input_tokens: Some(12),
+                effective_input_tokens: Some(9),
+                output_tokens: Some(3),
+                total_tokens: Some(15),
+                reasoning_output_tokens: Some(1),
+                cache_read_input_tokens: Some(2),
+                cache_write_input_tokens: Some(1),
+                other_input_tokens: Some(5),
+                fresh_input_tokens: Some(7),
+                cache_reuse_percent: Some(22.5),
+                nano_aiu: Some(8),
+                opaque_cost: Some(0.5),
+            },
+            latest_call: Some(ModelCallSummary {
+                started_at: Some("2026-08-15T00:00:00Z".to_owned()),
+                ended_at: Some("2026-08-15T00:00:01Z".to_owned()),
+                duration_ms: Some(1_000),
+                model: Some("gpt-5.6-sol".to_owned()),
+                requested_model: Some("gpt-5.6-sol".to_owned()),
+                provider: Some("openai".to_owned()),
+                agent_id: Some("builtin:task".to_owned()),
+                agent_name: Some("task".to_owned()),
+                is_subagent: true,
+                cache_reporting: CacheReportingState::Reported,
+                token_accounting_convention: TokenAccountingConvention::Inclusive,
+                usage: UsageBreakdown {
+                    raw_input_tokens: Some(6),
+                    effective_input_tokens: Some(4),
+                    output_tokens: Some(2),
+                    total_tokens: Some(8),
+                    reasoning_output_tokens: Some(1),
+                    cache_read_input_tokens: Some(2),
+                    cache_write_input_tokens: Some(1),
+                    other_input_tokens: Some(1),
+                    fresh_input_tokens: Some(3),
+                    cache_reuse_percent: Some(33.3),
+                    nano_aiu: Some(4),
+                    opaque_cost: Some(0.25),
+                },
+            }),
+            last_interaction: Some(UsageBreakdown {
+                raw_input_tokens: Some(10),
+                effective_input_tokens: Some(8),
+                output_tokens: Some(3),
+                total_tokens: Some(13),
+                reasoning_output_tokens: Some(1),
+                cache_read_input_tokens: Some(2),
+                cache_write_input_tokens: Some(1),
+                other_input_tokens: Some(5),
+                fresh_input_tokens: Some(6),
+                cache_reuse_percent: Some(20.0),
+                nano_aiu: Some(6),
+                opaque_cost: Some(0.4),
+            }),
+            context: Some(ContextUsage {
+                tokens: Some(111),
+                limit: Some(222),
+                message_count: Some(3),
+                observed_at: Some("2026-08-15T00:00:00Z".to_owned()),
+            }),
+            counts: ActivityCounts {
+                interactions: 1,
+                model_calls: 2,
+                tool_calls: 3,
+                subagent_invocations: 4,
+                subagent_model_calls: 5,
+                errors: 6,
+            },
+            subagents: SubagentBreakdown {
+                invocations: 1,
+                model_calls: 2,
+                effective_input_tokens: Some(3),
+                output_tokens: Some(4),
+                cache_read_input_tokens: Some(5),
+                cache_write_input_tokens: Some(6),
+                duration_ms: Some(7),
+            },
+            cache_signal: Some(CacheSignal {
+                state: CacheSignalState::CacheResetSuspected,
+                confidence: Some(CacheSignalConfidence::Medium),
+                reason: Some(CacheSignalReason::ContextDiscontinuity),
+            }),
+            reporting: ReportingCoverage {
+                model_calls: 2,
+                cache_reported_calls: 1,
+                convention_resolved_calls: 2,
+                effective_input_covered_calls: 2,
+                context_reported: true,
+            },
+            warnings: TelemetryWarningSummary {
+                total: 2,
+                items: vec![TelemetryWarning {
+                    code: TelemetryWarningCode::MalformedRecord,
+                    count: 2,
+                }],
+            },
+        }
     }
 
     #[tokio::test]
@@ -1688,6 +1879,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env,
@@ -1748,6 +1940,7 @@ mod tests {
         let registry = SessionRegistry::with_runtime(Arc::new(runtime.clone()));
         let request = CreateSessionRequest {
             session_id: Some("stable-session-123".to_owned()),
+            telemetry_volume_identity: Some("stable-session-123".to_owned()),
             harness: HarnessName::Echo,
             interaction_mode: InteractionMode::Chat,
             env: BTreeMap::new(),
@@ -1768,11 +1961,20 @@ mod tests {
         assert_eq!(first.session_id, "stable-session-123");
         assert_eq!(second.session_id, first.session_id);
         assert_eq!(first.interaction_mode, InteractionMode::Chat);
-        assert_eq!(runtime.state().created.len(), 2);
+        {
+            let state = runtime.state();
+            assert_eq!(state.created.len(), 2);
+            assert_eq!(
+                state.created[0].telemetry_volume_identity.as_deref(),
+                Some("stable-session-123")
+            );
+            drop(state);
+        }
 
         let result = registry
             .create_session(CreateSessionRequest {
                 session_id: Some(first.session_id),
+                telemetry_volume_identity: Some("stable-session-123".to_owned()),
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Cli,
                 env: BTreeMap::new(),
@@ -1789,7 +1991,26 @@ mod tests {
 
         let result = registry
             .create_session(CreateSessionRequest {
+                session_id: Some("stable-session-123".to_owned()),
+                telemetry_volume_identity: Some("different-telemetry".to_owned()),
+                harness: HarnessName::Echo,
+                interaction_mode: InteractionMode::Chat,
+                env: BTreeMap::new(),
+                additional_paths: Vec::new(),
+                skills: Vec::new(),
+                workspace_mounts: Vec::new(),
+            })
+            .await;
+        let Err(conflict) = result else {
+            panic!("registered session identity must not change telemetry identity");
+        };
+        assert!(matches!(conflict, AgentHostError::Conflict { .. }));
+        assert_eq!(runtime.state().created.len(), 2);
+
+        let result = registry
+            .create_session(CreateSessionRequest {
                 session_id: Some("not valid!".to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1806,6 +2027,7 @@ mod tests {
         let result = registry
             .create_session(CreateSessionRequest {
                 session_id: Some("valid-but-not-uuid".to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1827,6 +2049,7 @@ mod tests {
         registry
             .create_session(CreateSessionRequest {
                 session_id: Some("stable-session".to_owned()),
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1857,6 +2080,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1909,6 +2133,7 @@ mod tests {
         let enabled = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -1921,6 +2146,7 @@ mod tests {
         registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::CopilotCli,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2041,6 +2267,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2073,6 +2300,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2111,6 +2339,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2137,6 +2366,7 @@ mod tests {
         let session = registry
             .create_session(CreateSessionRequest {
                 session_id: None,
+                telemetry_volume_identity: None,
                 harness: HarnessName::Echo,
                 interaction_mode: InteractionMode::Chat,
                 env: BTreeMap::new(),
@@ -2185,6 +2415,12 @@ mod tests {
         .await;
         let (logs_status, logs) =
             empty_request(&app, Method::GET, &format!("/sessions/{session_id}/logs")).await;
+        let (telemetry_status, telemetry) = empty_request(
+            &app,
+            Method::GET,
+            &format!("/sessions/{session_id}/telemetry"),
+        )
+        .await;
         let (container_logs_status, container_logs) = empty_request(
             &app,
             Method::GET,
@@ -2210,10 +2446,75 @@ mod tests {
         assert_eq!(history["history"][0][2]["content"], "hello");
         assert_eq!(logs_status, StatusCode::OK);
         assert_eq!(logs["lines"][0], r#"{"type":"stub","data":{}}"#);
+        assert_eq!(telemetry_status, StatusCode::OK);
+        assert_eq!(telemetry["state"], "live");
+        assert_eq!(telemetry["content_mode"], "metadata");
+        assert_eq!(telemetry["latest_call"]["cache_reporting"], "reported");
+        assert_eq!(
+            telemetry["latest_call"]["token_accounting_convention"],
+            "inclusive"
+        );
+        assert_eq!(telemetry["cache_signal"]["state"], "cache_reset_suspected");
+        assert_eq!(
+            telemetry["warnings"]["items"][0]["code"],
+            "malformed_record"
+        );
         assert_eq!(container_logs_status, StatusCode::OK);
         assert_eq!(container_logs["lines"].as_array().map(Vec::len), Some(2));
         assert_eq!(deleted_status, StatusCode::NO_CONTENT);
         assert_eq!(after_status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn telemetry_route_returns_unavailable_for_unsupported_sessions() {
+        let app = router_with_runtime(FakeRuntime::default());
+        let (status, created) = json_request(
+            &app,
+            Method::POST,
+            "/sessions",
+            json!({ "harness": "echo" }),
+        )
+        .await;
+        let session_id = session_id_from(&created);
+        let (telemetry_status, telemetry) = empty_request(
+            &app,
+            Method::GET,
+            &format!("/sessions/{session_id}/telemetry"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(telemetry_status, StatusCode::OK);
+        assert_eq!(telemetry["state"], "unavailable");
+        assert!(
+            telemetry["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("harness echo"))
+        );
+    }
+
+    #[tokio::test]
+    async fn telemetry_route_uses_standard_not_found_and_service_unavailable() {
+        let runtime = FakeRuntime::default();
+        let app = router_with_runtime(runtime.clone());
+        let (_status, _created, session_id) = create_mounted_session(&app).await;
+
+        let missing_status =
+            status_request(&app, Method::GET, "/sessions/missing-session/telemetry").await;
+        runtime.state().fail_telemetry = true;
+        let (upstream_status, upstream_error) = empty_request(
+            &app,
+            Method::GET,
+            &format!("/sessions/{session_id}/telemetry"),
+        )
+        .await;
+
+        assert_eq!(missing_status, StatusCode::NOT_FOUND);
+        assert_eq!(upstream_status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            upstream_error["detail"],
+            "kernel telemetry provider is unavailable"
+        );
     }
 
     #[tokio::test]
