@@ -39,9 +39,10 @@ use crate::{
         CliHarnessName, CliLaunchOptionsSnapshot, CliLaunchSnapshot, CliProviderLaunchSnapshot,
         ClientType, ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
         GatewayRecord, GatewayType, HarnessName, InteractionMode, LaunchValueSource, MessageRecord,
-        MessageRole, RecoveryState, RuntimeStatus, SessionRecord, ToolCallRecord,
-        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now, validate_agent_id,
-        validate_connection_id, validate_gateway_id, validate_skill_id, validate_workspace_id,
+        MessageRole, PublicTerminalStatus, RecoveryState, RuntimeStatus, SessionRecord,
+        ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now,
+        validate_agent_id, validate_connection_id, validate_gateway_id, validate_skill_id,
+        validate_workspace_id,
     },
 };
 
@@ -189,10 +190,6 @@ fn terminal_router() -> Router<AppState> {
         .route(
             "/sessions/{session_id}/terminal/resume",
             post(terminal_resume),
-        )
-        .route(
-            "/sessions/{session_id}/terminal/copy-mode",
-            post(terminal_copy_mode),
         )
         .route(
             "/sessions/{session_id}/terminal/ws",
@@ -1077,6 +1074,7 @@ async fn create_session(
     }
     let env = session_env(&state, &agent)?;
     let session_id = Uuid::now_v7().simple().to_string();
+    let _lifecycle = state.session_lifecycle.lock(&session_id).await;
     tracing::info!(
         route = "/sessions",
         action = "create_session",
@@ -1101,7 +1099,7 @@ async fn create_session(
     session.workspace_volume_identity = Some(session_id);
     session.workspace_mounts = session_mounts;
     state.sessions.insert(session.clone())?;
-    ensure_chat_runtime(&state, &mut session).await?;
+    ensure_chat_runtime_locked(&state, &mut session, false).await?;
     let value = session_summary(&state, &session)?;
     tracing::info!(
         route = "/sessions",
@@ -1132,6 +1130,7 @@ async fn create_cli_session(
     }
 
     let session_id = Uuid::now_v7().simple().to_string();
+    let _lifecycle = state.session_lifecycle.lock(&session_id).await;
     let launch_snapshot = cli_launch_snapshot(state, agent, cli, &session_id, session_mounts)?;
     let mut session = SessionRecord::new(
         session_id.clone(),
@@ -1152,7 +1151,7 @@ async fn create_cli_session(
     session.launch_snapshot = Some(launch_snapshot);
 
     state.sessions.insert(session.clone())?;
-    ensure_cli_runtime(state, &mut session).await?;
+    ensure_cli_runtime_locked(state, &mut session).await?;
     let value = session_summary(state, &session)?;
     tracing::info!(
         route = "/sessions",
@@ -1446,6 +1445,15 @@ async fn ensure_cli_runtime(
     state: &AppState,
     session: &mut SessionRecord,
 ) -> Result<JsonObject, ApiError> {
+    let _lifecycle = state.session_lifecycle.lock(&session.session_id).await;
+    *session = require_session(state, &session.session_id)?;
+    ensure_cli_runtime_locked(state, session).await
+}
+
+async fn ensure_cli_runtime_locked(
+    state: &AppState,
+    session: &mut SessionRecord,
+) -> Result<JsonObject, ApiError> {
     let (_validated, agent) = match require_cli_session(state, &session.session_id) {
         Ok(validated) => validated,
         Err(error) => {
@@ -1494,10 +1502,25 @@ async fn ensure_cli_runtime(
     }
     session.agent_host_session_id = upstream_session_id;
     session.status = string_field(&upstream, "status").unwrap_or_else(|_| "idle".to_owned());
+    session.vscode_url = optional_non_empty_string(upstream.get("vscode_url"));
+    session.free_port_url = optional_non_empty_string(upstream.get("free_port_url"));
     session.runtime_generation.get_or_insert(0);
     session.runtime_status = Some(RuntimeStatus::Live);
     session.updated_at = utc_now();
-    state.sessions.update(session.clone())?;
+    if let Err(error) = state.sessions.update(session.clone()) {
+        if let Err(cleanup_error) = state
+            .agent_host
+            .destroy_session(&session.agent_host_session_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session.session_id,
+                %cleanup_error,
+                "failed to compensate upstream CLI runtime after persistence failure"
+            );
+        }
+        return Err(error.into());
+    }
 
     let terminal = match state
         .agent_host
@@ -1808,16 +1831,10 @@ async fn stream_turn(
     Ok(ndjson_stream_response(receiver))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TerminalCopyModeRequest {
-    attachment_id: String,
-}
-
 async fn terminal_status(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<PublicTerminalStatus>, ApiError> {
     let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
     let terminal = state
         .agent_host
@@ -1825,22 +1842,23 @@ async fn terminal_status(
         .await
         .map_err(terminal_upstream_error)?;
     apply_terminal_runtime_status(&state, &mut session, &terminal)?;
-    Ok(Json(Value::Object(terminal)))
+    Ok(Json(public_terminal_status(&terminal)?))
 }
 
 async fn terminal_ensure(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<PublicTerminalStatus>, ApiError> {
     let (mut session, _agent) = require_cli_session(&state, &session_id)?;
     let terminal = ensure_cli_runtime(&state, &mut session).await?;
-    Ok(Json(Value::Object(terminal)))
+    Ok(Json(public_terminal_status(&terminal)?))
 }
 
 async fn terminal_stop(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<PublicTerminalStatus>, ApiError> {
+    let _lifecycle = state.session_lifecycle.lock(&session_id).await;
     let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
     let terminal = state
         .agent_host
@@ -1848,13 +1866,14 @@ async fn terminal_stop(
         .await
         .map_err(terminal_upstream_error)?;
     apply_terminal_runtime_status(&state, &mut session, &terminal)?;
-    Ok(Json(Value::Object(terminal)))
+    Ok(Json(public_terminal_status(&terminal)?))
 }
 
 async fn terminal_resume(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Json<PublicTerminalStatus>, ApiError> {
+    let _lifecycle = state.session_lifecycle.lock(&session_id).await;
     let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
     let terminal = state
         .agent_host
@@ -1863,27 +1882,7 @@ async fn terminal_resume(
         .map_err(terminal_upstream_error)?;
     advance_runtime_generation_if_resumed(&mut session, &terminal);
     apply_terminal_runtime_status(&state, &mut session, &terminal)?;
-    Ok(Json(Value::Object(terminal)))
-}
-
-async fn terminal_copy_mode(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-    Json(payload): Json<TerminalCopyModeRequest>,
-) -> Result<Json<Value>, ApiError> {
-    if payload.attachment_id.is_empty() {
-        return Err(ApiError::unprocessable(
-            "attachment_id must not be empty".to_owned(),
-        ));
-    }
-    let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
-    let terminal = state
-        .agent_host
-        .terminal_copy_mode(&session.agent_host_session_id, &payload.attachment_id)
-        .await
-        .map_err(terminal_upstream_error)?;
-    apply_terminal_runtime_status(&state, &mut session, &terminal)?;
-    Ok(Json(Value::Object(terminal)))
+    Ok(Json(public_terminal_status(&terminal)?))
 }
 
 async fn terminal_websocket(
@@ -1970,6 +1969,38 @@ fn apply_terminal_runtime_status(
     session.updated_at = utc_now();
     state.sessions.update(session.clone())?;
     Ok(())
+}
+
+fn public_terminal_status(terminal: &JsonObject) -> Result<PublicTerminalStatus, ApiError> {
+    let state = terminal
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            ApiError::service_unavailable(
+                "agent_host terminal response is missing state".to_owned(),
+            )
+        })?
+        .to_owned();
+    let exit_status = terminal.get("exit_status").and_then(Value::as_i64);
+    let attach_kind = terminal
+        .get("attach_kind")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let attachment_count = terminal
+        .get("attachment_count")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .ok_or_else(|| {
+            ApiError::service_unavailable(
+                "agent_host terminal response is missing attachment_count".to_owned(),
+            )
+        })?;
+    Ok(PublicTerminalStatus {
+        state,
+        exit_status,
+        attach_kind,
+        attachment_count,
+    })
 }
 
 fn advance_runtime_generation_if_resumed(session: &mut SessionRecord, terminal: &JsonObject) {
@@ -2113,7 +2144,15 @@ async fn forward_upstream_message(
         return true;
     }
     let is_close = matches!(message, UpstreamWebSocketMessage::Close(_));
-    let message = upstream_to_browser_message(message);
+    let message = match message {
+        UpstreamWebSocketMessage::Text(text) => {
+            let Some(sanitized) = sanitize_terminal_server_frame(text.as_str()) else {
+                return true;
+            };
+            WebSocketMessage::Text(sanitized.into())
+        }
+        other => upstream_to_browser_message(other),
+    };
     match tokio::time::timeout(
         TERMINAL_WEBSOCKET_SEND_TIMEOUT,
         browser_sender.send(message),
@@ -2159,8 +2198,8 @@ fn browser_to_upstream_message(message: WebSocketMessage) -> UpstreamWebSocketMe
 
 fn upstream_to_browser_message(message: UpstreamWebSocketMessage) -> WebSocketMessage {
     match message {
-        UpstreamWebSocketMessage::Text(text) => {
-            WebSocketMessage::Text(text.as_str().to_owned().into())
+        UpstreamWebSocketMessage::Text(_) => {
+            unreachable!("text frames are sanitized before conversion")
         }
         UpstreamWebSocketMessage::Binary(bytes) => WebSocketMessage::Binary(bytes),
         UpstreamWebSocketMessage::Ping(bytes) => WebSocketMessage::Ping(bytes),
@@ -2173,6 +2212,44 @@ fn upstream_to_browser_message(message: UpstreamWebSocketMessage) -> WebSocketMe
         }
         UpstreamWebSocketMessage::Frame(_frame) => unreachable!("raw frames are filtered"),
     }
+}
+
+fn sanitize_terminal_server_frame(text: &str) -> Option<String> {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| {
+            let object = value.as_object()?;
+            match object.get("type").and_then(Value::as_str)? {
+                "ready" => {
+                    let terminal =
+                        public_terminal_status(object.get("terminal")?.as_object()?).ok()?;
+                    Some(json!({
+                        "type": "ready",
+                        "attachment_id": object.get("attachment_id")?.as_str()?,
+                        "cols": object.get("cols")?.as_u64()?,
+                        "rows": object.get("rows")?.as_u64()?,
+                        "terminal": terminal,
+                    }))
+                }
+                "exited" => {
+                    let terminal =
+                        public_terminal_status(object.get("terminal")?.as_object()?).ok()?;
+                    Some(json!({
+                        "type": "exited",
+                        "state": terminal.state,
+                        "exit_status": terminal.exit_status,
+                        "terminal": terminal,
+                    }))
+                }
+                "error" => Some(json!({
+                    "type": "error",
+                    "code": object.get("code")?.as_u64()?,
+                    "message": object.get("message")?.as_str()?,
+                })),
+                _ => None,
+            }
+        })
+        .map(|sanitized| sanitized.to_string())
 }
 
 async fn send_browser_disconnect(sender: &mut BrowserWebSocketSender, code: u16, message: &str) {
@@ -2218,8 +2295,9 @@ async fn reset_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
+    let _lifecycle = state.session_lifecycle.lock(&session_id).await;
     let mut session = require_chat_session(&state, &session_id)?;
-    ensure_chat_runtime(&state, &mut session).await?;
+    ensure_chat_runtime_locked(&state, &mut session, true).await?;
     require_available_runtime(&session)?;
     let upstream = match state
         .agent_host
@@ -2254,6 +2332,8 @@ async fn reset_session(
         }
     };
     session.runtime_status = Some(RuntimeStatus::Live);
+    session.vscode_url = optional_non_empty_string(upstream.get("vscode_url"));
+    session.free_port_url = optional_non_empty_string(upstream.get("free_port_url"));
     session.updated_at = utc_now();
     state.sessions.clear_messages(&session_id)?;
     state.sessions.update(session.clone())?;
@@ -2353,6 +2433,7 @@ async fn delete_session(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    let _lifecycle = state.session_lifecycle.lock(&session_id).await;
     let session = require_session(&state, &session_id)?;
     if !session.agent_host_session_id.is_empty() {
         state
@@ -2380,6 +2461,13 @@ async fn cleanup_runtime(
     State(state): State<AppState>,
     Json(payload): Json<RuntimeCleanupRequest>,
 ) -> Result<Json<Value>, ApiError> {
+    let _cleanup_lifecycle = state.session_lifecycle.lock_cleanup().await;
+    if !payload.dry_run && payload.reviewed_resources.is_none() {
+        return Err(ApiError::unprocessable(
+            "destructive runtime cleanup requires reviewed_resources from a dry-run report"
+                .to_owned(),
+        ));
+    }
     let owned_session_ids = state
         .sessions
         .list()?
@@ -2388,7 +2476,11 @@ async fn cleanup_runtime(
         .collect::<Vec<_>>();
     let report = state
         .agent_host
-        .cleanup_runtime(&owned_session_ids, payload.dry_run)
+        .cleanup_runtime(
+            &owned_session_ids,
+            payload.dry_run,
+            payload.reviewed_resources.as_deref(),
+        )
         .await?;
     tracing::info!(
         route = "/management/runtime-cleanup",
@@ -4668,6 +4760,16 @@ async fn ensure_chat_runtime(
     state: &AppState,
     session: &mut SessionRecord,
 ) -> Result<(), ApiError> {
+    let _lifecycle = state.session_lifecycle.lock(&session.session_id).await;
+    *session = require_chat_session(state, &session.session_id)?;
+    ensure_chat_runtime_locked(state, session, true).await
+}
+
+async fn ensure_chat_runtime_locked(
+    state: &AppState,
+    session: &mut SessionRecord,
+    recovery: bool,
+) -> Result<(), ApiError> {
     if session.recovery_state() == RecoveryState::LegacyUnrecoverable {
         match state
             .agent_host
@@ -4700,13 +4802,16 @@ async fn ensure_chat_runtime(
             return Err(error);
         }
     };
-    let env = match session_env(state, &agent) {
+    let mut env = match session_env(state, &agent) {
         Ok(env) => env,
         Err(error) => {
             mark_runtime_error(state, session)?;
             return Err(error);
         }
     };
+    if recovery {
+        env.insert(AGENTSPACE_RUNTIME_RECOVERY_ENV.to_owned(), "1".to_owned());
+    }
     let upstream = match state
         .agent_host
         .create_session(AgentHostSessionCreate {
@@ -4748,8 +4853,27 @@ async fn ensure_chat_runtime(
         }
     };
     session.runtime_status = Some(RuntimeStatus::Live);
+    session.vscode_url = optional_non_empty_string(upstream.get("vscode_url"));
+    session.free_port_url = optional_non_empty_string(upstream.get("free_port_url"));
     session.updated_at = utc_now();
-    state.sessions.update(session.clone())?;
+    persist_chat_runtime(state, session).await
+}
+
+async fn persist_chat_runtime(state: &AppState, session: &SessionRecord) -> Result<(), ApiError> {
+    if let Err(error) = state.sessions.update(session.clone()) {
+        if let Err(cleanup_error) = state
+            .agent_host
+            .destroy_session(&session.agent_host_session_id)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session.session_id,
+                %cleanup_error,
+                "failed to compensate upstream chat runtime after persistence failure"
+            );
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -4940,6 +5064,7 @@ struct CreateSessionRequest {
 struct RuntimeCleanupRequest {
     #[serde(default = "default_true")]
     dry_run: bool,
+    reviewed_resources: Option<Vec<Value>>,
 }
 
 const fn default_true() -> bool {

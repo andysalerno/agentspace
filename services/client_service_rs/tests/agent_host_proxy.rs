@@ -758,9 +758,33 @@ async fn failed_upstream_creation_leaves_recoverable_error_session()
     assert_eq!(sessions[0]["status"], "error");
     assert_eq!(sessions[0]["runtime_status"], "error");
     assert_eq!(sessions[0]["recovery_state"], "recoverable");
+    assert!(sessions[0].get("agent_host_session_id").is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_chat_recovery_requires_existing_durable_runtime_state()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    create_basic_agent(&app).await?;
+    let (session_id, _session) = create_basic_session(&app).await?;
+    server.clear_recorded()?;
+
+    let (status, _session) = get_json(&app, &format!("/sessions/{session_id}")).await?;
+
+    assert_eq!(status, StatusCode::OK);
+    let recovery_create = server
+        .recorded()?
+        .into_iter()
+        .find(|request| request.method == Method::POST && request.path == "/sessions")
+        .ok_or("missing recovery create")?;
     assert_eq!(
-        sessions[0]["agent_host_session_id"],
-        sessions[0]["session_id"]
+        recovery_create
+            .body
+            .as_ref()
+            .ok_or("missing recovery body")?["env"]["AGENTSPACE_RUNTIME_RECOVERY"],
+        "1"
     );
     Ok(())
 }
@@ -914,6 +938,7 @@ async fn send_message_proxies_to_stream_and_persists_messages()
                     "env": {
                         "AGENTSPACE_AGENT_ID": "stub-agent",
                         "AGENTSPACE_CLIENT_SERVICE_URL": "http://client-service:8002",
+                        "AGENTSPACE_RUNTIME_RECOVERY": "1",
                         "KERNEL_SYSTEM_PROMPT": "Be helpful"
                     },
                     "skills": []
@@ -1041,6 +1066,49 @@ async fn runtime_cleanup_uses_durable_sessions_as_authority()
             body: Some(json!({
                 "owned_session_ids": [session_id],
                 "dry_run": true
+            })),
+        }]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_cleanup_apply_requires_and_forwards_exact_reviewed_resources()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let server = TestServer::start().await?;
+    let app = server.app()?;
+    let (status, _error) = post_json(
+        &app,
+        "/management/runtime-cleanup",
+        json!({ "dry_run": false }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(server.recorded()?.is_empty());
+
+    let reviewed = json!([{
+        "kind": "kernel_container",
+        "name": "orphan",
+        "resource_id": "container-id",
+        "session_id": "orphan-session"
+    }]);
+    let (status, _report) = post_json(
+        &app,
+        "/management/runtime-cleanup",
+        json!({ "dry_run": false, "reviewed_resources": reviewed }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        server.recorded()?,
+        vec![RecordedRequest {
+            method: Method::POST,
+            path: "/management/runtime-cleanup".to_owned(),
+            query: None,
+            body: Some(json!({
+                "owned_session_ids": [],
+                "dry_run": false,
+                "reviewed_resources": reviewed,
             })),
         }]
     );

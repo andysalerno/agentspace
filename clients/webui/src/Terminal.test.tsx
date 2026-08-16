@@ -24,10 +24,13 @@ const xtermMocks = vi.hoisted(() => {
         rows = 24;
         disposed = false;
         focusCalls = 0;
+        scrollToTopCalls = 0;
+        scrollToBottomCalls = 0;
         options: Record<string, unknown>;
         unicode = { activeVersion: "" };
         dataHandler: ((data: string) => void) | null = null;
         binaryHandler: ((data: string) => void) | null = null;
+        keyHandler: ((event: KeyboardEvent) => boolean) | null = null;
 
         constructor(options: Record<string, unknown>) {
             this.options = { ...options };
@@ -43,6 +46,10 @@ const xtermMocks = vi.hoisted(() => {
         }
 
         open() {}
+
+        attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+            this.keyHandler = handler;
+        }
 
         onData(handler: (data: string) => void) {
             this.dataHandler = handler;
@@ -61,6 +68,18 @@ const xtermMocks = vi.hoisted(() => {
         focus() {
             this.focusCalls += 1;
         }
+
+        scrollToTop() {
+            this.scrollToTopCalls += 1;
+        }
+
+        scrollToBottom() {
+            this.scrollToBottomCalls += 1;
+        }
+
+        scrollPages() {}
+
+        scrollLines() {}
 
         dispose() {
             this.disposed = true;
@@ -246,7 +265,6 @@ const STATUS: TerminalStatus = {
     exit_status: null,
     attach_kind: "attached",
     attachment_count: 1,
-    clients: [],
 };
 
 function readyFrame() {
@@ -289,6 +307,43 @@ afterEach(() => {
 });
 
 describe("Terminal", () => {
+    it("keeps scrollback browser-local and blocks terminal input until exit", () => {
+        const onScrollbackModeChange = vi.fn();
+        const base = props();
+        const { rerender } = render(
+            <Terminal
+                {...base}
+                onScrollbackModeChange={onScrollbackModeChange}
+                scrollbackMode={false}
+            />,
+        );
+        const terminal = xtermMocks.FakeTerminal.instances[0];
+
+        rerender(
+            <Terminal
+                {...base}
+                onScrollbackModeChange={onScrollbackModeChange}
+                scrollbackMode
+            />,
+        );
+        expect(terminal.scrollToTopCalls).toBe(1);
+        expect(
+            terminal.keyHandler?.(
+                new KeyboardEvent("keydown", { key: "q" }),
+            ),
+        ).toBe(false);
+        expect(onScrollbackModeChange).toHaveBeenCalledWith(false);
+
+        rerender(
+            <Terminal
+                {...base}
+                onScrollbackModeChange={onScrollbackModeChange}
+                scrollbackMode={false}
+            />,
+        );
+        expect(terminal.scrollToBottomCalls).toBeGreaterThan(0);
+    });
+
     it("uses the current-origin API URL and preserves binary IO", () => {
         const callbacks = props();
         render(<Terminal {...callbacks} />);
@@ -299,7 +354,7 @@ describe("Terminal", () => {
             "ws://localhost:3000/api/sessions/session-one/terminal/ws",
         );
         expect(socket.binaryType).toBe("arraybuffer");
-        expect(terminal.options.scrollback).toBe(0);
+        expect(terminal.options.scrollback).toBe(100_000);
         expect(terminal.unicode.activeVersion).toBe("11");
 
         act(() => {

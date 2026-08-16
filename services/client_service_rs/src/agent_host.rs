@@ -152,16 +152,6 @@ impl AgentHostClient {
         self.terminal_control(session_id, "resume", None).await
     }
 
-    pub async fn terminal_copy_mode(
-        &self,
-        session_id: &str,
-        attachment_id: &str,
-    ) -> AgentHostResult<JsonObject> {
-        let payload = json!({ "attachment_id": attachment_id });
-        self.terminal_control(session_id, "copy-mode", Some(object_from_value(payload)?))
-            .await
-    }
-
     pub fn terminal_websocket_url(&self, session_id: &str) -> AgentHostResult<Url> {
         let mut url = self.endpoint(&["sessions", session_id, "terminal", "ws"])?;
         let websocket_scheme = match url.scheme() {
@@ -221,15 +211,18 @@ impl AgentHostClient {
         &self,
         owned_session_ids: &[String],
         dry_run: bool,
+        reviewed_resources: Option<&[Value]>,
     ) -> AgentHostResult<JsonObject> {
-        let payload = json!({
-            "owned_session_ids": owned_session_ids,
-            "dry_run": dry_run,
-        });
+        let mut payload = JsonObject::new();
+        payload.insert("owned_session_ids".to_owned(), json!(owned_session_ids));
+        payload.insert("dry_run".to_owned(), json!(dry_run));
+        if let Some(reviewed_resources) = reviewed_resources {
+            payload.insert("reviewed_resources".to_owned(), json!(reviewed_resources));
+        }
         self.request_object(
             Method::POST,
             self.endpoint(&["management", "runtime-cleanup"])?,
-            Some(object_from_value(payload)?),
+            Some(payload),
         )
         .await
     }

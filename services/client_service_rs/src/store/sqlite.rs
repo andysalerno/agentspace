@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS client_sessions (
     workspace_volume_identity TEXT,
     workspace_mounts TEXT,
     launch_snapshot TEXT,
+    vscode_url TEXT,
+    free_port_url TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -445,6 +447,8 @@ impl SqliteSessionStore {
                        workspace_volume_identity = ?,
                        workspace_mounts = ?,
                        launch_snapshot = ?,
+                       vscode_url = ?,
+                       free_port_url = ?,
                        updated_at = ?
                  WHERE session_id = ?
                 ",
@@ -463,6 +467,8 @@ impl SqliteSessionStore {
                     session.workspace_volume_identity,
                     serialize_workspace_mounts(&session.workspace_mounts)?,
                     serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
+                    session.vscode_url,
+                    session.free_port_url,
                     session.updated_at,
                     session.session_id,
                 ],
@@ -495,8 +501,8 @@ impl SqliteSessionStore {
                     channel_name, client_type, interaction_mode, cli_harness,
                     cli_connection_id, harness_session_id, runtime_generation,
                     runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    vscode_url, free_port_url, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     agent_host_session_id = excluded.agent_host_session_id,
@@ -512,6 +518,8 @@ impl SqliteSessionStore {
                     workspace_volume_identity = excluded.workspace_volume_identity,
                     workspace_mounts = excluded.workspace_mounts,
                     launch_snapshot = excluded.launch_snapshot,
+                    vscode_url = excluded.vscode_url,
+                    free_port_url = excluded.free_port_url,
                     updated_at = excluded.updated_at
                 ",
                 params![
@@ -530,6 +538,8 @@ impl SqliteSessionStore {
                     session.workspace_volume_identity,
                     serialize_workspace_mounts(&session.workspace_mounts)?,
                     serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
+                    session.vscode_url,
+                    session.free_port_url,
                     session.created_at,
                     session.updated_at,
                 ],
@@ -706,6 +716,8 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
             ),
             ("workspace_mounts", "workspace_mounts TEXT"),
             ("launch_snapshot", "launch_snapshot TEXT"),
+            ("vscode_url", "vscode_url TEXT"),
+            ("free_port_url", "free_port_url TEXT"),
         ] {
             ensure_column(connection, "client_sessions", column, definition)?;
         }
@@ -811,6 +823,8 @@ fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, Store
         workspace_volume_identity: row.get("workspace_volume_identity")?,
         workspace_mounts: deserialize_workspace_mounts(workspace_mounts_raw.as_deref())?,
         launch_snapshot: deserialize_launch_snapshot(launch_snapshot_raw.as_deref())?,
+        vscode_url: row.get("vscode_url")?,
+        free_port_url: row.get("free_port_url")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         messages: Vec::new(),
@@ -923,8 +937,8 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
             channel_name, client_type, interaction_mode, cli_harness,
             cli_connection_id, harness_session_id, runtime_generation,
             runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
-            created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            vscode_url, free_port_url, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             session.session_id,
@@ -943,6 +957,8 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
             serialize_workspace_mounts(&session.workspace_mounts).map_err(store_error_to_sqlite)?,
             serialize_launch_snapshot(session.launch_snapshot.as_ref())
                 .map_err(store_error_to_sqlite)?,
+            session.vscode_url,
+            session.free_port_url,
             session.created_at,
             session.updated_at,
         ],

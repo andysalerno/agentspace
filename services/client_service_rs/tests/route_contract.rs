@@ -914,11 +914,11 @@ async fn created_session_message_listing_shape_matches_contract()
     assert_eq!(status, StatusCode::OK);
     let session_id = string_field(&session, "session_id")?;
     assert_eq!(session["agent_id"], "agent-one");
-    assert_eq!(session["agent_host_session_id"], session_id);
+    assert!(session.get("agent_host_session_id").is_none());
     assert_eq!(session["status"], "idle");
     assert_eq!(session["interaction_mode"], "chat");
     assert_eq!(session["recovery_state"], "recoverable");
-    assert_eq!(session["workspace_volume_identity"], session_id);
+    assert!(session.get("workspace_volume_identity").is_none());
     assert!(session["cli_harness"].is_null());
     assert_eq!(session["message_count"], json!(0));
 
@@ -1013,25 +1013,9 @@ async fn cli_sessions_create_durable_upstream_terminal_runtime()
     assert_eq!(session["runtime_generation"], 0);
     assert_eq!(session["cli_harness"], "copilot-cli");
     assert_eq!(session["cli_connection_id"], "openrouter");
-    assert_eq!(session["agent_host_session_id"], session["session_id"]);
+    assert!(session.get("agent_host_session_id").is_none());
     assert_eq!(session["recovery_state"], "recoverable");
-    assert_eq!(
-        session["launch_snapshot"]["provider"]["provider_type"],
-        "openai"
-    );
-    assert_eq!(
-        session["launch_snapshot"]["provider"]["wire_api"],
-        "responses"
-    );
-    assert_eq!(
-        session["launch_snapshot"]["provider"]["api_key"]["kind"],
-        "config_reference"
-    );
-    assert_eq!(session["launch_snapshot"]["model"]["value"], "gpt-5.4");
-    assert_eq!(
-        session["launch_snapshot"]["reasoning_effort"]["value"],
-        "high"
-    );
+    assert!(session.get("launch_snapshot").is_none());
     let harness_session_id = string_field(&session, "harness_session_id")?;
     uuid::Uuid::parse_str(&harness_session_id)?;
     assert!(

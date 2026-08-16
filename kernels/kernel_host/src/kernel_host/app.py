@@ -58,17 +58,6 @@ class SendMessageRequest(BaseModel):
     message: str
 
 
-class CopyModeRequest(BaseModel):
-    tmux_client_id: str = Field(
-        min_length=1,
-        max_length=256,
-        description=(
-            "Exact clients[].id value observed from GET /terminal. agent_host maps "
-            "its attachment ID to this tmux client ID."
-        ),
-    )
-
-
 class DetachClientRequest(BaseModel):
     tmux_client_id: str = Field(min_length=1, max_length=256)
 
@@ -219,16 +208,6 @@ async def terminal_stop() -> dict[str, Any]:
 async def terminal_resume() -> dict[str, Any]:
     controller = _terminal_controller_for_request()
     return await _terminal_call("resume", controller.resume)
-
-
-@app.post("/terminal/copy-mode")
-async def terminal_copy_mode(payload: CopyModeRequest) -> dict[str, Any]:
-    controller = _terminal_controller_for_request()
-
-    async def enter_copy_mode() -> TerminalStatus:
-        return await controller.copy_mode(payload.tmux_client_id)
-
-    return await _terminal_call("copy-mode", enter_copy_mode)
 
 
 @app.post("/terminal/detach-client")

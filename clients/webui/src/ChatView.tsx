@@ -742,16 +742,15 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         if (!selectedSession) {
             return null;
         }
-        return kernels.find((kernel) => (
-            kernel.session_id === selectedSession.agent_host_session_id
-            || kernel.client_session_ids.includes(selectedSession.session_id)
-        )) ?? null;
+        return kernels.find((kernel) =>
+            kernel.client_session_ids.includes(selectedSession.session_id)
+        ) ?? null;
     }, [kernels, selectedSession]);
-    const vscodeUrl = selectedKernel?.vscode_url
-        ? browserReachableLocalUrl(selectedKernel.vscode_url)
+    const vscodeUrl = selectedSession?.vscode_url
+        ? browserReachableLocalUrl(selectedSession.vscode_url)
         : null;
-    const serviceUrl = selectedKernel?.free_port_url
-        ? browserReachableLocalUrl(selectedKernel.free_port_url)
+    const serviceUrl = selectedSession?.free_port_url
+        ? browserReachableLocalUrl(selectedSession.free_port_url)
         : null;
     const selectedTone = sessionTone(selectedSession?.status ?? "");
 

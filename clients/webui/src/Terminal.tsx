@@ -36,9 +36,11 @@ type TerminalProps = {
     sessionId: string;
     darkMode: boolean;
     reconnectKey: number;
+    scrollbackMode?: boolean;
     onAttachmentChange: (attachment: TerminalAttachment | null) => void;
     onConnectionStateChange: (state: TerminalConnectionState) => void;
     onLifecycleStatus: (status: TerminalStatus) => void;
+    onScrollbackModeChange?: (active: boolean) => void;
 };
 
 function terminalTheme(darkMode: boolean): ITheme {
@@ -151,17 +153,21 @@ export default function Terminal({
     sessionId,
     darkMode,
     reconnectKey,
+    scrollbackMode = false,
     onAttachmentChange,
     onConnectionStateChange,
     onLifecycleStatus,
+    onScrollbackModeChange = () => {},
 }: TerminalProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const terminalRef = useRef<XtermTerminal | null>(null);
     const darkModeRef = useRef(darkMode);
+    const scrollbackModeRef = useRef(scrollbackMode);
     const callbacksRef = useRef({
         onAttachmentChange,
         onConnectionStateChange,
         onLifecycleStatus,
+        onScrollbackModeChange,
     });
     const [statusText, setStatusText] = useState("Connecting to terminal…");
     const [rendererText, setRendererText] = useState("");
@@ -171,8 +177,28 @@ export default function Terminal({
             onAttachmentChange,
             onConnectionStateChange,
             onLifecycleStatus,
+            onScrollbackModeChange,
         };
-    }, [onAttachmentChange, onConnectionStateChange, onLifecycleStatus]);
+    }, [
+        onAttachmentChange,
+        onConnectionStateChange,
+        onLifecycleStatus,
+        onScrollbackModeChange,
+    ]);
+
+    useEffect(() => {
+        scrollbackModeRef.current = scrollbackMode;
+        const terminal = terminalRef.current;
+        if (terminal === null) {
+            return;
+        }
+        if (scrollbackMode) {
+            terminal.scrollToTop();
+        } else {
+            terminal.scrollToBottom();
+            terminal.focus();
+        }
+    }, [scrollbackMode]);
 
     useEffect(() => {
         darkModeRef.current = darkMode;
@@ -207,7 +233,7 @@ export default function Terminal({
                 '"Cascadia Code", "Cascadia Mono", "SFMono-Regular", Consolas, '
                 + '"Liberation Mono", "Noto Color Emoji", "Segoe UI Emoji", monospace',
             fontSize: 14,
-            scrollback: 0,
+            scrollback: 100_000,
             theme: terminalTheme(darkModeRef.current),
         });
         terminalRef.current = terminal;
@@ -217,6 +243,32 @@ export default function Terminal({
         terminal.loadAddon(unicodeAddon);
         terminal.unicode.activeVersion = "11";
         terminal.open(container);
+        terminal.attachCustomKeyEventHandler((event) => {
+            if (!scrollbackModeRef.current) {
+                return true;
+            }
+            if (event.type !== "keydown") {
+                return false;
+            }
+            if (event.key === "q" || event.key === "Escape") {
+                callbacksRef.current.onScrollbackModeChange(false);
+                return false;
+            }
+            if (event.key === "PageUp") {
+                terminal.scrollPages(-1);
+            } else if (event.key === "PageDown") {
+                terminal.scrollPages(1);
+            } else if (event.key === "Home") {
+                terminal.scrollToTop();
+            } else if (event.key === "End") {
+                terminal.scrollToBottom();
+            } else if (event.key === "ArrowUp") {
+                terminal.scrollLines(-1);
+            } else if (event.key === "ArrowDown") {
+                terminal.scrollLines(1);
+            }
+            return false;
+        });
 
         try {
             webglAddon = new WebglAddon();

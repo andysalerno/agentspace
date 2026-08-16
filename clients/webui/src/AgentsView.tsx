@@ -665,15 +665,6 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                                 </span>
                                                             </div>
                                                         </td>
-                                                        <td>
-                                                            {agent.cli === null
-                                                                ? <span className="muted">Disabled</span>
-                                                                : (
-                                                                    <span title={cliConnection ?? undefined}>
-                                                                        Copilot CLI
-                                                                    </span>
-                                                                )}
-                                                        </td>
                                                         <td className="nowrap">
                                                             {formatHarnessLabel(agent.harness)}
                                                         </td>
@@ -681,6 +672,18 @@ export default function AgentsView({ onSessionCreated }: AgentsViewProps) {
                                                             {connection === null
                                                                 ? <span className="muted">None</span>
                                                                 : connection}
+                                                        </td>
+                                                        <td>
+                                                            {agent.cli === null
+                                                                ? <span className="muted">Disabled</span>
+                                                                : (
+                                                                    <span title={cliConnection ?? undefined}>
+                                                                        Copilot CLI
+                                                                        {cliConnection === null
+                                                                            ? ""
+                                                                            : ` · ${cliConnection}`}
+                                                                    </span>
+                                                                )}
                                                         </td>
                                                         <td className="num">
                                                             {agent.skills.length}

@@ -3,13 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from fastapi import HTTPException
 from fastapi.routing import APIRoute
 from kernel_host import app as app_module
 from kernel_host.terminal import (
     AttachKind,
     TerminalClient,
-    TerminalClientError,
     TerminalState,
     TerminalStatus,
 )
@@ -108,7 +106,6 @@ async def test_vscode_server_uses_configured_command(
 
 class StubTerminalController:
     def __init__(self) -> None:
-        self.copy_mode_ids: list[str] = []
         self.detach_client_ids: list[str] = []
         self.raise_client_error = False
 
@@ -123,13 +120,6 @@ class StubTerminalController:
 
     async def resume(self) -> TerminalStatus:
         return _terminal_status(attach_kind=AttachKind.RESUMED)
-
-    async def copy_mode(self, tmux_client_id: str) -> TerminalStatus:
-        if self.raise_client_error:
-            msg = "unknown tmux client"
-            raise TerminalClientError(msg)
-        self.copy_mode_ids.append(tmux_client_id)
-        return _terminal_status()
 
     async def detach_client(self, tmux_client_id: str) -> TerminalStatus:
         self.detach_client_ids.append(tmux_client_id)
@@ -186,7 +176,6 @@ def test_current_and_terminal_routes_are_registered() -> None:
         ("GET", "/terminal"),
         ("POST", "/terminal/stop"),
         ("POST", "/terminal/resume"),
-        ("POST", "/terminal/copy-mode"),
         ("POST", "/terminal/detach-client"),
     } <= routes
 
@@ -200,9 +189,6 @@ async def test_terminal_routes_return_structured_metadata(
 
     ensured = await app_module.terminal_ensure()
     observed = await app_module.terminal_status()
-    copied = await app_module.terminal_copy_mode(
-        app_module.CopyModeRequest(tmux_client_id="/dev/pts/7"),
-    )
     detached = await app_module.terminal_detach_client(
         app_module.DetachClientRequest(tmux_client_id="/dev/pts/7"),
     )
@@ -211,14 +197,5 @@ async def test_terminal_routes_return_structured_metadata(
     assert ensured["attach_kind"] == AttachKind.STARTED
     assert observed["attachment_count"] == 1
     assert observed["clients"][0]["id"] == "/dev/pts/7"
-    assert copied["pane_id"] == "%0"
     assert detached["pane_id"] == "%0"
-    assert controller.copy_mode_ids == ["/dev/pts/7"]
     assert controller.detach_client_ids == ["/dev/pts/7"]
-
-    controller.raise_client_error = True
-    with pytest.raises(HTTPException) as error:
-        await app_module.terminal_copy_mode(
-            app_module.CopyModeRequest(tmux_client_id="/dev/pts/8"),
-        )
-    assert error.value.status_code == 404

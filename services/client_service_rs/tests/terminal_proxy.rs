@@ -39,8 +39,7 @@ use tokio_tungstenite::{
 const ALLOWED_ORIGIN: &str = "http://allowed.example";
 const DENIED_ORIGIN: &str = "https://denied.example";
 const UPSTREAM_BINARY: &[u8] = &[0, 0xff, b'A', 0x80];
-const LIFECYCLE_FRAME: &str =
-    r#"{"type":"exited","state":"exited","exit_status":7,"terminal":{"state":"exited"}}"#;
+const LIFECYCLE_FRAME: &str = r#"{"type":"exited","state":"exited","exit_status":7,"terminal":{"state":"exited","exit_status":7,"attach_kind":null,"attachment_count":0,"socket_path":"/run/agentspace-tmux.sock","pane_pid":4242}}"#;
 
 #[derive(Clone, Debug, PartialEq)]
 struct RecordedRequest {
@@ -313,10 +312,6 @@ fn stub_router(state: StubState) -> Router {
             post(upstream_terminal_resume),
         )
         .route(
-            "/sessions/{session_id}/terminal/copy-mode",
-            post(upstream_terminal_copy_mode),
-        )
-        .route(
             "/sessions/{session_id}/terminal/ws",
             get(upstream_terminal_websocket),
         )
@@ -336,6 +331,8 @@ async fn create_upstream_session(
     Json(json!({
         "session_id": body["session_id"],
         "status": "idle",
+        "vscode_url": "http://127.0.0.1:45678",
+        "free_port_url": "http://127.0.0.1:45679",
     }))
     .into_response()
 }
@@ -453,25 +450,6 @@ async fn upstream_terminal_resume(
     }
     state.terminal_resumed.store(true, Ordering::SeqCst);
     terminal_response(&state, Some("resumed"), "running")
-}
-
-async fn upstream_terminal_copy_mode(
-    State(state): State<StubState>,
-    Path(session_id): Path<String>,
-    Json(body): Json<Value>,
-) -> Response {
-    if let Err(status) = state.record(
-        "POST",
-        format!("/sessions/{session_id}/terminal/copy-mode"),
-        Some(body),
-    ) {
-        return status.into_response();
-    }
-    let attach_kind = state
-        .terminal_resumed
-        .load(Ordering::SeqCst)
-        .then_some("resumed");
-    terminal_response(&state, attach_kind, "running")
 }
 
 async fn upstream_terminal_websocket(
@@ -609,7 +587,9 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
     let (session_id, session) = harness.create_cli_session().await?;
     assert_eq!(session["runtime_status"], "live");
     assert_eq!(session["status"], "running");
-    assert_eq!(session["agent_host_session_id"], session_id);
+    assert!(session.get("agent_host_session_id").is_none());
+    assert_eq!(session["vscode_url"], "http://127.0.0.1:45678");
+    assert_eq!(session["free_port_url"], "http://127.0.0.1:45679");
     let harness_session_id = string_field(&session, "harness_session_id")?;
 
     let (status, terminal) = harness
@@ -617,6 +597,20 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
         .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(terminal["state"], "running");
+    for internal in [
+        "session_name",
+        "target_session",
+        "socket_path",
+        "attach_argv",
+        "pane_id",
+        "pane_pid",
+        "clients",
+    ] {
+        assert!(
+            terminal.get(internal).is_none(),
+            "leaked terminal field {internal}"
+        );
+    }
 
     let (status, _updated) = harness
         .patch(
@@ -662,14 +656,6 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
         .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(resumed["attach_kind"], "resumed");
-    let (status, copied) = harness
-        .post(
-            &format!("/sessions/{session_id}/terminal/copy-mode"),
-            json!({ "attachment_id": "attachment-one" }),
-        )
-        .await?;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(copied["state"], "running");
     let (status, updated_session) = harness.get(&format!("/sessions/{session_id}")).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated_session["runtime_generation"], 1);
@@ -753,7 +739,7 @@ async fn failed_cli_creation_is_retryable_without_false_success()
     let session_id = string_field(&sessions[0], "session_id")?;
     assert_eq!(sessions[0]["runtime_status"], "error");
     assert_eq!(sessions[0]["status"], "error");
-    assert_eq!(sessions[0]["agent_host_session_id"], session_id);
+    assert!(sessions[0].get("agent_host_session_id").is_none());
 
     harness.upstream.fail_create.store(false, Ordering::SeqCst);
     let (status, terminal) = harness
@@ -931,7 +917,7 @@ async fn terminal_routes_validate_mode_missing_origin_and_upstream()
 }
 
 #[tokio::test]
-async fn websocket_origin_binary_text_and_lifecycle_frames_are_preserved()
+async fn websocket_origin_binary_and_sanitized_lifecycle_frames_are_preserved()
 -> Result<(), Box<dyn Error + Send + Sync>> {
     let harness = TestHarness::start().await?;
     let (session_id, _session) = harness.create_cli_session().await?;
@@ -946,19 +932,27 @@ async fn websocket_origin_binary_text_and_lifecycle_frames_are_preserved()
 
     let mut socket = connect_terminal(&url, None).await?;
     let ready = socket.next().await.ok_or("missing ready frame")??;
-    assert!(
-        matches!(ready, ClientMessage::Text(text) if text.as_str().contains("\"type\":\"ready\""))
-    );
+    let ready = match ready {
+        ClientMessage::Text(text) => serde_json::from_str::<Value>(text.as_str())?,
+        other => return Err(format!("unexpected ready frame: {other:?}").into()),
+    };
+    assert_eq!(ready["type"], "ready");
+    assert!(ready["terminal"].get("socket_path").is_none());
+    assert!(ready["terminal"].get("clients").is_none());
     let binary = socket.next().await.ok_or("missing binary frame")??;
     assert_eq!(
         binary,
         ClientMessage::Binary(UPSTREAM_BINARY.to_vec().into())
     );
     let lifecycle = socket.next().await.ok_or("missing lifecycle frame")??;
-    assert_eq!(
-        lifecycle,
-        ClientMessage::Text(LIFECYCLE_FRAME.to_owned().into())
-    );
+    let lifecycle = match lifecycle {
+        ClientMessage::Text(text) => serde_json::from_str::<Value>(text.as_str())?,
+        other => return Err(format!("unexpected lifecycle frame: {other:?}").into()),
+    };
+    assert_eq!(lifecycle["type"], "exited");
+    assert_eq!(lifecycle["terminal"]["attachment_count"], 0);
+    assert!(lifecycle["terminal"].get("socket_path").is_none());
+    assert!(lifecycle["terminal"].get("pane_pid").is_none());
 
     let input = vec![0, 0xfe, b'Z', 0x81];
     socket
@@ -972,10 +966,6 @@ async fn websocket_origin_binary_text_and_lifecycle_frames_are_preserved()
     socket
         .send(ClientMessage::Text(resize.to_owned().into()))
         .await?;
-    assert_eq!(
-        socket.next().await.ok_or("missing resize echo")??,
-        ClientMessage::Text(resize.to_owned().into())
-    );
     socket.close(None).await?;
 
     sleep(Duration::from_millis(25)).await;

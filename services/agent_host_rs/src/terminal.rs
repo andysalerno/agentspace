@@ -36,6 +36,7 @@ const MAX_DIMENSION: u16 = 1_000;
 const DEFAULT_QUEUE_CAPACITY: usize = 64;
 const CLIENT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
 const CLIENT_DISCOVERY_INTERVAL: Duration = Duration::from_millis(25);
+const PANE_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 1024 * 1024;
 
 pub const CLOSE_NORMAL: u16 = 1000;
@@ -291,45 +292,20 @@ impl TerminalService {
         Ok(observed)
     }
 
-    pub async fn copy_mode(
-        &self,
-        session_id: &str,
-        session: &KernelRuntimeSession,
-        attachment_id: &str,
-    ) -> Result<TerminalStatus, AgentHostError> {
-        let _boundary = self.inner.boundary_lock.lock().await;
-        let client_id = {
-            let attachments = self.inner.attachments.lock().await;
-            attachments
-                .get(attachment_id)
-                .filter(|lease| lease.session_id == session_id)
-                .and_then(|lease| lease.tmux_client_id.clone())
-        }
-        .ok_or_else(|| AgentHostError::terminal_attachment_not_found(attachment_id))?;
-        let status = self
-            .inner
-            .runtime
-            .terminal_copy_mode(session, &client_id)
-            .await?;
-        self.reconcile_status_locked(session_id, session, status)
-            .await
-    }
-
     pub async fn attach(
         &self,
         session_id: &str,
         session: &KernelRuntimeSession,
     ) -> Result<TerminalConnection, AgentHostError> {
         let _boundary = self.inner.boundary_lock.lock().await;
-        self.reconcile_locked(session_id, session).await?;
-        let ensured = self.inner.runtime.terminal_ensure(session).await?;
-        if ensured.state != TerminalState::Running {
+        let observed = self.reconcile_locked(session_id, session).await?;
+        if observed.state != TerminalState::Running {
             return Err(AgentHostError::conflict(format!(
                 "terminal attachment requires a running terminal; observed {:?}",
-                ensured.state
+                observed.state
             )));
         }
-        if ensured.attach_argv.is_empty() {
+        if observed.attach_argv.is_empty() {
             return Err(AgentHostError::upstream_unavailable(
                 "kernel terminal controller returned an empty attach argv",
             ));
@@ -339,7 +315,7 @@ impl TerminalService {
         let exec = self
             .inner
             .runtime
-            .terminal_attach(session, &attachment_id, &ensured.attach_argv)
+            .terminal_attach(session, &attachment_id, &observed.attach_argv)
             .await?;
         self.inner
             .runtime
@@ -374,13 +350,24 @@ impl TerminalService {
         if let Some(lease) = self.inner.attachments.lock().await.get_mut(&attachment_id) {
             lease.tmux_client_id = Some(client_id);
         }
-        let attach_kind = ensured.attach_kind;
+        let attach_kind = observed.attach_kind;
         let mut status = self.reconcile_locked(session_id, session).await?;
         status.attach_kind = attach_kind;
 
         let (input_tx, input_rx) = mpsc::channel(self.inner.queue_capacity);
         let (output_tx, output_rx) = mpsc::channel(self.inner.queue_capacity);
-        let tasks = spawn_io_tasks(exec.input, exec.output, input_rx, output_tx, lifecycle_tx);
+        let mut tasks = spawn_io_tasks(
+            exec.input,
+            exec.output,
+            input_rx,
+            output_tx,
+            lifecycle_tx.clone(),
+        );
+        tasks.push(spawn_pane_monitor(
+            self.inner.runtime.clone(),
+            session.clone(),
+            lifecycle_tx,
+        ));
 
         Ok(TerminalConnection {
             attachment_id,
@@ -647,6 +634,30 @@ fn spawn_io_tasks(
     vec![input_task, output_task]
 }
 
+fn spawn_pane_monitor(
+    runtime: Arc<dyn KernelRuntime>,
+    session: KernelRuntimeSession,
+    lifecycle: watch::Sender<Option<Disconnect>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            time::sleep(PANE_STATUS_POLL_INTERVAL).await;
+            match runtime.terminal_status(&session).await {
+                Ok(status) if status.state == TerminalState::Exited => {
+                    let _ = lifecycle.send(Some(Disconnect::exec_ended()));
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    let _ =
+                        lifecycle.send(Some(Disconnect::upstream_unavailable(error.to_string())));
+                    return;
+                }
+            }
+        }
+    })
+}
+
 fn validate_dimensions(cols: u16, rows: u16) -> Result<(), AgentHostError> {
     if !(1..=MAX_DIMENSION).contains(&cols) || !(1..=MAX_DIMENSION).contains(&rows) {
         return Err(AgentHostError::validation(format!(
@@ -660,11 +671,6 @@ fn validate_dimensions(cols: u16, rows: u16) -> Result<(), AgentHostError> {
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 enum ClientFrame {
     Resize { cols: u16, rows: u16 },
-}
-
-#[derive(Debug, Deserialize)]
-struct CopyModeRequest {
-    attachment_id: String,
 }
 
 #[derive(Serialize)]
@@ -705,10 +711,6 @@ pub fn router() -> Router<AppState> {
         .route(
             "/sessions/{session_id}/terminal/resume",
             post(terminal_resume),
-        )
-        .route(
-            "/sessions/{session_id}/terminal/copy-mode",
-            post(terminal_copy_mode),
         )
         .route(
             "/sessions/{session_id}/terminal/ws",
@@ -759,19 +761,6 @@ async fn terminal_resume(
     state
         .sessions
         .terminal_resume(&session_id)
-        .await
-        .map(Json)
-        .map_err(ApiError::from)
-}
-
-async fn terminal_copy_mode(
-    State(state): State<AppState>,
-    Path(session_id): Path<String>,
-    Json(payload): Json<CopyModeRequest>,
-) -> Result<Json<TerminalStatus>, ApiError> {
-    state
-        .sessions
-        .terminal_copy_mode(&session_id, &payload.attachment_id)
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -972,12 +961,7 @@ async fn handle_terminal_output(
     };
     match time::timeout(Duration::from_secs(5), sender.send(Message::Binary(bytes))).await {
         Ok(Ok(())) => true,
-        Ok(Err(_)) => false,
-        Err(_) => {
-            let disconnect = Disconnect::backpressure("terminal WebSocket output stalled");
-            let _ = send_disconnect(sender, &disconnect).await;
-            false
-        }
+        Ok(Err(_)) | Err(_) => false,
     }
 }
 
@@ -1127,8 +1111,9 @@ mod tests {
         AppConfig, AppState, build_router,
         errors::AgentHostError,
         models::{
-            CleanupReport, DockerStatsSummary, HarnessName, InteractionMode, KernelEvent,
-            KernelRuntimeSession, KernelStatus, RuntimeSessionSummary,
+            CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName,
+            InteractionMode, KernelEvent, KernelRuntimeSession, KernelStatus,
+            RuntimeSessionSummary,
         },
         sessions::{EventStream, KernelRuntime, RuntimeCreateSession, SessionRegistry},
     };
@@ -1148,7 +1133,6 @@ mod tests {
         exec_pids: BTreeMap<String, i64>,
         resizes: Vec<(String, u16, u16)>,
         detached: Vec<String>,
-        copied: Vec<String>,
         controls: Vec<&'static str>,
         created: Vec<RuntimeCreateSession>,
     }
@@ -1170,7 +1154,6 @@ mod tests {
                     exec_pids: BTreeMap::new(),
                     resizes: Vec::new(),
                     detached: Vec::new(),
-                    copied: Vec::new(),
                     controls: Vec::new(),
                     created: Vec::new(),
                 })),
@@ -1349,6 +1332,7 @@ mod tests {
             &self,
             owned_session_ids: &BTreeSet<String>,
             dry_run: bool,
+            _reviewed_resources: Option<&[CleanupResourceIdentity]>,
         ) -> Result<CleanupReport, AgentHostError> {
             Ok(CleanupReport {
                 dry_run,
@@ -1435,16 +1419,6 @@ mod tests {
             }
             state.terminal.state = TerminalState::Running;
             state.terminal.attach_kind = Some(TerminalAttachKind::Resumed);
-            Ok(state.terminal.clone())
-        }
-
-        async fn terminal_copy_mode(
-            &self,
-            _session: &KernelRuntimeSession,
-            tmux_client_id: &str,
-        ) -> Result<TerminalStatus, AgentHostError> {
-            let mut state = self.state();
-            state.copied.push(tmux_client_id.to_owned());
             Ok(state.terminal.clone())
         }
 
@@ -1801,17 +1775,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn controls_proxy_status_and_attachment_copy_mode() {
+    async fn controls_proxy_status_stop_and_resume() {
         let runtime = FakeTerminalRuntime::default();
         let service = TerminalService::new(Arc::new(runtime.clone()));
         let connection = service
             .attach(SESSION_ID, &runtime_session())
             .await
             .unwrap_or_else(|error| panic!("attach failed: {error}"));
-        service
-            .copy_mode(SESSION_ID, &runtime_session(), &connection.attachment_id)
-            .await
-            .unwrap_or_else(|error| panic!("copy mode failed: {error}"));
         service
             .stop(SESSION_ID, &runtime_session())
             .await
@@ -1826,10 +1796,53 @@ mod tests {
             .unwrap_or_else(|error| panic!("resume failed: {error}"));
         assert_eq!(resumed.attach_kind, Some(TerminalAttachKind::Resumed));
         let state = runtime.state();
-        assert_eq!(state.copied, vec!["/dev/pts/1001"]);
         assert!(state.controls.contains(&"stop"));
         assert!(state.controls.contains(&"resume"));
         drop(state);
+        connection.abort_tasks();
+    }
+
+    #[tokio::test]
+    async fn attachment_is_status_only_and_does_not_restart_stopped_terminal() {
+        let runtime = FakeTerminalRuntime::default();
+        runtime.state().terminal.state = TerminalState::Exited;
+        let service = TerminalService::new(Arc::new(runtime.clone()));
+
+        let error = match service.attach(SESSION_ID, &runtime_session()).await {
+            Ok(connection) => {
+                connection.abort_tasks();
+                panic!("stopped terminal attachment must fail");
+            }
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, AgentHostError::Conflict { .. }));
+        assert!(!runtime.state().controls.contains(&"ensure"));
+    }
+
+    #[tokio::test]
+    async fn pane_exit_is_reported_while_attach_exec_remains_alive() {
+        let runtime = FakeTerminalRuntime::default();
+        let service = TerminalService::new(Arc::new(runtime.clone()));
+        let mut connection = service
+            .attach(SESSION_ID, &runtime_session())
+            .await
+            .unwrap_or_else(|error| panic!("attach failed: {error}"));
+        runtime.state().terminal.state = TerminalState::Exited;
+
+        timeout(Duration::from_secs(1), connection.lifecycle.changed())
+            .await
+            .unwrap_or_else(|_| panic!("pane monitor did not report exit"))
+            .unwrap_or_else(|error| panic!("lifecycle channel closed: {error}"));
+
+        assert_eq!(
+            connection
+                .lifecycle
+                .borrow()
+                .as_ref()
+                .map(|event| event.kind),
+            Some(DisconnectKind::ExecEnded)
+        );
         connection.abort_tasks();
     }
 

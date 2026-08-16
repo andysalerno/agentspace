@@ -159,7 +159,6 @@ export type SkillVersion = {
 export type SessionSummary = {
   session_id: string;
   agent_id: string;
-  agent_host_session_id: string | null;
   status: string;
   channel_name: string | null;
   client_type: string | null;
@@ -169,42 +168,13 @@ export type SessionSummary = {
   harness_session_id: string | null;
   runtime_generation: number | null;
   runtime_status: "starting" | "live" | "exited" | "disconnected" | "resuming" | "error" | null;
-  workspace_volume_identity: string | null;
-  launch_snapshot: CliLaunchSnapshot | null;
   recovery_state: "recoverable" | "legacy-unrecoverable";
+  vscode_url: string | null;
+  free_port_url: string | null;
   created_at: string;
   updated_at: string;
   message_count: number;
   active_turn?: ActiveTurnSummary;
-};
-
-type LaunchValueSource =
-  | { kind: "literal"; value: string }
-  | { kind: "config_reference"; field: string }
-  | { kind: "secret_reference"; field: string; name: string };
-
-type CliLaunchSnapshot = {
-  schema_version: number;
-  provider?: {
-    provider_type: string;
-    wire_api: string;
-    connection_id: string;
-    base_url: LaunchValueSource;
-    api_key?: LaunchValueSource;
-  };
-  model?: LaunchValueSource;
-  reasoning_effort?: LaunchValueSource;
-  options: {
-    no_auto_update: boolean;
-    mouse: boolean;
-    config_dir?: LaunchValueSource;
-    extra_args?: LaunchValueSource;
-  };
-  additional_paths: Array<Record<string, unknown>>;
-  agent_profile?: {
-    identity: string;
-    system_prompt: LaunchValueSource;
-  };
 };
 
 type ActiveTurnSummary = {
@@ -254,29 +224,11 @@ export type SessionDetail = SessionSummary & {
 type TerminalState = "missing" | "running" | "exited";
 export type TerminalAttachKind = "started" | "attached" | "resumed";
 
-type TerminalClient = {
-  id: string;
-  tty: string;
-  pid: number;
-  width: number;
-  height: number;
-  session_name: string;
-  pane_id: string;
-  attachment_id?: string | null;
-};
-
 export type TerminalStatus = {
   state: TerminalState;
   exit_status: number | null;
   attach_kind: TerminalAttachKind | null;
-  session_name?: string;
-  target_session?: string;
-  socket_path?: string;
-  attach_argv?: string[];
-  pane_id?: string | null;
-  pane_pid?: number | null;
   attachment_count: number;
-  clients: TerminalClient[];
 };
 
 export type TerminalReadyFrame = {

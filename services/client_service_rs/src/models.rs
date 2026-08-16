@@ -803,6 +803,10 @@ pub struct SessionRecord {
     pub workspace_mounts: Vec<WorkspaceMountRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_snapshot: Option<CliLaunchSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vscode_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_port_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default)]
@@ -836,6 +840,8 @@ impl SessionRecord {
             workspace_volume_identity: None,
             workspace_mounts: Vec::new(),
             launch_snapshot: None,
+            vscode_url: None,
+            free_port_url: None,
             created_at: now.clone(),
             updated_at: now,
             messages: Vec::new(),
@@ -853,32 +859,8 @@ impl SessionRecord {
 
     #[must_use]
     pub fn summary(&self) -> Value {
-        let client_type = self.client_type.map(ClientType::as_str);
-        let agent_host_session_id = if self.agent_host_session_id.is_empty() {
-            None
-        } else {
-            Some(self.agent_host_session_id.as_str())
-        };
-        json!({
-            "session_id": self.session_id,
-            "agent_id": self.agent_id,
-            "agent_host_session_id": agent_host_session_id,
-            "status": self.status,
-            "channel_name": self.channel_name,
-            "client_type": client_type,
-            "interaction_mode": self.interaction_mode.as_str(),
-            "cli_harness": self.cli_harness.map(CliHarnessName::as_str),
-            "cli_connection_id": self.cli_connection_id,
-            "harness_session_id": self.harness_session_id,
-            "runtime_generation": self.runtime_generation,
-            "runtime_status": self.runtime_status.map(RuntimeStatus::as_str),
-            "workspace_volume_identity": self.workspace_volume_identity,
-            "launch_snapshot": self.launch_snapshot,
-            "recovery_state": self.recovery_state().as_str(),
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "message_count": self.messages.len(),
-        })
+        serde_json::to_value(PublicSessionSummary::from(self))
+            .unwrap_or_else(|_| Value::Object(Map::new()))
     }
 
     #[must_use]
@@ -895,6 +877,59 @@ impl SessionRecord {
         data.insert("messages".to_owned(), json!(messages));
         Value::Object(data)
     }
+}
+
+#[derive(Serialize)]
+pub struct PublicSessionSummary<'a> {
+    pub session_id: &'a str,
+    pub agent_id: &'a str,
+    pub status: &'a str,
+    pub channel_name: Option<&'a str>,
+    pub client_type: Option<&'static str>,
+    pub interaction_mode: &'static str,
+    pub cli_harness: Option<&'static str>,
+    pub cli_connection_id: Option<&'a str>,
+    pub harness_session_id: Option<&'a str>,
+    pub runtime_generation: Option<u64>,
+    pub runtime_status: Option<&'static str>,
+    pub recovery_state: &'static str,
+    pub vscode_url: Option<&'a str>,
+    pub free_port_url: Option<&'a str>,
+    pub created_at: &'a str,
+    pub updated_at: &'a str,
+    pub message_count: usize,
+}
+
+impl<'a> From<&'a SessionRecord> for PublicSessionSummary<'a> {
+    fn from(session: &'a SessionRecord) -> Self {
+        Self {
+            session_id: &session.session_id,
+            agent_id: &session.agent_id,
+            status: &session.status,
+            channel_name: session.channel_name.as_deref(),
+            client_type: session.client_type.map(ClientType::as_str),
+            interaction_mode: session.interaction_mode.as_str(),
+            cli_harness: session.cli_harness.map(CliHarnessName::as_str),
+            cli_connection_id: session.cli_connection_id.as_deref(),
+            harness_session_id: session.harness_session_id.as_deref(),
+            runtime_generation: session.runtime_generation,
+            runtime_status: session.runtime_status.map(RuntimeStatus::as_str),
+            recovery_state: session.recovery_state().as_str(),
+            vscode_url: session.vscode_url.as_deref(),
+            free_port_url: session.free_port_url.as_deref(),
+            created_at: &session.created_at,
+            updated_at: &session.updated_at,
+            message_count: session.messages.len(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PublicTerminalStatus {
+    pub state: String,
+    pub exit_status: Option<i64>,
+    pub attach_kind: Option<String>,
+    pub attachment_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1268,7 +1303,6 @@ mod tests {
             json!({
                 "session_id": "sess",
                 "agent_id": "agent",
-                "agent_host_session_id": "host-sess",
                 "status": "running",
                 "channel_name": "cli",
                 "client_type": "cli",
@@ -1278,9 +1312,9 @@ mod tests {
                 "harness_session_id": null,
                 "runtime_generation": null,
                 "runtime_status": null,
-                "workspace_volume_identity": null,
-                "launch_snapshot": null,
                 "recovery_state": "legacy-unrecoverable",
+                "vscode_url": null,
+                "free_port_url": null,
                 "created_at": "c",
                 "updated_at": "u",
                 "message_count": 1,

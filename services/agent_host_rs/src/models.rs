@@ -434,11 +434,19 @@ pub struct SessionSummary {
     pub stats: Option<DockerStatsSummary>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CleanupResourceKind {
     KernelContainer,
     SessionWorkspaceVolume,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct CleanupResourceIdentity {
+    pub kind: CleanupResourceKind,
+    pub name: String,
+    pub resource_id: String,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -453,6 +461,7 @@ pub enum CleanupAction {
 pub struct CleanupResource {
     pub kind: CleanupResourceKind,
     pub name: String,
+    pub resource_id: String,
     pub session_id: Option<String>,
     pub interaction_mode: Option<String>,
     pub status: Option<String>,

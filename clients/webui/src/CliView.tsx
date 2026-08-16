@@ -211,12 +211,11 @@ export default function CliView({
             return null;
         }
         return kernels.find((kernel) => (
-            kernel.session_id === selectedSession.agent_host_session_id
-            || kernel.client_session_ids.includes(selectedSession.session_id)
+            kernel.client_session_ids.includes(selectedSession.session_id)
         )) ?? null;
     }, [kernels, selectedSession]);
-    const vscodeUrl = selectedKernel?.vscode_url
-        ? browserReachableLocalUrl(selectedKernel.vscode_url)
+    const vscodeUrl = selectedSession?.vscode_url
+        ? browserReachableLocalUrl(selectedSession.vscode_url)
         : null;
 
     const handleLifecycleStatus = useCallback((status: TerminalStatus) => {
@@ -303,21 +302,12 @@ export default function CliView({
         }
     }
 
-    async function handleCopyMode() {
-        if (selectedSessionId === null || attachment === null) {
+    function handleScrollback() {
+        if (attachment === null) {
             return;
         }
         setOperationError(null);
-        try {
-            const status = await api.enterTerminalCopyMode(
-                selectedSessionId,
-                attachment.attachmentId,
-            );
-            cacheTerminalStatus(selectedSessionId, status);
-            setCopyMode(true);
-        } catch (error) {
-            setOperationError(errorMessage(error));
-        }
+        setCopyMode(true);
     }
 
     async function handleSaveWorkspace(sessionId: string) {
@@ -520,13 +510,13 @@ export default function CliView({
                             <Tooltip
                                 content={attachment === null
                                     ? "Attach the terminal before entering scrollback"
-                                    : "Enter tmux scrollback for this attachment"}
+                                    : "Open browser-local scrollback for this attachment"}
                                 relationship="description"
                             >
                                 <Button
                                     disabled={busy || attachment === null}
                                     icon={<History20Regular />}
-                                    onClick={() => void handleCopyMode()}
+                                    onClick={handleScrollback}
                                     size="small"
                                 >
                                     Scrollback
@@ -582,8 +572,8 @@ export default function CliView({
                 )}
                 {copyMode && (
                     <div className="copy-mode-notice" role="status">
-                        Scrollback is active for this attachment. Press <kbd>q</kbd> to exit copy
-                        mode and return mouse input to Copilot.
+                        Browser-local scrollback is active for this attachment. Press <kbd>q</kbd>{" "}
+                        or <kbd>Esc</kbd> to return to Copilot.
                     </div>
                 )}
 
@@ -635,7 +625,9 @@ export default function CliView({
                             onAttachmentChange={setAttachment}
                             onConnectionStateChange={setConnectionState}
                             onLifecycleStatus={handleLifecycleStatus}
+                            onScrollbackModeChange={setCopyMode}
                             reconnectKey={reconnectKey}
+                            scrollbackMode={copyMode}
                             sessionId={selectedSessionId}
                         />
                     )

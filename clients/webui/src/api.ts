@@ -390,11 +390,6 @@ export const api = {
     requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/resume`, {
       method: "POST",
     }),
-  enterTerminalCopyMode: (sessionId: string, attachmentId: string) =>
-    requestJson<TerminalStatus>(`/sessions/${sessionId}/terminal/copy-mode`, {
-      method: "POST",
-      body: JSON.stringify({ attachment_id: attachmentId }),
-    }),
   listKernels: () => requestJson<KernelSummary[]>("/kernels"),
   killKernel: (sessionId: string) =>
     requestJson<void>(`/kernels/${sessionId}`, { method: "DELETE" }),

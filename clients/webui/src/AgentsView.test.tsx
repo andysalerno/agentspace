@@ -82,7 +82,12 @@ describe("AgentsView CLI capability", () => {
 
     render(<AgentsView onSessionCreated={vi.fn()} />, { wrapper: wrapper() });
 
-    expect(await screen.findByText("Copilot CLI")).toBeTruthy();
+    expect(await screen.findByText(/Copilot CLI/)).toBeTruthy();
+    const row = screen.getByText("Reviewer").closest("tr");
+    const cells = row?.querySelectorAll("td");
+    expect(cells?.[2].textContent).toContain("ACP");
+    expect(cells?.[3].textContent).toContain("None");
+    expect(cells?.[4].textContent).toContain("Copilot CLI · OpenRouter");
     await user.click(screen.getByRole("button", { name: "New agent" }));
     fireEvent.change(await screen.findByLabelText(/Agent ID/), {
       target: { value: "new-reviewer" },

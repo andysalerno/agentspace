@@ -304,6 +304,7 @@ pub struct AppState {
     pub(crate) workspaces: WorkspaceStore,
     pub(crate) sessions: SessionStore,
     pub(crate) active_turns: Arc<Mutex<BTreeMap<String, ActiveTurnRecord>>>,
+    pub(crate) session_lifecycle: SessionLifecycleLocks,
     /// Serializes `/config/apply` end to end (validate → stage skills → commit
     /// → reconcile gateways) so two applies cannot interleave reconciliation.
     pub(crate) apply_lock: Arc<tokio::sync::Mutex<()>>,
@@ -322,6 +323,40 @@ pub(crate) struct ActiveTurnRecord {
 pub(crate) struct ActiveTurnStreamState {
     pub(crate) subscribers: Vec<StreamSender>,
     pub(crate) final_payload: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SessionLifecycleLocks {
+    gate: Arc<tokio::sync::RwLock<()>>,
+    sessions: Arc<tokio::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+}
+
+pub(crate) struct SessionLifecycleGuard {
+    _gate: tokio::sync::OwnedRwLockReadGuard<()>,
+    _session: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl SessionLifecycleLocks {
+    pub(crate) async fn lock(&self, session_id: &str) -> SessionLifecycleGuard {
+        let gate = self.gate.clone().read_owned().await;
+        let session = {
+            let mut sessions = self.sessions.lock().await;
+            sessions
+                .entry(session_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        }
+        .lock_owned()
+        .await;
+        SessionLifecycleGuard {
+            _gate: gate,
+            _session: session,
+        }
+    }
+
+    pub(crate) async fn lock_cleanup(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.gate.clone().write_owned().await
+    }
 }
 
 impl AppState {
@@ -370,6 +405,7 @@ impl AppState {
             workspaces: stores.workspaces,
             sessions: stores.sessions,
             active_turns: Arc::new(Mutex::new(BTreeMap::new())),
+            session_lifecycle: SessionLifecycleLocks::default(),
             apply_lock: Arc::new(tokio::sync::Mutex::new(())),
             instance_id: Uuid::now_v7(),
             started_at: Utc::now(),
@@ -526,9 +562,11 @@ fn parse_port() -> Result<u16, ConfigError> {
 mod tests {
     use std::{collections::BTreeMap, error::Error, fs, path::PathBuf};
 
+    use tokio::time::{Duration, sleep, timeout};
+
     use crate::models::{AgentRecord, HarnessName};
 
-    use super::{AppConfig, AppState};
+    use super::{AppConfig, AppState, SessionLifecycleLocks};
 
     #[test]
     fn app_state_uses_sqlite_when_db_path_is_configured() -> Result<(), Box<dyn Error + Send + Sync>>
@@ -569,5 +607,39 @@ mod tests {
             let _ignored = fs::remove_file(candidate);
         }
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_lifecycle_lock_serializes_same_session_and_cleanup() {
+        let locks = SessionLifecycleLocks::default();
+        let first = locks.lock("session").await;
+        let same_session = {
+            let locks = locks.clone();
+            tokio::spawn(async move {
+                let _guard = locks.lock("session").await;
+            })
+        };
+        sleep(Duration::from_millis(20)).await;
+        assert!(!same_session.is_finished());
+        drop(first);
+        timeout(Duration::from_secs(1), same_session)
+            .await
+            .unwrap_or_else(|_| panic!("same-session lifecycle lock stayed blocked"))
+            .unwrap_or_else(|error| panic!("lifecycle task failed: {error}"));
+
+        let session = locks.lock("session").await;
+        let cleanup = {
+            let locks = locks.clone();
+            tokio::spawn(async move {
+                let _guard = locks.lock_cleanup().await;
+            })
+        };
+        sleep(Duration::from_millis(20)).await;
+        assert!(!cleanup.is_finished());
+        drop(session);
+        timeout(Duration::from_secs(1), cleanup)
+            .await
+            .unwrap_or_else(|_| panic!("cleanup lifecycle lock stayed blocked"))
+            .unwrap_or_else(|error| panic!("cleanup task failed: {error}"));
     }
 }

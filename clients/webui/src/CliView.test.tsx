@@ -52,7 +52,6 @@ vi.mock("./Terminal", async () => {
                     exit_status: null,
                     attach_kind: terminalMock.attachKind,
                     attachment_count: 1,
-                    clients: [],
                 };
                 onAttachmentChange({
                     attachmentId: "attachment-ready",
@@ -120,7 +119,6 @@ const CHAT_AGENT: Agent = {
 const CLI_SESSION: SessionSummary = {
     session_id: "session-1234567890abcdefghijkl",
     agent_id: "cli-agent",
-    agent_host_session_id: "session-1234567890abcdefghijkl",
     status: "running",
     channel_name: null,
     client_type: "webui",
@@ -130,9 +128,9 @@ const CLI_SESSION: SessionSummary = {
     harness_session_id: "copilot-abcdef1234567890",
     runtime_generation: 3,
     runtime_status: "live",
-    workspace_volume_identity: "session-1234567890abcdefghijkl",
-    launch_snapshot: null,
     recovery_state: "recoverable",
+    vscode_url: "http://127.0.0.1:8100",
+    free_port_url: null,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     message_count: 0,
@@ -142,13 +140,11 @@ const CHAT_SESSION: SessionSummary = {
     ...CLI_SESSION,
     session_id: "chat-session",
     agent_id: "chat-agent",
-    agent_host_session_id: "chat-session",
     interaction_mode: "chat",
     cli_harness: null,
     harness_session_id: null,
     runtime_generation: null,
     runtime_status: null,
-    workspace_volume_identity: "chat-session",
 };
 
 const KERNEL: KernelSummary = {
@@ -172,7 +168,6 @@ const RUNNING_TERMINAL: TerminalStatus = {
     exit_status: null,
     attach_kind: "started",
     attachment_count: 1,
-    clients: [],
 };
 
 function detail(session = CLI_SESSION): SessionDetail {
@@ -200,7 +195,6 @@ beforeEach(() => {
         attach_kind: null,
         attachment_count: 0,
     });
-    vi.spyOn(api, "enterTerminalCopyMode").mockResolvedValue(RUNNING_TERMINAL);
     vi.spyOn(api, "saveSessionWorkspace").mockResolvedValue({
         workspace_id: "saved",
         name: "Saved",
@@ -275,7 +269,7 @@ describe("CliView", () => {
             .toBe("http://localhost:8100/");
     });
 
-    it("targets copy mode at the ready attachment and explains how to exit", async () => {
+    it("opens browser-local scrollback without mutating the shared tmux pane", async () => {
         const user = userEvent.setup();
         render(
             <CliView
@@ -287,14 +281,8 @@ describe("CliView", () => {
         );
         await screen.findByLabelText("Mock terminal");
         await user.click(screen.getByRole("button", { name: "Scrollback" }));
-        await waitFor(() => {
-            expect(api.enterTerminalCopyMode).toHaveBeenCalledWith(
-                CLI_SESSION.session_id,
-                "attachment-ready",
-            );
-        });
         expect(screen.getByText(/Press/).textContent).toContain("q");
-        expect(screen.getByText(/return mouse input to Copilot/)).toBeTruthy();
+        expect(screen.getByText(/Browser-local scrollback/)).toBeTruthy();
     });
 
     it("keeps stop and delete distinct", async () => {

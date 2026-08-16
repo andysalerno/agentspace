@@ -14,25 +14,21 @@ All routes are under `/sessions/{session_id}/terminal` on `client_service`.
 | `POST /terminal/ensure` | Create, adopt, or recover the terminal. |
 | `POST /terminal/stop` | Stop tmux without deleting the durable session. |
 | `POST /terminal/resume` | Respawn an exited pane with the durable Copilot ID. |
-| `POST /terminal/copy-mode` | Enter tmux copy mode for one attachment. |
 | `GET /terminal/ws` | Upgrade to a raw terminal attachment. |
-
-Copy mode accepts:
-
-```json
-{"attachment_id":"<ready-frame attachment_id>"}
-```
 
 The status/control response includes `state` (`missing`, `running`, or
 `exited`), `exit_status`, `attach_kind` (`started`, `attached`, or `resumed`),
-the fixed tmux attach argv, pane identity, attachment count, and observed tmux
-clients.
+and attachment count. Internal socket paths, attach commands, pane PIDs, and
+tmux client records are never exposed by `client_service`.
+
+The Web UI implements scrollback in its own xterm buffer. It does not mutate
+tmux copy mode, so one browser attachment cannot change another attachment's
+pane interaction state.
 
 `client_service` proxies equivalent internal routes on `agent_host`.
 `agent_host` uses `kernel_host`'s `/terminal`, `/terminal/ensure`,
-`/terminal/stop`, `/terminal/resume`, `/terminal/copy-mode`, and
-`/terminal/detach-client` routes for control only. PTY bytes never travel over
-those internal HTTP routes.
+`/terminal/stop`, `/terminal/resume`, and `/terminal/detach-client` routes for
+control only. PTY bytes never travel over those internal HTTP routes.
 
 ## WebSocket frames
 

@@ -27,9 +27,9 @@ use crate::{
     docker_runtime::DockerKernelRuntime,
     errors::AgentHostError,
     models::{
-        CleanupReport, DockerStatsSummary, HarnessName, InteractionMode, KernelEvent,
-        KernelEventType, KernelRuntimeSession, KernelStatus, RuntimeSessionSummary, ServiceSummary,
-        SessionSummary, WorkspaceMount, WorkspaceMountMode,
+        CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName, InteractionMode,
+        KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus, RuntimeSessionSummary,
+        ServiceSummary, SessionSummary, WorkspaceMount, WorkspaceMountMode,
     },
     skills::{SkillRegistry, SkillVolumeResource},
     terminal::{TerminalConnection, TerminalExec, TerminalService, TerminalStatus},
@@ -112,6 +112,7 @@ pub trait KernelRuntime: Send + Sync {
         &self,
         owned_session_ids: &BTreeSet<String>,
         dry_run: bool,
+        reviewed_resources: Option<&[CleanupResourceIdentity]>,
     ) -> Result<CleanupReport, AgentHostError>;
 
     async fn snapshot_session_workspace(
@@ -168,16 +169,6 @@ pub trait KernelRuntime: Send + Sync {
     ) -> Result<TerminalStatus, AgentHostError> {
         Err(AgentHostError::runtime(
             "terminal resume is not supported by this runtime",
-        ))
-    }
-
-    async fn terminal_copy_mode(
-        &self,
-        _session: &KernelRuntimeSession,
-        _tmux_client_id: &str,
-    ) -> Result<TerminalStatus, AgentHostError> {
-        Err(AgentHostError::runtime(
-            "terminal copy mode is not supported by this runtime",
         ))
     }
 
@@ -480,10 +471,16 @@ impl SessionRegistry {
         &self,
         owned_session_ids: &BTreeSet<String>,
         dry_run: bool,
+        reviewed_resources: Option<&[CleanupResourceIdentity]>,
     ) -> Result<CleanupReport, AgentHostError> {
+        if !dry_run && reviewed_resources.is_none() {
+            return Err(AgentHostError::validation(
+                "destructive runtime cleanup requires reviewed_resources from a dry-run report",
+            ));
+        }
         self.inner
             .runtime
-            .cleanup_orphans(owned_session_ids, dry_run)
+            .cleanup_orphans(owned_session_ids, dry_run, reviewed_resources)
             .await
     }
 
@@ -659,18 +656,6 @@ impl SessionRegistry {
             .await
     }
 
-    pub async fn terminal_copy_mode(
-        &self,
-        session_id: &str,
-        attachment_id: &str,
-    ) -> Result<TerminalStatus, AgentHostError> {
-        let record = self.get_terminal_record(session_id).await?;
-        self.inner
-            .terminal
-            .copy_mode(session_id, &record.runtime_session, attachment_id)
-            .await
-    }
-
     pub async fn terminal_attach(
         &self,
         session_id: &str,
@@ -832,6 +817,7 @@ struct CleanupRequest {
     owned_session_ids: BTreeSet<String>,
     #[serde(default = "default_true")]
     dry_run: bool,
+    reviewed_resources: Option<Vec<CleanupResourceIdentity>>,
 }
 
 #[derive(Clone)]
@@ -1385,7 +1371,11 @@ async fn cleanup_orphans(
 ) -> Result<Json<CleanupReport>, ApiError> {
     state
         .sessions
-        .cleanup_orphans(&payload.owned_session_ids, payload.dry_run)
+        .cleanup_orphans(
+            &payload.owned_session_ids,
+            payload.dry_run,
+            payload.reviewed_resources.as_deref(),
+        )
         .await
         .map(Json)
         .map_err(ApiError::from)
@@ -1453,9 +1443,9 @@ mod tests {
         AppConfig, AppState, build_router,
         errors::AgentHostError,
         models::{
-            CleanupReport, DockerStatsSummary, HarnessName, InteractionMode, KernelEvent,
-            KernelEventType, KernelRuntimeSession, KernelStatus, RuntimeSessionSummary,
-            WorkspaceMount, WorkspaceMountMode,
+            CleanupReport, CleanupResourceIdentity, DockerStatsSummary, HarnessName,
+            InteractionMode, KernelEvent, KernelEventType, KernelRuntimeSession, KernelStatus,
+            RuntimeSessionSummary, WorkspaceMount, WorkspaceMountMode,
         },
         skills::{SkillRegistry, SkillVolumeMode, SkillVolumeResource, SkillsService},
     };
@@ -1635,6 +1625,7 @@ mod tests {
             &self,
             owned_session_ids: &BTreeSet<String>,
             dry_run: bool,
+            _reviewed_resources: Option<&[CleanupResourceIdentity]>,
         ) -> Result<CleanupReport, AgentHostError> {
             Ok(CleanupReport {
                 dry_run,
@@ -2234,7 +2225,8 @@ mod tests {
             "/management/runtime-cleanup",
             json!({
                 "owned_session_ids": ["one", "two"],
-                "dry_run": false
+                "dry_run": false,
+                "reviewed_resources": []
             }),
         )
         .await;

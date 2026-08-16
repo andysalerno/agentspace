@@ -271,22 +271,6 @@ class TerminalController:
             task.add_done_callback(self._resume_finished)
         return await asyncio.shield(task)
 
-    async def copy_mode(self, tmux_client_id: str) -> TerminalStatus:
-        status = await self._status()
-        if status.state != TerminalState.RUNNING:
-            msg = (
-                f"copy mode requires a running terminal; observed {status.state.value}"
-            )
-            raise TerminalStateError(msg)
-        client = self._observed_client(status, tmux_client_id)
-        result = await self._run(
-            (*self._tmux_argv(), "copy-mode", "-t", client.pane_id),
-        )
-        if result.returncode != 0:
-            error = self._command_error("enter tmux copy mode", result)
-            raise error
-        return await self._status()
-
     async def detach_client(self, tmux_client_id: str) -> TerminalStatus:
         status = await self._status()
         if status.state == TerminalState.MISSING:

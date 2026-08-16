@@ -25,25 +25,18 @@ const agents = [
 ];
 
 const sessions = [
-  { session_id: "se-1a2b3c4d", agent_id: "ag-reviewer", agent_host_session_id: "se-1a2b3c4d", status: "active", channel_name: "webui", client_type: "webui", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "live", workspace_volume_identity: "se-1a2b3c4d", launch_snapshot: null, recovery_state: "recoverable", created_at: then, updated_at: now, message_count: 12 },
-  { session_id: "cli-6f4e93c1-52aa-4d91", agent_id: "ag-reviewer", agent_host_session_id: "cli-6f4e93c1-52aa-4d91", status: "running", channel_name: null, client_type: "webui", interaction_mode: "cli", cli_harness: "copilot-cli", cli_connection_id: "cn-openai", harness_session_id: "f13ac6f8-90d7-4aa6-a985-bff43123d7e2", runtime_generation: 2, runtime_status: "live", workspace_volume_identity: "cli-6f4e93c1-52aa-4d91", launch_snapshot: null, recovery_state: "recoverable", created_at: now, updated_at: now, message_count: 0 },
-  { session_id: "se-5e6f7a8b", agent_id: "ag-docs", agent_host_session_id: "se-5e6f7a8b", status: "idle", channel_name: "slack", client_type: "gateway", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "live", workspace_volume_identity: "se-5e6f7a8b", launch_snapshot: null, recovery_state: "recoverable", created_at: then, updated_at: now, message_count: 4 },
-  { session_id: "se-9c0d1e2f", agent_id: "ag-triage", agent_host_session_id: "se-9c0d1e2f", status: "error", channel_name: null, client_type: "cli", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "error", workspace_volume_identity: "se-9c0d1e2f", launch_snapshot: null, recovery_state: "recoverable", created_at: then, updated_at: now, message_count: 31 },
-  { session_id: "se-3a4b5c6d", agent_id: "ag-reviewer", agent_host_session_id: "se-3a4b5c6d", status: "closed", channel_name: "webui", client_type: "webui", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "exited", workspace_volume_identity: "se-3a4b5c6d", launch_snapshot: null, recovery_state: "recoverable", created_at: then, updated_at: now, message_count: 2 },
+  { session_id: "se-1a2b3c4d", agent_id: "ag-reviewer", status: "active", channel_name: "webui", client_type: "webui", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "live", recovery_state: "recoverable", vscode_url: "http://127.0.0.1:8100", free_port_url: "http://127.0.0.1:8101", created_at: then, updated_at: now, message_count: 12 },
+  { session_id: "cli-6f4e93c1-52aa-4d91", agent_id: "ag-reviewer", status: "running", channel_name: null, client_type: "webui", interaction_mode: "cli", cli_harness: "copilot-cli", cli_connection_id: "cn-openai", harness_session_id: "f13ac6f8-90d7-4aa6-a985-bff43123d7e2", runtime_generation: 2, runtime_status: "live", recovery_state: "recoverable", vscode_url: "http://127.0.0.1:8120", free_port_url: null, created_at: now, updated_at: now, message_count: 0 },
+  { session_id: "se-5e6f7a8b", agent_id: "ag-docs", status: "idle", channel_name: "slack", client_type: "gateway", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "live", recovery_state: "recoverable", vscode_url: null, free_port_url: null, created_at: then, updated_at: now, message_count: 4 },
+  { session_id: "se-9c0d1e2f", agent_id: "ag-triage", status: "error", channel_name: null, client_type: "cli", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "error", recovery_state: "recoverable", vscode_url: null, free_port_url: null, created_at: then, updated_at: now, message_count: 31 },
+  { session_id: "se-3a4b5c6d", agent_id: "ag-reviewer", status: "closed", channel_name: "webui", client_type: "webui", interaction_mode: "chat", cli_harness: null, cli_connection_id: null, harness_session_id: null, runtime_generation: 1, runtime_status: "exited", recovery_state: "recoverable", vscode_url: null, free_port_url: null, created_at: then, updated_at: now, message_count: 2 },
 ];
 
 const terminalStatus = {
   state: "running",
   exit_status: null,
   attach_kind: "attached",
-  session_name: "agentspace-cli-6f4e93c1",
-  target_session: "agentspace-cli-6f4e93c1:0",
-  socket_path: "/run/agentspace/tmux.sock",
-  attach_argv: ["tmux", "attach-session", "-t", "agentspace-cli-6f4e93c1"],
-  pane_id: "%0",
-  pane_pid: 4242,
   attachment_count: 1,
-  clients: [],
 };
 
 const longAnswer = `Here's what I found in \`services/client_service_rs\`.

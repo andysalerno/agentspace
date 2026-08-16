@@ -13,7 +13,6 @@ from kernel_host.terminal import (
     TERMINAL_LAUNCH_CWD_ENV,
     AttachKind,
     CommandResult,
-    TerminalClientError,
     TerminalCommandError,
     TerminalConfigurationError,
     TerminalController,
@@ -58,7 +57,6 @@ class FakeTmuxRunner:
         self.clients: list[tuple[str, str, int, int, int, str, str]] = []
         self.fail_new = False
         self.fail_has_session = False
-        self.copy_mode_panes: list[str] = []
         self.detached_clients: list[str] = []
 
     async def run(  # noqa: C901, PLR0911, PLR0912
@@ -125,9 +123,6 @@ class FakeTmuxRunner:
                 return CommandResult(1, stderr="can't find session")
             self.exists = False
             self.clients.clear()
-            return CommandResult(0)
-        if command == "copy-mode":
-            self.copy_mode_panes.append(argv[-1])
             return CommandResult(0)
         if command == "detach-client":
             client_id = argv[-1]
@@ -440,36 +435,6 @@ def test_invalid_terminal_identity_and_session_ids(tmp_path: Path) -> None:
             ),
             runner=runner,
         )
-
-
-@pytest.mark.asyncio
-async def test_copy_mode_uses_validated_observed_client_mapping(
-    tmp_path: Path,
-) -> None:
-    runner = FakeTmuxRunner(exists=True)
-    runner.clients = [
-        (
-            "/dev/pts/7",
-            "/dev/pts/7",
-            700,
-            120,
-            40,
-            "agentspace-session",
-            "%0",
-        ),
-    ]
-    controller = _controller(tmp_path, runner)
-
-    status = await controller.copy_mode("/dev/pts/7")
-
-    assert status.attachment_count == 1
-    assert status.clients[0].id == "/dev/pts/7"
-    assert runner.copy_mode_panes == ["%0"]
-
-    with pytest.raises(TerminalClientError, match="invalid tmux client"):
-        await controller.copy_mode("-bad")
-    with pytest.raises(TerminalClientError, match=r"clients\[\]\.id"):
-        await controller.copy_mode("/dev/pts/8")
 
 
 @pytest.mark.asyncio
