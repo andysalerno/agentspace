@@ -122,8 +122,9 @@ missing, ensure fails instead of silently changing the Copilot UUID.
 
 The terminal is a remote shell-equivalent capability. AgentSpace has no user
 authentication, and the `Origin` check is browser hardening, not
-authentication. Compose binds to loopback by default. A trusted local
-deployment does not require TLS or locally generated certificates.
+authentication. Compose exposes the Web UI to the trusted local network while
+keeping the direct API port on loopback by default. A trusted local deployment
+does not require TLS or locally generated certificates.
 
 Do not expose the API or Web UI to an untrusted network. A remote deployment
 must add real authentication, authorization, and TLS at a trusted reverse

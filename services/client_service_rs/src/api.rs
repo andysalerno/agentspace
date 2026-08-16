@@ -1933,6 +1933,7 @@ fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(),
         .cors_allowed_origins()
         .iter()
         .any(|allowed| allowed == origin)
+        || terminal_origin_matches_forwarded_request(origin, headers)
     {
         Ok(())
     } else {
@@ -1940,6 +1941,23 @@ fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(),
             "terminal WebSocket Origin {origin:?} is not allowed"
         )))
     }
+}
+
+fn terminal_origin_matches_forwarded_request(origin: &str, headers: &HeaderMap) -> bool {
+    let Some(scheme) = headers
+        .get(HeaderName::from_static("x-forwarded-proto"))
+        .and_then(|value| value.to_str().ok())
+        .filter(|scheme| matches!(*scheme, "http" | "https"))
+    else {
+        return false;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    origin == format!("{scheme}://{host}")
 }
 
 fn apply_terminal_runtime_status(
@@ -6312,7 +6330,10 @@ mod tests {
     use tokio_stream::wrappers::ReceiverStream;
     use tower::ServiceExt;
 
-    use super::{send_stream_item, session_workspace_exclude_paths};
+    use super::{
+        send_stream_item, session_workspace_exclude_paths,
+        terminal_origin_matches_forwarded_request,
+    };
     use crate::{
         ActiveTurnStreamState, AppConfig, AppState,
         agent_host::AgentHostClient,
@@ -6324,6 +6345,33 @@ mod tests {
             WorkspaceMountRecord,
         },
     };
+
+    #[test]
+    fn terminal_origin_accepts_same_origin_webui_proxy() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("192.0.2.10:8003"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+
+        assert!(terminal_origin_matches_forwarded_request(
+            "http://192.0.2.10:8003",
+            &headers
+        ));
+        assert!(!terminal_origin_matches_forwarded_request(
+            "http://malicious.example",
+            &headers
+        ));
+    }
+
+    #[test]
+    fn terminal_origin_requires_trusted_proxy_scheme() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("192.0.2.10:8003"));
+
+        assert!(!terminal_origin_matches_forwarded_request(
+            "http://192.0.2.10:8003",
+            &headers
+        ));
+    }
 
     #[test]
     fn copilot_workspace_exclusions_preserve_unrelated_github_content() {

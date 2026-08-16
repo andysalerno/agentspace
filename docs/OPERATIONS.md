@@ -1,10 +1,13 @@
 # Local operations
 
-AgentSpace is intended for a trusted, single-user machine. Compose publishes
-services on `127.0.0.1` by default. There is no application authentication and
-no TLS requirement or certificate setup for this local trusted deployment.
-Do not set `AGENTSPACE_BIND_HOST` to a non-loopback address without adding
-authentication, authorization, and TLS in front of the stack.
+AgentSpace is intended for a trusted, single-user environment. Compose
+publishes the Web UI on `0.0.0.0` for access from a trusted local network and
+publishes the direct `client_service` API on `127.0.0.1` by default. There is
+no application authentication and no TLS requirement or certificate setup for
+this trusted deployment. Do not expose the Web UI or API to an untrusted
+network without adding authentication, authorization, and TLS in front of the
+stack. Override the bindings with `AGENTSPACE_WEBUI_BIND_HOST` and
+`AGENTSPACE_CLIENT_SERVICE_BIND_HOST`.
 
 ## Persistent data
 

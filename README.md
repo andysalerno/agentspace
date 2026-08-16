@@ -128,12 +128,13 @@ Start the stack:
 just stack-up
 ```
 
-Then open <http://127.0.0.1:8003>. Create an agent using the `echo` harness for
-a credential-free smoke test.
+Then open `http://<host>:8003` from the same machine or a trusted local network.
+Create an agent using the `echo` harness for a credential-free smoke test.
 
-Compose binds published services to loopback by default. The local trusted
-deployment has no authentication and needs no TLS certificates. Do not expose
-it to an untrusted network.
+Compose publishes the Web UI on all host interfaces and keeps the direct
+`client_service` port on loopback by default. The local trusted deployment has
+no authentication and needs no TLS certificates. Do not expose it to an
+untrusted network.
 
 Useful stack commands:
 
