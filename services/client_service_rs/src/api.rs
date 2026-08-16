@@ -59,6 +59,7 @@ use crate::config::{
 
 const DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL: &str = "http://client-service:8002";
 const AGENTSPACE_CLIENT_SERVICE_URL_ENV: &str = "CLIENT_SERVICE_AGENTSPACE_BASE_URL";
+const AGENTSPACE_SKILLS_API_ENV: &str = "AGENTSPACE_SKILLS_API";
 const GATEWAY_AUTOSTART_ATTEMPTS: usize = 5;
 const GATEWAY_AUTOSTART_RETRY_DELAY: Duration = Duration::from_secs(2);
 const MEMORY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -1558,6 +1559,23 @@ async fn ensure_cli_runtime_locked(
     Ok(terminal)
 }
 
+fn insert_agentspace_api_env(env: &mut BTreeMap<String, String>, state: &AppState) {
+    let client_service_url = state
+        .config
+        .client_service_env
+        .get(AGENTSPACE_CLIENT_SERVICE_URL_ENV)
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL.to_owned());
+    env.insert(
+        AGENTSPACE_SKILLS_API_ENV.to_owned(),
+        format!("{}/skills", client_service_url.trim_end_matches('/')),
+    );
+    env.insert(
+        "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
+        client_service_url,
+    );
+}
+
 fn cli_runtime_launch(
     state: &AppState,
     session: &SessionRecord,
@@ -1570,15 +1588,7 @@ fn cli_runtime_launch(
     })?;
     let mut env = BTreeMap::new();
     env.insert("AGENTSPACE_AGENT_ID".to_owned(), session.agent_id.clone());
-    env.insert(
-        "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
-        state
-            .config
-            .client_service_env
-            .get(AGENTSPACE_CLIENT_SERVICE_URL_ENV)
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL.to_owned()),
-    );
+    insert_agentspace_api_env(&mut env, state);
     env.insert(
         "KERNEL_SESSION_ID".to_owned(),
         session.harness_session_id.clone().ok_or_else(|| {
@@ -3844,15 +3854,7 @@ fn session_env(
             .map_err(resolve_error_to_api)?,
     );
     env.insert("AGENTSPACE_AGENT_ID".to_owned(), agent.agent_id.clone());
-    env.insert(
-        "AGENTSPACE_CLIENT_SERVICE_URL".to_owned(),
-        state
-            .config
-            .client_service_env
-            .get(AGENTSPACE_CLIENT_SERVICE_URL_ENV)
-            .cloned()
-            .unwrap_or_else(|| DEFAULT_AGENTSPACE_CLIENT_SERVICE_URL.to_owned()),
-    );
+    insert_agentspace_api_env(&mut env, state);
     let system_prompt = config::resolver::resolve_agent_system_prompt(
         &state.config_state,
         &agent.agent_id,

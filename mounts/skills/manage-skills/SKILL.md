@@ -14,9 +14,9 @@ Use the AgentSpace client-service API. In normal AgentSpace sessions these
 environment variables are provided:
 
 ```sh
-AGENTSPACE_CLIENT_SERVICE_URL="${AGENTSPACE_CLIENT_SERVICE_URL:-http://client-service:8002}"
-AGENTSPACE_AGENT_ID="${AGENTSPACE_AGENT_ID:-}"
-AGENTSPACE_SKILLS_API="$AGENTSPACE_CLIENT_SERVICE_URL/skills"
+AGENTSPACE_CLIENT_SERVICE_URL
+AGENTSPACE_SKILLS_API
+AGENTSPACE_AGENT_ID
 ```
 
 Always use the API instead of writing directly to `/mnt/all-skills`, `/skills`,
@@ -44,57 +44,24 @@ Steps, commands, API notes, assumptions, and examples go here.
 Additional files are allowed. File paths must be relative paths inside the skill
 directory, for example `scripts/check-weather.sh` or `docs/examples.md`.
 
-## Create a non-builtin skill
+## Create or update a non-builtin skill
 
-Include `creator_agent_id` when `AGENTSPACE_AGENT_ID` is available. AgentSpace
-will automatically enable the new skill for the creating agent.
-
-```sh
-python - <<'PY' | curl -fsS -X POST "$AGENTSPACE_SKILLS_API" \
-  -H "Content-Type: application/json" \
-  -d @-
-import json
-import os
-
-payload = {
-    "skill_id": "check-weather",
-    "files": {
-        "SKILL.md": "---\nname: check-weather\ndescription: Use this skill when checking weather should be repeatable.\n---\n\n# Check weather\n\n1. Ask for location if missing.\n2. Use the available weather source or CLI.\n3. Report current conditions, forecast, and source.\n",
-    },
-}
-agent_id = os.environ.get("AGENTSPACE_AGENT_ID")
-if agent_id:
-    payload["creator_agent_id"] = agent_id
-print(json.dumps(payload))
-PY
-```
-
-If `AGENTSPACE_AGENT_ID` is empty, omit `creator_agent_id`.
-
-## Update a non-builtin skill
-
-First inspect the skill and confirm it is not builtin:
+Author the complete skill normally in a temporary workspace directory. Do not
+embed file bodies in shell heredocs or hand-build JSON. The directory name is
+the skill ID.
 
 ```sh
-curl -fsS "$AGENTSPACE_SKILLS_API/check-weather"
+mkdir -p /workspace/.agentspace-skills/check-weather/scripts
+# Write SKILL.md and any scripts/docs with normal file-editing tools.
+python /mnt/all-skills/manage-skills/scripts/sync_skill.py \
+  /workspace/.agentspace-skills/check-weather
 ```
 
-Only update skills whose `source` is `user`. Update by replacing the full file
-set:
-
-```sh
-curl -fsS -X PUT "$AGENTSPACE_SKILLS_API/check-weather" \
-  -H "Content-Type: application/json" \
-  -d @- <<'JSON'
-{
-  "files": {
-    "SKILL.md": "---\nname: check-weather\ndescription: Use this skill when checking weather should be repeatable.\n---\n\n# Check weather\n\nUpdated steps go here.\n"
-  }
-}
-JSON
-```
-
-Each create, update, and rollback saves a new version snapshot for user skills.
+The client recursively reads UTF-8 files, rejects symlinks, creates a missing
+skill, or replaces the full file set of an existing user skill. It refuses to
+update builtin skills. New skills are automatically enabled for the creating
+agent when `AGENTSPACE_AGENT_ID` is set. Each create, update, and rollback saves
+a version snapshot.
 
 ## View history and roll back
 

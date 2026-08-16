@@ -812,6 +812,10 @@ async fn cli_creation_controls_and_repeated_ensure_use_stable_snapshot()
         assert_eq!(body["interaction_mode"], "cli");
         assert_eq!(body["harness"], "copilot-cli");
         assert_eq!(body["env"]["KERNEL_SESSION_ID"], harness_session_id);
+        assert_eq!(
+            body["env"]["AGENTSPACE_SKILLS_API"],
+            "http://client-service:8002/skills"
+        );
         assert_eq!(body["env"]["CONNECTION_URL"], "https://provider.example/v1");
         assert_eq!(body["env"]["COPILOT_MODEL"], "original-model");
         assert_eq!(body["env"]["KERNEL_SYSTEM_PROMPT"], "Original prompt");
