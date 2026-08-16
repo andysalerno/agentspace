@@ -29,9 +29,9 @@ use crate::{
         CliHarnessName, CliLaunchOptionsSnapshot, CliLaunchSnapshot, CliProviderLaunchSnapshot,
         ClientType, ConnectionApiFlavor, ConnectionRecord, DEFAULT_AGENT_SYSTEM_PROMPT,
         GatewayRecord, GatewayType, HarnessName, InteractionMode, LaunchValueSource, MessageRecord,
-        MessageRole, RuntimeStatus, SessionRecord, ToolCallRecord, WorkspaceMountRecord,
-        WorkspaceRecord, WorkspaceStatus, utc_now, validate_agent_id, validate_connection_id,
-        validate_gateway_id, validate_skill_id, validate_workspace_id,
+        MessageRole, RecoveryState, RuntimeStatus, SessionRecord, ToolCallRecord,
+        WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus, utc_now, validate_agent_id,
+        validate_connection_id, validate_gateway_id, validate_skill_id, validate_workspace_id,
     },
 };
 
@@ -131,6 +131,7 @@ pub fn router() -> Router<AppState> {
             "/kernels/{kernel_session_id}/container-logs",
             get(kernel_container_logs),
         )
+        .route("/management/runtime-cleanup", post(cleanup_runtime))
         .route("/skills", get(list_skills).post(create_skill))
         .route("/skills/{skill_id}/versions", get(list_skill_versions))
         .route("/skills/{skill_id}/download", get(download_skill))
@@ -852,13 +853,13 @@ async fn delete_agent(
             kernel_session_id = %session.agent_host_session_id,
             "destroying session for deleted agent"
         );
-        let _removed = state.sessions.delete(&session.session_id)?;
         if session.interaction_mode == InteractionMode::Chat {
             state
                 .agent_host
                 .destroy_session(&session.agent_host_session_id)
                 .await?;
         }
+        let _removed = state.sessions.delete(&session.session_id)?;
     }
     tracing::info!(
         route = "/agents/:agent_id",
@@ -1036,6 +1037,7 @@ async fn create_session(
         return create_cli_session(&state, payload, &agent, &session_mounts);
     }
     let env = session_env(&state, &agent)?;
+    let session_id = Uuid::now_v7().simple().to_string();
     tracing::info!(
         route = "/sessions",
         action = "create_session",
@@ -1047,35 +1049,28 @@ async fn create_session(
         has_connection = agent.connection_id.is_some(),
         "creating upstream session"
     );
-    let workspace_mounts = session_mounts.clone();
-    let upstream = state
-        .agent_host
-        .create_session(
-            agent.harness.as_str(),
-            Some(&agent.skills),
-            Some(&env),
-            Some(&workspace_mounts),
-        )
-        .await?;
-    let upstream_session_id = string_field(&upstream, "session_id")?;
-    let status = string_field(&upstream, "status")?;
-    let session = SessionRecord::new(
-        Uuid::now_v7().simple().to_string(),
+    let mut session = SessionRecord::new(
+        session_id.clone(),
         payload.agent_id,
-        upstream_session_id.clone(),
-        status.clone(),
+        session_id.clone(),
+        "starting",
         payload.channel_name,
         payload.client_type,
     );
+    session.runtime_generation = Some(0);
+    session.runtime_status = Some(RuntimeStatus::Starting);
+    session.workspace_volume_identity = Some(session_id);
+    session.workspace_mounts = session_mounts;
+    state.sessions.insert(session.clone())?;
+    ensure_chat_runtime(&state, &mut session).await?;
     let value = session_summary(&state, &session)?;
-    state.sessions.insert(session)?;
     tracing::info!(
         route = "/sessions",
         action = "create_session",
         session_id = %value["session_id"].as_str().unwrap_or_default(),
         agent_id = %value["agent_id"].as_str().unwrap_or_default(),
-        kernel_session_id = %upstream_session_id,
-        upstream_status = %status,
+        kernel_session_id = %session.agent_host_session_id,
+        upstream_status = %session.status,
         "api handler completed"
     );
     Ok(Json(value))
@@ -1114,6 +1109,7 @@ fn create_cli_session(
     session.runtime_generation = Some(0);
     session.runtime_status = Some(RuntimeStatus::Starting);
     session.workspace_volume_identity = Some(session_id);
+    session.workspace_mounts = session_mounts.to_vec();
     session.launch_snapshot = Some(launch_snapshot);
 
     state.sessions.insert(session.clone())?;
@@ -1318,15 +1314,7 @@ async fn get_session(
     if session.interaction_mode == InteractionMode::Cli {
         return Ok(Json(session_detail(&state, &session)?));
     }
-    let upstream = state
-        .agent_host
-        .get_session(&session.agent_host_session_id)
-        .await?;
-    if let Ok(status) = string_field(&upstream, "status") {
-        session.status = status;
-        session.updated_at = utc_now();
-        state.sessions.update(session.clone())?;
-    }
+    ensure_chat_runtime(&state, &mut session).await?;
     tracing::info!(
         route = "/sessions/:session_id",
         action = "get_session",
@@ -1381,6 +1369,9 @@ async fn stream_message(
     Path(session_id): Path<String>,
     Json(payload): Json<SendMessageRequest>,
 ) -> Result<Response, ApiError> {
+    let mut session = require_chat_session(&state, &session_id)?;
+    ensure_chat_runtime(&state, &mut session).await?;
+    require_available_runtime(&session)?;
     let (turn, receiver) = start_streaming_turn(&state, &session_id, payload.message)?;
     tracing::info!(
         route = "/sessions/:session_id/messages/stream",
@@ -1416,12 +1407,41 @@ async fn reset_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let mut session = require_chat_session(&state, &session_id)?;
-    let upstream = state
+    ensure_chat_runtime(&state, &mut session).await?;
+    require_available_runtime(&session)?;
+    let upstream = match state
         .agent_host
         .reset_session(&session.agent_host_session_id)
-        .await?;
-    session.agent_host_session_id = string_field(&upstream, "session_id")?;
-    session.status = string_field(&upstream, "status")?;
+        .await
+    {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            mark_runtime_error(&state, &mut session)?;
+            return Err(error.into());
+        }
+    };
+    let upstream_session_id = match string_field(&upstream, "session_id") {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            mark_runtime_error(&state, &mut session)?;
+            return Err(error);
+        }
+    };
+    if upstream_session_id != session.session_id {
+        mark_runtime_error(&state, &mut session)?;
+        return Err(ApiError::bad_gateway(format!(
+            "agent_host reset returned unexpected session identity {upstream_session_id:?}"
+        )));
+    }
+    session.agent_host_session_id = upstream_session_id;
+    session.status = match string_field(&upstream, "status") {
+        Ok(status) => status,
+        Err(error) => {
+            mark_runtime_error(&state, &mut session)?;
+            return Err(error);
+        }
+    };
+    session.runtime_status = Some(RuntimeStatus::Live);
     session.updated_at = utc_now();
     state.sessions.clear_messages(&session_id)?;
     state.sessions.update(session.clone())?;
@@ -1443,7 +1463,9 @@ async fn save_session_workspace(
     Json(payload): Json<SaveSessionWorkspaceRequest>,
 ) -> Result<Json<Value>, ApiError> {
     validate_workspace_id(&payload.workspace_id)?;
-    let session = require_chat_session(&state, &session_id)?;
+    let mut session = require_chat_session(&state, &session_id)?;
+    ensure_chat_runtime(&state, &mut session).await?;
+    require_available_runtime(&session)?;
     let mut workspace = WorkspaceRecord::new_with_status(
         payload.workspace_id,
         payload.name,
@@ -1500,16 +1522,16 @@ async fn delete_session(
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let session = require_session(&state, &session_id)?;
-    if !state.sessions.delete(&session_id)? {
-        return Err(ApiError::not_found(format!(
-            "session {session_id:?} not found"
-        )));
-    }
     if session.interaction_mode == InteractionMode::Chat {
         state
             .agent_host
             .destroy_session(&session.agent_host_session_id)
             .await?;
+    }
+    if !state.sessions.delete(&session_id)? {
+        return Err(ApiError::not_found(format!(
+            "session {session_id:?} not found"
+        )));
     }
     tracing::info!(
         route = "/sessions/:session_id",
@@ -1520,6 +1542,30 @@ async fn delete_session(
         "api handler completed"
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cleanup_runtime(
+    State(state): State<AppState>,
+    Json(payload): Json<RuntimeCleanupRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let owned_session_ids = state
+        .sessions
+        .list()?
+        .into_iter()
+        .map(|session| session.session_id)
+        .collect::<Vec<_>>();
+    let report = state
+        .agent_host
+        .cleanup_runtime(&owned_session_ids, payload.dry_run)
+        .await?;
+    tracing::info!(
+        route = "/management/runtime-cleanup",
+        action = "cleanup_runtime",
+        dry_run = payload.dry_run,
+        owned_session_count = owned_session_ids.len(),
+        "api handler completed"
+    );
+    Ok(Json(Value::Object(report)))
 }
 
 async fn list_kernels(State(state): State<AppState>) -> Result<Json<Vec<Value>>, ApiError> {
@@ -3305,6 +3351,8 @@ fn send_stream_item(
 
 async fn run_turn(state: &AppState, session_id: &str, message: &str) -> Result<Value, ApiError> {
     let mut session = require_chat_session(state, session_id)?;
+    ensure_chat_runtime(state, &mut session).await?;
+    require_available_runtime(&session)?;
     let turn_id = Uuid::now_v7().simple().to_string();
     let user_message = MessageRecord::new(
         Uuid::now_v7().simple().to_string(),
@@ -3784,6 +3832,113 @@ fn require_chat_session(state: &AppState, session_id: &str) -> Result<SessionRec
     Ok(session)
 }
 
+async fn ensure_chat_runtime(
+    state: &AppState,
+    session: &mut SessionRecord,
+) -> Result<(), ApiError> {
+    if session.recovery_state() == RecoveryState::LegacyUnrecoverable {
+        match state
+            .agent_host
+            .get_session(&session.agent_host_session_id)
+            .await
+        {
+            Ok(upstream) => {
+                if let Ok(status) = string_field(&upstream, "status") {
+                    session.status = status;
+                    session.updated_at = utc_now();
+                    state.sessions.update(session.clone())?;
+                }
+                return Ok(());
+            }
+            Err(AgentHostError::HttpStatus { status, .. }) if status == StatusCode::NOT_FOUND => {
+                "legacy-unrecoverable".clone_into(&mut session.status);
+                session.runtime_status = Some(RuntimeStatus::Error);
+                session.updated_at = utc_now();
+                state.sessions.update(session.clone())?;
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let agent = match require_agent(state, &session.agent_id) {
+        Ok(agent) => agent,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error);
+        }
+    };
+    let env = match session_env(state, &agent) {
+        Ok(env) => env,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error);
+        }
+    };
+    let upstream = match state
+        .agent_host
+        .create_session(
+            &session.session_id,
+            InteractionMode::Chat.as_str(),
+            agent.harness.as_str(),
+            Some(&agent.skills),
+            Some(&env),
+            Some(&session.workspace_mounts),
+        )
+        .await
+    {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error.into());
+        }
+    };
+    let upstream_session_id = match string_field(&upstream, "session_id") {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error);
+        }
+    };
+    if upstream_session_id != session.session_id {
+        mark_runtime_error(state, session)?;
+        return Err(ApiError::bad_gateway(format!(
+            "agent_host returned unexpected session identity {upstream_session_id:?}"
+        )));
+    }
+    session.agent_host_session_id = upstream_session_id;
+    session.status = match string_field(&upstream, "status") {
+        Ok(status) => status,
+        Err(error) => {
+            mark_runtime_error(state, session)?;
+            return Err(error);
+        }
+    };
+    session.runtime_status = Some(RuntimeStatus::Live);
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+    Ok(())
+}
+
+fn mark_runtime_error(state: &AppState, session: &mut SessionRecord) -> Result<(), ApiError> {
+    "error".clone_into(&mut session.status);
+    session.runtime_status = Some(RuntimeStatus::Error);
+    session.updated_at = utc_now();
+    state.sessions.update(session.clone())?;
+    Ok(())
+}
+
+fn require_available_runtime(session: &SessionRecord) -> Result<(), ApiError> {
+    if session.status == "legacy-unrecoverable" {
+        return Err(ApiError::conflict(format!(
+            "session {:?} has recovery state legacy-unrecoverable",
+            session.session_id
+        ))
+        .with_extra(json!({ "recovery_state": "legacy-unrecoverable" })));
+    }
+    Ok(())
+}
+
 fn validate_workspace_mounts(
     state: &AppState,
     mounts: &[WorkspaceMountRecord],
@@ -3946,6 +4101,16 @@ struct CreateSessionRequest {
     interaction_mode: InteractionMode,
     #[serde(default)]
     workspace_mounts: Vec<WorkspaceMountRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeCleanupRequest {
+    #[serde(default = "default_true")]
+    dry_run: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]
@@ -5297,8 +5462,8 @@ mod tests {
         format!("http://{address}")
     }
 
-    async fn upstream_create_session(Json(_body): Json<Value>) -> Json<Value> {
-        Json(json!({ "session_id": "upstream-session", "status": "idle" }))
+    async fn upstream_create_session(Json(body): Json<Value>) -> Json<Value> {
+        Json(json!({ "session_id": body["session_id"], "status": "idle" }))
     }
 
     async fn upstream_get_session(Path(session_id): Path<String>) -> Json<Value> {

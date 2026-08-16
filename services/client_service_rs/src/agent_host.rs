@@ -86,12 +86,16 @@ impl AgentHostClient {
 
     pub async fn create_session(
         &self,
+        session_id: &str,
+        interaction_mode: &str,
         harness: &str,
         skills: Option<&[String]>,
         env: Option<&BTreeMap<String, String>>,
         workspace_mounts: Option<&[WorkspaceMountRecord]>,
     ) -> AgentHostResult<JsonObject> {
         let mut payload = JsonObject::new();
+        payload.insert("session_id".to_owned(), json!(session_id));
+        payload.insert("interaction_mode".to_owned(), json!(interaction_mode));
         payload.insert("harness".to_owned(), json!(harness));
         if let Some(skills) = skills {
             payload.insert("skills".to_owned(), json!(skills));
@@ -105,6 +109,23 @@ impl AgentHostClient {
 
         self.request_object(Method::POST, self.endpoint(&["sessions"])?, Some(payload))
             .await
+    }
+
+    pub async fn cleanup_runtime(
+        &self,
+        owned_session_ids: &[String],
+        dry_run: bool,
+    ) -> AgentHostResult<JsonObject> {
+        let payload = json!({
+            "owned_session_ids": owned_session_ids,
+            "dry_run": dry_run,
+        });
+        self.request_object(
+            Method::POST,
+            self.endpoint(&["management", "runtime-cleanup"])?,
+            Some(object_from_value(payload)?),
+        )
+        .await
     }
 
     pub async fn get_session(&self, session_id: &str) -> AgentHostResult<JsonObject> {
@@ -2240,7 +2261,14 @@ mod tests {
         let env = BTreeMap::from([("KEY".to_owned(), "value".to_owned())]);
 
         let response = client
-            .create_session("copilot", Some(&skills), Some(&env), None)
+            .create_session(
+                "stable-session",
+                "chat",
+                "copilot",
+                Some(&skills),
+                Some(&env),
+                None,
+            )
             .await?;
 
         assert_eq!(response["session_id"], "session-1");
@@ -2251,6 +2279,8 @@ mod tests {
                 path: "/sessions".to_owned(),
                 query: None,
                 body: Some(json!({
+                    "session_id": "stable-session",
+                    "interaction_mode": "chat",
                     "harness": "copilot",
                     "skills": ["skill-a", "skill-b"],
                     "env": { "KEY": "value" }
@@ -2268,7 +2298,7 @@ mod tests {
         let env = BTreeMap::new();
 
         client
-            .create_session("copilot", None, Some(&env), None)
+            .create_session("stable-session", "chat", "copilot", None, Some(&env), None)
             .await?;
 
         assert_eq!(
@@ -2277,7 +2307,11 @@ mod tests {
                 method: Method::POST,
                 path: "/sessions".to_owned(),
                 query: None,
-                body: Some(json!({ "harness": "copilot" })),
+                body: Some(json!({
+                    "session_id": "stable-session",
+                    "interaction_mode": "chat",
+                    "harness": "copilot"
+                })),
             }]
         );
 

@@ -9,6 +9,7 @@ use bollard::errors::Error as BollardError;
 pub enum AgentHostError {
     SessionNotFound { session_id: String },
     Validation { message: String },
+    Conflict { message: String },
     Runtime { message: String },
     Docker { source: BollardError },
     Http { source: reqwest::Error },
@@ -32,6 +33,13 @@ impl AgentHostError {
     }
 
     #[must_use]
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::Conflict {
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
     pub fn runtime(message: impl Into<String>) -> Self {
         Self::Runtime {
             message: message.into(),
@@ -43,9 +51,9 @@ impl Display for AgentHostError {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::SessionNotFound { session_id } => write!(formatter, "{session_id}"),
-            Self::Validation { message } | Self::Runtime { message } => {
-                formatter.write_str(message)
-            }
+            Self::Validation { message }
+            | Self::Conflict { message }
+            | Self::Runtime { message } => formatter.write_str(message),
             Self::Docker { source } => write!(formatter, "Docker request failed: {source}"),
             Self::Http { source } => write!(formatter, "kernel HTTP request failed: {source}"),
             Self::Io { source } => write!(formatter, "I/O error: {source}"),
@@ -61,7 +69,10 @@ impl Error for AgentHostError {
             Self::Http { source } => Some(source),
             Self::Io { source } => Some(source),
             Self::Json { source } => Some(source),
-            Self::SessionNotFound { .. } | Self::Validation { .. } | Self::Runtime { .. } => None,
+            Self::SessionNotFound { .. }
+            | Self::Validation { .. }
+            | Self::Conflict { .. }
+            | Self::Runtime { .. } => None,
         }
     }
 }

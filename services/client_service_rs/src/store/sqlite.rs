@@ -13,7 +13,7 @@ use crate::{
     errors::{StoreError, ValidationError},
     models::{
         CliHarnessName, CliLaunchSnapshot, ClientType, MessageRecord, MessageRole, RuntimeStatus,
-        SessionRecord, ToolCallRecord, WorkspaceRecord, WorkspaceStatus,
+        SessionRecord, ToolCallRecord, WorkspaceMountRecord, WorkspaceRecord, WorkspaceStatus,
     },
 };
 use tracing::{debug, info, warn};
@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS client_sessions (
     runtime_generation INTEGER,
     runtime_status TEXT,
     workspace_volume_identity TEXT,
+    workspace_mounts TEXT,
     launch_snapshot TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -442,6 +443,7 @@ impl SqliteSessionStore {
                        runtime_generation = ?,
                        runtime_status = ?,
                        workspace_volume_identity = ?,
+                       workspace_mounts = ?,
                        launch_snapshot = ?,
                        updated_at = ?
                  WHERE session_id = ?
@@ -459,6 +461,7 @@ impl SqliteSessionStore {
                     optional_u64_to_i64(session.runtime_generation)?,
                     session.runtime_status.map(RuntimeStatus::as_str),
                     session.workspace_volume_identity,
+                    serialize_workspace_mounts(&session.workspace_mounts)?,
                     serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
                     session.updated_at,
                     session.session_id,
@@ -491,9 +494,9 @@ impl SqliteSessionStore {
                     session_id, agent_id, agent_host_session_id, status,
                     channel_name, client_type, interaction_mode, cli_harness,
                     cli_connection_id, harness_session_id, runtime_generation,
-                    runtime_status, workspace_volume_identity, launch_snapshot,
+                    runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     agent_host_session_id = excluded.agent_host_session_id,
@@ -507,6 +510,7 @@ impl SqliteSessionStore {
                     runtime_generation = excluded.runtime_generation,
                     runtime_status = excluded.runtime_status,
                     workspace_volume_identity = excluded.workspace_volume_identity,
+                    workspace_mounts = excluded.workspace_mounts,
                     launch_snapshot = excluded.launch_snapshot,
                     updated_at = excluded.updated_at
                 ",
@@ -524,6 +528,7 @@ impl SqliteSessionStore {
                     optional_u64_to_i64(session.runtime_generation)?,
                     session.runtime_status.map(RuntimeStatus::as_str),
                     session.workspace_volume_identity,
+                    serialize_workspace_mounts(&session.workspace_mounts)?,
                     serialize_launch_snapshot(session.launch_snapshot.as_ref())?,
                     session.created_at,
                     session.updated_at,
@@ -699,6 +704,7 @@ fn initialize_schema(database: &SqliteDatabase) -> Result<(), StoreError> {
                 "workspace_volume_identity",
                 "workspace_volume_identity TEXT",
             ),
+            ("workspace_mounts", "workspace_mounts TEXT"),
             ("launch_snapshot", "launch_snapshot TEXT"),
         ] {
             ensure_column(connection, "client_sessions", column, definition)?;
@@ -772,6 +778,7 @@ fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, Store
     let cli_harness_raw: Option<String> = row.get("cli_harness")?;
     let runtime_generation_raw: Option<i64> = row.get("runtime_generation")?;
     let runtime_status_raw: Option<String> = row.get("runtime_status")?;
+    let workspace_mounts_raw: Option<String> = row.get("workspace_mounts")?;
     let launch_snapshot_raw: Option<String> = row.get("launch_snapshot")?;
     Ok(SessionRecord {
         session_id: row.get("session_id")?,
@@ -802,6 +809,7 @@ fn row_to_session_without_messages(row: &Row<'_>) -> Result<SessionRecord, Store
             .transpose()
             .map_err(validation_error("sessions"))?,
         workspace_volume_identity: row.get("workspace_volume_identity")?,
+        workspace_mounts: deserialize_workspace_mounts(workspace_mounts_raw.as_deref())?,
         launch_snapshot: deserialize_launch_snapshot(launch_snapshot_raw.as_deref())?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -914,9 +922,9 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
             session_id, agent_id, agent_host_session_id, status,
             channel_name, client_type, interaction_mode, cli_harness,
             cli_connection_id, harness_session_id, runtime_generation,
-            runtime_status, workspace_volume_identity, launch_snapshot,
+            runtime_status, workspace_volume_identity, workspace_mounts, launch_snapshot,
             created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ",
         params![
             session.session_id,
@@ -932,6 +940,7 @@ fn insert_session(connection: &Connection, session: &SessionRecord) -> Result<()
             optional_u64_to_i64(session.runtime_generation).map_err(store_error_to_sqlite)?,
             session.runtime_status.map(RuntimeStatus::as_str),
             session.workspace_volume_identity,
+            serialize_workspace_mounts(&session.workspace_mounts).map_err(store_error_to_sqlite)?,
             serialize_launch_snapshot(session.launch_snapshot.as_ref())
                 .map_err(store_error_to_sqlite)?,
             session.created_at,
@@ -1032,6 +1041,34 @@ fn i64_to_u64(value: i64) -> Result<u64, StoreError> {
         store: "sessions",
         detail: format!("runtime_generation is invalid: {error}"),
     })
+}
+
+fn serialize_workspace_mounts(
+    mounts: &[WorkspaceMountRecord],
+) -> Result<Option<String>, StoreError> {
+    if mounts.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(mounts)
+        .map(Some)
+        .map_err(|error| StoreError::Persistence {
+            store: "sessions",
+            detail: format!("failed to serialize workspace_mounts: {error}"),
+        })
+}
+
+fn deserialize_workspace_mounts(
+    raw: Option<&str>,
+) -> Result<Vec<WorkspaceMountRecord>, StoreError> {
+    raw.map_or_else(
+        || Ok(Vec::new()),
+        |raw| {
+            serde_json::from_str(raw).map_err(|error| StoreError::Persistence {
+                store: "sessions",
+                detail: format!("failed to deserialize workspace_mounts: {error}"),
+            })
+        },
+    )
 }
 
 fn serialize_launch_snapshot(

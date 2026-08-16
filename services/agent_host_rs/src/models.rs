@@ -21,6 +21,30 @@ pub enum HarnessName {
     Acp,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InteractionMode {
+    #[default]
+    Chat,
+    Cli,
+}
+
+impl InteractionMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Cli => "cli",
+        }
+    }
+}
+
+impl Display for InteractionMode {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl HarnessName {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -356,6 +380,7 @@ pub struct WorkspaceMountSummary {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DockerKernelSession {
+    pub session_id: String,
     pub container_name: String,
     pub session_workspace_volume_name: String,
     pub base_url: String,
@@ -397,6 +422,7 @@ pub struct RuntimeSessionSummary {
 pub struct SessionSummary {
     pub session_id: String,
     pub harness: HarnessName,
+    pub interaction_mode: InteractionMode,
     pub status: KernelStatus,
     pub turns: usize,
     pub resume_token: Option<String>,
@@ -406,6 +432,42 @@ pub struct SessionSummary {
     pub vscode_url: Option<String>,
     pub free_port_url: Option<String>,
     pub stats: Option<DockerStatsSummary>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupResourceKind {
+    KernelContainer,
+    SessionWorkspaceVolume,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CleanupAction {
+    WouldDelete,
+    Deleted,
+    DeleteFailed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CleanupResource {
+    pub kind: CleanupResourceKind,
+    pub name: String,
+    pub session_id: Option<String>,
+    pub interaction_mode: Option<String>,
+    pub status: Option<String>,
+    pub action: CleanupAction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CleanupReport {
+    pub dry_run: bool,
+    pub owned_session_count: usize,
+    pub resources: Vec<CleanupResource>,
+    pub deleted_count: usize,
+    pub error_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

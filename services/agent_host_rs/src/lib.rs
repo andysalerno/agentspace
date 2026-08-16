@@ -151,7 +151,7 @@ impl AppState {
     }
 
     pub async fn shutdown(&self) {
-        self.sessions.destroy_all_sessions().await;
+        self.sessions.forget_all_sessions().await;
         self.gateways.destroy_all_gateways().await;
     }
 }

@@ -598,7 +598,8 @@ mod tests {
             AdditionalPathIdentity, AgentCliRecord, AgentRecord, CliHarnessName,
             CliLaunchOptionsSnapshot, CliLaunchSnapshot, ClientType, ConnectionApiFlavor,
             ConnectionRecord, GatewayRecord, GatewayType, HarnessName, InteractionMode,
-            MessageRecord, MessageRole, RuntimeStatus, SessionRecord, ToolCallRecord,
+            MessageRecord, MessageRole, RecoveryState, RuntimeStatus, SessionRecord,
+            ToolCallRecord, WorkspaceMountMode, WorkspaceMountRecord,
         },
     };
 
@@ -893,6 +894,10 @@ mod tests {
             session.runtime_generation = Some(2);
             session.runtime_status = Some(RuntimeStatus::Starting);
             session.workspace_volume_identity = Some("workspace-identity".to_owned());
+            session.workspace_mounts = vec![WorkspaceMountRecord::new(
+                "workspace",
+                WorkspaceMountMode::ReadOnly,
+            )];
             session.launch_snapshot = Some(CliLaunchSnapshot {
                 schema_version: 1,
                 provider: None,
@@ -999,6 +1004,13 @@ mod tests {
                 Some("workspace-identity")
             );
             assert_eq!(
+                session.workspace_mounts,
+                vec![WorkspaceMountRecord::new(
+                    "workspace",
+                    WorkspaceMountMode::ReadOnly
+                )]
+            );
+            assert_eq!(
                 session
                     .launch_snapshot
                     .as_ref()
@@ -1056,6 +1068,9 @@ mod tests {
         assert_eq!(session.interaction_mode, InteractionMode::Chat);
         assert_eq!(session.cli_harness, None);
         assert_eq!(session.launch_snapshot, None);
+        assert!(session.workspace_mounts.is_empty());
+        assert_eq!(session.recovery_state(), RecoveryState::LegacyUnrecoverable);
+        assert_eq!(session.summary()["recovery_state"], "legacy-unrecoverable");
 
         cleanup_sqlite_path(&path);
         Ok(())

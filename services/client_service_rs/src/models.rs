@@ -799,6 +799,8 @@ pub struct SessionRecord {
     pub runtime_status: Option<RuntimeStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_volume_identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_mounts: Vec<WorkspaceMountRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_snapshot: Option<CliLaunchSnapshot>,
     pub created_at: String,
@@ -832,6 +834,7 @@ impl SessionRecord {
             runtime_generation: None,
             runtime_status: None,
             workspace_volume_identity: None,
+            workspace_mounts: Vec::new(),
             launch_snapshot: None,
             created_at: now.clone(),
             updated_at: now,
@@ -841,7 +844,7 @@ impl SessionRecord {
 
     #[must_use]
     pub const fn recovery_state(&self) -> RecoveryState {
-        if self.launch_snapshot.is_some() && self.workspace_volume_identity.is_some() {
+        if self.workspace_volume_identity.is_some() {
             RecoveryState::Recoverable
         } else {
             RecoveryState::LegacyUnrecoverable

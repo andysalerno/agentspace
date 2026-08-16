@@ -61,8 +61,8 @@ async fn spawn_stub_agent_host() -> Result<StubAgentHost, Box<dyn Error + Send +
     })
 }
 
-async fn stub_create_session(Json(_payload): Json<Value>) -> Json<Value> {
-    Json(json!({ "session_id": "host-session", "status": "idle" }))
+async fn stub_create_session(Json(payload): Json<Value>) -> Json<Value> {
+    Json(json!({ "session_id": payload["session_id"], "status": "idle" }))
 }
 
 async fn stub_get_session(Path(session_id): Path<String>) -> Json<Value> {
@@ -848,14 +848,16 @@ async fn created_session_message_listing_shape_matches_contract()
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    let session_id = string_field(&session, "session_id")?;
     assert_eq!(session["agent_id"], "agent-one");
-    assert_eq!(session["agent_host_session_id"], "host-session");
+    assert_eq!(session["agent_host_session_id"], session_id);
     assert_eq!(session["status"], "idle");
     assert_eq!(session["interaction_mode"], "chat");
+    assert_eq!(session["recovery_state"], "recoverable");
+    assert_eq!(session["workspace_volume_identity"], session_id);
     assert!(session["cli_harness"].is_null());
     assert_eq!(session["message_count"], json!(0));
 
-    let session_id = string_field(&session, "session_id")?;
     let (status, value) =
         get_json(app.clone(), &format!("/sessions/{session_id}/messages")).await?;
     assert_eq!(status, StatusCode::OK);
