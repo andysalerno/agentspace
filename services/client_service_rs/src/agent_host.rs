@@ -7,13 +7,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use percent_encoding::percent_decode_str;
 use reqwest::{Method, StatusCode, Url, header};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
-    tungstenite::{Error as WebSocketError, protocol::WebSocketConfig},
+    tungstenite::{Error as WebSocketError, client::IntoClientRequest, protocol::WebSocketConfig},
 };
 
 use crate::models::{TelemetrySnapshot, WorkspaceMountRecord};
@@ -30,6 +31,8 @@ pub type AgentHostResult<T> = Result<T, AgentHostError>;
 pub type AgentHostWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const MAX_TERMINAL_WEBSOCKET_MESSAGE_SIZE: usize = 1024 * 1024;
 const MAX_TERMINAL_WEBSOCKET_WRITE_BUFFER_SIZE: usize = 1024 * 1024;
+const MAX_VSCODE_WEBSOCKET_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+const MAX_VSCODE_WEBSOCKET_WRITE_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 
 pub struct AgentHostSessionCreate<'a> {
     pub session_id: &'a str,
@@ -52,6 +55,7 @@ pub struct AgentHostDownload {
 #[derive(Clone, Debug)]
 pub struct AgentHostClient {
     client: reqwest::Client,
+    proxy_client: reqwest::Client,
     base_url: Url,
     timeout: Duration,
 }
@@ -86,9 +90,14 @@ impl AgentHostClient {
         let client = reqwest::Client::builder()
             .build()
             .map_err(|source| AgentHostError::BuildClient { source })?;
+        let proxy_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|source| AgentHostError::BuildClient { source })?;
 
         Ok(Self {
             client,
+            proxy_client,
             base_url,
             timeout,
         })
@@ -209,6 +218,104 @@ impl AgentHostClient {
                 timeout: self.timeout,
             }),
         }
+    }
+
+    pub async fn proxy_vscode_http(
+        &self,
+        session_id: &str,
+        path_and_query: &str,
+        method: Method,
+        headers: &header::HeaderMap,
+        body: reqwest::Body,
+    ) -> AgentHostResult<reqwest::Response> {
+        let url = self.vscode_proxy_url(session_id, path_and_query, false)?;
+        let mut request = self.proxy_client.request(method, url).body(body);
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        match tokio::time::timeout(self.timeout, request.send()).await {
+            Ok(Ok(response)) => Ok(response),
+            Ok(Err(source)) => Err(AgentHostError::Http { source }),
+            Err(_elapsed) => Err(AgentHostError::InitialResponseTimeout {
+                timeout: self.timeout,
+            }),
+        }
+    }
+
+    pub async fn connect_vscode_websocket(
+        &self,
+        session_id: &str,
+        path_and_query: &str,
+        protocol: Option<&header::HeaderValue>,
+    ) -> AgentHostResult<(AgentHostWebSocket, Option<String>)> {
+        let url = self.vscode_proxy_url(session_id, path_and_query, true)?;
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|source| AgentHostError::WebSocket { source })?;
+        if let Some(protocol) = protocol {
+            request
+                .headers_mut()
+                .insert(header::SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+        }
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(MAX_VSCODE_WEBSOCKET_MESSAGE_SIZE);
+        config.max_frame_size = Some(MAX_VSCODE_WEBSOCKET_MESSAGE_SIZE);
+        config.max_write_buffer_size = MAX_VSCODE_WEBSOCKET_WRITE_BUFFER_SIZE;
+        match tokio::time::timeout(
+            self.timeout,
+            connect_async_with_config(request, Some(config), true),
+        )
+        .await
+        {
+            Ok(Ok((websocket, response))) => {
+                let protocol = response
+                    .headers()
+                    .get(header::SEC_WEBSOCKET_PROTOCOL)
+                    .and_then(|value| value.to_str().ok())
+                    .map(ToOwned::to_owned);
+                Ok((websocket, protocol))
+            }
+            Ok(Err(source)) => Err(AgentHostError::WebSocket { source }),
+            Err(_elapsed) => Err(AgentHostError::WebSocketTimeout {
+                timeout: self.timeout,
+            }),
+        }
+    }
+
+    fn vscode_proxy_url(
+        &self,
+        session_id: &str,
+        path_and_query: &str,
+        websocket: bool,
+    ) -> AgentHostResult<Url> {
+        if vscode_proxy_path_has_dot_segment(path_and_query) {
+            return Err(AgentHostError::InvalidProxyPath {
+                path: path_and_query.to_owned(),
+            });
+        }
+        let base = self.endpoint(&["sessions", session_id, "vscode"])?;
+        let raw = format!("{}{}", base.as_str().trim_end_matches('/'), path_and_query);
+        let mut url = Url::parse(&raw).map_err(|source| AgentHostError::InvalidBaseUrl {
+            raw,
+            message: source.to_string(),
+        })?;
+        if websocket {
+            let scheme = match url.scheme() {
+                "http" => "ws",
+                "https" => "wss",
+                scheme => {
+                    return Err(AgentHostError::InvalidWebSocketScheme {
+                        scheme: scheme.to_owned(),
+                    });
+                }
+            };
+            url.set_scheme(scheme)
+                .map_err(|()| AgentHostError::InvalidWebSocketScheme {
+                    scheme: scheme.to_owned(),
+                })?;
+        }
+        Ok(url)
     }
 
     async fn terminal_control(
@@ -956,6 +1063,25 @@ impl AgentHostClient {
     }
 }
 
+pub(crate) fn vscode_proxy_path_has_dot_segment(path_and_query: &str) -> bool {
+    let path = path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(path, _query)| path);
+    let mut decoded = path.to_owned();
+    loop {
+        let next = percent_decode_str(&decoded)
+            .decode_utf8_lossy()
+            .into_owned();
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    decoded
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".."))
+}
+
 #[derive(Clone, Debug, Default)]
 struct RequestTraceContext {
     target: String,
@@ -1338,6 +1464,7 @@ fn agent_host_error_kind(error: &AgentHostError) -> &'static str {
         AgentHostError::InvalidBaseUrl { .. } => "invalid_base_url",
         AgentHostError::InvalidTimeout { .. } => "invalid_timeout",
         AgentHostError::InvalidWebSocketScheme { .. } => "invalid_websocket_scheme",
+        AgentHostError::InvalidProxyPath { .. } => "invalid_proxy_path",
         AgentHostError::InitialResponseTimeout { .. } => "initial_response_timeout",
         AgentHostError::WebSocketTimeout { .. } => "websocket_timeout",
         AgentHostError::UrlCannotBeBase { .. } => "url_cannot_be_base",
@@ -1366,6 +1493,7 @@ fn agent_host_error_status(error: &AgentHostError) -> u16 {
         | AgentHostError::InvalidBaseUrl { .. }
         | AgentHostError::InvalidTimeout { .. }
         | AgentHostError::InvalidWebSocketScheme { .. }
+        | AgentHostError::InvalidProxyPath { .. }
         | AgentHostError::InitialResponseTimeout { .. }
         | AgentHostError::WebSocketTimeout { .. }
         | AgentHostError::UrlCannotBeBase { .. }
@@ -1392,6 +1520,9 @@ pub enum AgentHostError {
     },
     InvalidWebSocketScheme {
         scheme: String,
+    },
+    InvalidProxyPath {
+        path: String,
     },
     InitialResponseTimeout {
         timeout: Duration,
@@ -1459,10 +1590,13 @@ impl Display for AgentHostError {
                     "agent_host WebSocket requires an HTTP(S) base URL, got scheme {scheme:?}"
                 )
             }
+            Self::InvalidProxyPath { path } => {
+                write!(formatter, "invalid VS Code proxy path {path:?}")
+            }
             Self::InitialResponseTimeout { timeout } => {
                 write!(
                     formatter,
-                    "agent_host stream did not start within {timeout:?}"
+                    "agent_host response did not start within {timeout:?}"
                 )
             }
             Self::WebSocketTimeout { timeout } => {
@@ -1532,6 +1666,7 @@ impl Error for AgentHostError {
             Self::InvalidBaseUrl { .. }
             | Self::InvalidTimeout { .. }
             | Self::InvalidWebSocketScheme { .. }
+            | Self::InvalidProxyPath { .. }
             | Self::InitialResponseTimeout { .. }
             | Self::WebSocketTimeout { .. }
             | Self::UrlCannotBeBase { .. }
@@ -1951,17 +2086,20 @@ mod tests {
         body::{Body, Bytes},
         extract::{Path, Query, State},
         http::{
-            HeaderMap, Method, StatusCode,
-            header::{CONTENT_DISPOSITION, CONTENT_TYPE},
+            HeaderMap, HeaderValue, Method, StatusCode,
+            header::{CONTENT_DISPOSITION, CONTENT_TYPE, LOCATION},
         },
         response::{IntoResponse, Response},
-        routing::{get, post},
+        routing::{any, get, post},
     };
     use serde_json::{Value, json};
     use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
     use tokio_stream::wrappers::ReceiverStream;
 
-    use super::{AgentHostClient, AgentHostError, AgentHostSessionCreate, JsonObject};
+    use super::{
+        AgentHostClient, AgentHostError, AgentHostSessionCreate, JsonObject,
+        vscode_proxy_path_has_dot_segment,
+    };
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedRequest {
@@ -2102,6 +2240,7 @@ mod tests {
             .route("/sessions/{session_id}/container-logs", get(container_logs))
             .route("/sessions/{session_id}/telemetry", get(telemetry))
             .route("/sessions/{session_id}/reset", post(reset_session))
+            .route("/sessions/{session_id}/vscode/{*path}", any(vscode_proxy))
             .route("/skills", post(create_skill).get(list_skills))
             .route("/skills/{skill_id}/download", get(download_skill))
             .route(
@@ -2206,6 +2345,33 @@ mod tests {
             "\n{\"type\":\"start\"}\n[\"ignored\"]\n{\"type\":\"content\",\"content\":\"hello\"}\n",
         );
         Ok((StatusCode::OK, body).into_response())
+    }
+
+    async fn vscode_proxy(
+        Path((_session_id, path)): Path<(String, String)>,
+    ) -> Result<Response, StatusCode> {
+        if path == "slow" {
+            let (sender, receiver) = mpsc::channel::<Result<Bytes, Infallible>>(2);
+            tokio::spawn(async move {
+                let _ignored = sender.send(Ok(Bytes::from_static(b"started"))).await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let _ignored = sender.send(Ok(Bytes::from_static(b"-delayed"))).await;
+            });
+            return Ok((
+                StatusCode::OK,
+                Body::from_stream(ReceiverStream::new(receiver)),
+            )
+                .into_response());
+        }
+        if path == "redirect" {
+            return Ok((
+                StatusCode::FOUND,
+                [(LOCATION, "./?folder=/workspace")],
+                Body::empty(),
+            )
+                .into_response());
+        }
+        Ok((StatusCode::OK, Body::from(path)).into_response())
     }
 
     async fn history(
@@ -2749,6 +2915,68 @@ mod tests {
                 object(json!({ "type": "content", "content": "started" }))?,
                 object(json!({ "type": "content", "content": "delayed" }))?,
             ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vscode_proxy_body_is_not_limited_by_client_timeout()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        let server = TestServer::start().await?;
+        let client = AgentHostClient::new(&server.base_url, Duration::from_millis(10))?;
+
+        let response = client
+            .proxy_vscode_http(
+                "session-1",
+                "/slow",
+                Method::GET,
+                &HeaderMap::new(),
+                reqwest::Body::default(),
+            )
+            .await?;
+
+        assert_eq!(response.bytes().await?.as_ref(), b"started-delayed");
+        Ok(())
+    }
+
+    #[test]
+    fn vscode_proxy_path_detects_encoded_dot_segments() {
+        for path in [
+            "/%2e%2e/admin",
+            "/%252e%252e/admin",
+            "/%2e%2e%2fadmin",
+            "/%2e%2e%5cadmin",
+        ] {
+            assert!(
+                vscode_proxy_path_has_dot_segment(path),
+                "path should be rejected: {path}"
+            );
+        }
+        assert!(!vscode_proxy_path_has_dot_segment(
+            "/stable/workbench.js?redirect=../allowed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn vscode_proxy_preserves_upstream_redirects() -> Result<(), Box<dyn Error + Send + Sync>>
+    {
+        let server = TestServer::start().await?;
+        let client = server.client()?;
+
+        let response = client
+            .proxy_vscode_http(
+                "session-1",
+                "/redirect",
+                Method::GET,
+                &HeaderMap::new(),
+                reqwest::Body::default(),
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers().get(LOCATION),
+            Some(&HeaderValue::from_static("./?folder=/workspace"))
         );
         Ok(())
     }

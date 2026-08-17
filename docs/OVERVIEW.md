@@ -91,6 +91,10 @@ Multiple browsers or future terminal clients can attach simultaneously. Tmux
 owns the process and scrollback, so detaching clients does not stop Copilot.
 See [TERMINAL_PROTOCOL.md](TERMINAL_PROTOCOL.md).
 
+Chat and CLI open their per-session code-server through a separate same-origin
+HTTP and WebSocket route. See [VSCODE_PROXY.md](VSCODE_PROXY.md) for the proxy
+path, networking configuration, invariants, and debugging workflow.
+
 ## Identity, persistence, and recovery
 
 The full client session ID is the stable runtime identity. Containers and

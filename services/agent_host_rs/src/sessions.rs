@@ -3,23 +3,39 @@ use std::{
     future::Future,
     path::{Component, Path as FsPath},
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     task::{Context, Poll},
 };
 
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    body::{Body, Bytes},
+    body::{Body, Bytes, to_bytes},
+    extract::{
+        FromRequestParts, OriginalUri,
+        ws::{Message as WebSocketMessage, WebSocket, WebSocketUpgrade},
+    },
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, HeaderName, Request, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
-use futures_util::{Stream, StreamExt};
+use futures_util::{SinkExt, Stream, StreamExt};
+use percent_encoding::percent_decode_str;
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::{Mutex, RwLock};
+use tokio::{
+    net::TcpStream,
+    sync::{Mutex, RwLock},
+};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
+    tungstenite::{
+        Error as WebSocketClientError, Message as UpstreamWebSocketMessage,
+        client::IntoClientRequest,
+        protocol::{CloseFrame as UpstreamCloseFrame, WebSocketConfig, frame::coding::CloseCode},
+    },
+};
 use uuid::Uuid;
 
 use crate::{
@@ -36,6 +52,16 @@ use crate::{
 };
 
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<KernelEvent, AgentHostError>> + Send>>;
+
+const VSCODE_PROXY_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+static VSCODE_PROXY_CLIENT: LazyLock<Result<reqwest::Client, String>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| error.to_string())
+});
+type VscodeUpstreamWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeCreateSession {
@@ -102,6 +128,15 @@ pub trait KernelRuntime: Send + Sync {
     fn container_name(&self, session: &KernelRuntimeSession) -> Option<String>;
 
     fn vscode_url(&self, session: &KernelRuntimeSession) -> Option<String>;
+
+    fn vscode_proxy_base_url(
+        &self,
+        _session: &KernelRuntimeSession,
+    ) -> Result<String, AgentHostError> {
+        Err(AgentHostError::runtime(
+            "VS Code proxying is not supported by this runtime",
+        ))
+    }
 
     fn free_port_url(&self, session: &KernelRuntimeSession) -> Option<String>;
 
@@ -636,6 +671,13 @@ impl SessionRegistry {
     pub async fn telemetry(&self, session_id: &str) -> Result<TelemetrySnapshot, AgentHostError> {
         let record = self.get_record(session_id).await?;
         self.inner.runtime.telemetry(&record.runtime_session).await
+    }
+
+    pub async fn vscode_proxy_base_url(&self, session_id: &str) -> Result<String, AgentHostError> {
+        let record = self.get_record(session_id).await?;
+        self.inner
+            .runtime
+            .vscode_proxy_base_url(&record.runtime_session)
     }
 
     pub async fn terminal_status(
@@ -1218,6 +1260,18 @@ pub fn router() -> Router<AppState> {
         .route("/sessions/{session_id}/logs", get(session_logs))
         .route("/sessions/{session_id}/telemetry", get(session_telemetry))
         .route(
+            "/sessions/{session_id}/vscode",
+            any(proxy_session_vscode_root),
+        )
+        .route(
+            "/sessions/{session_id}/vscode/",
+            any(proxy_session_vscode_root),
+        )
+        .route(
+            "/sessions/{session_id}/vscode/{*path}",
+            any(proxy_session_vscode_path),
+        )
+        .route(
             "/sessions/{session_id}/container-logs",
             get(session_container_logs),
         )
@@ -1306,7 +1360,7 @@ async fn stream_message(
         header::HeaderValue::from_static("no-cache"),
     );
     response.headers_mut().insert(
-        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderName::from_static("x-accel-buffering"),
         header::HeaderValue::from_static("no"),
     );
     Ok(response)
@@ -1338,6 +1392,308 @@ async fn session_telemetry(
         .await
         .map(Json)
         .map_err(ApiError::from)
+}
+
+async fn proxy_session_vscode_root(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    original_uri: OriginalUri,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    proxy_session_vscode(state, session_id, original_uri, request).await
+}
+
+async fn proxy_session_vscode_path(
+    State(state): State<AppState>,
+    Path((session_id, _path)): Path<(String, String)>,
+    original_uri: OriginalUri,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    proxy_session_vscode(state, session_id, original_uri, request).await
+}
+
+async fn proxy_session_vscode(
+    state: AppState,
+    session_id: String,
+    original_uri: OriginalUri,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let base_url = state.sessions.vscode_proxy_base_url(&session_id).await?;
+    let route_prefix = format!("/sessions/{session_id}/vscode");
+    let target = proxy_target_url(&base_url, &route_prefix, &original_uri)?;
+    let (mut parts, body) = request.into_parts();
+    let websocket = WebSocketUpgrade::from_request_parts(&mut parts, &state)
+        .await
+        .ok();
+    let request = Request::from_parts(parts, body);
+    if let Some(websocket) = websocket {
+        let headers = request.headers().clone();
+        return proxy_vscode_websocket(websocket, &headers, &target).await;
+    }
+    proxy_vscode_http(request, &target).await
+}
+
+fn proxy_target_url(
+    base_url: &str,
+    route_prefix: &str,
+    original_uri: &OriginalUri,
+) -> Result<String, ApiError> {
+    let uri = &original_uri.0;
+    let suffix = uri
+        .path()
+        .strip_prefix(route_prefix)
+        .ok_or_else(|| AgentHostError::runtime("VS Code proxy route prefix is invalid"))?;
+    if vscode_proxy_path_has_dot_segment(suffix) {
+        return Err(
+            AgentHostError::validation("VS Code proxy path must not contain dot segments").into(),
+        );
+    }
+    let path = if suffix.is_empty() { "/" } else { suffix };
+    let mut target = format!("{}{}", base_url.trim_end_matches('/'), path);
+    if let Some(query) = uri.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+
+    Ok(target)
+}
+
+fn vscode_proxy_path_has_dot_segment(path: &str) -> bool {
+    let mut decoded = path.to_owned();
+    loop {
+        let next = percent_decode_str(&decoded)
+            .decode_utf8_lossy()
+            .into_owned();
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    decoded
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".."))
+}
+
+async fn proxy_vscode_http(request: Request<Body>, target: &str) -> Result<Response, ApiError> {
+    let (parts, body) = request.into_parts();
+    let body = to_bytes(body, VSCODE_PROXY_MAX_REQUEST_BYTES)
+        .await
+        .map_err(|error| {
+            AgentHostError::payload_too_large(format!(
+                "VS Code proxy request body is too large: {error}"
+            ))
+        })?;
+    let client = VSCODE_PROXY_CLIENT.as_ref().map_err(|error| {
+        AgentHostError::runtime(format!(
+            "failed to initialize VS Code proxy client: {error}"
+        ))
+    })?;
+    let mut upstream_request = client.request(parts.method, target).body(body);
+    for (name, value) in &parts.headers {
+        if should_proxy_header(name) {
+            upstream_request = upstream_request.header(name, value);
+        }
+    }
+    let upstream = upstream_request.send().await.map_err(|error| {
+        AgentHostError::upstream_unavailable(format!("VS Code server is unavailable: {error}"))
+    })?;
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let mut response = Response::builder().status(status);
+    for (name, value) in &headers {
+        if should_proxy_header(name) {
+            response = response.header(name, value);
+        }
+    }
+    response
+        .body(Body::from_stream(upstream.bytes_stream()))
+        .map_err(|error| {
+            ApiError(AgentHostError::runtime(format!(
+                "failed to build VS Code proxy response: {error}"
+            )))
+        })
+}
+
+async fn proxy_vscode_websocket(
+    websocket: WebSocketUpgrade,
+    headers: &HeaderMap,
+    target: &str,
+) -> Result<Response, ApiError> {
+    let websocket_target = websocket_url(target)?;
+    let mut upstream_request = websocket_target
+        .into_client_request()
+        .map_err(|error| vscode_websocket_error("build request", &error))?;
+    copy_websocket_protocol(headers, upstream_request.headers_mut());
+    rewrite_websocket_origin(upstream_request.headers_mut(), target)?;
+    let mut config = WebSocketConfig::default();
+    config.max_message_size = Some(VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES);
+    config.max_frame_size = Some(VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES);
+    config.max_write_buffer_size = VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES;
+    let (upstream, response) = connect_async_with_config(upstream_request, Some(config), true)
+        .await
+        .map_err(|error| vscode_websocket_error("connect", &error))?;
+    let selected_protocol = response
+        .headers()
+        .get(header::SEC_WEBSOCKET_PROTOCOL)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let websocket = match selected_protocol {
+        Some(protocol) => websocket.protocols(std::iter::once(protocol)),
+        None => websocket,
+    };
+    Ok(websocket
+        .max_message_size(VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES)
+        .max_frame_size(VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES)
+        .on_upgrade(move |browser| bridge_vscode_websockets(browser, upstream)))
+}
+
+fn websocket_url(target: &str) -> Result<String, ApiError> {
+    target.strip_prefix("http://").map_or_else(
+        || {
+            target.strip_prefix("https://").map_or_else(
+                || {
+                    Err(ApiError(AgentHostError::runtime(
+                        "VS Code proxy target must use HTTP or HTTPS",
+                    )))
+                },
+                |suffix| Ok(format!("wss://{suffix}")),
+            )
+        },
+        |suffix| Ok(format!("ws://{suffix}")),
+    )
+}
+
+fn copy_websocket_protocol(source: &HeaderMap, target: &mut HeaderMap) {
+    if let Some(protocol) = source.get(header::SEC_WEBSOCKET_PROTOCOL) {
+        target.insert(header::SEC_WEBSOCKET_PROTOCOL, protocol.clone());
+    }
+}
+
+fn rewrite_websocket_origin(headers: &mut HeaderMap, target: &str) -> Result<(), ApiError> {
+    let url = reqwest::Url::parse(target).map_err(|error| {
+        AgentHostError::runtime(format!("VS Code proxy target URL is invalid: {error}"))
+    })?;
+    let origin = url
+        .origin()
+        .ascii_serialization()
+        .parse()
+        .map_err(|error| {
+            AgentHostError::runtime(format!("VS Code proxy origin is invalid: {error}"))
+        })?;
+    headers.insert(header::ORIGIN, origin);
+    Ok(())
+}
+
+fn vscode_websocket_error(operation: &str, error: &WebSocketClientError) -> ApiError {
+    ApiError(AgentHostError::upstream_unavailable(format!(
+        "failed to {operation} VS Code WebSocket: {error}"
+    )))
+}
+
+async fn bridge_vscode_websockets(browser: WebSocket, upstream: VscodeUpstreamWebSocket) {
+    let (mut browser_sender, mut browser_receiver) = browser.split();
+    let (mut upstream_sender, mut upstream_receiver) = upstream.split();
+    loop {
+        let keep_open = tokio::select! {
+            browser_message = browser_receiver.next() => {
+                forward_vscode_browser_message(browser_message, &mut upstream_sender).await
+            }
+            upstream_message = upstream_receiver.next() => {
+                forward_vscode_upstream_message(upstream_message, &mut browser_sender).await
+            }
+        };
+        if !keep_open {
+            return;
+        }
+    }
+}
+
+async fn forward_vscode_browser_message(
+    message: Option<Result<WebSocketMessage, axum::Error>>,
+    upstream: &mut futures_util::stream::SplitSink<
+        VscodeUpstreamWebSocket,
+        UpstreamWebSocketMessage,
+    >,
+) -> bool {
+    let Some(Ok(message)) = message else {
+        return false;
+    };
+    let is_close = matches!(message, WebSocketMessage::Close(_));
+    upstream
+        .send(browser_to_upstream_message(message))
+        .await
+        .is_ok()
+        && !is_close
+}
+
+async fn forward_vscode_upstream_message(
+    message: Option<Result<UpstreamWebSocketMessage, WebSocketClientError>>,
+    browser: &mut futures_util::stream::SplitSink<WebSocket, WebSocketMessage>,
+) -> bool {
+    let Some(Ok(message)) = message else {
+        return false;
+    };
+    if matches!(message, UpstreamWebSocketMessage::Frame(_)) {
+        return true;
+    }
+    let is_close = matches!(message, UpstreamWebSocketMessage::Close(_));
+    browser
+        .send(upstream_to_browser_message(message))
+        .await
+        .is_ok()
+        && !is_close
+}
+
+fn browser_to_upstream_message(message: WebSocketMessage) -> UpstreamWebSocketMessage {
+    match message {
+        WebSocketMessage::Text(text) => {
+            UpstreamWebSocketMessage::Text(text.as_str().to_owned().into())
+        }
+        WebSocketMessage::Binary(bytes) => UpstreamWebSocketMessage::Binary(bytes),
+        WebSocketMessage::Ping(bytes) => UpstreamWebSocketMessage::Ping(bytes),
+        WebSocketMessage::Pong(bytes) => UpstreamWebSocketMessage::Pong(bytes),
+        WebSocketMessage::Close(frame) => {
+            UpstreamWebSocketMessage::Close(frame.map(|frame| UpstreamCloseFrame {
+                code: CloseCode::from(frame.code),
+                reason: frame.reason.as_str().to_owned().into(),
+            }))
+        }
+    }
+}
+
+fn upstream_to_browser_message(message: UpstreamWebSocketMessage) -> WebSocketMessage {
+    match message {
+        UpstreamWebSocketMessage::Text(text) => {
+            WebSocketMessage::Text(text.as_str().to_owned().into())
+        }
+        UpstreamWebSocketMessage::Binary(bytes) => WebSocketMessage::Binary(bytes),
+        UpstreamWebSocketMessage::Ping(bytes) => WebSocketMessage::Ping(bytes),
+        UpstreamWebSocketMessage::Pong(bytes) => WebSocketMessage::Pong(bytes),
+        UpstreamWebSocketMessage::Close(frame) => {
+            WebSocketMessage::Close(frame.map(|frame| axum::extract::ws::CloseFrame {
+                code: frame.code.into(),
+                reason: frame.reason.as_str().to_owned().into(),
+            }))
+        }
+        UpstreamWebSocketMessage::Frame(_) => {
+            unreachable!("raw WebSocket frames are filtered before conversion")
+        }
+    }
+}
+
+fn should_proxy_header(name: &HeaderName) -> bool {
+    !matches!(
+        name.as_str().to_ascii_lowercase().as_str(),
+        "connection"
+            | "host"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
 }
 
 async fn session_container_logs(
@@ -1448,6 +1804,7 @@ impl IntoResponse for ApiError {
             AgentHostError::SessionNotFound { .. }
             | AgentHostError::TerminalAttachmentNotFound { .. } => StatusCode::NOT_FOUND,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            AgentHostError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             AgentHostError::Conflict { .. } => StatusCode::CONFLICT,
             AgentHostError::UpstreamUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             AgentHostError::Runtime { .. }
@@ -1474,15 +1831,31 @@ mod tests {
     use axum::{
         Router,
         body::Body,
-        http::{Method, Request, StatusCode, header},
+        extract::{
+            OriginalUri, State,
+            ws::{Message, WebSocket, WebSocketUpgrade},
+        },
+        http::{HeaderMap, Method, Request, StatusCode, header},
+        response::IntoResponse,
+        routing::any,
     };
-    use futures_util::{StreamExt, stream};
+    use futures_util::{SinkExt, StreamExt, stream};
     use http_body_util::BodyExt;
     use serde_json::{Value as JsonValue, json};
+    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{
+            Message as ClientMessage,
+            client::IntoClientRequest,
+            http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL},
+        },
+    };
     use tower::ServiceExt;
 
     use super::{
         CreateSessionRequest, EventStream, KernelRuntime, RuntimeCreateSession, SessionRegistry,
+        proxy_target_url, proxy_vscode_http, proxy_vscode_websocket,
     };
     use crate::{
         AppConfig, AppState, build_router,
@@ -1515,6 +1888,187 @@ mod tests {
         telemetry: BTreeMap<String, TelemetrySnapshot>,
         fail_summary: bool,
         fail_telemetry: bool,
+    }
+
+    #[test]
+    fn vscode_proxy_target_strips_service_route_and_preserves_query() {
+        let uri = OriginalUri(axum::http::Uri::from_static(
+            "/sessions/session-1/vscode/stable/workbench.js?cache=1",
+        ));
+
+        let result = proxy_target_url(
+            "http://agentspace-kernel-session-1:8080",
+            "/sessions/session-1/vscode",
+            &uri,
+        );
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap_or_default(),
+            "http://agentspace-kernel-session-1:8080/stable/workbench.js?cache=1"
+        );
+    }
+
+    #[test]
+    fn vscode_proxy_target_rejects_encoded_dot_segments() {
+        for path in [
+            "/sessions/session-1/vscode/%2e%2e/admin",
+            "/sessions/session-1/vscode/%252e%252e/admin",
+            "/sessions/session-1/vscode/%2e%2e%2fadmin",
+            "/sessions/session-1/vscode/%2e%2e%5cadmin",
+        ] {
+            let uri = OriginalUri(
+                path.parse()
+                    .unwrap_or_else(|error| panic!("test URI should parse: {error}")),
+            );
+            let result = proxy_target_url(
+                "https://proxy.internal/kernel/ports/8080",
+                "/sessions/session-1/vscode",
+                &uri,
+            );
+
+            assert!(result.is_err(), "path should be rejected: {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn vscode_proxy_rejects_request_bodies_over_sixteen_mib() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .body(Body::from(vec![0_u8; 16 * 1024 * 1024 + 1]))
+            .unwrap_or_else(|error| panic!("request should build: {error}"));
+
+        let Err(error) = proxy_vscode_http(request, "http://127.0.0.1:9").await else {
+            panic!("oversized request should fail");
+        };
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn vscode_websocket_proxy_rewrites_origin_and_forwards_protocol_and_frames() {
+        let observed_origin = Arc::new(Mutex::new(None::<String>));
+        let upstream_app = Router::new()
+            .route("/stable/ws", any(test_code_server_websocket))
+            .with_state(observed_origin.clone());
+        let (upstream_url, upstream_handle) = spawn_test_server(upstream_app).await;
+        let proxy_app = Router::new()
+            .route("/stable/ws", any(test_vscode_websocket_proxy))
+            .with_state(upstream_url.clone());
+        let (proxy_url, proxy_handle) = spawn_test_server(proxy_app).await;
+
+        let mut request = format!("{}/stable/ws", proxy_url.replacen("http://", "ws://", 1))
+            .into_client_request()
+            .unwrap_or_else(|error| panic!("WebSocket request should build: {error}"));
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://browser.example"),
+        );
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("unused, vscode-test"),
+        );
+        let (mut socket, response) = connect_async(request)
+            .await
+            .unwrap_or_else(|error| panic!("proxy WebSocket should connect: {error}"));
+
+        assert_eq!(
+            response.headers().get(SEC_WEBSOCKET_PROTOCOL),
+            Some(&HeaderValue::from_static("vscode-test"))
+        );
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing upstream text frame");
+        };
+        assert_eq!(message, ClientMessage::Text("upstream-text".into()));
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing upstream binary frame");
+        };
+        assert_eq!(message, ClientMessage::Binary(vec![0, 0xff, 0x80].into()));
+        socket
+            .send(ClientMessage::Text("browser-text".into()))
+            .await
+            .unwrap_or_else(|error| panic!("text frame should send: {error}"));
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing text echo");
+        };
+        assert_eq!(message, ClientMessage::Text("browser-text".into()));
+        socket
+            .send(ClientMessage::Binary(vec![0, 0xfe, 0x81].into()))
+            .await
+            .unwrap_or_else(|error| panic!("binary frame should send: {error}"));
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing binary echo");
+        };
+        assert_eq!(message, ClientMessage::Binary(vec![0, 0xfe, 0x81].into()));
+        socket
+            .close(None)
+            .await
+            .unwrap_or_else(|error| panic!("WebSocket should close: {error}"));
+
+        assert_eq!(
+            observed_origin
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref(),
+            Some(upstream_url.as_str())
+        );
+        proxy_handle.abort();
+        upstream_handle.abort();
+    }
+
+    async fn spawn_test_server(app: Router) -> (String, JoinHandle<Result<(), std::io::Error>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("test listener should bind: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("test listener should have an address: {error}"));
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await });
+        (format!("http://{address}"), handle)
+    }
+
+    async fn test_vscode_websocket_proxy(
+        State(upstream_url): State<String>,
+        headers: HeaderMap,
+        websocket: WebSocketUpgrade,
+    ) -> Result<axum::response::Response, super::ApiError> {
+        proxy_vscode_websocket(websocket, &headers, &format!("{upstream_url}/stable/ws")).await
+    }
+
+    async fn test_code_server_websocket(
+        State(observed_origin): State<Arc<Mutex<Option<String>>>>,
+        headers: HeaderMap,
+        websocket: WebSocketUpgrade,
+    ) -> axum::response::Response {
+        *observed_origin
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = headers
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        websocket
+            .protocols(["vscode-test"])
+            .on_upgrade(serve_test_code_server_websocket)
+    }
+
+    async fn serve_test_code_server_websocket(mut socket: WebSocket) {
+        if socket
+            .send(Message::Text("upstream-text".into()))
+            .await
+            .is_err()
+            || socket
+                .send(Message::Binary(vec![0, 0xff, 0x80].into()))
+                .await
+                .is_err()
+        {
+            return;
+        }
+        while let Some(Ok(message)) = socket.next().await {
+            let close = matches!(message, Message::Close(_));
+            if socket.send(message).await.is_err() || close {
+                return;
+            }
+        }
     }
 
     impl FakeRuntime {

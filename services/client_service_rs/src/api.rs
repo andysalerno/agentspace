@@ -9,12 +9,12 @@ use axum::{
     Json, Router,
     body::{Body, Bytes, to_bytes},
     extract::{
-        DefaultBodyLimit, OriginalUri, Path, Query, State,
+        DefaultBodyLimit, FromRequestParts, OriginalUri, Path, Query, State,
         ws::{CloseFrame, Message as WebSocketMessage, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{any, delete, get, post},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ use crate::{
     ActiveTurnRecord, ActiveTurnStreamState, AppState, ENV_PREFIX, StreamItem,
     agent_host::{
         AgentHostError, AgentHostSessionCreate, AgentHostWebSocket, JsonObject, KernelEvent,
+        vscode_proxy_path_has_dot_segment,
     },
     errors::{StoreError, ValidationError},
     memory::{MEMORY_JSON_CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE, MemoryProxyError},
@@ -66,6 +67,8 @@ const MEMORY_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MEMORY_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const TERMINAL_WEBSOCKET_MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 const TERMINAL_WEBSOCKET_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+const VSCODE_PROXY_MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
+const VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const TERMINAL_CLOSE_NORMAL: u16 = 1000;
 const TERMINAL_CLOSE_BACKPRESSURE: u16 = 4429;
 const TERMINAL_CLOSE_UPSTREAM_UNAVAILABLE: u16 = 4503;
@@ -78,6 +81,7 @@ const AGENTSPACE_RUNTIME_RECOVERY_ENV: &str = "AGENTSPACE_RUNTIME_RECOVERY";
 /// are accepted while other routes keep the framework's smaller default limit.
 const CONFIG_BODY_LIMIT_BYTES: usize = 40 * 1024 * 1024;
 
+#[allow(clippy::too_many_lines)]
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
@@ -134,6 +138,18 @@ pub fn router() -> Router<AppState> {
             post(stream_message),
         )
         .route("/sessions/{session_id}/telemetry", get(session_telemetry))
+        .route(
+            "/sessions/{session_id}/vscode",
+            any(proxy_session_vscode_root),
+        )
+        .route(
+            "/sessions/{session_id}/vscode/",
+            any(proxy_session_vscode_root),
+        )
+        .route(
+            "/sessions/{session_id}/vscode/{*path}",
+            any(proxy_session_vscode_path),
+        )
         .merge(terminal_router())
         .route(
             "/sessions/{session_id}/workspace/save",
@@ -1910,6 +1926,211 @@ async fn session_telemetry(
     Ok(Json(snapshot))
 }
 
+async fn proxy_session_vscode_root(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    original_uri: OriginalUri,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    proxy_session_vscode(state, session_id, original_uri, request).await
+}
+
+async fn proxy_session_vscode_path(
+    State(state): State<AppState>,
+    Path((session_id, _path)): Path<(String, String)>,
+    original_uri: OriginalUri,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    proxy_session_vscode(state, session_id, original_uri, request).await
+}
+
+async fn proxy_session_vscode(
+    state: AppState,
+    session_id: String,
+    original_uri: OriginalUri,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let session = require_session(&state, &session_id)?;
+    let route_prefix = format!("/sessions/{session_id}/vscode");
+    let path_and_query = proxy_path_and_query(&route_prefix, &original_uri)?;
+    let (mut parts, body) = request.into_parts();
+    let websocket = WebSocketUpgrade::from_request_parts(&mut parts, &state)
+        .await
+        .ok();
+    let request = Request::from_parts(parts, body);
+    if let Some(websocket) = websocket {
+        let headers = request.headers().clone();
+        validate_websocket_origin(&state, &headers, "VS Code")?;
+        let (upstream, protocol) = state
+            .agent_host
+            .connect_vscode_websocket(
+                &session.agent_host_session_id,
+                &path_and_query,
+                headers.get(header::SEC_WEBSOCKET_PROTOCOL),
+            )
+            .await
+            .map_err(vscode_upstream_error)?;
+        let websocket = match protocol {
+            Some(protocol) => websocket.protocols(std::iter::once(protocol)),
+            None => websocket,
+        };
+        return Ok(websocket
+            .max_message_size(VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES)
+            .max_frame_size(VSCODE_PROXY_MAX_WEBSOCKET_MESSAGE_BYTES)
+            .on_upgrade(move |browser| proxy_vscode_websocket(browser, upstream)));
+    }
+    proxy_vscode_http(state, session, path_and_query, request).await
+}
+
+fn proxy_path_and_query(
+    route_prefix: &str,
+    original_uri: &OriginalUri,
+) -> Result<String, ApiError> {
+    let uri = &original_uri.0;
+    let suffix = uri
+        .path()
+        .strip_prefix(route_prefix)
+        .ok_or_else(|| ApiError::internal("VS Code proxy route prefix is invalid".to_owned()))?;
+    if vscode_proxy_path_has_dot_segment(suffix) {
+        return Err(ApiError::unprocessable(
+            "VS Code proxy path must not contain dot segments".to_owned(),
+        ));
+    }
+    let mut result = if suffix.is_empty() {
+        "/".to_owned()
+    } else {
+        suffix.to_owned()
+    };
+    if let Some(query) = uri.query() {
+        result.push('?');
+        result.push_str(query);
+    }
+    Ok(result)
+}
+
+async fn proxy_vscode_http(
+    state: AppState,
+    session: SessionRecord,
+    path_and_query: String,
+    request: Request<Body>,
+) -> Result<Response, ApiError> {
+    let (parts, body) = request.into_parts();
+    let body = to_bytes(body, VSCODE_PROXY_MAX_REQUEST_BYTES)
+        .await
+        .map_err(|error| {
+            ApiError::payload_too_large(format!("VS Code proxy request body is too large: {error}"))
+        })?;
+    let headers = proxy_headers(&parts.headers);
+    let upstream = state
+        .agent_host
+        .proxy_vscode_http(
+            &session.agent_host_session_id,
+            &path_and_query,
+            parts.method,
+            &headers,
+            reqwest::Body::from(body),
+        )
+        .await
+        .map_err(vscode_upstream_error)?;
+    let status = upstream.status();
+    let headers = upstream.headers().clone();
+    let mut response = Response::builder().status(status);
+    for (name, value) in &headers {
+        if should_proxy_header(name) {
+            response = response.header(name, value);
+        }
+    }
+    response
+        .body(Body::from_stream(upstream.bytes_stream()))
+        .map_err(|error| {
+            ApiError::internal(format!("failed to build VS Code proxy response: {error}"))
+        })
+}
+
+fn proxy_headers(headers: &HeaderMap) -> HeaderMap {
+    headers
+        .iter()
+        .filter(|(name, _value)| should_proxy_header(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+fn should_proxy_header(name: &HeaderName) -> bool {
+    !matches!(
+        name.as_str().to_ascii_lowercase().as_str(),
+        "connection"
+            | "host"
+            | "keep-alive"
+            | "origin"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
+fn vscode_upstream_error(error: AgentHostError) -> ApiError {
+    match error {
+        AgentHostError::HttpStatus { status, .. } if status == StatusCode::NOT_FOUND => {
+            ApiError::not_found("VS Code session runtime was not found".to_owned())
+        }
+        other => ApiError::service_unavailable(format!("VS Code proxy is unavailable: {other}")),
+    }
+}
+
+async fn proxy_vscode_websocket(browser: WebSocket, upstream: AgentHostWebSocket) {
+    let (mut browser_sender, mut browser_receiver) = browser.split();
+    let (mut upstream_sender, mut upstream_receiver) = upstream.split();
+    loop {
+        let keep_open = tokio::select! {
+            browser_message = browser_receiver.next() => {
+                forward_vscode_browser_message(browser_message, &mut upstream_sender).await
+            }
+            upstream_message = upstream_receiver.next() => {
+                forward_vscode_upstream_message(upstream_message, &mut browser_sender).await
+            }
+        };
+        if !keep_open {
+            return;
+        }
+    }
+}
+
+async fn forward_vscode_browser_message(
+    message: Option<Result<WebSocketMessage, axum::Error>>,
+    upstream_sender: &mut UpstreamWebSocketSender,
+) -> bool {
+    let Some(Ok(message)) = message else {
+        return false;
+    };
+    let is_close = matches!(message, WebSocketMessage::Close(_));
+    upstream_sender
+        .send(browser_to_upstream_message(message))
+        .await
+        .is_ok()
+        && !is_close
+}
+
+async fn forward_vscode_upstream_message(
+    message: Option<Result<UpstreamWebSocketMessage, WebSocketClientError>>,
+    browser_sender: &mut BrowserWebSocketSender,
+) -> bool {
+    let Some(Ok(message)) = message else {
+        return false;
+    };
+    if matches!(message, UpstreamWebSocketMessage::Frame(_)) {
+        return true;
+    }
+    let is_close = matches!(message, UpstreamWebSocketMessage::Close(_));
+    browser_sender
+        .send(upstream_to_browser_message(message))
+        .await
+        .is_ok()
+        && !is_close
+}
+
 async fn terminal_ensure(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
@@ -1956,7 +2177,7 @@ async fn terminal_websocket(
     headers: HeaderMap,
     websocket: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    validate_terminal_origin(&state, &headers)?;
+    validate_websocket_origin(&state, &headers, "terminal")?;
     let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
     let terminal = state
         .agent_host
@@ -1980,7 +2201,11 @@ async fn terminal_websocket(
         .on_upgrade(move |browser| proxy_terminal_websocket(browser, upstream)))
 }
 
-fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+fn validate_websocket_origin(
+    state: &AppState,
+    headers: &HeaderMap,
+    endpoint: &str,
+) -> Result<(), ApiError> {
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let Some(origin) = origins.next() else {
         return Ok(());
@@ -1992,7 +2217,7 @@ fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(),
     }
     let origin = origin
         .to_str()
-        .map_err(|_| ApiError::forbidden("terminal WebSocket Origin is invalid".to_owned()))?;
+        .map_err(|_| ApiError::forbidden(format!("{endpoint} WebSocket Origin is invalid")))?;
     if state
         .config
         .cors_allowed_origins()
@@ -2003,7 +2228,7 @@ fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(),
         Ok(())
     } else {
         Err(ApiError::forbidden(format!(
-            "terminal WebSocket Origin {origin:?} is not allowed"
+            "{endpoint} WebSocket Origin {origin:?} is not allowed"
         )))
     }
 }
@@ -2289,8 +2514,8 @@ fn browser_to_upstream_message(message: WebSocketMessage) -> UpstreamWebSocketMe
 
 fn upstream_to_browser_message(message: UpstreamWebSocketMessage) -> WebSocketMessage {
     match message {
-        UpstreamWebSocketMessage::Text(_) => {
-            unreachable!("text frames are sanitized before conversion")
+        UpstreamWebSocketMessage::Text(text) => {
+            WebSocketMessage::Text(text.as_str().to_owned().into())
         }
         UpstreamWebSocketMessage::Binary(bytes) => WebSocketMessage::Binary(bytes),
         UpstreamWebSocketMessage::Ping(bytes) => WebSocketMessage::Ping(bytes),
@@ -6406,8 +6631,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        cli_model_source, flatten_text, send_stream_item, session_workspace_exclude_paths,
-        terminal_origin_matches_forwarded_request,
+        cli_model_source, flatten_text, proxy_path_and_query, send_stream_item,
+        session_workspace_exclude_paths, terminal_origin_matches_forwarded_request,
     };
     use crate::{
         ActiveTurnStreamState, AppConfig, AppState,
@@ -6435,6 +6660,34 @@ mod tests {
             "http://malicious.example",
             &headers
         ));
+    }
+
+    #[test]
+    fn vscode_proxy_path_preserves_nested_assets_and_query() {
+        let uri = axum::extract::OriginalUri(axum::http::Uri::from_static(
+            "/sessions/session-1/vscode/stable/workbench.js?cache=1",
+        ));
+        let result = proxy_path_and_query("/sessions/session-1/vscode", &uri);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or_default(), "/stable/workbench.js?cache=1");
+    }
+
+    #[test]
+    fn vscode_proxy_path_rejects_encoded_dot_segments() {
+        for path in [
+            "/sessions/session-1/vscode/%2e%2e/admin",
+            "/sessions/session-1/vscode/%252e%252e/admin",
+            "/sessions/session-1/vscode/%2e%2e%2fadmin",
+            "/sessions/session-1/vscode/%2e%2e%5cadmin",
+        ] {
+            let uri = axum::extract::OriginalUri(
+                path.parse()
+                    .unwrap_or_else(|error| panic!("test URI should parse: {error}")),
+            );
+            let result = proxy_path_and_query("/sessions/session-1/vscode", &uri);
+
+            assert!(result.is_err(), "path should be rejected: {path}");
+        }
     }
 
     #[test]

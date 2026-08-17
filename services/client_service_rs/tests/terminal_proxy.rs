@@ -20,7 +20,7 @@ use axum::{
     },
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use client_service_rs::{AppConfig, AppState, agent_host::AgentHostClient, build_router};
 use futures_util::{SinkExt, StreamExt};
@@ -31,7 +31,11 @@ use tokio_tungstenite::{
     tungstenite::{
         Error as WebSocketError, Message as ClientMessage,
         client::IntoClientRequest,
-        http::{HeaderValue, header::ORIGIN},
+        handshake::client::Response as WebSocketResponse,
+        http::{
+            HeaderValue,
+            header::{ORIGIN, SEC_WEBSOCKET_PROTOCOL},
+        },
         protocol::{CloseFrame as ClientCloseFrame, frame::coding::CloseCode},
     },
 };
@@ -273,6 +277,11 @@ impl TestHarness {
         self.client_server.base_url.replacen("http://", "ws://", 1)
             + &format!("/sessions/{session_id}/terminal/ws")
     }
+
+    fn vscode_websocket_url(&self, session_id: &str) -> String {
+        self.client_server.base_url.replacen("http://", "ws://", 1)
+            + &format!("/sessions/{session_id}/vscode/stable/ws")
+    }
 }
 
 async fn spawn_server(app: Router) -> Result<TestServer, Box<dyn Error + Send + Sync>> {
@@ -320,6 +329,10 @@ fn stub_router(state: StubState) -> Router {
         .route(
             "/sessions/{session_id}/terminal/ws",
             get(upstream_terminal_websocket),
+        )
+        .route(
+            "/sessions/{session_id}/vscode/{*path}",
+            any(upstream_vscode_websocket),
         )
         .with_state(state)
 }
@@ -677,6 +690,63 @@ async fn serve_upstream_websocket(state: StubState, mut socket: WebSocket) {
     }
 }
 
+async fn upstream_vscode_websocket(
+    State(state): State<StubState>,
+    Path((session_id, path)): Path<(String, String)>,
+    websocket: WebSocketUpgrade,
+) -> Response {
+    if let Err(status) = state.record("GET", format!("/sessions/{session_id}/vscode/{path}"), None)
+    {
+        return status.into_response();
+    }
+    websocket
+        .protocols(["vscode-test"])
+        .on_upgrade(move |socket| serve_upstream_vscode_websocket(state, socket))
+}
+
+async fn serve_upstream_vscode_websocket(state: StubState, mut socket: WebSocket) {
+    if socket
+        .send(Message::Text("upstream-text".into()))
+        .await
+        .is_err()
+        || socket
+            .send(Message::Binary(UPSTREAM_BINARY.to_vec().into()))
+            .await
+            .is_err()
+    {
+        return;
+    }
+    while let Some(message) = socket.next().await {
+        match message {
+            Ok(Message::Text(text)) => {
+                if let Ok(mut observations) = state.observations.lock() {
+                    observations.push(WebSocketObservation::Text(text.as_str().to_owned()));
+                }
+                if socket.send(Message::Text(text)).await.is_err() {
+                    return;
+                }
+            }
+            Ok(Message::Binary(bytes)) => {
+                if let Ok(mut observations) = state.observations.lock() {
+                    observations.push(WebSocketObservation::Binary(bytes.to_vec()));
+                }
+                if socket.send(Message::Binary(bytes)).await.is_err() {
+                    return;
+                }
+            }
+            Ok(Message::Close(frame)) => {
+                let _ = socket.send(Message::Close(frame)).await;
+                return;
+            }
+            Ok(Message::Ping(bytes)) => {
+                let _ = socket.send(Message::Pong(bytes)).await;
+            }
+            Ok(Message::Pong(_)) => {}
+            Err(_error) => return,
+        }
+    }
+}
+
 fn string_field(value: &Value, field: &str) -> Result<String, Box<dyn Error + Send + Sync>> {
     value
         .get(field)
@@ -701,6 +771,28 @@ async fn connect_terminal(
     connect_async(request)
         .await
         .map(|(socket, _response)| socket)
+}
+
+async fn connect_vscode(
+    url: &str,
+) -> Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        WebSocketResponse,
+    ),
+    WebSocketError,
+> {
+    let mut request = url.into_client_request()?;
+    request
+        .headers_mut()
+        .insert(ORIGIN, HeaderValue::from_static(ALLOWED_ORIGIN));
+    request.headers_mut().insert(
+        SEC_WEBSOCKET_PROTOCOL,
+        HeaderValue::from_static("unused, vscode-test"),
+    );
+    connect_async(request).await
 }
 
 async fn websocket_status(url: &str, origin: Option<&str>) -> StatusCode {
@@ -1263,6 +1355,76 @@ async fn websocket_origin_binary_and_sanitized_lifecycle_frames_are_preserved()
     let observations = harness.upstream.observations()?;
     assert!(observations.contains(&WebSocketObservation::Binary(input)));
     assert!(observations.contains(&WebSocketObservation::Text(resize.to_owned())));
+    Ok(())
+}
+
+#[tokio::test]
+async fn vscode_websocket_preserves_protocol_and_bidirectional_frames()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let harness = TestHarness::start().await?;
+    let (session_id, _session) = harness.create_cli_session().await?;
+    let (mut socket, response) = connect_vscode(&harness.vscode_websocket_url(&session_id)).await?;
+
+    assert_eq!(
+        response.headers().get(SEC_WEBSOCKET_PROTOCOL),
+        Some(&HeaderValue::from_static("vscode-test"))
+    );
+    assert_eq!(
+        socket.next().await.ok_or("missing upstream text")??,
+        ClientMessage::Text("upstream-text".into())
+    );
+    assert_eq!(
+        socket.next().await.ok_or("missing upstream binary")??,
+        ClientMessage::Binary(UPSTREAM_BINARY.to_vec().into())
+    );
+
+    let text = "browser-text".to_owned();
+    socket
+        .send(ClientMessage::Text(text.clone().into()))
+        .await?;
+    assert_eq!(
+        socket.next().await.ok_or("missing text echo")??,
+        ClientMessage::Text(text.clone().into())
+    );
+    let binary = vec![0, 0xfe, b'Z', 0x81];
+    socket
+        .send(ClientMessage::Binary(binary.clone().into()))
+        .await?;
+    assert_eq!(
+        socket.next().await.ok_or("missing binary echo")??,
+        ClientMessage::Binary(binary.clone().into())
+    );
+    socket.close(None).await?;
+
+    sleep(Duration::from_millis(25)).await;
+    let observations = harness.upstream.observations()?;
+    assert!(observations.contains(&WebSocketObservation::Text(text)));
+    assert!(observations.contains(&WebSocketObservation::Binary(binary)));
+    assert!(harness.upstream.requests()?.iter().any(|request| {
+        request.method == "GET"
+            && request.path == format!("/sessions/{session_id}/vscode/stable/ws")
+    }));
+    Ok(())
+}
+
+#[tokio::test]
+async fn vscode_proxy_rejects_request_bodies_over_sixteen_mib()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let harness = TestHarness::start().await?;
+    let (session_id, _session) = harness.create_cli_session().await?;
+    let response = harness
+        .client
+        .post(format!(
+            "{}/sessions/{session_id}/vscode/upload",
+            harness.client_server.base_url
+        ))
+        .body(vec![0_u8; 16 * 1024 * 1024 + 1])
+        .send()
+        .await?;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = response.json::<Value>().await?;
+    assert!(body["detail"].as_str().is_some());
     Ok(())
 }
 

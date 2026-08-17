@@ -10,6 +10,23 @@ server {
   root /usr/share/nginx/html;
   index index.html;
 
+  location ~ ^/api/sessions/[^/]+/vscode(?:/.*)?$ {
+    client_max_body_size 16m;
+    rewrite ^/api/(.*)$ /$1 break;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $terminal_connection;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1d;
+    proxy_send_timeout 1d;
+    proxy_pass ${WEBUI_CLIENT_SERVICE_BASE_URL};
+  }
+
   location ~ ^/api/sessions/[^/]+/terminal/ws$ {
     rewrite ^/api/(.*)$ /$1 break;
     proxy_http_version 1.1;
