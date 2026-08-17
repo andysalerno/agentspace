@@ -15,6 +15,7 @@ services:
       - AGENT_HOST_DOCKER_NETWORK=agentspace-agent-host_default
       - AGENT_HOST_KERNEL_BASE_URL_TEMPLATE=http://{container_name}:8000
       - AGENT_HOST_KERNEL_IMAGE=agentspace-kernel-kernel:latest
+      - AGENT_HOST_KERNEL_VSCODE_PROXY_URL_TEMPLATE=http://{container_name}:{container_port}
       - KERNEL_WORKDIR=${KERNEL_WORKDIR}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

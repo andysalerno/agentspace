@@ -1070,10 +1070,14 @@ impl KernelRuntime for DockerKernelRuntime {
         session: &KernelRuntimeSession,
     ) -> Result<String, AgentHostError> {
         let handle = Self::docker_session(session)?;
-        Ok(format!(
-            "http://{}:{}",
-            handle.container_name, self.config.vscode_container_port
-        ))
+        Ok(self
+            .config
+            .vscode_proxy_url_template
+            .replace(CONTAINER_NAME_PLACEHOLDER, &handle.container_name)
+            .replace(
+                CONTAINER_PORT_PLACEHOLDER,
+                &self.config.vscode_container_port.to_string(),
+            ))
     }
 
     fn free_port_url(&self, session: &KernelRuntimeSession) -> Option<String> {
@@ -1455,6 +1459,7 @@ pub struct DockerRuntimeConfig {
     pub vscode_container_port: u16,
     pub vscode_host_ip: String,
     pub vscode_url_template: String,
+    pub vscode_proxy_url_template: String,
     pub free_port_container_port: u16,
     pub free_port_host_ip: String,
     pub free_port_url_template: String,
@@ -1474,6 +1479,7 @@ impl Default for DockerRuntimeConfig {
             vscode_container_port: 8080,
             vscode_host_ip: "0.0.0.0".to_owned(),
             vscode_url_template: "http://127.0.0.1:{host_port}".to_owned(),
+            vscode_proxy_url_template: "http://{container_name}:{container_port}".to_owned(),
             free_port_container_port: 8081,
             free_port_host_ip: "0.0.0.0".to_owned(),
             free_port_url_template: "http://127.0.0.1:{host_port}".to_owned(),
@@ -1504,6 +1510,10 @@ impl DockerRuntimeConfig {
         config.vscode_url_template = env_or(
             "AGENT_HOST_KERNEL_VSCODE_URL_TEMPLATE",
             &config.vscode_url_template,
+        );
+        config.vscode_proxy_url_template = env_or(
+            "AGENT_HOST_KERNEL_VSCODE_PROXY_URL_TEMPLATE",
+            &config.vscode_proxy_url_template,
         );
         config.free_port_container_port = env_u16(
             "AGENT_HOST_KERNEL_FREE_PORT_CONTAINER_PORT",
@@ -4457,6 +4467,33 @@ mod tests {
                 container_port: 8081,
                 host_ip: "0.0.0.0".to_owned(),
             }]
+        );
+    }
+
+    #[test]
+    fn vscode_proxy_uses_configured_agent_host_route() {
+        let config = DockerRuntimeConfig {
+            vscode_container_port: 9443,
+            vscode_proxy_url_template:
+                "https://proxy.internal/{container_name}/ports/{container_port}".to_owned(),
+            ..DockerRuntimeConfig::default()
+        };
+        let runtime = DockerKernelRuntime::new(config, Arc::new(FakeDockerBackend::default()));
+        let session = KernelRuntimeSession::Docker(DockerKernelSession {
+            session_id: "session".to_owned(),
+            container_name: "agentspace-kernel-session".to_owned(),
+            session_workspace_volume_name: "workspace".to_owned(),
+            session_telemetry_volume_name: None,
+            base_url: "http://kernel".to_owned(),
+            vscode_url: None,
+            free_port_url: None,
+        });
+
+        assert_eq!(
+            runtime
+                .vscode_proxy_base_url(&session)
+                .unwrap_or_else(|error| panic!("proxy URL should resolve: {error}")),
+            "https://proxy.internal/agentspace-kernel-session/ports/9443"
         );
     }
 

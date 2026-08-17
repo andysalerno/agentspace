@@ -1456,7 +1456,9 @@ async fn proxy_vscode_http(request: Request<Body>, target: &str) -> Result<Respo
     let body = to_bytes(body, VSCODE_PROXY_MAX_REQUEST_BYTES)
         .await
         .map_err(|error| {
-            AgentHostError::validation(format!("VS Code proxy request body is too large: {error}"))
+            AgentHostError::payload_too_large(format!(
+                "VS Code proxy request body is too large: {error}"
+            ))
         })?;
     let client = VSCODE_PROXY_CLIENT.as_ref().map_err(|error| {
         AgentHostError::runtime(format!(
@@ -1779,6 +1781,7 @@ impl IntoResponse for ApiError {
             AgentHostError::SessionNotFound { .. }
             | AgentHostError::TerminalAttachmentNotFound { .. } => StatusCode::NOT_FOUND,
             AgentHostError::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            AgentHostError::PayloadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             AgentHostError::Conflict { .. } => StatusCode::CONFLICT,
             AgentHostError::UpstreamUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
             AgentHostError::Runtime { .. }
@@ -1807,6 +1810,7 @@ mod tests {
         body::Body,
         extract::OriginalUri,
         http::{Method, Request, StatusCode, header},
+        response::IntoResponse,
     };
     use futures_util::{StreamExt, stream};
     use http_body_util::BodyExt;
@@ -1815,7 +1819,7 @@ mod tests {
 
     use super::{
         CreateSessionRequest, EventStream, KernelRuntime, RuntimeCreateSession, SessionRegistry,
-        proxy_target_url,
+        proxy_target_url, proxy_vscode_http,
     };
     use crate::{
         AppConfig, AppState, build_router,
@@ -1866,6 +1870,21 @@ mod tests {
             result.unwrap_or_default(),
             "http://agentspace-kernel-session-1:8080/stable/workbench.js?cache=1"
         );
+    }
+
+    #[tokio::test]
+    async fn vscode_proxy_rejects_request_bodies_over_sixteen_mib() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .body(Body::from(vec![0_u8; 16 * 1024 * 1024 + 1]))
+            .unwrap_or_else(|error| panic!("request should build: {error}"));
+
+        let Err(error) = proxy_vscode_http(request, "http://127.0.0.1:9").await else {
+            panic!("oversized request should fail");
+        };
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     impl FakeRuntime {

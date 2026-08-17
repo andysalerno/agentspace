@@ -2012,7 +2012,7 @@ async fn proxy_vscode_http(
     let body = to_bytes(body, VSCODE_PROXY_MAX_REQUEST_BYTES)
         .await
         .map_err(|error| {
-            ApiError::unprocessable(format!("VS Code proxy request body is too large: {error}"))
+            ApiError::payload_too_large(format!("VS Code proxy request body is too large: {error}"))
         })?;
     let headers = proxy_headers(&parts.headers);
     let upstream = state

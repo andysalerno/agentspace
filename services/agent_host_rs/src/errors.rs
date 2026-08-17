@@ -10,6 +10,7 @@ pub enum AgentHostError {
     SessionNotFound { session_id: String },
     TerminalAttachmentNotFound { attachment_id: String },
     Validation { message: String },
+    PayloadTooLarge { message: String },
     Conflict { message: String },
     UpstreamUnavailable { message: String },
     Runtime { message: String },
@@ -30,6 +31,13 @@ impl AgentHostError {
     #[must_use]
     pub fn validation(message: impl Into<String>) -> Self {
         Self::Validation {
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn payload_too_large(message: impl Into<String>) -> Self {
+        Self::PayloadTooLarge {
             message: message.into(),
         }
     }
@@ -74,6 +82,7 @@ impl Display for AgentHostError {
                 )
             }
             Self::Validation { message }
+            | Self::PayloadTooLarge { message }
             | Self::Conflict { message }
             | Self::UpstreamUnavailable { message }
             | Self::Runtime { message } => formatter.write_str(message),
@@ -95,6 +104,7 @@ impl Error for AgentHostError {
             Self::SessionNotFound { .. }
             | Self::TerminalAttachmentNotFound { .. }
             | Self::Validation { .. }
+            | Self::PayloadTooLarge { .. }
             | Self::Conflict { .. }
             | Self::UpstreamUnavailable { .. }
             | Self::Runtime { .. } => None,

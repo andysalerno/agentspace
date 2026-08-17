@@ -1064,6 +1064,7 @@ fn disconnect_for_error(error: &AgentHostError) -> Disconnect {
         AgentHostError::SessionNotFound { .. } => Disconnect::gone(error.to_string()),
         AgentHostError::Conflict { .. }
         | AgentHostError::Validation { .. }
+        | AgentHostError::PayloadTooLarge { .. }
         | AgentHostError::TerminalAttachmentNotFound { .. } => {
             Disconnect::conflict(error.to_string())
         }
