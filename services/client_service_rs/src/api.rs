@@ -1960,7 +1960,7 @@ async fn proxy_session_vscode(
     let request = Request::from_parts(parts, body);
     if let Some(websocket) = websocket {
         let headers = request.headers().clone();
-        validate_terminal_origin(&state, &headers)?;
+        validate_websocket_origin(&state, &headers, "VS Code")?;
         let (upstream, protocol) = state
             .agent_host
             .connect_vscode_websocket(
@@ -2177,7 +2177,7 @@ async fn terminal_websocket(
     headers: HeaderMap,
     websocket: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
-    validate_terminal_origin(&state, &headers)?;
+    validate_websocket_origin(&state, &headers, "terminal")?;
     let (mut session, _agent) = require_cli_runtime(&state, &session_id)?;
     let terminal = state
         .agent_host
@@ -2201,7 +2201,11 @@ async fn terminal_websocket(
         .on_upgrade(move |browser| proxy_terminal_websocket(browser, upstream)))
 }
 
-fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+fn validate_websocket_origin(
+    state: &AppState,
+    headers: &HeaderMap,
+    endpoint: &str,
+) -> Result<(), ApiError> {
     let mut origins = headers.get_all(header::ORIGIN).iter();
     let Some(origin) = origins.next() else {
         return Ok(());
@@ -2213,7 +2217,7 @@ fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(),
     }
     let origin = origin
         .to_str()
-        .map_err(|_| ApiError::forbidden("terminal WebSocket Origin is invalid".to_owned()))?;
+        .map_err(|_| ApiError::forbidden(format!("{endpoint} WebSocket Origin is invalid")))?;
     if state
         .config
         .cors_allowed_origins()
@@ -2224,7 +2228,7 @@ fn validate_terminal_origin(state: &AppState, headers: &HeaderMap) -> Result<(),
         Ok(())
     } else {
         Err(ApiError::forbidden(format!(
-            "terminal WebSocket Origin {origin:?} is not allowed"
+            "{endpoint} WebSocket Origin {origin:?} is not allowed"
         )))
     }
 }

@@ -1831,18 +1831,31 @@ mod tests {
     use axum::{
         Router,
         body::Body,
-        extract::OriginalUri,
-        http::{Method, Request, StatusCode, header},
+        extract::{
+            OriginalUri, State,
+            ws::{Message, WebSocket, WebSocketUpgrade},
+        },
+        http::{HeaderMap, Method, Request, StatusCode, header},
         response::IntoResponse,
+        routing::any,
     };
-    use futures_util::{StreamExt, stream};
+    use futures_util::{SinkExt, StreamExt, stream};
     use http_body_util::BodyExt;
     use serde_json::{Value as JsonValue, json};
+    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{
+            Message as ClientMessage,
+            client::IntoClientRequest,
+            http::{HeaderValue, header::SEC_WEBSOCKET_PROTOCOL},
+        },
+    };
     use tower::ServiceExt;
 
     use super::{
         CreateSessionRequest, EventStream, KernelRuntime, RuntimeCreateSession, SessionRegistry,
-        proxy_target_url, proxy_vscode_http,
+        proxy_target_url, proxy_vscode_http, proxy_vscode_websocket,
     };
     use crate::{
         AppConfig, AppState, build_router,
@@ -1930,6 +1943,132 @@ mod tests {
         let response = error.into_response();
 
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn vscode_websocket_proxy_rewrites_origin_and_forwards_protocol_and_frames() {
+        let observed_origin = Arc::new(Mutex::new(None::<String>));
+        let upstream_app = Router::new()
+            .route("/stable/ws", any(test_code_server_websocket))
+            .with_state(observed_origin.clone());
+        let (upstream_url, upstream_handle) = spawn_test_server(upstream_app).await;
+        let proxy_app = Router::new()
+            .route("/stable/ws", any(test_vscode_websocket_proxy))
+            .with_state(upstream_url.clone());
+        let (proxy_url, proxy_handle) = spawn_test_server(proxy_app).await;
+
+        let mut request = format!("{}/stable/ws", proxy_url.replacen("http://", "ws://", 1))
+            .into_client_request()
+            .unwrap_or_else(|error| panic!("WebSocket request should build: {error}"));
+        request.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("http://browser.example"),
+        );
+        request.headers_mut().insert(
+            SEC_WEBSOCKET_PROTOCOL,
+            HeaderValue::from_static("unused, vscode-test"),
+        );
+        let (mut socket, response) = connect_async(request)
+            .await
+            .unwrap_or_else(|error| panic!("proxy WebSocket should connect: {error}"));
+
+        assert_eq!(
+            response.headers().get(SEC_WEBSOCKET_PROTOCOL),
+            Some(&HeaderValue::from_static("vscode-test"))
+        );
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing upstream text frame");
+        };
+        assert_eq!(message, ClientMessage::Text("upstream-text".into()));
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing upstream binary frame");
+        };
+        assert_eq!(message, ClientMessage::Binary(vec![0, 0xff, 0x80].into()));
+        socket
+            .send(ClientMessage::Text("browser-text".into()))
+            .await
+            .unwrap_or_else(|error| panic!("text frame should send: {error}"));
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing text echo");
+        };
+        assert_eq!(message, ClientMessage::Text("browser-text".into()));
+        socket
+            .send(ClientMessage::Binary(vec![0, 0xfe, 0x81].into()))
+            .await
+            .unwrap_or_else(|error| panic!("binary frame should send: {error}"));
+        let Some(Ok(message)) = socket.next().await else {
+            panic!("missing binary echo");
+        };
+        assert_eq!(message, ClientMessage::Binary(vec![0, 0xfe, 0x81].into()));
+        socket
+            .close(None)
+            .await
+            .unwrap_or_else(|error| panic!("WebSocket should close: {error}"));
+
+        assert_eq!(
+            observed_origin
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_deref(),
+            Some(upstream_url.as_str())
+        );
+        proxy_handle.abort();
+        upstream_handle.abort();
+    }
+
+    async fn spawn_test_server(app: Router) -> (String, JoinHandle<Result<(), std::io::Error>>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|error| panic!("test listener should bind: {error}"));
+        let address = listener
+            .local_addr()
+            .unwrap_or_else(|error| panic!("test listener should have an address: {error}"));
+        let handle = tokio::spawn(async move { axum::serve(listener, app).await });
+        (format!("http://{address}"), handle)
+    }
+
+    async fn test_vscode_websocket_proxy(
+        State(upstream_url): State<String>,
+        headers: HeaderMap,
+        websocket: WebSocketUpgrade,
+    ) -> Result<axum::response::Response, super::ApiError> {
+        proxy_vscode_websocket(websocket, &headers, &format!("{upstream_url}/stable/ws")).await
+    }
+
+    async fn test_code_server_websocket(
+        State(observed_origin): State<Arc<Mutex<Option<String>>>>,
+        headers: HeaderMap,
+        websocket: WebSocketUpgrade,
+    ) -> axum::response::Response {
+        *observed_origin
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = headers
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        websocket
+            .protocols(["vscode-test"])
+            .on_upgrade(serve_test_code_server_websocket)
+    }
+
+    async fn serve_test_code_server_websocket(mut socket: WebSocket) {
+        if socket
+            .send(Message::Text("upstream-text".into()))
+            .await
+            .is_err()
+            || socket
+                .send(Message::Binary(vec![0, 0xff, 0x80].into()))
+                .await
+                .is_err()
+        {
+            return;
+        }
+        while let Some(Ok(message)) = socket.next().await {
+            let close = matches!(message, Message::Close(_));
+            if socket.send(message).await.is_err() || close {
+                return;
+            }
+        }
     }
 
     impl FakeRuntime {
