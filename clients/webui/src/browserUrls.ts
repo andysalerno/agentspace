@@ -17,3 +17,7 @@ export function browserReachableLocalUrl(localUrl: string): string {
     return localUrl;
   }
 }
+
+export function sessionVscodeUrl(sessionId: string): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/vscode/`;
+}

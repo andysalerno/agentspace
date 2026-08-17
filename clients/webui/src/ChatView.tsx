@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { api } from "./api";
-import { browserReachableLocalUrl } from "./browserUrls";
+import { browserReachableLocalUrl, sessionVscodeUrl } from "./browserUrls";
 import type {
     ChatMessage,
     KernelEvent,
@@ -747,7 +747,7 @@ export default function ChatView({ selectedSessionId, onSelectSession }: ChatVie
         ) ?? null;
     }, [kernels, selectedSession]);
     const vscodeUrl = selectedSession?.vscode_url
-        ? browserReachableLocalUrl(selectedSession.vscode_url)
+        ? sessionVscodeUrl(selectedSession.session_id)
         : null;
     const serviceUrl = selectedSession?.free_port_url
         ? browserReachableLocalUrl(selectedSession.free_port_url)

@@ -398,7 +398,7 @@ describe("CliView", () => {
         expect(onSelect).toHaveBeenCalledWith(CLI_SESSION.session_id);
     });
 
-    it("shows status, attach kind, IDs, attachment count, and browser-reachable VS Code", async () => {
+    it("shows status, attach kind, IDs, attachment count, and proxied VS Code", async () => {
         render(
             <CliView
                 darkMode={false}
@@ -415,7 +415,7 @@ describe("CliView", () => {
         expect(screen.getByText(/AgentSpace session-…/)).toBeTruthy();
         expect(screen.getByText(/Copilot copilot-…/)).toBeTruthy();
         expect(screen.getByRole("link", { name: "VS Code" }).getAttribute("href"))
-            .toBe("http://localhost:8100/");
+            .toBe("/api/sessions/session-1234567890abcdefghijkl/vscode/");
         expect(screen.getByLabelText("CLI telemetry summary")).toBeTruthy();
         expect(screen.getAllByText("48.4k tokens").length).toBeGreaterThan(0);
         expect(screen.getByText("16.5k input / 13 output")).toBeTruthy();

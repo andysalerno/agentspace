@@ -1065,6 +1065,17 @@ impl KernelRuntime for DockerKernelRuntime {
             .and_then(|handle| handle.vscode_url.clone())
     }
 
+    fn vscode_proxy_base_url(
+        &self,
+        session: &KernelRuntimeSession,
+    ) -> Result<String, AgentHostError> {
+        let handle = Self::docker_session(session)?;
+        Ok(format!(
+            "http://{}:{}",
+            handle.container_name, self.config.vscode_container_port
+        ))
+    }
+
     fn free_port_url(&self, session: &KernelRuntimeSession) -> Option<String> {
         Self::docker_session(session)
             .ok()

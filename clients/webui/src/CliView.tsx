@@ -12,7 +12,7 @@ import {
     WindowConsole20Regular,
 } from "@fluentui/react-icons";
 import { api } from "./api";
-import { browserReachableLocalUrl } from "./browserUrls";
+import { sessionVscodeUrl } from "./browserUrls";
 import {
     queryKeys,
     useAgents,
@@ -195,7 +195,7 @@ export default function CliView({
         )) ?? null;
     }, [kernels, selectedSession]);
     const vscodeUrl = selectedSession?.vscode_url
-        ? browserReachableLocalUrl(selectedSession.vscode_url)
+        ? sessionVscodeUrl(selectedSession.session_id)
         : null;
 
     const handleLifecycleStatus = useCallback((status: TerminalStatus) => {
