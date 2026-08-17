@@ -1,0 +1,29 @@
+[package]
+name = "agentspace_cli_rs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Agent-facing CLI for AgentSpace host capabilities"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "agentspace"
+path = "src/main.rs"
+
+[dependencies]
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+memory_rs = { path = "../../services/memory_rs" }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"
+
+[lints]
+workspace = true

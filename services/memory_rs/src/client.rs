@@ -25,7 +25,7 @@ pub type CancelFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 /// A boxed, `'static` output sink accepted by [`MemoryClient::run_command`].
 pub type OutputSink = Box<dyn AsyncWrite + Unpin + Send>;
 
-/// The transport-neutral operations backing every `memory` CLI command.
+/// The transport-neutral operations backing every `agentspace memory` command.
 ///
 /// Both the in-process `DirectMemoryClient` and any future HTTP client
 /// implement exactly this interface; validation, revision/conflict

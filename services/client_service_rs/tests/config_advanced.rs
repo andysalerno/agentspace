@@ -654,6 +654,13 @@ async fn skills_are_read_from_document_not_stale_upstream()
     assert!(ids.contains(&"doc-skill".to_owned()), "{ids:?}");
     assert!(ids.contains(&"builtin-skill".to_owned()), "{ids:?}");
     assert!(
+        value
+            .as_array()
+            .and_then(|skills| skills.iter().find(|skill| skill["skill_id"] == "doc-skill"))
+            .is_some_and(|skill| skill.get("files").is_none() && skill["file_count"] == 1),
+        "{value}"
+    );
+    assert!(
         !ids.contains(&"phantom".to_owned()),
         "stale upstream user skill leaked into the listing: {ids:?}"
     );

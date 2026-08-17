@@ -1,12 +1,11 @@
-//! The `memory` binary: parses CLI arguments and either runs a single
-//! command through [`memory_rs::client::MemoryClient`] or, with `--serve`,
-//! runs the Axum HTTP adapter over a local store.
+//! Runtime selection and HTTP serving for `agentspace memory`.
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
-use clap::Parser as _;
-use memory_rs::{
-    cli::{self, Cli},
+use tokio::net::TcpListener;
+
+use crate::{
+    cli::{self, MemoryArgs},
     client::MemoryClient,
     direct_client::DirectMemoryClient,
     fs_store::FilesystemMemoryStore,
@@ -14,13 +13,9 @@ use memory_rs::{
     server::{self, AppState},
     service::MemoryService,
 };
-use tokio::net::TcpListener;
-use tracing_subscriber::{EnvFilter, fmt};
 
 const ENV_MEMORY_URI: &str = "AGENTSPACE_MEMORY_URI";
 const ENV_MEMORY_DIR: &str = "AGENTSPACE_MEMORY_DIR";
-/// Bounds every `--serve` request body, `/v1/run`'s JSON launch request
-/// included (the streamed run response itself is unrelated to this limit).
 const MAX_SERVE_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
 enum Backend {
@@ -28,26 +23,21 @@ enum Backend {
     Remote(String),
 }
 
-#[tokio::main]
-async fn main() {
-    init_tracing();
-
-    let cli = Cli::parse();
-
-    if cli.serve {
-        std::process::exit(serve(&cli).await);
+/// Runs one memory command or the memory HTTP service.
+pub async fn run(args: MemoryArgs, json: bool) -> i32 {
+    if args.serve {
+        return serve(&args).await;
     }
 
-    let backend = resolve_backend(&cli);
-    let exit_code = match backend {
+    match resolve_backend(&args) {
         Backend::Local(root) => match FilesystemMemoryStore::open(&root) {
             Ok(store) => {
                 let client = DirectMemoryClient::new(MemoryService::new(store));
-                cli::run(cli, &client as &dyn MemoryClient).await
+                cli::run(args, &client as &dyn MemoryClient, json).await
             }
             Err(error) => {
                 eprintln!(
-                    "memory: failed to open store at {}: {error}",
+                    "agentspace memory: failed to open store at {}: {error}",
                     root.display()
                 );
                 1
@@ -55,31 +45,16 @@ async fn main() {
         },
         Backend::Remote(uri) => {
             let client = HttpMemoryClient::new(uri);
-            cli::run(cli, &client as &dyn MemoryClient).await
+            cli::run(args, &client as &dyn MemoryClient, json).await
         }
-    };
-
-    std::process::exit(exit_code);
+    }
 }
 
-fn init_tracing() {
-    let env_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("memory_rs=info"));
-    fmt().with_env_filter(env_filter).init();
-}
-
-/// Runs `memory --serve`, returning the process exit code.
-///
-/// Always serves the resolved *local* root; a remote URI configured via
-/// `--uri` (rejected by `clap` itself, see [`Cli`]'s `conflicts_with`) or
-/// `AGENTSPACE_MEMORY_URI` is treated as a configuration error rather than
-/// silently ignored: `--serve`
-/// never proxies to another remote memory service.
-async fn serve(cli: &Cli) -> i32 {
-    let root = match resolve_serve_root(cli) {
+async fn serve(args: &MemoryArgs) -> i32 {
+    let root = match resolve_serve_root(args) {
         Ok(root) => root,
         Err(message) => {
-            eprintln!("memory: {message}");
+            eprintln!("agentspace memory: {message}");
             return 2;
         }
     };
@@ -88,7 +63,7 @@ async fn serve(cli: &Cli) -> i32 {
         Ok(store) => store,
         Err(error) => {
             eprintln!(
-                "memory: failed to open store at {}: {error}",
+                "agentspace memory: failed to open store at {}: {error}",
                 root.display()
             );
             return 1;
@@ -99,25 +74,28 @@ async fn serve(cli: &Cli) -> i32 {
         Arc::new(DirectMemoryClient::new(MemoryService::new(store)));
     let app = server::build_router(AppState::new(client), MAX_SERVE_REQUEST_BYTES);
 
-    let listener = match TcpListener::bind((cli.host.as_str(), cli.port)).await {
+    let listener = match TcpListener::bind((args.host.as_str(), args.port)).await {
         Ok(listener) => listener,
         Err(error) => {
-            eprintln!("memory: failed to bind {}:{}: {error}", cli.host, cli.port);
+            eprintln!(
+                "agentspace memory: failed to bind {}:{}: {error}",
+                args.host, args.port
+            );
             return 1;
         }
     };
 
     let address = listener.local_addr().map_or_else(
-        |_| format!("{}:{}", cli.host, cli.port),
+        |_| format!("{}:{}", args.host, args.port),
         |address| address.to_string(),
     );
-    tracing::info!(%address, root = %root.display(), "memory --serve listening");
+    tracing::info!(%address, root = %root.display(), "agentspace memory --serve listening");
 
     if let Err(error) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
     {
-        eprintln!("memory: server error: {error}");
+        eprintln!("agentspace memory: server error: {error}");
         return 1;
     }
 
@@ -150,18 +128,11 @@ async fn shutdown_signal() {
         () = ctrl_c => {}
         () = terminate => {}
     }
-    // Give in-flight `/v1/run` streams a moment to observe cancellation and
-    // report a terminal frame rather than being hard-killed mid-response.
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
-/// Resolves the local root `--serve` must use: `--root`, then
-/// `AGENTSPACE_MEMORY_DIR`, then the private built-in root. Returns `Err`
-/// if `AGENTSPACE_MEMORY_URI` is set without `--root`, since serving over a
-/// remote-configured environment would otherwise silently ignore the
-/// operator's evident intent to use a remote store.
-fn resolve_serve_root(cli: &Cli) -> Result<PathBuf, String> {
-    if let Some(root) = &cli.root {
+fn resolve_serve_root(args: &MemoryArgs) -> Result<PathBuf, String> {
+    if let Some(root) = &args.root {
         return Ok(root.clone());
     }
     if let Ok(uri) = std::env::var(ENV_MEMORY_URI)
@@ -180,14 +151,11 @@ fn resolve_serve_root(cli: &Cli) -> Result<PathBuf, String> {
     Ok(built_in_root())
 }
 
-/// Resolves the backend using this precedence: explicit `--uri`/`--root`, then
-/// `AGENTSPACE_MEMORY_URI`, then `AGENTSPACE_MEMORY_DIR`, then the private
-/// built-in local root.
-fn resolve_backend(cli: &Cli) -> Backend {
-    if let Some(uri) = &cli.uri {
+fn resolve_backend(args: &MemoryArgs) -> Backend {
+    if let Some(uri) = &args.uri {
         return Backend::Remote(uri.clone());
     }
-    if let Some(root) = &cli.root {
+    if let Some(root) = &args.root {
         return Backend::Local(root.clone());
     }
     if let Ok(uri) = std::env::var(ENV_MEMORY_URI)
@@ -203,8 +171,6 @@ fn resolve_backend(cli: &Cli) -> Backend {
     Backend::Local(built_in_root())
 }
 
-/// The private built-in local root used when no backend is configured.
-/// Not part of the stable agent-facing contract.
 fn built_in_root() -> PathBuf {
     std::env::var_os("HOME").map_or_else(
         || PathBuf::from(".agentspace/memory"),

@@ -295,7 +295,8 @@ export default function SkillsView() {
                                     <tbody>
                                         {skills.map((skill) => {
                                             const builtin = skill.source === "builtin";
-                                            const fileCount = Object.keys(skill.files ?? {}).length;
+                                            const fileCount = skill.file_count
+                                                ?? Object.keys(skill.files ?? {}).length;
                                             return (
                                                 <tr key={skill.skill_id}>
                                                     <td>

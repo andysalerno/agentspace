@@ -1,4 +1,4 @@
-//! Clap CLI surface for the `memory` binary.
+//! Clap CLI surface for `agentspace memory`.
 //!
 //! Every command constructs a transport-neutral request and calls it
 //! through [`crate::client::MemoryClient`] — never directly against
@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Subcommand};
 use serde::Serialize;
 
 use crate::{
@@ -20,10 +20,9 @@ use crate::{
     path::PagePath,
 };
 
-/// `AgentSpace` text-first memory store and CLI.
-#[derive(Debug, Parser)]
-#[command(name = "memory", version, about, propagate_version = true)]
-pub struct Cli {
+/// Arguments for the `agentspace memory` command.
+#[derive(Args, Debug)]
+pub struct MemoryArgs {
     /// Use a local filesystem store at this root instead of the default.
     /// Mutually exclusive with `--uri`. Not part of the agent-facing
     /// contract; operator/local-development use only.
@@ -34,10 +33,6 @@ pub struct Cli {
     /// Mutually exclusive with `--root`.
     #[arg(long, global = true, conflicts_with = "root")]
     pub uri: Option<String>,
-
-    /// Emit stable, machine-readable JSON instead of human-readable text.
-    #[arg(long, global = true)]
-    pub json: bool,
 
     /// Run the Axum HTTP server over the resolved local store instead of a
     /// one-shot command. Mutually exclusive with `--uri`; `--serve` never
@@ -219,14 +214,16 @@ fn print_error(error: &MemoryError, json: bool) {
             return;
         }
     }
-    eprintln!("memory: {error}");
+    eprintln!("agentspace memory: {error}");
 }
 
 fn print_value<T: Serialize>(value: &T, json: bool, human: impl FnOnce(&T)) {
     if json {
         match serde_json::to_string_pretty(value) {
             Ok(text) => println!("{text}"),
-            Err(error) => eprintln!("memory: failed to serialize JSON output: {error}"),
+            Err(error) => {
+                eprintln!("agentspace memory: failed to serialize JSON output: {error}");
+            }
         }
     } else {
         human(value);
@@ -246,10 +243,9 @@ fn read_body(file: Option<&PathBuf>) -> Result<String, MemoryError> {
 
 /// Runs a single parsed CLI invocation against `client`, returning the
 /// process exit code.
-pub async fn run(cli: Cli, client: &dyn MemoryClient) -> i32 {
-    let json = cli.json;
+pub async fn run(cli: MemoryArgs, client: &dyn MemoryClient, json: bool) -> i32 {
     let Some(command) = cli.command else {
-        eprintln!("memory: no command given; see `memory --help`");
+        eprintln!("agentspace memory: no command given; see `agentspace memory --help`");
         return 2;
     };
 

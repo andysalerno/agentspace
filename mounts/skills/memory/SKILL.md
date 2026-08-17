@@ -5,8 +5,8 @@ description: Use this skill to recall or preserve durable knowledge that should 
 
 # Agent memory
 
-Use the `memory` CLI as the only supported interface to durable memory. Never
-read or write its backing storage directly.
+Use `agentspace memory` as the only supported interface to durable memory.
+Never read or write its backing storage directly.
 
 ## Safety
 
@@ -23,16 +23,16 @@ Query memory before writing so related knowledge is reused instead of
 duplicated:
 
 ```sh
-memory query "relevant terms"
-memory pages ls --under projects
-memory tags ls
+agentspace memory query "relevant terms"
+agentspace memory pages ls --under projects
+agentspace memory tags ls
 ```
 
 Read likely matches and inspect links when useful:
 
 ```sh
-memory read projects/example
-memory links projects/example --backlinks
+agentspace memory read projects/example
+agentspace memory links projects/example --backlinks
 ```
 
 ## Write and maintain
@@ -43,23 +43,25 @@ standard input:
 
 ```sh
 printf '%s\n' 'Durable fact or decision.' |
-  memory write projects/example --title "Example project" --tag project
+  agentspace memory write projects/example --title "Example project" --tag project
 ```
 
-Use the revision returned by `memory read --json` when replacing or deleting
-content that may have changed concurrently. Use `memory move` and `memory rm`
-instead of filesystem commands so links and revision checks remain correct.
+Use the revision returned by `agentspace memory read --json` when replacing or
+deleting content that may have changed concurrently. Use
+`agentspace memory move` and `agentspace memory rm` instead of filesystem
+commands so links and revision checks remain correct.
 
 ## Inspection and integrity
 
-Use `memory run` for familiar read-only inspection commands; do not bypass the
-CLI:
+Use `agentspace memory run` for familiar read-only inspection commands; do not
+bypass the CLI:
 
 ```sh
-memory run rg "search terms"
-memory run ls
-memory check
+agentspace memory run rg "search terms"
+agentspace memory run ls
+agentspace memory check
 ```
 
-Run `memory --help` or a subcommand's `--help` when command details are unclear.
-Surface conflicts or integrity errors rather than silently overwriting data.
+Run `agentspace memory --help` or a subcommand's `--help` when command details
+are unclear. Surface conflicts or integrity errors rather than silently
+overwriting data.
