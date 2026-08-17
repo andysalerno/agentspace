@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use percent_encoding::percent_decode_str;
 use reqwest::{Method, StatusCode, Url, header};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -288,6 +289,11 @@ impl AgentHostClient {
         path_and_query: &str,
         websocket: bool,
     ) -> AgentHostResult<Url> {
+        if vscode_proxy_path_has_dot_segment(path_and_query) {
+            return Err(AgentHostError::InvalidProxyPath {
+                path: path_and_query.to_owned(),
+            });
+        }
         let base = self.endpoint(&["sessions", session_id, "vscode"])?;
         let raw = format!("{}{}", base.as_str().trim_end_matches('/'), path_and_query);
         let mut url = Url::parse(&raw).map_err(|source| AgentHostError::InvalidBaseUrl {
@@ -1057,6 +1063,25 @@ impl AgentHostClient {
     }
 }
 
+pub(crate) fn vscode_proxy_path_has_dot_segment(path_and_query: &str) -> bool {
+    let path = path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(path, _query)| path);
+    let mut decoded = path.to_owned();
+    loop {
+        let next = percent_decode_str(&decoded)
+            .decode_utf8_lossy()
+            .into_owned();
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    decoded
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".."))
+}
+
 #[derive(Clone, Debug, Default)]
 struct RequestTraceContext {
     target: String,
@@ -1439,6 +1464,7 @@ fn agent_host_error_kind(error: &AgentHostError) -> &'static str {
         AgentHostError::InvalidBaseUrl { .. } => "invalid_base_url",
         AgentHostError::InvalidTimeout { .. } => "invalid_timeout",
         AgentHostError::InvalidWebSocketScheme { .. } => "invalid_websocket_scheme",
+        AgentHostError::InvalidProxyPath { .. } => "invalid_proxy_path",
         AgentHostError::InitialResponseTimeout { .. } => "initial_response_timeout",
         AgentHostError::WebSocketTimeout { .. } => "websocket_timeout",
         AgentHostError::UrlCannotBeBase { .. } => "url_cannot_be_base",
@@ -1467,6 +1493,7 @@ fn agent_host_error_status(error: &AgentHostError) -> u16 {
         | AgentHostError::InvalidBaseUrl { .. }
         | AgentHostError::InvalidTimeout { .. }
         | AgentHostError::InvalidWebSocketScheme { .. }
+        | AgentHostError::InvalidProxyPath { .. }
         | AgentHostError::InitialResponseTimeout { .. }
         | AgentHostError::WebSocketTimeout { .. }
         | AgentHostError::UrlCannotBeBase { .. }
@@ -1493,6 +1520,9 @@ pub enum AgentHostError {
     },
     InvalidWebSocketScheme {
         scheme: String,
+    },
+    InvalidProxyPath {
+        path: String,
     },
     InitialResponseTimeout {
         timeout: Duration,
@@ -1559,6 +1589,9 @@ impl Display for AgentHostError {
                     formatter,
                     "agent_host WebSocket requires an HTTP(S) base URL, got scheme {scheme:?}"
                 )
+            }
+            Self::InvalidProxyPath { path } => {
+                write!(formatter, "invalid VS Code proxy path {path:?}")
             }
             Self::InitialResponseTimeout { timeout } => {
                 write!(
@@ -1633,6 +1666,7 @@ impl Error for AgentHostError {
             Self::InvalidBaseUrl { .. }
             | Self::InvalidTimeout { .. }
             | Self::InvalidWebSocketScheme { .. }
+            | Self::InvalidProxyPath { .. }
             | Self::InitialResponseTimeout { .. }
             | Self::WebSocketTimeout { .. }
             | Self::UrlCannotBeBase { .. }
@@ -2062,7 +2096,10 @@ mod tests {
     use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
     use tokio_stream::wrappers::ReceiverStream;
 
-    use super::{AgentHostClient, AgentHostError, AgentHostSessionCreate, JsonObject};
+    use super::{
+        AgentHostClient, AgentHostError, AgentHostSessionCreate, JsonObject,
+        vscode_proxy_path_has_dot_segment,
+    };
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct RecordedRequest {
@@ -2900,6 +2937,24 @@ mod tests {
 
         assert_eq!(response.bytes().await?.as_ref(), b"started-delayed");
         Ok(())
+    }
+
+    #[test]
+    fn vscode_proxy_path_detects_encoded_dot_segments() {
+        for path in [
+            "/%2e%2e/admin",
+            "/%252e%252e/admin",
+            "/%2e%2e%2fadmin",
+            "/%2e%2e%5cadmin",
+        ] {
+            assert!(
+                vscode_proxy_path_has_dot_segment(path),
+                "path should be rejected: {path}"
+            );
+        }
+        assert!(!vscode_proxy_path_has_dot_segment(
+            "/stable/workbench.js?redirect=../allowed"
+        ));
     }
 
     #[tokio::test]

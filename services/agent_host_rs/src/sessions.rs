@@ -21,6 +21,7 @@ use axum::{
     routing::{any, get, post},
 };
 use futures_util::{SinkExt, Stream, StreamExt};
+use percent_encoding::percent_decode_str;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::{
@@ -1442,13 +1443,35 @@ fn proxy_target_url(
         .path()
         .strip_prefix(route_prefix)
         .ok_or_else(|| AgentHostError::runtime("VS Code proxy route prefix is invalid"))?;
+    if vscode_proxy_path_has_dot_segment(suffix) {
+        return Err(
+            AgentHostError::validation("VS Code proxy path must not contain dot segments").into(),
+        );
+    }
     let path = if suffix.is_empty() { "/" } else { suffix };
     let mut target = format!("{}{}", base_url.trim_end_matches('/'), path);
     if let Some(query) = uri.query() {
         target.push('?');
         target.push_str(query);
     }
+
     Ok(target)
+}
+
+fn vscode_proxy_path_has_dot_segment(path: &str) -> bool {
+    let mut decoded = path.to_owned();
+    loop {
+        let next = percent_decode_str(&decoded)
+            .decode_utf8_lossy()
+            .into_owned();
+        if next == decoded {
+            break;
+        }
+        decoded = next;
+    }
+    decoded
+        .split(['/', '\\'])
+        .any(|segment| matches!(segment, "." | ".."))
 }
 
 async fn proxy_vscode_http(request: Request<Body>, target: &str) -> Result<Response, ApiError> {
@@ -1870,6 +1893,28 @@ mod tests {
             result.unwrap_or_default(),
             "http://agentspace-kernel-session-1:8080/stable/workbench.js?cache=1"
         );
+    }
+
+    #[test]
+    fn vscode_proxy_target_rejects_encoded_dot_segments() {
+        for path in [
+            "/sessions/session-1/vscode/%2e%2e/admin",
+            "/sessions/session-1/vscode/%252e%252e/admin",
+            "/sessions/session-1/vscode/%2e%2e%2fadmin",
+            "/sessions/session-1/vscode/%2e%2e%5cadmin",
+        ] {
+            let uri = OriginalUri(
+                path.parse()
+                    .unwrap_or_else(|error| panic!("test URI should parse: {error}")),
+            );
+            let result = proxy_target_url(
+                "https://proxy.internal/kernel/ports/8080",
+                "/sessions/session-1/vscode",
+                &uri,
+            );
+
+            assert!(result.is_err(), "path should be rejected: {path}");
+        }
     }
 
     #[tokio::test]

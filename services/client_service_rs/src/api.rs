@@ -31,6 +31,7 @@ use crate::{
     ActiveTurnRecord, ActiveTurnStreamState, AppState, ENV_PREFIX, StreamItem,
     agent_host::{
         AgentHostError, AgentHostSessionCreate, AgentHostWebSocket, JsonObject, KernelEvent,
+        vscode_proxy_path_has_dot_segment,
     },
     errors::{StoreError, ValidationError},
     memory::{MEMORY_JSON_CONTENT_TYPE, MEMORY_RUN_CONTENT_TYPE, MemoryProxyError},
@@ -1990,6 +1991,11 @@ fn proxy_path_and_query(
         .path()
         .strip_prefix(route_prefix)
         .ok_or_else(|| ApiError::internal("VS Code proxy route prefix is invalid".to_owned()))?;
+    if vscode_proxy_path_has_dot_segment(suffix) {
+        return Err(ApiError::unprocessable(
+            "VS Code proxy path must not contain dot segments".to_owned(),
+        ));
+    }
     let mut result = if suffix.is_empty() {
         "/".to_owned()
     } else {
@@ -6660,6 +6666,24 @@ mod tests {
         let result = proxy_path_and_query("/sessions/session-1/vscode", &uri);
         assert!(result.is_ok());
         assert_eq!(result.unwrap_or_default(), "/stable/workbench.js?cache=1");
+    }
+
+    #[test]
+    fn vscode_proxy_path_rejects_encoded_dot_segments() {
+        for path in [
+            "/sessions/session-1/vscode/%2e%2e/admin",
+            "/sessions/session-1/vscode/%252e%252e/admin",
+            "/sessions/session-1/vscode/%2e%2e%2fadmin",
+            "/sessions/session-1/vscode/%2e%2e%5cadmin",
+        ] {
+            let uri = axum::extract::OriginalUri(
+                path.parse()
+                    .unwrap_or_else(|error| panic!("test URI should parse: {error}")),
+            );
+            let result = proxy_path_and_query("/sessions/session-1/vscode", &uri);
+
+            assert!(result.is_err(), "path should be rejected: {path}");
+        }
     }
 
     #[test]
