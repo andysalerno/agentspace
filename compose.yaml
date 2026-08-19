@@ -1,5 +1,13 @@
 services:
 
+  # The `*-image` services exist only to make Compose build the images that
+  # agent-host spawns at runtime; they must start, print, and exit 0.
+  #
+  # Override `entrypoint` rather than `command`: both images declare an
+  # ENTRYPOINT and no CMD, so a bare `command` is appended as arguments to the
+  # real server entrypoint instead of replacing it. `entrypoint: []` does not
+  # help either -- podman-compose treats the empty list as "not set" and keeps
+  # the image ENTRYPOINT, which starts the actual server and fails.
   kernel-host-image:
     image: agentspace-kernel-kernel:latest
     build:
@@ -8,7 +16,7 @@ services:
       args:
         AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
         RUST_BUILD_PROFILE: ${RUST_BUILD_PROFILE:-release}
-    command: ["python", "-c", "print('kernel image ready')"]
+    entrypoint: ["python", "-c", "print('kernel image ready')"]
     restart: "no"
 
   gateway-host-image:
@@ -18,8 +26,7 @@ services:
       dockerfile: gateways/gateway_host/Dockerfile
       args:
         AGENTSPACE_VERSION: ${AGENTSPACE_VERSION:-dev}
-    entrypoint: []
-    command: ["python", "-c", "print('gateway image ready')"]
+    entrypoint: ["python", "-c", "print('gateway image ready')"]
     restart: "no"
 
   memory:
